@@ -248,8 +248,63 @@ async function main() {
         "`!stop` — stop focused task",
         "`!diff` — show diff",
         "`!log` — show commits",
+        "`!tpl` — list templates",
+        "`!run <name> [k=v ...]` — fire a template",
+        "`!sched` — list schedules",
         "anything else in this channel becomes input to the focused task.",
       ].join("\n"));
+      return;
+    }
+
+    if (text === "!tpl") {
+      try {
+        const { templates } = await client.listTemplates();
+        if (templates.length === 0) return send(channel, "(no templates)");
+        await send(
+          channel,
+          templates.map((t) => `• \`${t.name}\` (${t.agent}, ${t.repoPath})`).join("\n"),
+        );
+      } catch (e) {
+        await send(channel, (e as Error).message);
+      }
+      return;
+    }
+
+    if (text.startsWith("!run ")) {
+      const parts = text.slice(5).trim().split(/\s+/);
+      const name = parts[0];
+      if (!name) return send(channel, "usage: !run <template-name> [k=v ...]");
+      const args: Record<string, string> = {};
+      for (const p of parts.slice(1)) {
+        const eq = p.indexOf("=");
+        if (eq > 0) args[p.slice(0, eq)] = p.slice(eq + 1);
+      }
+      try {
+        const { task } = await client.runTemplate(name, { args });
+        focus.set(channelId, task.id);
+        await send(channel, `fired \`${name}\` → **${task.id.slice(-8)}** (focused)`);
+      } catch (e) {
+        await send(channel, (e as Error).message);
+      }
+      return;
+    }
+
+    if (text === "!sched") {
+      try {
+        const { schedules } = await client.listSchedules();
+        if (schedules.length === 0) return send(channel, "(no schedules)");
+        await send(
+          channel,
+          schedules
+            .map((s) => {
+              const next = s.nextRunAt ? new Date(s.nextRunAt).toLocaleString() : "—";
+              return `• \`${s.name}\` ${s.enabled ? "✓" : "✗"} \`${s.cron}\` next=${next}`;
+            })
+            .join("\n"),
+        );
+      } catch (e) {
+        await send(channel, (e as Error).message);
+      }
       return;
     }
 

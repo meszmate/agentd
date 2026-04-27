@@ -126,7 +126,8 @@ async function main() {
       [
         "agentd telegram bridge",
         "",
-        "/new <repo?> <prompt> — spawn a task (uses default repo if omitted)",
+        "Tasks:",
+        "/new <repo?> <prompt> — spawn a task",
         "/ls — list tasks",
         "/show <id?> — show task (or focused)",
         "/in <text> — send input to focused task",
@@ -134,6 +135,12 @@ async function main() {
         "/stop — stop focused task",
         "/diff — show diff for focused task",
         "/log — show commits for focused task",
+        "",
+        "Templates / schedules:",
+        "/tpl — list templates",
+        "/run <template> [k=v ...] — fire a template",
+        "/sched — list schedules",
+        "",
         cfg.defaultRepo ? `default repo: ${cfg.defaultRepo}` : "(no default repo set)",
       ].join("\n"),
     );
@@ -252,6 +259,55 @@ async function main() {
       const { log } = await client.getLog(id, 20);
       if (log.length === 0) return ctx.reply("(no commits)");
       const body = log.map((c) => `${c.sha.slice(0, 7)}  ${c.subject}`).join("\n");
+      await ctx.reply(body);
+    } catch (e) {
+      await ctx.reply((e as Error).message);
+    }
+  });
+
+  bot.command("tpl", async (ctx) => {
+    try {
+      const { templates } = await client.listTemplates();
+      if (templates.length === 0) return ctx.reply("(no templates) use /run <name> after creating one with the CLI or web UI.");
+      const body = templates
+        .map((t) => `• ${t.name} (${t.agent}, ${t.repoPath})`)
+        .join("\n");
+      await ctx.reply(body);
+    } catch (e) {
+      await ctx.reply((e as Error).message);
+    }
+  });
+
+  bot.command("run", async (ctx) => {
+    const text = (ctx.match || "").toString().trim();
+    if (!text) return ctx.reply("usage: /run <template-name> [key=value ...]");
+    const parts = text.split(/\s+/);
+    const name = parts[0];
+    if (!name) return ctx.reply("usage: /run <template-name> [key=value ...]");
+    const args: Record<string, string> = {};
+    for (const p of parts.slice(1)) {
+      const eq = p.indexOf("=");
+      if (eq > 0) args[p.slice(0, eq)] = p.slice(eq + 1);
+    }
+    try {
+      const { task } = await client.runTemplate(name, { args });
+      focus.set(ctx.chat!.id, task.id);
+      await ctx.reply(`fired '${name}' → ${task.id.slice(-8)} (focused)`);
+    } catch (e) {
+      await ctx.reply((e as Error).message);
+    }
+  });
+
+  bot.command("sched", async (ctx) => {
+    try {
+      const { schedules } = await client.listSchedules();
+      if (schedules.length === 0) return ctx.reply("(no schedules)");
+      const body = schedules
+        .map((s) => {
+          const next = s.nextRunAt ? new Date(s.nextRunAt).toLocaleString() : "—";
+          return `• ${s.name} ${s.enabled ? "✓" : "✗"} '${s.cron}' next=${next}`;
+        })
+        .join("\n");
       await ctx.reply(body);
     } catch (e) {
       await ctx.reply((e as Error).message);
