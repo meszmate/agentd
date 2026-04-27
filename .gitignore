@@ -1,0 +1,14 @@
+node_modules
+dist
+.DS_Store
+*.log
+.env
+.env.local
+
+# agentd runtime data
+data/
+worktrees/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

@@ -1,0 +1,19 @@
+{
+  "name": "agentd",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "daemon": "bun --filter @agentd/daemon dev",
+    "cli": "bun --filter @agentd/cli start",
+    "typecheck": "bun --filter '*' typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "@types/bun": "^1.1.14"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@agentd/cli",
+  "version": "0.0.1",
+  "type": "module",
+  "bin": {
+    "agentd": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentd/contracts": "workspace:*"
+  }
+}

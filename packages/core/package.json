@@ -1,0 +1,21 @@
+{
+  "name": "@agentd/core",
+  "version": "0.0.1",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./db": "./src/db.ts",
+    "./tasks": "./src/tasks.ts",
+    "./worktrees": "./src/worktrees.ts",
+    "./auth": "./src/auth.ts",
+    "./paths": "./src/paths.ts",
+    "./events": "./src/events.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentd/contracts": "workspace:*",
+    "drizzle-orm": "^0.36.4"
+  }
+}
