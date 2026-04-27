@@ -1,0 +1,597 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0c0d10" />
+  <title>agentd</title>
+  <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='4' fill='%2333d27a'/></svg>" />
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0c0d10;
+      --panel: #15171c;
+      --panel-2: #1c1f25;
+      --border: #2a2e36;
+      --text: #e7e9ee;
+      --muted: #8a93a3;
+      --accent: #33d27a;
+      --accent-dim: #1f7a48;
+      --warn: #f0b341;
+      --err: #f06a6a;
+      --user: #6aa9f0;
+      --tool: #b87bf0;
+      --system: #8a93a3;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+    button, input, textarea, select { font: inherit; color: inherit; }
+    button { cursor: pointer; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
+    button:hover { background: #232730; }
+    button.primary { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
+    button.primary:hover { background: var(--accent); color: #052b15; }
+    button.danger { color: var(--err); border-color: #4a2a2a; }
+    button.danger:hover { background: #2a1717; }
+    input, textarea, select { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; width: 100%; }
+    input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+    a { color: var(--accent); }
+    code { background: #00000040; padding: 1px 4px; border-radius: 3px; }
+
+    .login {
+      max-width: 460px; margin: 80px auto; padding: 24px;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    }
+    .login h1 { margin: 0 0 4px; font-size: 22px; }
+    .login p { color: var(--muted); margin: 0 0 16px; }
+    .login label { display: block; margin: 12px 0 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .login button { width: 100%; margin-top: 16px; }
+
+    .layout { display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
+    @media (max-width: 720px) { .layout { grid-template-columns: 1fr; } .layout.has-task .sidebar { display: none; } .layout:not(.has-task) .main { display: none; } }
+
+    .sidebar { background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+    .sidebar header { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+    .sidebar header .title { font-weight: 600; flex: 1; }
+    .sidebar header .conn { font-size: 11px; color: var(--muted); }
+    .sidebar header .conn.live { color: var(--accent); }
+    .sidebar .new-form { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+    .sidebar .new-form input { padding: 6px 8px; font-size: 13px; }
+    .sidebar .new-form select { padding: 6px 8px; font-size: 13px; }
+    .sidebar .new-form .row { display: flex; gap: 6px; }
+    .sidebar .new-form textarea { resize: vertical; min-height: 60px; font-size: 13px; padding: 6px 8px; }
+    .task-list { flex: 1; overflow-y: auto; }
+    .task-row { padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
+    .task-row:hover { background: var(--panel-2); }
+    .task-row.active { background: var(--panel-2); border-left: 3px solid var(--accent); padding-left: 11px; }
+    .task-row .top { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+    .task-row .agent { color: var(--accent); }
+    .task-row .status { color: var(--muted); margin-left: auto; }
+    .task-row .status.running { color: var(--warn); }
+    .task-row .status.done { color: var(--accent); }
+    .task-row .status.failed, .task-row .status.stopped { color: var(--err); }
+    .task-row .title { margin-top: 4px; color: var(--text); font-size: 13px; line-height: 1.3; }
+    .task-row .branch { color: var(--muted); font-size: 11px; margin-top: 2px; }
+
+    .main { display: flex; flex-direction: column; min-height: 0; }
+    .main header { padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--panel); display: flex; gap: 12px; align-items: center; }
+    .main header .back { display: none; }
+    @media (max-width: 720px) { .main header .back { display: inline-block; } }
+    .main header .title { font-size: 14px; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .main header .meta { font-size: 11px; color: var(--muted); }
+
+    .tabs { display: flex; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--border); }
+    .tabs button { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 12px; color: var(--muted); }
+    .tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+
+    .content { flex: 1; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+    .chat { flex: 1; overflow-y: auto; padding: 16px; }
+    .msg { margin-bottom: 12px; max-width: 100%; }
+    .msg .role { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 2px; }
+    .msg.user .role { color: var(--user); }
+    .msg.agent .role { color: var(--accent); }
+    .msg.tool .role { color: var(--tool); }
+    .msg.system .role { color: var(--system); }
+    .msg .body { white-space: pre-wrap; word-break: break-word; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+    .msg.tool .body { background: var(--panel-2); font-size: 12px; color: var(--muted); }
+    .msg.system .body { background: transparent; border-style: dashed; font-size: 12px; color: var(--muted); }
+
+    .input-row { padding: 10px 12px; border-top: 1px solid var(--border); background: var(--panel); display: flex; gap: 8px; align-items: flex-end; }
+    .input-row textarea { flex: 1; resize: none; min-height: 40px; max-height: 200px; }
+    .input-row .actions { display: flex; flex-direction: column; gap: 6px; }
+
+    .files-pane { display: grid; grid-template-columns: 240px 1fr; height: 100%; min-height: 0; }
+    @media (max-width: 720px) { .files-pane { grid-template-columns: 1fr; } .files-pane .file-view { display: none; } .files-pane.has-file .file-tree { display: none; } .files-pane.has-file .file-view { display: block; } }
+    .file-tree { border-right: 1px solid var(--border); overflow-y: auto; }
+    .file-tree .file { padding: 6px 12px; font-size: 12px; cursor: pointer; border-bottom: 1px solid #1a1d22; }
+    .file-tree .file:hover { background: var(--panel-2); }
+    .file-tree .file.active { background: var(--panel-2); color: var(--accent); }
+    .file-view { overflow: auto; padding: 12px; }
+    .file-view pre { margin: 0; white-space: pre; font-size: 12px; }
+
+    .diff-pane, .log-pane { padding: 12px; overflow: auto; height: 100%; }
+    .diff-pane pre { margin: 0; white-space: pre; font-size: 12px; }
+    .diff-pane pre .add { color: #6acb74; }
+    .diff-pane pre .del { color: #f06a6a; }
+    .diff-pane pre .hunk { color: var(--user); }
+    .log-pane .commit { padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .log-pane .commit .sha { color: var(--accent); font-size: 11px; }
+    .log-pane .commit .subject { margin-top: 2px; }
+    .log-pane .commit .meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    .log-pane .commit .actions { margin-top: 4px; }
+
+    .empty { color: var(--muted); padding: 24px; text-align: center; }
+    .toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel-2); border: 1px solid var(--border); padding: 10px 14px; border-radius: 8px; max-width: 360px; z-index: 100; }
+    .toast.err { border-color: var(--err); color: var(--err); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+  (() => {
+    const $ = (q, root = document) => root.querySelector(q);
+    const root = $("#root");
+
+    const state = {
+      server: localStorage.getItem("agentd.server") || location.origin,
+      token: localStorage.getItem("agentd.token") || null,
+      tasks: [],
+      activeId: null,
+      activeMessages: [],
+      tab: "chat",
+      files: [],
+      activeFile: null,
+      fileContent: null,
+      diff: null,
+      log: [],
+      ws: null,
+      wsLive: false,
+      toast: null,
+    };
+
+    function setState(patch) {
+      Object.assign(state, patch);
+      render();
+    }
+
+    function toast(msg, isErr = false) {
+      setState({ toast: { msg, isErr } });
+      setTimeout(() => setState({ toast: null }), 3500);
+    }
+
+    async function api(path, opts = {}) {
+      const r = await fetch(state.server + path, {
+        ...opts,
+        headers: {
+          "content-type": "application/json",
+          "x-agentd-session": state.token || "",
+          ...(opts.headers || {}),
+        },
+      });
+      if (!r.ok) {
+        const text = await r.text().catch(() => "");
+        throw new Error(`${r.status}: ${text}`);
+      }
+      const ct = r.headers.get("content-type") || "";
+      return ct.includes("application/json") ? r.json() : r.text();
+    }
+
+    async function loadTasks() {
+      try {
+        const { tasks } = await api("/api/tasks");
+        setState({ tasks });
+      } catch (e) {
+        toast(`load tasks: ${e.message}`, true);
+      }
+    }
+
+    async function loadTask(id) {
+      try {
+        const { task, messages } = await api("/api/tasks/" + id);
+        const exists = state.tasks.find((t) => t.id === id);
+        const tasks = exists
+          ? state.tasks.map((t) => (t.id === id ? task : t))
+          : [task, ...state.tasks];
+        setState({ tasks, activeId: id, activeMessages: messages, tab: "chat" });
+        attachWs(id);
+      } catch (e) {
+        toast(`load task: ${e.message}`, true);
+      }
+    }
+
+    function attachWs(taskId) {
+      if (state.ws) try { state.ws.close(); } catch {}
+      const url = new URL(state.server);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.pathname = "/ws";
+      url.searchParams.set("session", state.token);
+      if (taskId) url.searchParams.set("task", taskId);
+      const ws = new WebSocket(url.toString());
+      ws.onopen = () => setState({ wsLive: true });
+      ws.onclose = () => setState({ wsLive: false });
+      ws.onerror = () => setState({ wsLive: false });
+      ws.onmessage = (ev) => {
+        let data; try { data = JSON.parse(ev.data); } catch { return; }
+        if (data.type === "event") handleEvent(data.taskId, data.event);
+      };
+      setState({ ws });
+    }
+
+    function handleEvent(taskId, event) {
+      if (event.kind === "status") {
+        const tasks = state.tasks.map((t) =>
+          t.id === taskId ? { ...t, status: event.status } : t
+        );
+        setState({ tasks });
+      }
+      if (taskId !== state.activeId) return;
+      if (event.kind === "message") {
+        appendMsg({ role: event.role, content: event.text });
+      } else if (event.kind === "tool_call") {
+        const args = JSON.stringify(event.args).slice(0, 400);
+        appendMsg({ role: "tool", content: `[call ${event.tool}] ${args}` });
+      } else if (event.kind === "tool_result") {
+        appendMsg({ role: "tool", content: `[result ${event.tool}] ${event.ok ? "ok" : "err"}: ${String(event.output).slice(0, 400)}` });
+      } else if (event.kind === "raw") {
+        appendMsg({ role: "system", content: event.text });
+      }
+    }
+
+    function appendMsg(m) {
+      state.activeMessages = [...state.activeMessages, { ...m, id: "tmp_" + Math.random(), ts: Date.now() }];
+      renderChatOnly();
+    }
+
+    async function pair(server, pairingToken) {
+      const r = await fetch(server + "/pair", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pairingToken, deviceLabel: "web@" + (navigator.userAgent.match(/\((.*?)\)/)?.[1] || "browser") }),
+      });
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      const { sessionToken } = await r.json();
+      localStorage.setItem("agentd.server", server);
+      localStorage.setItem("agentd.token", sessionToken);
+      setState({ server, token: sessionToken });
+      await loadTasks();
+      attachWs(null);
+    }
+
+    function logout() {
+      localStorage.removeItem("agentd.token");
+      if (state.ws) try { state.ws.close(); } catch {}
+      setState({ token: null, tasks: [], activeId: null, activeMessages: [], ws: null });
+    }
+
+    async function newTask(form) {
+      const repoPath = form.repo.value.trim();
+      const prompt = form.prompt.value.trim();
+      const agent = form.agent.value;
+      if (!repoPath || !prompt) { toast("repo and prompt required", true); return; }
+      try {
+        const { task } = await api("/api/tasks", {
+          method: "POST",
+          body: JSON.stringify({ agent, repoPath, baseBranch: form.base.value.trim() || "main", prompt }),
+        });
+        form.prompt.value = "";
+        await loadTasks();
+        loadTask(task.id);
+      } catch (e) {
+        toast(`create: ${e.message}`, true);
+      }
+    }
+
+    async function sendInput(text) {
+      if (!state.activeId || !text.trim()) return;
+      try {
+        await api(`/api/tasks/${state.activeId}/input`, {
+          method: "POST",
+          body: JSON.stringify({ text }),
+        });
+        appendMsg({ role: "user", content: text });
+      } catch (e) {
+        toast(`send: ${e.message}`, true);
+      }
+    }
+
+    async function stopTask() {
+      if (!state.activeId) return;
+      await api(`/api/tasks/${state.activeId}/stop`, { method: "POST" }).catch((e) => toast(e.message, true));
+    }
+
+    async function removeTask(id) {
+      if (!confirm("Remove task and worktree?")) return;
+      try {
+        await api(`/api/tasks/${id}`, { method: "DELETE" });
+        if (state.activeId === id) setState({ activeId: null, activeMessages: [] });
+        await loadTasks();
+      } catch (e) {
+        toast(e.message, true);
+      }
+    }
+
+    async function loadFiles() {
+      if (!state.activeId) return;
+      try {
+        const { files } = await api(`/api/tasks/${state.activeId}/files`);
+        setState({ files });
+      } catch (e) { toast(e.message, true); }
+    }
+
+    async function loadFileContent(path) {
+      try {
+        const { content } = await api(`/api/tasks/${state.activeId}/file?path=${encodeURIComponent(path)}`);
+        setState({ activeFile: path, fileContent: content });
+      } catch (e) { toast(e.message, true); }
+    }
+
+    async function loadDiff() {
+      if (!state.activeId) return;
+      try {
+        const d = await api(`/api/tasks/${state.activeId}/diff`);
+        setState({ diff: d });
+      } catch (e) { toast(e.message, true); }
+    }
+
+    async function loadLog() {
+      if (!state.activeId) return;
+      try {
+        const { log } = await api(`/api/tasks/${state.activeId}/log`);
+        setState({ log });
+      } catch (e) { toast(e.message, true); }
+    }
+
+    async function revertCommit(sha) {
+      if (!state.activeId) return;
+      if (!confirm(`Revert commit ${sha.slice(0,7)}?`)) return;
+      try {
+        await api(`/api/tasks/${state.activeId}/revert`, {
+          method: "POST",
+          body: JSON.stringify({ sha }),
+        });
+        toast(`reverted ${sha.slice(0,7)}`);
+        await loadLog();
+      } catch (e) { toast(e.message, true); }
+    }
+
+    function colorDiff(text) {
+      return text
+        .replace(/[&<>]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;" }[c]))
+        .split("\n").map((line) => {
+          if (line.startsWith("+++") || line.startsWith("---")) return `<span class="hunk">${line}</span>`;
+          if (line.startsWith("@@")) return `<span class="hunk">${line}</span>`;
+          if (line.startsWith("+")) return `<span class="add">${line}</span>`;
+          if (line.startsWith("-")) return `<span class="del">${line}</span>`;
+          return line;
+        }).join("\n");
+    }
+
+    function renderLogin() {
+      root.innerHTML = `
+        <div class="login">
+          <h1>agentd</h1>
+          <p>Pair this browser with a running daemon.</p>
+          <form id="pair-form">
+            <label>server URL</label>
+            <input name="server" value="${state.server}" required />
+            <label>one-time pairing token</label>
+            <input name="token" placeholder="paste token printed on daemon startup" required autofocus />
+            <button class="primary" type="submit">pair</button>
+          </form>
+        </div>
+      `;
+      $("#pair-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        try {
+          await pair(fd.get("server"), fd.get("token"));
+        } catch (err) {
+          toast(`pair: ${err.message}`, true);
+        }
+      });
+    }
+
+    function renderApp() {
+      const active = state.tasks.find((t) => t.id === state.activeId);
+      root.innerHTML = `
+        <div class="layout ${active ? "has-task" : ""}">
+          <aside class="sidebar">
+            <header>
+              <span class="title">agentd</span>
+              <span class="conn ${state.wsLive ? "live" : ""}">${state.wsLive ? "● live" : "○ offline"}</span>
+              <button title="log out" id="logout">⎋</button>
+            </header>
+            <form class="new-form" id="new-form">
+              <input name="repo" placeholder="/path/to/git/repo" required />
+              <div class="row">
+                <select name="agent">
+                  <option value="claude">claude</option>
+                  <option value="codex" disabled>codex (soon)</option>
+                </select>
+                <input name="base" placeholder="base branch" value="main" style="width:120px" />
+              </div>
+              <textarea name="prompt" placeholder="What should the agent do?" required></textarea>
+              <button class="primary" type="submit">spawn</button>
+            </form>
+            <div class="task-list" id="task-list">
+              ${state.tasks.length === 0 ? `<div class="empty">No tasks yet.</div>` :
+                state.tasks.map((t) => `
+                  <div class="task-row ${t.id === state.activeId ? "active" : ""}" data-id="${t.id}">
+                    <div class="top">
+                      <span class="agent">${t.agent}</span>
+                      <span class="status ${t.status}">${t.status}</span>
+                    </div>
+                    <div class="title">${escapeHtml(t.title)}</div>
+                    <div class="branch">${escapeHtml(t.branch)}</div>
+                  </div>
+                `).join("")}
+            </div>
+          </aside>
+          <main class="main">
+            ${active ? renderTask(active) : `<div class="empty" style="margin:auto">Select or spawn a task.</div>`}
+          </main>
+        </div>
+        ${state.toast ? `<div class="toast ${state.toast.isErr ? "err" : ""}">${escapeHtml(state.toast.msg)}</div>` : ""}
+      `;
+
+      $("#logout")?.addEventListener("click", logout);
+      $("#new-form")?.addEventListener("submit", (e) => { e.preventDefault(); newTask(e.target); });
+      root.querySelectorAll(".task-row").forEach((el) => {
+        el.addEventListener("click", () => loadTask(el.dataset.id));
+      });
+      wireTaskPane(active);
+    }
+
+    function renderTask(task) {
+      return `
+        <header>
+          <button class="back" id="back">←</button>
+          <div class="title">${escapeHtml(task.title)}</div>
+          <span class="meta">${task.agent} · ${task.status} · ${escapeHtml(task.branch)}</span>
+          <button id="stop">stop</button>
+          <button class="danger" id="rm">rm</button>
+        </header>
+        <nav class="tabs">
+          <button data-tab="chat" class="${state.tab==='chat'?'active':''}">chat</button>
+          <button data-tab="files" class="${state.tab==='files'?'active':''}">files</button>
+          <button data-tab="diff" class="${state.tab==='diff'?'active':''}">diff</button>
+          <button data-tab="log" class="${state.tab==='log'?'active':''}">log</button>
+        </nav>
+        <div class="content">
+          ${state.tab === 'chat' ? renderChat() : ""}
+          ${state.tab === 'files' ? renderFiles() : ""}
+          ${state.tab === 'diff' ? renderDiff() : ""}
+          ${state.tab === 'log' ? renderLog() : ""}
+        </div>
+      `;
+    }
+
+    function renderChat() {
+      return `
+        <div class="chat" id="chat">
+          ${state.activeMessages.map(renderMsg).join("")}
+        </div>
+        <form class="input-row" id="input-form">
+          <textarea name="text" placeholder="Send input to the agent... (Cmd/Ctrl+Enter to send)" rows="2"></textarea>
+          <div class="actions"><button class="primary" type="submit">send</button></div>
+        </form>
+      `;
+    }
+
+    function renderMsg(m) {
+      return `
+        <div class="msg ${m.role}">
+          <div class="role">${m.role}</div>
+          <div class="body">${escapeHtml(m.content)}</div>
+        </div>
+      `;
+    }
+
+    function renderFiles() {
+      return `
+        <div class="files-pane ${state.activeFile ? "has-file" : ""}">
+          <div class="file-tree">
+            ${state.files.length === 0 ? `<div class="empty">(no files / loading)</div>` :
+              state.files.map((f) => `<div class="file ${f===state.activeFile?'active':''}" data-path="${escapeHtml(f)}">${escapeHtml(f)}</div>`).join("")}
+          </div>
+          <div class="file-view">
+            ${state.activeFile ?
+              `<div style="margin-bottom:8px;color:var(--muted);font-size:12px">${escapeHtml(state.activeFile)} <button id="close-file" style="float:right">close</button></div>
+               <pre>${escapeHtml(state.fileContent || "")}</pre>` :
+              `<div class="empty">Select a file</div>`}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderDiff() {
+      if (!state.diff) return `<div class="diff-pane"><div class="empty">loading…</div></div>`;
+      return `
+        <div class="diff-pane">
+          <div style="color:var(--muted);font-size:12px;margin-bottom:8px">vs ${escapeHtml(state.diff.baseRef)}</div>
+          <pre>${state.diff.stat ? escapeHtml(state.diff.stat) + "\n" : ""}${colorDiff(state.diff.diff || "(no changes)")}</pre>
+        </div>
+      `;
+    }
+
+    function renderLog() {
+      if (state.log.length === 0) return `<div class="log-pane"><div class="empty">no commits</div></div>`;
+      return `
+        <div class="log-pane">
+          ${state.log.map((c) => `
+            <div class="commit">
+              <div class="sha">${c.sha.slice(0,12)} · ${escapeHtml(c.author)} · ${new Date(c.ts).toLocaleString()}</div>
+              <div class="subject">${escapeHtml(c.subject)}</div>
+              <div class="actions"><button data-revert="${c.sha}">revert</button></div>
+            </div>
+          `).join("")}
+        </div>
+      `;
+    }
+
+    function wireTaskPane(task) {
+      if (!task) return;
+      $("#back")?.addEventListener("click", () => setState({ activeId: null }));
+      $("#stop")?.addEventListener("click", stopTask);
+      $("#rm")?.addEventListener("click", () => removeTask(task.id));
+      root.querySelectorAll(".tabs button").forEach((b) => {
+        b.addEventListener("click", () => {
+          setState({ tab: b.dataset.tab });
+          if (b.dataset.tab === "files") loadFiles();
+          else if (b.dataset.tab === "diff") loadDiff();
+          else if (b.dataset.tab === "log") loadLog();
+        });
+      });
+      const chat = $("#chat");
+      if (chat) chat.scrollTop = chat.scrollHeight;
+      const inputForm = $("#input-form");
+      if (inputForm) {
+        const ta = inputForm.querySelector("textarea");
+        inputForm.addEventListener("submit", (e) => {
+          e.preventDefault();
+          const text = ta.value;
+          ta.value = "";
+          sendInput(text);
+        });
+        ta.addEventListener("keydown", (e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+            e.preventDefault();
+            inputForm.requestSubmit();
+          }
+        });
+      }
+      root.querySelectorAll(".file-tree .file").forEach((el) => {
+        el.addEventListener("click", () => loadFileContent(el.dataset.path));
+      });
+      $("#close-file")?.addEventListener("click", () => setState({ activeFile: null, fileContent: null }));
+      root.querySelectorAll("[data-revert]").forEach((b) => {
+        b.addEventListener("click", () => revertCommit(b.dataset.revert));
+      });
+    }
+
+    function renderChatOnly() {
+      const chat = $("#chat");
+      if (!chat) return;
+      const wasAtBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 40;
+      chat.innerHTML = state.activeMessages.map(renderMsg).join("");
+      if (wasAtBottom) chat.scrollTop = chat.scrollHeight;
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+    }
+
+    function render() {
+      if (!state.token) renderLogin();
+      else renderApp();
+    }
+
+    // boot
+    render();
+    if (state.token) {
+      loadTasks().then(() => attachWs(null));
+      setInterval(loadTasks, 5000);
+    }
+  })();
+  </script>
+</body>
+</html>
