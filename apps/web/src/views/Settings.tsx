@@ -1,13 +1,11 @@
 import { useEffect, useState } from "react";
-import type { AgentdClient } from "@agentd/client";
+import { useApp, useClient } from "../AppContext";
 
-interface Props {
-  client: AgentdClient;
-  onError: (m: string) => void;
-  onInfo: (m: string) => void;
-}
-
-export function Settings({ client, onError, onInfo }: Props) {
+export function Settings() {
+  const client = useClient();
+  const { toast } = useApp();
+  const onError = (m: string) => toast(m, true);
+  const onInfo = (m: string) => toast(m);
   const [agentInstructions, setAgentInstructions] = useState("");
   const [commitPrefix, setCommitPrefix] = useState("");
   const [prTitlePrefix, setPrTitlePrefix] = useState("");

@@ -171,18 +171,25 @@ code {
   gap: 2px;
   flex: 1;
 }
-.topbar .nav button {
+.topbar .nav button,
+.topbar .nav a {
   background: none;
   border: 1px solid transparent;
   border-radius: 6px;
   color: var(--muted);
   padding: 4px 10px;
+  text-decoration: none;
+  font: inherit;
+  cursor: pointer;
+  display: inline-block;
 }
-.topbar .nav button.active {
+.topbar .nav button.active,
+.topbar .nav a.active {
   color: var(--text);
   background: var(--panel-2);
 }
-.topbar .nav button:hover {
+.topbar .nav button:hover,
+.topbar .nav a:hover {
   color: var(--text);
 }
 .topbar .conn {

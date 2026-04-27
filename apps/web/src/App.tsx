@@ -1,38 +1,32 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { AgentdClient } from "@agentd/client";
+import { lazy, Suspense, useEffect } from "react";
 import {
-  clearSession,
-  loadStoredServer,
-  loadStoredToken,
-  saveSession,
-} from "./api";
+  createBrowserRouter,
+  NavLink,
+  Outlet,
+  RouterProvider,
+  Navigate,
+} from "react-router-dom";
+import { AppProvider, useApp } from "./AppContext";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { Login } from "./views/Login";
-import { Tasks } from "./views/Tasks";
-import { Templates } from "./views/Templates";
-import { Schedules } from "./views/Schedules";
-import { Settings } from "./views/Settings";
-import { Plugins } from "./views/Plugins";
 
-type Page = "tasks" | "templates" | "schedules" | "plugins" | "settings";
+// Lazy-loaded views: each view ships in its own chunk so xterm.js (only used
+// by the terminal tab inside Tasks) and the bigger plugin/settings forms
+// don't bloat the initial paint.
+const Tasks = lazy(() => import("./views/Tasks").then((m) => ({ default: m.Tasks })));
+const Templates = lazy(() => import("./views/Templates").then((m) => ({ default: m.Templates })));
+const Schedules = lazy(() => import("./views/Schedules").then((m) => ({ default: m.Schedules })));
+const Plugins = lazy(() => import("./views/Plugins").then((m) => ({ default: m.Plugins })));
+const Settings = lazy(() => import("./views/Settings").then((m) => ({ default: m.Settings })));
 
-export function App() {
-  const [server, setServer] = useState<string>(() => loadStoredServer());
-  const [token, setToken] = useState<string | null>(() => loadStoredToken());
-  const [page, setPage] = useState<Page>("tasks");
-  const [toast, setToast] = useState<{ msg: string; isErr: boolean } | null>(null);
+function ViewSuspense({ children }: { children: React.ReactNode }) {
+  return <Suspense fallback={<div className="empty page-pad">loading…</div>}>{children}</Suspense>;
+}
 
-  const client = useMemo<AgentdClient | null>(
-    () => (token ? new AgentdClient(server, token) : null),
-    [server, token],
-  );
+function Shell() {
+  const { client, server, setSession, logout, toast, toastState } = useApp();
 
-  const showToast = useCallback((msg: string, isErr = false) => {
-    setToast({ msg, isErr });
-    const t = setTimeout(() => setToast(null), 3500);
-    return () => clearTimeout(t);
-  }, []);
-
-  // Verify session on mount; if it 401s, log out and prompt re-pair.
+  // Verify session on mount; on 401 boot back to login.
   useEffect(() => {
     if (!client) return;
     let cancelled = false;
@@ -41,28 +35,25 @@ export function App() {
         await client.health();
       } catch {
         if (!cancelled) {
-          clearSession();
-          setToken(null);
-          showToast("session invalid — please pair again", true);
+          logout();
+          toast("session invalid — please pair again", true);
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [client, showToast]);
+  }, [client, logout, toast]);
 
   if (!client) {
     return (
       <Login
         initialServer={server}
-        onPair={(s, tok) => {
-          saveSession(s, tok);
-          setServer(s);
-          setToken(tok);
-          showToast("paired ✓");
+        onPair={(s, t) => {
+          setSession(s, t);
+          toast("paired ✓");
         }}
-        onError={(m) => showToast(m, true)}
+        onError={(m) => toast(m, true)}
       />
     );
   }
@@ -76,36 +67,97 @@ export function App() {
         </div>
         <div className="nav">
           {(["tasks", "templates", "schedules", "plugins", "settings"] as const).map((p) => (
-            <button
+            <NavLink
               key={p}
-              className={p === page ? "active" : ""}
-              onClick={() => setPage(p)}
+              to={`/${p}`}
+              className={({ isActive }) => (isActive ? "active" : "")}
+              // NavLink renders an <a> by default; we want it to look like our
+              // existing nav buttons, so we still expose the same DOM as a
+              // plain button via role + tabIndex via the className. CSS handles
+              // it because .topbar .nav button styling is now duplicated for a.
             >
               {p}
-            </button>
+            </NavLink>
           ))}
         </div>
-        <button
-          className="ghost"
-          onClick={() => {
-            clearSession();
-            setToken(null);
-          }}
-          title="log out"
-        >
+        <button className="ghost" onClick={logout} title="log out">
           ⎋
         </button>
       </div>
       <div style={{ minHeight: 0, overflow: "hidden" }}>
-        {page === "tasks" && <Tasks client={client} onError={(m) => showToast(m, true)} />}
-        {page === "templates" && <Templates client={client} onError={(m) => showToast(m, true)} onInfo={(m) => showToast(m)} />}
-        {page === "schedules" && <Schedules client={client} onError={(m) => showToast(m, true)} onInfo={(m) => showToast(m)} />}
-        {page === "plugins" && <Plugins client={client} onError={(m) => showToast(m, true)} onInfo={(m) => showToast(m)} />}
-        {page === "settings" && <Settings client={client} onError={(m) => showToast(m, true)} onInfo={(m) => showToast(m)} />}
+        <ErrorBoundary>
+          <Outlet />
+        </ErrorBoundary>
       </div>
-      {toast && (
-        <div className={`toast${toast.isErr ? " err" : ""}`}>{toast.msg}</div>
+      {toastState && (
+        <div className={`toast${toastState.isErr ? " err" : ""}`}>{toastState.msg}</div>
       )}
     </div>
+  );
+}
+
+const router = createBrowserRouter([
+  {
+    path: "/",
+    element: <Shell />,
+    children: [
+      { index: true, element: <Navigate to="/tasks" replace /> },
+      {
+        path: "tasks",
+        element: (
+          <ViewSuspense>
+            <Tasks />
+          </ViewSuspense>
+        ),
+        children: [
+          // /tasks/:id renders the same Tasks view, which reads :id from
+          // useParams and selects it. The nested route exists purely so
+          // <NavLink to={`/tasks/${id}`}> shows the proper active state and
+          // browser nav (back/forward) works.
+          { path: ":taskId" },
+        ],
+      },
+      {
+        path: "templates",
+        element: (
+          <ViewSuspense>
+            <Templates />
+          </ViewSuspense>
+        ),
+      },
+      {
+        path: "schedules",
+        element: (
+          <ViewSuspense>
+            <Schedules />
+          </ViewSuspense>
+        ),
+      },
+      {
+        path: "plugins",
+        element: (
+          <ViewSuspense>
+            <Plugins />
+          </ViewSuspense>
+        ),
+      },
+      {
+        path: "settings",
+        element: (
+          <ViewSuspense>
+            <Settings />
+          </ViewSuspense>
+        ),
+      },
+      { path: "*", element: <Navigate to="/tasks" replace /> },
+    ],
+  },
+]);
+
+export function App() {
+  return (
+    <AppProvider>
+      <RouterProvider router={router} />
+    </AppProvider>
   );
 }

@@ -1,11 +1,6 @@
 import { useEffect, useState } from "react";
-import type { AgentdClient, PluginStatus } from "@agentd/client";
-
-interface Props {
-  client: AgentdClient;
-  onError: (m: string) => void;
-  onInfo: (m: string) => void;
-}
+import type { PluginStatus } from "@agentd/client";
+import { useApp, useClient } from "../AppContext";
 
 interface PluginConfigRaw {
   enabled: boolean;
@@ -16,7 +11,11 @@ interface PluginConfigRaw {
   allowedChannelIds?: string[];
 }
 
-export function Plugins({ client, onError, onInfo }: Props) {
+export function Plugins() {
+  const client = useClient();
+  const { toast } = useApp();
+  const onError = (m: string) => toast(m, true);
+  const onInfo = (m: string) => toast(m);
   const [status, setStatus] = useState<PluginStatus[]>([]);
   const [config, setConfig] = useState<Record<string, PluginConfigRaw> | null>(null);
   const [busy, setBusy] = useState<string | null>(null);

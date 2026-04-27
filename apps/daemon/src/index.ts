@@ -45,39 +45,55 @@ async function main() {
   const webHtml = existsSync(WEB_INDEX) ? readFileSync(WEB_INDEX, "utf8") : null;
 
   /**
-   * Serve the built Vite app from apps/web/dist when present. Hashed asset
-   * filenames mean we can mark them immutable. The HTML doc itself is served
-   * with no-cache so a redeploy is reflected on next page load. Anything not
-   * matching a real file falls through to the SPA shell so client-side routing
-   * works without a 404.
+   * Serve the built Vite app from apps/web/dist when present.
+   *
+   * Three rules, in order:
+   *   1. Static assets (anything in /assets or with a known extension) are
+   *      served from disk. Hashed names get an immutable cache.
+   *   2. API/WS routes (/api, /ws, /pty, /pair, /health) bypass us entirely
+   *      and fall through to the Hono app — handled by returning null below.
+   *   3. Everything else (/, /tasks/:id, /templates, ...) gets the SPA shell
+   *      so client-side React Router can resolve the route. Without this,
+   *      hard-refreshing on /templates would 404.
    */
   function serveWeb(req: Request): Response | null {
     if (!webHtml) return null;
     const url = new URL(req.url);
-    if (url.pathname === "/" || url.pathname === "/index.html") {
-      return new Response(webHtml, {
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "cache-control": "no-cache",
-        },
-      });
+
+    // 2. API + WS reserved paths — let the Hono app / WS handler take them.
+    if (
+      url.pathname.startsWith("/api") ||
+      url.pathname.startsWith("/ws") ||
+      url.pathname.startsWith("/pty/") ||
+      url.pathname === "/pair" ||
+      url.pathname === "/health"
+    ) {
+      return null;
     }
-    // Static assets: anything under /assets, plus a few common extensions
-    // emitted at the dist root.
+
+    // 1. Static assets.
     const assetMatch =
       url.pathname.startsWith("/assets/") ||
       /\.(js|css|map|svg|png|webp|ico|woff2?)$/.test(url.pathname);
-    if (!assetMatch) return null;
-    const safe = resolve(WEB_DIST, "." + url.pathname);
-    if (!safe.startsWith(WEB_DIST)) return null;
-    if (!existsSync(safe)) return null;
-    const file = Bun.file(safe);
-    const isHashed = /\/assets\//.test(url.pathname);
-    return new Response(file, {
+    if (assetMatch) {
+      const safe = resolve(WEB_DIST, "." + url.pathname);
+      if (!safe.startsWith(WEB_DIST) || !existsSync(safe)) return null;
+      const isHashed = /\/assets\//.test(url.pathname);
+      return new Response(Bun.file(safe), {
+        headers: {
+          "cache-control": isHashed
+            ? "public, max-age=31536000, immutable"
+            : "public, max-age=300",
+        },
+      });
+    }
+
+    // 3. SPA shell fallback — only for GET; let other verbs 404 through Hono.
+    if (req.method !== "GET" && req.method !== "HEAD") return null;
+    return new Response(webHtml, {
       headers: {
-        "cache-control": isHashed
-          ? "public, max-age=31536000, immutable"
-          : "public, max-age=300",
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-cache",
       },
     });
   }

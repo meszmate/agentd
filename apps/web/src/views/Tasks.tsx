@@ -1,25 +1,29 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { NavLink, useNavigate, useParams } from "react-router-dom";
 import type { AgentdClient } from "@agentd/client";
 import type { Task, Message, AgentEvent } from "@agentd/contracts";
 import { usePoll, useTaskStream } from "../api";
-import { Terminal } from "./Terminal";
+import { useApp, useClient } from "../AppContext";
+
+// xterm.js is heavy (~80KB gzipped) and only needed for the terminal tab —
+// lazy-load so it doesn't bloat the initial Tasks chunk.
+const Terminal = lazy(() => import("./Terminal").then((m) => ({ default: m.Terminal })));
 
 type Tab = "chat" | "files" | "diff" | "log" | "term";
 
-interface Props {
-  client: AgentdClient;
-  onError: (msg: string) => void;
-}
+export function Tasks() {
+  const client = useClient();
+  const { toast } = useApp();
+  const onError = (m: string) => toast(m, true);
+  const navigate = useNavigate();
+  const { taskId: routeTaskId } = useParams<{ taskId: string }>();
 
-export function Tasks({ client, onError }: Props) {
-  const tasksPoll = usePoll(
-    () => client.listTasks(),
-    { tasks: [] as Task[] },
-    4000,
-  );
+  const tasksPoll = usePoll(() => client.listTasks(), { tasks: [] as Task[] }, 4000);
   const tasks = tasksPoll.data.tasks;
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const active = useMemo(() => tasks.find((t) => t.id === activeId) ?? null, [tasks, activeId]);
+  const active = useMemo(
+    () => tasks.find((t) => t.id === routeTaskId) ?? null,
+    [tasks, routeTaskId],
+  );
 
   return (
     <div className={`body${active ? " has-detail" : ""}`}>
@@ -29,7 +33,7 @@ export function Tasks({ client, onError }: Props) {
           onError={onError}
           onSpawned={async (id) => {
             await tasksPoll.refresh();
-            setActiveId(id);
+            navigate(`/tasks/${id}`);
           }}
         />
         <div className="list">
@@ -37,10 +41,11 @@ export function Tasks({ client, onError }: Props) {
             <div className="empty">No tasks yet.</div>
           ) : (
             tasks.map((t) => (
-              <div
+              <NavLink
                 key={t.id}
-                className={`row${t.id === activeId ? " active" : ""}`}
-                onClick={() => setActiveId(t.id)}
+                to={`/tasks/${t.id}`}
+                className={({ isActive }) => `row${isActive ? " active" : ""}`}
+                style={{ display: "block", color: "inherit", textDecoration: "none" }}
               >
                 <div className="top">
                   <span className="agent">{t.agent}</span>
@@ -54,7 +59,7 @@ export function Tasks({ client, onError }: Props) {
                     {t.totalCostUsd != null ? ` · $${t.totalCostUsd.toFixed(4)}` : ""}
                   </div>
                 )}
-              </div>
+              </NavLink>
             ))
           )}
         </div>
@@ -65,7 +70,7 @@ export function Tasks({ client, onError }: Props) {
             client={client}
             task={active}
             onError={onError}
-            onClose={() => setActiveId(null)}
+            onClose={() => navigate("/tasks")}
             onTaskChanged={() => void tasksPoll.refresh()}
           />
         ) : (
@@ -295,7 +300,11 @@ function TaskDetail({ client, task, onError, onClose, onTaskChanged }: DetailPro
         {tab === "log" && (
           <LogView client={client} taskId={task.id} onError={onError} />
         )}
-        {tab === "term" && <Terminal taskId={task.id} onError={onError} />}
+        {tab === "term" && (
+          <Suspense fallback={<div className="empty">loading terminal…</div>}>
+            <Terminal taskId={task.id} onError={onError} />
+          </Suspense>
+        )}
       </div>
     </>
   );

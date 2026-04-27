@@ -2,14 +2,13 @@ import { useState } from "react";
 import type { AgentdClient } from "@agentd/client";
 import type { Template } from "@agentd/contracts";
 import { usePoll } from "../api";
+import { useApp, useClient } from "../AppContext";
 
-interface Props {
-  client: AgentdClient;
-  onError: (m: string) => void;
-  onInfo: (m: string) => void;
-}
-
-export function Templates({ client, onError, onInfo }: Props) {
+export function Templates() {
+  const client = useClient();
+  const { toast } = useApp();
+  const onError = (m: string) => toast(m, true);
+  const onInfo = (m: string) => toast(m);
   const poll = usePoll(() => client.listTemplates(), { templates: [] as Template[] }, 6000);
   const [showForm, setShowForm] = useState(false);
   const [running, setRunning] = useState<string | null>(null);
