@@ -16,7 +16,8 @@ import { PluginManager } from "./pluginManager.ts";
 import { Scheduler } from "./scheduler.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const WEB_INDEX = resolve(HERE, "..", "..", "web", "index.html");
+const WEB_DIST = resolve(HERE, "..", "..", "web", "dist");
+const WEB_INDEX = resolve(WEB_DIST, "index.html");
 
 const VERSION = "0.0.1";
 
@@ -43,18 +44,52 @@ async function main() {
 
   const webHtml = existsSync(WEB_INDEX) ? readFileSync(WEB_INDEX, "utf8") : null;
 
+  /**
+   * Serve the built Vite app from apps/web/dist when present. Hashed asset
+   * filenames mean we can mark them immutable. The HTML doc itself is served
+   * with no-cache so a redeploy is reflected on next page load. Anything not
+   * matching a real file falls through to the SPA shell so client-side routing
+   * works without a 404.
+   */
+  function serveWeb(req: Request): Response | null {
+    if (!webHtml) return null;
+    const url = new URL(req.url);
+    if (url.pathname === "/" || url.pathname === "/index.html") {
+      return new Response(webHtml, {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+      });
+    }
+    // Static assets: anything under /assets, plus a few common extensions
+    // emitted at the dist root.
+    const assetMatch =
+      url.pathname.startsWith("/assets/") ||
+      /\.(js|css|map|svg|png|webp|ico|woff2?)$/.test(url.pathname);
+    if (!assetMatch) return null;
+    const safe = resolve(WEB_DIST, "." + url.pathname);
+    if (!safe.startsWith(WEB_DIST)) return null;
+    if (!existsSync(safe)) return null;
+    const file = Bun.file(safe);
+    const isHashed = /\/assets\//.test(url.pathname);
+    return new Response(file, {
+      headers: {
+        "cache-control": isHashed
+          ? "public, max-age=31536000, immutable"
+          : "public, max-age=300",
+      },
+    });
+  }
+
   const server = Bun.serve({
     hostname: cfg.host,
     port: cfg.port,
     fetch(req, server) {
       const upgraded = upgradeRequest(req, server);
       if (upgraded !== undefined) return upgraded;
-      const url = new URL(req.url);
-      if ((url.pathname === "/" || url.pathname === "/index.html") && webHtml) {
-        return new Response(webHtml, {
-          headers: { "content-type": "text/html; charset=utf-8" },
-        });
-      }
+      const webResp = serveWeb(req);
+      if (webResp) return webResp;
       return app.fetch(req, { server });
     },
     websocket: wsHandler,
@@ -63,7 +98,9 @@ async function main() {
   const announceUrl = `http://${cfg.host}:${server.port}`;
   console.log(`agentd v${VERSION}`);
   console.log(`listening on ${announceUrl}`);
-  console.log(`web ui:    ${webHtml ? announceUrl + "/" : "(disabled — apps/web/index.html not found)"}`);
+  console.log(
+    `web ui:    ${webHtml ? announceUrl + "/" : "(not built — run `bun --filter @agentd/web build`)"}`,
+  );
   console.log(`db:        ${paths.db}`);
   console.log(`worktrees: ${paths.worktrees}`);
   console.log(`config:    ${paths.root}/config.json`);
