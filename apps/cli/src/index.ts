@@ -2,7 +2,7 @@
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { ApiClient } from "./api.ts";
+import { AgentdClient } from "@agentd/client";
 import { loadCliConfig, saveCliConfig } from "./config.ts";
 
 const HELP = `agentd — remote coding-agent orchestrator
@@ -38,7 +38,7 @@ async function cmdPair(argv: string[]) {
     process.exit(2);
   }
   const label = values.label ?? `${process.env.USER ?? "user"}@${hostname()}`;
-  const client = new ApiClient(String(values.server), null);
+  const client = new AgentdClient(String(values.server), null);
   const res = await client.pair({
     pairingToken: String(values.token),
     deviceLabel: label,
@@ -49,9 +49,9 @@ async function cmdPair(argv: string[]) {
   console.log(`session saved to ~/.agentd/cli.json`);
 }
 
-function client(): ApiClient {
+function client(): AgentdClient {
   const cfg = loadCliConfig();
-  return new ApiClient(cfg.server, cfg.sessionToken);
+  return new AgentdClient(cfg.server, cfg.sessionToken);
 }
 
 async function cmdLs() {

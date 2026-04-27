@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@agentd/contracts": "workspace:*"
+    "@agentd/contracts": "workspace:*",
+    "@agentd/client": "workspace:*"
   }
 }
