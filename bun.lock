@@ -80,6 +80,7 @@
       "dependencies": {
         "@agentd/contracts": "workspace:*",
         "drizzle-orm": "^0.36.4",
+        "zod": "^3.23.8",
       },
     },
   },

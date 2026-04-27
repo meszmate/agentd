@@ -10,13 +10,15 @@
     "./auth": "./src/auth.ts",
     "./paths": "./src/paths.ts",
     "./events": "./src/events.ts",
-    "./git": "./src/git.ts"
+    "./git": "./src/git.ts",
+    "./config": "./src/config.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@agentd/contracts": "workspace:*",
-    "drizzle-orm": "^0.36.4"
+    "drizzle-orm": "^0.36.4",
+    "zod": "^3.23.8"
   }
 }

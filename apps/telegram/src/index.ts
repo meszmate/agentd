@@ -7,7 +7,19 @@ interface BotConfig {
   server: string;
   session: string;
   allowedChatIds: Set<number>;
+  allowedUserIds: Set<number>;
   defaultRepo: string | null;
+}
+
+function parseIdList(raw: string | undefined): Set<number> {
+  return new Set(
+    (raw ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => Number(s))
+      .filter((n) => Number.isFinite(n)),
+  );
 }
 
 function loadConfig(): BotConfig {
@@ -22,24 +34,19 @@ function loadConfig(): BotConfig {
     console.error("AGENTD_TOKEN is required (an agentd session token, not a pairing token)");
     process.exit(2);
   }
-  const raw = process.env.TELEGRAM_ALLOWED_CHAT_IDS ?? "";
-  const allowed = new Set(
-    raw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((s) => Number(s)),
-  );
-  if (allowed.size === 0) {
+  const allowedChatIds = parseIdList(process.env.TELEGRAM_ALLOWED_CHAT_IDS);
+  const allowedUserIds = parseIdList(process.env.TELEGRAM_ALLOWED_USER_IDS);
+  if (allowedChatIds.size === 0 && allowedUserIds.size === 0) {
     console.error(
-      "TELEGRAM_ALLOWED_CHAT_IDS must list at least one chat id (comma-separated). Use /whoami in a chat to get yours after launch.",
+      "TELEGRAM_ALLOWED_USER_IDS or TELEGRAM_ALLOWED_CHAT_IDS must list at least one id. Use /whoami in a chat to discover yours after launch.",
     );
   }
   return {
     token,
     server,
     session,
-    allowedChatIds: allowed,
+    allowedChatIds,
+    allowedUserIds,
     defaultRepo: process.env.AGENTD_DEFAULT_REPO ?? null,
   };
 }
@@ -77,23 +84,38 @@ async function main() {
   // Per-chat current task focus, so user can `/in <text>` without an id.
   const focus = new Map<number, string>();
 
-  function isAllowed(chatId: number | undefined): boolean {
-    if (!chatId) return false;
-    if (cfg.allowedChatIds.size === 0) return false;
-    return cfg.allowedChatIds.has(chatId);
+  /**
+   * Two-axis check: a request is allowed only if the chat is on the chat
+   * allowlist OR the user is on the user allowlist (whichever is configured).
+   * If only user ids are configured, chat ids are not required (and vice
+   * versa) — but at least one axis MUST match. If neither list is configured,
+   * everything is denied. This keeps personal DMs and shared groups both
+   * lockable, and it lets a user-id allowlist work even in groups where the
+   * chat id varies.
+   */
+  function isAllowed(chatId: number | undefined, userId: number | undefined): boolean {
+    if (cfg.allowedUserIds.size === 0 && cfg.allowedChatIds.size === 0) return false;
+    const userOk = userId != null && cfg.allowedUserIds.has(userId);
+    const chatOk = chatId != null && cfg.allowedChatIds.has(chatId);
+    if (cfg.allowedUserIds.size > 0 && cfg.allowedChatIds.size > 0) {
+      return userOk && chatOk;
+    }
+    return userOk || chatOk;
   }
 
   bot.command("whoami", async (ctx) => {
-    const id = ctx.chat?.id;
-    await ctx.reply(`chat id: \`${id}\`\nallowed: ${isAllowed(id) ? "yes" : "no"}`, {
-      parse_mode: "MarkdownV2",
-    });
+    const chatId = ctx.chat?.id;
+    const userId = ctx.from?.id;
+    await ctx.reply(
+      `chat id: \`${chatId}\`\nuser id: \`${userId}\`\nallowed: ${isAllowed(chatId, userId) ? "yes" : "no"}`,
+      { parse_mode: "MarkdownV2" },
+    );
   });
 
   bot.use(async (ctx, next) => {
     if (ctx.message?.text?.startsWith("/whoami")) return next();
-    if (!isAllowed(ctx.chat?.id)) {
-      await ctx.reply("not allowed. add this chat id to TELEGRAM_ALLOWED_CHAT_IDS.");
+    if (!isAllowed(ctx.chat?.id, ctx.from?.id)) {
+      await ctx.reply("not allowed. ask the operator to add this chat id and/or user id to the allowlist.");
       return;
     }
     return next();
@@ -271,7 +293,9 @@ async function main() {
   ws.addEventListener("close", () => console.error("ws closed"));
   ws.addEventListener("error", () => console.error("ws error"));
 
-  console.log(`telegram bot ready · server=${cfg.server} · ${cfg.allowedChatIds.size} allowed chat(s)`);
+  console.log(
+    `telegram bot ready · server=${cfg.server} · ${cfg.allowedUserIds.size} allowed user(s) · ${cfg.allowedChatIds.size} allowed chat(s)`,
+  );
   await bot.start();
 }
 

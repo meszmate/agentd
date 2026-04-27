@@ -20,9 +20,15 @@ import {
   listLog,
   revertCommit,
   resolveSession,
+  loadConfig,
+  saveConfig,
+  TelegramPluginConfig,
+  DiscordPluginConfig,
   type AgentdPaths,
   type Db,
+  type PluginName,
 } from "@agentd/core";
+import type { PluginManager } from "./pluginManager.ts";
 import { requireSession, bearerOrHeader } from "./auth.ts";
 import type { TaskManager } from "./taskManager.ts";
 
@@ -37,11 +43,12 @@ export interface BuildServerOptions {
   bus: EventBus;
   paths: AgentdPaths;
   tasks: TaskManager;
+  plugins: PluginManager;
   version: string;
 }
 
 export function buildServer(opts: BuildServerOptions) {
-  const { db, bus, tasks, version } = opts;
+  const { db, bus, paths, tasks, plugins, version } = opts;
   const app = new Hono();
 
   app.use("*", cors());
@@ -196,6 +203,36 @@ export function buildServer(opts: BuildServerOptions) {
     // Issue an additional pairing token from an authenticated session.
     const issued = issuePairingToken(db);
     return c.json(issued);
+  });
+
+  api.get("/admin/plugins", (c) => {
+    const cfg = loadConfig(paths.root);
+    return c.json({ plugins: plugins.status(), config: cfg.plugins });
+  });
+
+  const PluginPatchTelegram = TelegramPluginConfig.partial();
+  const PluginPatchDiscord = DiscordPluginConfig.partial();
+
+  api.post("/admin/plugins/:name", async (c) => {
+    const name = c.req.param("name") as PluginName;
+    if (name !== "telegram" && name !== "discord") {
+      return c.json({ error: "unknown plugin" }, 404);
+    }
+    const body = await c.req.json().catch(() => null);
+    const schema = name === "telegram" ? PluginPatchTelegram : PluginPatchDiscord;
+    const parsed = schema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "invalid patch", issues: parsed.error.issues }, 400);
+    }
+    const cfg = loadConfig(paths.root);
+    const merged = { ...cfg.plugins[name], ...parsed.data };
+    const next = {
+      ...cfg,
+      plugins: { ...cfg.plugins, [name]: merged },
+    };
+    saveConfig(paths.root, next);
+    await plugins.reload();
+    return c.json({ ok: true, plugin: next.plugins[name], status: plugins.status() });
   });
 
   app.route("/api", api);

@@ -17,6 +17,10 @@ Usage:
   agentd stop <task-id>
   agentd rm <task-id>
   agentd config
+  agentd plugin status
+  agentd plugin enable telegram --token <bot-token> [--allow-user 1,2] [--allow-chat 3,4] [--default-repo <path>]
+  agentd plugin enable discord  --token <bot-token> [--allow-user a,b] [--allow-channel c,d] [--default-repo <path>]
+  agentd plugin disable <telegram|discord>
 
 Env:
   AGENTD_SERVER   default server URL (overrides saved config)
@@ -208,6 +212,114 @@ function cmdConfig() {
   console.log(JSON.stringify(c, null, 2));
 }
 
+function fmtAgo(ts: number | null): string {
+  if (!ts) return "—";
+  const sec = Math.floor((Date.now() - ts) / 1000);
+  if (sec < 60) return sec + "s ago";
+  if (sec < 3600) return Math.floor(sec / 60) + "m ago";
+  if (sec < 86400) return Math.floor(sec / 3600) + "h ago";
+  return Math.floor(sec / 86400) + "d ago";
+}
+
+async function cmdPlugin(argv: string[]) {
+  const sub = argv[0];
+  if (!sub || sub === "status") {
+    const { plugins, config } = await client().pluginStatus();
+    for (const p of plugins) {
+      const cfg = (config as Record<string, Record<string, unknown>>)[p.name] ?? {};
+      const allowedUsers = ((cfg.allowedUserIds as unknown[]) ?? []).length;
+      const allowedScopes =
+        p.name === "telegram"
+          ? ((cfg.allowedChatIds as unknown[]) ?? []).length + " chat(s)"
+          : ((cfg.allowedChannelIds as unknown[]) ?? []).length + " channel(s)";
+      const state = p.enabled ? (p.running ? "running" : "stopped") : "disabled";
+      console.log(
+        `${p.name.padEnd(8)}  ${state.padEnd(9)}  pid=${p.pid ?? "—"}  restarts=${p.restarts}  users=${allowedUsers}  ${allowedScopes}  uptime=${fmtAgo(p.startedAt)}`,
+      );
+      if (p.lastError) console.log(`            last error: ${p.lastError}`);
+    }
+    return;
+  }
+
+  const name = argv[1];
+  if (sub === "disable") {
+    if (name !== "telegram" && name !== "discord") {
+      console.error("usage: agentd plugin disable <telegram|discord>");
+      process.exit(2);
+    }
+    await client().patchPlugin(name as "telegram", { enabled: false });
+    console.log(`${name} disabled.`);
+    return;
+  }
+
+  if (sub === "enable") {
+    if (name !== "telegram" && name !== "discord") {
+      console.error("usage: agentd plugin enable <telegram|discord> --token <bot-token> ...");
+      process.exit(2);
+    }
+    const { values } = parseArgs({
+      args: argv.slice(2),
+      options: {
+        token: { type: "string" },
+        "allow-user": { type: "string" },
+        "allow-chat": { type: "string" },
+        "allow-channel": { type: "string" },
+        "default-repo": { type: "string" },
+      },
+      allowPositionals: false,
+    });
+    if (!values.token) {
+      console.error("--token is required");
+      process.exit(2);
+    }
+    if (name === "telegram") {
+      const patch = {
+        enabled: true,
+        botToken: String(values.token),
+        ...(values["allow-user"]
+          ? {
+              allowedUserIds: String(values["allow-user"])
+                .split(",")
+                .map((s) => Number(s.trim()))
+                .filter((n) => Number.isFinite(n)),
+            }
+          : {}),
+        ...(values["allow-chat"]
+          ? {
+              allowedChatIds: String(values["allow-chat"])
+                .split(",")
+                .map((s) => Number(s.trim()))
+                .filter((n) => Number.isFinite(n)),
+            }
+          : {}),
+        ...(values["default-repo"] ? { defaultRepo: String(values["default-repo"]) } : {}),
+      };
+      const r = await client().patchPlugin("telegram", patch);
+      console.log("telegram enabled. status:");
+      for (const p of r.status) console.log(`  ${p.name}: ${p.running ? "running pid=" + p.pid : (p.lastError ?? "stopped")}`);
+    } else {
+      const patch = {
+        enabled: true,
+        botToken: String(values.token),
+        ...(values["allow-user"]
+          ? { allowedUserIds: String(values["allow-user"]).split(",").map((s) => s.trim()).filter(Boolean) }
+          : {}),
+        ...(values["allow-channel"]
+          ? { allowedChannelIds: String(values["allow-channel"]).split(",").map((s) => s.trim()).filter(Boolean) }
+          : {}),
+        ...(values["default-repo"] ? { defaultRepo: String(values["default-repo"]) } : {}),
+      };
+      const r = await client().patchPlugin("discord", patch);
+      console.log("discord enabled. status:");
+      for (const p of r.status) console.log(`  ${p.name}: ${p.running ? "running pid=" + p.pid : (p.lastError ?? "stopped")}`);
+    }
+    return;
+  }
+
+  console.error(`unknown plugin subcommand: ${sub}`);
+  process.exit(2);
+}
+
 async function main() {
   const [, , cmd, ...rest] = process.argv;
   switch (cmd) {
@@ -229,6 +341,9 @@ async function main() {
       return cmdRm(rest);
     case "config":
       return cmdConfig();
+    case "plugin":
+    case "plugins":
+      return cmdPlugin(rest);
     case undefined:
     case "help":
     case "-h":

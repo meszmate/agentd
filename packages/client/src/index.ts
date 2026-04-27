@@ -21,6 +21,34 @@ export interface AgentdDiff {
   headRef: string;
 }
 
+export type PluginName = "telegram" | "discord";
+
+export interface PluginStatus {
+  name: PluginName;
+  enabled: boolean;
+  running: boolean;
+  pid: number | null;
+  restarts: number;
+  lastError: string | null;
+  startedAt: number | null;
+}
+
+export interface TelegramPluginPatch {
+  enabled?: boolean;
+  botToken?: string;
+  allowedUserIds?: number[];
+  allowedChatIds?: number[];
+  defaultRepo?: string | null;
+}
+
+export interface DiscordPluginPatch {
+  enabled?: boolean;
+  botToken?: string;
+  allowedUserIds?: string[];
+  allowedChannelIds?: string[];
+  defaultRepo?: string | null;
+}
+
 export class AgentdClient {
   constructor(
     private readonly server: string,
@@ -124,6 +152,28 @@ export class AgentdClient {
     await this.req(`/api/tasks/${id}/revert`, {
       method: "POST",
       body: JSON.stringify({ sha }),
+    });
+  }
+
+  async pluginStatus(): Promise<{ plugins: PluginStatus[]; config: Record<string, unknown> }> {
+    return this.req("/api/admin/plugins");
+  }
+
+  async patchPlugin(
+    name: "telegram",
+    patch: TelegramPluginPatch,
+  ): Promise<{ ok: boolean; plugin: unknown; status: PluginStatus[] }>;
+  async patchPlugin(
+    name: "discord",
+    patch: DiscordPluginPatch,
+  ): Promise<{ ok: boolean; plugin: unknown; status: PluginStatus[] }>;
+  async patchPlugin(
+    name: PluginName,
+    patch: TelegramPluginPatch | DiscordPluginPatch,
+  ): Promise<{ ok: boolean; plugin: unknown; status: PluginStatus[] }> {
+    return this.req(`/api/admin/plugins/${name}`, {
+      method: "POST",
+      body: JSON.stringify(patch),
     });
   }
 

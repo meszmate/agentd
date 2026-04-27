@@ -108,3 +108,37 @@ export function revokeSession(db: Db, sessionId: string): void {
 export function listSessions(db: Db) {
   return db.select().from(sessions).all();
 }
+
+/**
+ * Mint a long-lived session without going through the pairing flow.
+ * Used for trusted internal subprocesses (e.g. plugin bots spawned by the
+ * daemon itself). Caller is responsible for keeping the returned token secret.
+ */
+export function createSystemSession(
+  db: Db,
+  deviceLabel: string,
+): { sessionToken: string; sessionId: string } {
+  const sessionToken = randomBytes(SESSION_TOKEN_BYTES).toString("base64url");
+  const sessionId = newId("sess");
+  const now = Date.now();
+  db.insert(sessions)
+    .values({
+      id: sessionId,
+      tokenHash: sha256(sessionToken),
+      deviceLabel,
+      createdAt: now,
+      expiresAt: null,
+      lastSeenAt: now,
+    })
+    .run();
+  return { sessionToken, sessionId };
+}
+
+export function sessionExists(db: Db, token: string): boolean {
+  const row = db
+    .select()
+    .from(sessions)
+    .where(eq(sessions.tokenHash, sha256(token)))
+    .get();
+  return !!row;
+}

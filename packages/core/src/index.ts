@@ -5,3 +5,4 @@ export * from "./worktrees.ts";
 export * from "./auth.ts";
 export * from "./tasks.ts";
 export * from "./git.ts";
+export * from "./config.ts";

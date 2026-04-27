@@ -13,7 +13,17 @@ interface BotConfig {
   server: string;
   session: string;
   allowedChannelIds: Set<string>;
+  allowedUserIds: Set<string>;
   defaultRepo: string | null;
+}
+
+function parseIdList(raw: string | undefined): Set<string> {
+  return new Set(
+    (raw ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
 }
 
 function loadConfig(): BotConfig {
@@ -28,22 +38,19 @@ function loadConfig(): BotConfig {
     console.error("AGENTD_TOKEN is required (an agentd session token)");
     process.exit(2);
   }
-  const allowed = new Set(
-    (process.env.DISCORD_ALLOWED_CHANNEL_IDS ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
-  if (allowed.size === 0) {
+  const allowedChannelIds = parseIdList(process.env.DISCORD_ALLOWED_CHANNEL_IDS);
+  const allowedUserIds = parseIdList(process.env.DISCORD_ALLOWED_USER_IDS);
+  if (allowedChannelIds.size === 0 && allowedUserIds.size === 0) {
     console.error(
-      "DISCORD_ALLOWED_CHANNEL_IDS must list at least one channel id (comma-separated). Use !whoami to find one.",
+      "DISCORD_ALLOWED_USER_IDS or DISCORD_ALLOWED_CHANNEL_IDS must list at least one id. Use !whoami to discover yours after launch.",
     );
   }
   return {
     token,
     server,
     session,
-    allowedChannelIds: allowed,
+    allowedChannelIds,
+    allowedUserIds,
     defaultRepo: process.env.AGENTD_DEFAULT_REPO ?? null,
   };
 }
@@ -93,12 +100,25 @@ async function main() {
   // channelId → focused taskId
   const focus = new Map<string, string>();
 
-  function isAllowed(channelId: string): boolean {
-    return cfg.allowedChannelIds.has(channelId);
+  /**
+   * Same two-axis rule as Telegram. If both lists are configured, BOTH must
+   * match (channel allowed AND user allowed). If only one is configured, that
+   * one alone gates access.
+   */
+  function isAllowed(channelId: string, userId: string): boolean {
+    if (cfg.allowedChannelIds.size === 0 && cfg.allowedUserIds.size === 0) return false;
+    const channelOk = cfg.allowedChannelIds.has(channelId);
+    const userOk = cfg.allowedUserIds.has(userId);
+    if (cfg.allowedChannelIds.size > 0 && cfg.allowedUserIds.size > 0) {
+      return channelOk && userOk;
+    }
+    return channelOk || userOk;
   }
 
   bot.once(Events.ClientReady, (c) => {
-    console.log(`discord bot ready as ${c.user.tag} · ${cfg.allowedChannelIds.size} allowed channel(s)`);
+    console.log(
+      `discord bot ready as ${c.user.tag} · ${cfg.allowedUserIds.size} allowed user(s) · ${cfg.allowedChannelIds.size} allowed channel(s)`,
+    );
   });
 
   bot.on(Events.MessageCreate, async (msg: Message) => {
@@ -108,11 +128,15 @@ async function main() {
     const channel = msg.channel;
     const channelId = msg.channelId;
 
+    const userId = msg.author.id;
     if (text === "!whoami") {
-      await send(channel, `channel id: \`${channelId}\`\nallowed: ${isAllowed(channelId) ? "yes" : "no"}`);
+      await send(
+        channel,
+        `channel id: \`${channelId}\`\nuser id: \`${userId}\`\nallowed: ${isAllowed(channelId, userId) ? "yes" : "no"}`,
+      );
       return;
     }
-    if (!isAllowed(channelId)) return;
+    if (!isAllowed(channelId, userId)) return;
 
     if (text.startsWith("!new ")) {
       const rest = text.slice(5).trim();
