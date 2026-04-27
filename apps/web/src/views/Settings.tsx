@@ -1,37 +1,32 @@
 import { useEffect, useState } from "react";
-import { useApp, useClient } from "../AppContext";
+import { useApp } from "../AppContext";
+import { usePatchSettings, useSettings } from "../queries";
 
 export function Settings() {
-  const client = useClient();
   const { toast } = useApp();
   const onError = (m: string) => toast(m, true);
   const onInfo = (m: string) => toast(m);
+  const settingsQ = useSettings();
+  const patch = usePatchSettings();
+
   const [agentInstructions, setAgentInstructions] = useState("");
   const [commitPrefix, setCommitPrefix] = useState("");
   const [prTitlePrefix, setPrTitlePrefix] = useState("");
   const [prBodyTemplate, setPrBodyTemplate] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    void (async () => {
-      try {
-        const s = await client.getSettings();
-        setAgentInstructions(s.agentInstructions);
-        setCommitPrefix(s.commitPrefix);
-        setPrTitlePrefix(s.prTitlePrefix);
-        setPrBodyTemplate(s.prBodyTemplate);
-        setLoaded(true);
-      } catch (e) {
-        onError((e as Error).message);
-      }
-    })();
-  }, [client, onError]);
+    if (!settingsQ.data || hydrated) return;
+    setAgentInstructions(settingsQ.data.agentInstructions);
+    setCommitPrefix(settingsQ.data.commitPrefix);
+    setPrTitlePrefix(settingsQ.data.prTitlePrefix);
+    setPrBodyTemplate(settingsQ.data.prBodyTemplate);
+    setHydrated(true);
+  }, [settingsQ.data, hydrated]);
 
   async function save() {
-    setBusy(true);
     try {
-      await client.patchSettings({
+      await patch.mutateAsync({
         agentInstructions,
         commitPrefix,
         prTitlePrefix,
@@ -40,16 +35,25 @@ export function Settings() {
       onInfo("settings saved");
     } catch (e) {
       onError((e as Error).message);
-    } finally {
-      setBusy(false);
     }
   }
 
-  if (!loaded) return <div className="page-pad empty">loading…</div>;
+  if (!hydrated) return <div className="page empty">loading…</div>;
+
   return (
-    <div className="page-pad">
-      <h2>Settings</h2>
-      <div className="form">
+    <div className="page fade-in">
+      <div className="page-head">
+        <div className="crumb">~/settings</div>
+        <h2>Settings</h2>
+      </div>
+      <form
+        className="panel"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void save();
+        }}
+      >
+        <div className="title">AGENT POLICY</div>
         <div className="row">
           <label>agent instructions</label>
           <textarea
@@ -58,6 +62,11 @@ export function Settings() {
             rows={6}
           />
         </div>
+        <div style={{ fontSize: 11, color: "var(--ink-mute)", marginLeft: 176, marginTop: -4, marginBottom: 8 }}>
+          // appended to every agent run via <code>--append-system-prompt</code>
+        </div>
+
+        <div className="title" style={{ marginTop: 24 }}>COMMITS &amp; PRS</div>
         <div className="row">
           <label>commit prefix</label>
           <input value={commitPrefix} onChange={(e) => setCommitPrefix(e.target.value)} />
@@ -74,16 +83,16 @@ export function Settings() {
             rows={4}
           />
         </div>
+        <div style={{ fontSize: 11, color: "var(--ink-mute)", marginLeft: 176, marginTop: -4 }}>
+          // placeholders: <code>{"{prompt}"}</code> <code>{"{title}"}</code>{" "}
+          <code>{"{task_id}"}</code> <code>{"{branch}"}</code>
+        </div>
         <div className="actions">
-          <button className="primary" onClick={() => void save()} disabled={busy}>
-            {busy ? "saving…" : "save"}
+          <button className="primary" type="submit" disabled={patch.isPending}>
+            {patch.isPending ? "saving…" : "› save"}
           </button>
         </div>
-      </div>
-      <p style={{ color: "var(--muted)", fontSize: 12 }}>
-        Placeholders for PR body: <code>{"{prompt}"}</code>, <code>{"{title}"}</code>,{" "}
-        <code>{"{task_id}"}</code>, <code>{"{branch}"}</code>.
-      </p>
+      </form>
     </div>
   );
 }

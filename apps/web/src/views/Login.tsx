@@ -17,9 +17,7 @@ export function Login({ initialServer, onPair, onError }: Props) {
     setBusy(true);
     try {
       const c = new AgentdClient(server, null);
-      const label =
-        "web@" +
-        (navigator.userAgent.match(/\((.*?)\)/)?.[1] ?? "browser");
+      const label = "web@" + (navigator.userAgent.match(/\((.*?)\)/)?.[1] ?? "browser");
       const r = await c.pair({ pairingToken: token, deviceLabel: label });
       onPair(server, r.sessionToken);
     } catch (e) {
@@ -30,24 +28,37 @@ export function Login({ initialServer, onPair, onError }: Props) {
   }
 
   return (
-    <div className="login">
-      <h1>agentd</h1>
-      <p>Pair this browser with a running daemon.</p>
-      <form onSubmit={submit}>
-        <label>server URL</label>
-        <input value={server} onChange={(e) => setServer(e.target.value)} required />
-        <label>one-time pairing token</label>
-        <input
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          required
-          autoFocus
-          placeholder="paste token printed on daemon startup"
-        />
-        <button className="primary" type="submit" disabled={busy}>
-          {busy ? "pairing…" : "pair"}
-        </button>
-      </form>
+    <div className="login-page">
+      <div className="login fade-in">
+        <div className="login__head">
+          <div className="login__brand">
+            <span className="slash">/</span>agentd
+          </div>
+          <div className="login__sub">
+            $ pair --server &lt;url&gt; --token &lt;token&gt;
+            <br />
+            <span style={{ opacity: 0.6 }}>
+              # daemon prints a one-time token + QR on startup
+            </span>
+          </div>
+        </div>
+        <form className="login__body" onSubmit={submit}>
+          <label>SERVER</label>
+          <input value={server} onChange={(e) => setServer(e.target.value)} required />
+          <label>PAIRING TOKEN</label>
+          <input
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            required
+            autoFocus
+            placeholder="paste token from daemon log"
+            spellCheck={false}
+          />
+          <button className="primary" type="submit" disabled={busy}>
+            {busy ? "PAIRING…" : "› AUTHORIZE"}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

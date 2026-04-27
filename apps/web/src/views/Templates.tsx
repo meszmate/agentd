@@ -1,109 +1,100 @@
 import { useState } from "react";
-import type { AgentdClient } from "@agentd/client";
 import type { Template } from "@agentd/contracts";
-import { usePoll } from "../api";
-import { useApp, useClient } from "../AppContext";
+import { useApp } from "../AppContext";
+import { useCreateTemplate, useDeleteTemplate, useRunTemplate, useTemplates } from "../queries";
 
 export function Templates() {
-  const client = useClient();
   const { toast } = useApp();
   const onError = (m: string) => toast(m, true);
   const onInfo = (m: string) => toast(m);
-  const poll = usePoll(() => client.listTemplates(), { templates: [] as Template[] }, 6000);
+  const tplQ = useTemplates();
+  const del = useDeleteTemplate();
+  const run = useRunTemplate();
   const [showForm, setShowForm] = useState(false);
-  const [running, setRunning] = useState<string | null>(null);
   const [argInput, setArgInput] = useState("");
 
   async function fire(t: Template) {
-    if (running) return;
-    setRunning(t.name);
     try {
       const args = parseArgs(argInput);
-      const { task } = await client.runTemplate(t.name, { args });
+      const { task } = await run.mutateAsync({ name: t.name, args });
       onInfo(`fired '${t.name}' → ${task.id.slice(-8)}`);
       setArgInput("");
     } catch (e) {
       onError((e as Error).message);
-    } finally {
-      setRunning(null);
     }
   }
 
   async function rm(t: Template) {
     if (!confirm(`delete template '${t.name}'?`)) return;
     try {
-      await client.deleteTemplate(t.name);
-      await poll.refresh();
+      await del.mutateAsync(t.name);
     } catch (e) {
       onError((e as Error).message);
     }
   }
 
   return (
-    <div className="page-pad">
-      <h2>
-        Templates{" "}
-        <button className="ghost" onClick={() => setShowForm((s) => !s)}>
-          {showForm ? "cancel" : "+ new"}
-        </button>
-      </h2>
+    <div className="page fade-in">
+      <div className="page-head">
+        <div className="crumb">~/templates</div>
+        <h2>Templates</h2>
+        <div className="actions">
+          <button className="primary" onClick={() => setShowForm((s) => !s)}>
+            {showForm ? "× cancel" : "+ new template"}
+          </button>
+        </div>
+      </div>
+
       {showForm && (
-        <CreateForm
-          client={client}
-          onError={onError}
-          onCreated={async () => {
-            setShowForm(false);
-            await poll.refresh();
-          }}
-        />
+        <CreateForm onError={onError} onCreated={() => setShowForm(false)} />
       )}
-      <div style={{ marginBottom: 12 }}>
+
+      <div className="panel">
+        <div className="title">RUN ARGS</div>
         <input
-          placeholder='args for template runs (e.g. "name=foo target=server")'
+          placeholder='space-separated key=value pairs, e.g. name=foo target=server'
           value={argInput}
           onChange={(e) => setArgInput(e.target.value)}
         />
+        <div style={{ marginTop: 8, fontSize: 11, color: "var(--ink-mute)" }}>
+          // these substitute into <code>{"{placeholders}"}</code> in any template you fire
+        </div>
       </div>
+
       <table className="table">
         <thead>
           <tr>
-            <th>name</th>
-            <th>agent</th>
+            <th style={{ width: 180 }}>name</th>
+            <th style={{ width: 80 }}>agent</th>
             <th>repo</th>
-            <th>flags</th>
+            <th style={{ width: 120 }}>flags</th>
             <th>prompt</th>
             <th className="actions">actions</th>
           </tr>
         </thead>
         <tbody>
-          {poll.data.templates.length === 0 ? (
-            <tr>
-              <td colSpan={6}>
-                <div className="empty">No templates yet.</div>
-              </td>
-            </tr>
+          {!tplQ.data ? (
+            <tr><td colSpan={6}><div className="empty">loading…</div></td></tr>
+          ) : tplQ.data.templates.length === 0 ? (
+            <tr><td colSpan={6}><div className="empty">no templates yet</div></td></tr>
           ) : (
-            poll.data.templates.map((t) => (
+            tplQ.data.templates.map((t) => (
               <tr key={t.id}>
-                <td>{t.name}</td>
+                <td><strong>{t.name}</strong></td>
                 <td>{t.agent}</td>
                 <td>{t.repoPath}</td>
                 <td>
-                  {t.autoPush ? "push " : ""}
-                  {t.autoPr ? "pr" : ""}
+                  {t.autoPush && <span className="pill mute" style={{ marginRight: 4 }}>push</span>}
+                  {t.autoPr && <span className="pill red">pr</span>}
                 </td>
-                <td title={t.promptTemplate}>
+                <td title={t.promptTemplate} style={{ maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis" }}>
                   {t.promptTemplate.length > 60
                     ? t.promptTemplate.slice(0, 60) + "…"
                     : t.promptTemplate}
                 </td>
                 <td className="actions">
-                  <button
-                    className="primary"
-                    onClick={() => void fire(t)}
-                    disabled={running === t.name}
-                  >
-                    {running === t.name ? "…" : "run"}
+                  <button className="primary" onClick={() => void fire(t)} disabled={run.isPending}>
+                    › run
                   </button>
                   <button className="danger" onClick={() => void rm(t)}>
                     rm
@@ -129,13 +120,11 @@ function parseArgs(raw: string): Record<string, string> {
 }
 
 function CreateForm({
-  client,
   onError,
   onCreated,
 }: {
-  client: AgentdClient;
   onError: (m: string) => void;
-  onCreated: () => void | Promise<void>;
+  onCreated: () => void;
 }) {
   const [name, setName] = useState("");
   const [agent, setAgent] = useState<"claude" | "codex">("claude");
@@ -144,13 +133,12 @@ function CreateForm({
   const [push, setPush] = useState(false);
   const [pr, setPr] = useState(false);
   const [prompt, setPrompt] = useState("");
-  const [busy, setBusy] = useState(false);
+  const create = useCreateTemplate();
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    setBusy(true);
     try {
-      await client.createTemplate({
+      await create.mutateAsync({
         name,
         agent,
         repoPath: repo,
@@ -159,16 +147,15 @@ function CreateForm({
         autoPush: push || pr,
         autoPr: pr,
       });
-      await onCreated();
+      onCreated();
     } catch (e) {
       onError((e as Error).message);
-    } finally {
-      setBusy(false);
     }
   }
 
   return (
-    <form className="form" onSubmit={submit}>
+    <form className="panel" onSubmit={submit}>
+      <div className="title">NEW TEMPLATE</div>
       <div className="row">
         <label>name</label>
         <input value={name} onChange={(e) => setName(e.target.value)} required />
@@ -190,14 +177,12 @@ function CreateForm({
       </div>
       <div className="row">
         <label>flags</label>
-        <div>
-          <label className="toggle" style={{ display: "inline-flex", marginRight: 16 }}>
-            <input type="checkbox" checked={push} onChange={(e) => setPush(e.target.checked)} />{" "}
-            auto-push
+        <div style={{ display: "flex", gap: 18 }}>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: 0, color: "var(--ink-mute)" }}>
+            <input type="checkbox" checked={push} onChange={(e) => setPush(e.target.checked)} /> auto-push
           </label>
-          <label className="toggle" style={{ display: "inline-flex" }}>
-            <input type="checkbox" checked={pr} onChange={(e) => setPr(e.target.checked)} />{" "}
-            auto-PR
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: 0, color: "var(--ink-mute)" }}>
+            <input type="checkbox" checked={pr} onChange={(e) => setPr(e.target.checked)} /> auto-pr
           </label>
         </div>
       </div>
@@ -206,13 +191,14 @@ function CreateForm({
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Use {placeholders} for values to substitute at run time."
+          placeholder="use {placeholders} for run-time args"
           required
+          rows={4}
         />
       </div>
       <div className="actions">
-        <button type="submit" className="primary" disabled={busy}>
-          create
+        <button type="submit" className="primary" disabled={create.isPending}>
+          {create.isPending ? "creating…" : "› create"}
         </button>
       </div>
     </form>

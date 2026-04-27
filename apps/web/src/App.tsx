@@ -1,18 +1,19 @@
-import { lazy, Suspense, useEffect } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import {
   createBrowserRouter,
   NavLink,
   Outlet,
   RouterProvider,
   Navigate,
+  useLocation,
 } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppProvider, useApp } from "./AppContext";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Login } from "./views/Login";
 
-// Lazy-loaded views: each view ships in its own chunk so xterm.js (only used
-// by the terminal tab inside Tasks) and the bigger plugin/settings forms
-// don't bloat the initial paint.
+// Each view ships in its own chunk so xterm.js (only used by the terminal
+// tab) and the bigger plugin/settings forms don't bloat the initial paint.
 const Tasks = lazy(() => import("./views/Tasks").then((m) => ({ default: m.Tasks })));
 const Templates = lazy(() => import("./views/Templates").then((m) => ({ default: m.Templates })));
 const Schedules = lazy(() => import("./views/Schedules").then((m) => ({ default: m.Schedules })));
@@ -20,7 +21,65 @@ const Plugins = lazy(() => import("./views/Plugins").then((m) => ({ default: m.P
 const Settings = lazy(() => import("./views/Settings").then((m) => ({ default: m.Settings })));
 
 function ViewSuspense({ children }: { children: React.ReactNode }) {
-  return <Suspense fallback={<div className="empty page-pad">loading…</div>}>{children}</Suspense>;
+  return (
+    <Suspense fallback={<div className="empty">loading...</div>}>
+      <div className="fade-in" style={{ display: "contents" }}>
+        {children}
+      </div>
+    </Suspense>
+  );
+}
+
+const NAV: ReadonlyArray<{ to: string; label: string }> = [
+  { to: "/tasks", label: "tasks" },
+  { to: "/templates", label: "templates" },
+  { to: "/schedules", label: "schedules" },
+  { to: "/plugins", label: "plugins" },
+  { to: "/settings", label: "settings" },
+];
+
+function ThemeToggle() {
+  const [mode, setMode] = useState<"system" | "light" | "dark">(() => {
+    return (localStorage.getItem("agentd.theme") as "system" | "light" | "dark") ?? "system";
+  });
+  useEffect(() => {
+    if (mode === "system") {
+      document.documentElement.removeAttribute("data-theme");
+    } else {
+      document.documentElement.setAttribute("data-theme", mode);
+    }
+    localStorage.setItem("agentd.theme", mode);
+  }, [mode]);
+  const next = mode === "system" ? "light" : mode === "light" ? "dark" : "system";
+  const icon = mode === "dark" ? "◐" : mode === "light" ? "◑" : "◓";
+  return (
+    <button className="ghost" onClick={() => setMode(next)} title={`theme: ${mode} (click for ${next})`}>
+      <span style={{ fontSize: 14 }}>{icon}</span>
+    </button>
+  );
+}
+
+function Modeline() {
+  const { client } = useApp();
+  const loc = useLocation();
+  const path = loc.pathname.split("/").filter(Boolean).join(" / ") || "tasks";
+  const server = client?.baseUrl ?? "—";
+  const host = (() => {
+    try { return new URL(server).host; } catch { return "—"; }
+  })();
+  return (
+    <div className="modeline">
+      <div className="mode">CONNECTED</div>
+      <div className="spacer" />
+      <div>~/{path}</div>
+      <div>{host}</div>
+      <div className="spacer">
+        <a href="https://github.com/meszmate/agentd" target="_blank" rel="noreferrer">
+          /agentd
+        </a>
+      </div>
+    </div>
+  );
 }
 
 function Shell() {
@@ -60,35 +119,31 @@ function Shell() {
 
   return (
     <div className="shell">
-      <div className="topbar">
-        <div className="brand">
-          <span className="dot" />
-          agentd
-        </div>
-        <div className="nav">
-          {(["tasks", "templates", "schedules", "plugins", "settings"] as const).map((p) => (
-            <NavLink
-              key={p}
-              to={`/${p}`}
-              className={({ isActive }) => (isActive ? "active" : "")}
-              // NavLink renders an <a> by default; we want it to look like our
-              // existing nav buttons, so we still expose the same DOM as a
-              // plain button via role + tabIndex via the className. CSS handles
-              // it because .topbar .nav button styling is now duplicated for a.
-            >
-              {p}
+      <header className="topbar">
+        <NavLink to="/" className="topbar__brand" end>
+          <span className="slash">/</span>agentd
+        </NavLink>
+        <nav className="topbar__nav">
+          {NAV.map((n) => (
+            <NavLink key={n.to} to={n.to} className={({ isActive }) => (isActive ? "active" : "")}>
+              {n.label}
             </NavLink>
           ))}
+        </nav>
+        <div className="topbar__right">
+          <div className="meta">
+            <strong>{server.replace(/^https?:\/\//, "")}</strong>
+          </div>
+          <ThemeToggle />
+          <button className="ghost" onClick={logout} title="log out">
+            ⎋
+          </button>
         </div>
-        <button className="ghost" onClick={logout} title="log out">
-          ⎋
-        </button>
-      </div>
-      <div style={{ minHeight: 0, overflow: "hidden" }}>
-        <ErrorBoundary>
-          <Outlet />
-        </ErrorBoundary>
-      </div>
+      </header>
+      <ErrorBoundary>
+        <Outlet />
+      </ErrorBoundary>
+      <Modeline />
       {toastState && (
         <div className={`toast${toastState.isErr ? " err" : ""}`}>{toastState.msg}</div>
       )}
@@ -109,13 +164,7 @@ const router = createBrowserRouter([
             <Tasks />
           </ViewSuspense>
         ),
-        children: [
-          // /tasks/:id renders the same Tasks view, which reads :id from
-          // useParams and selects it. The nested route exists purely so
-          // <NavLink to={`/tasks/${id}`}> shows the proper active state and
-          // browser nav (back/forward) works.
-          { path: ":taskId" },
-        ],
+        children: [{ path: ":taskId" }],
       },
       {
         path: "templates",
@@ -154,10 +203,24 @@ const router = createBrowserRouter([
   },
 ]);
 
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      // Match the pre-Query polling behavior: refetch in background, don't
+      // refetch on window focus (we already poll), keep cached data fresh.
+      refetchOnWindowFocus: false,
+      retry: 1,
+      staleTime: 2000,
+    },
+  },
+});
+
 export function App() {
   return (
-    <AppProvider>
-      <RouterProvider router={router} />
-    </AppProvider>
+    <QueryClientProvider client={queryClient}>
+      <AppProvider>
+        <RouterProvider router={router} />
+      </AppProvider>
+    </QueryClientProvider>
   );
 }

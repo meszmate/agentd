@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { PluginStatus } from "@agentd/client";
-import { useApp, useClient } from "../AppContext";
+import { useApp } from "../AppContext";
+import { usePatchDiscord, usePatchTelegram, usePluginsStatus } from "../queries";
 
 interface PluginConfigRaw {
   enabled: boolean;
@@ -12,111 +13,70 @@ interface PluginConfigRaw {
 }
 
 export function Plugins() {
-  const client = useClient();
   const { toast } = useApp();
   const onError = (m: string) => toast(m, true);
   const onInfo = (m: string) => toast(m);
-  const [status, setStatus] = useState<PluginStatus[]>([]);
-  const [config, setConfig] = useState<Record<string, PluginConfigRaw> | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const q = usePluginsStatus();
 
-  async function refresh() {
-    try {
-      const r = await client.pluginStatus();
-      setStatus(r.plugins);
-      setConfig(r.config as unknown as Record<string, PluginConfigRaw>);
-    } catch (e) {
-      onError((e as Error).message);
-    }
-  }
-  useEffect(() => {
-    void refresh();
-    const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
-  }, []);
-
-  async function patchTelegram(patch: Record<string, unknown>) {
-    setBusy("telegram");
-    try {
-      await client.patchPlugin("telegram", patch);
-      onInfo("telegram updated");
-      await refresh();
-    } catch (e) {
-      onError((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  }
-  async function patchDiscord(patch: Record<string, unknown>) {
-    setBusy("discord");
-    try {
-      await client.patchPlugin("discord", patch);
-      onInfo("discord updated");
-      await refresh();
-    } catch (e) {
-      onError((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  if (!config) return <div className="page-pad empty">loading…</div>;
-
+  if (!q.data) return <div className="page empty">loading…</div>;
+  const status = q.data.plugins;
+  const config = q.data.config as unknown as Record<string, PluginConfigRaw>;
   const tg = config.telegram;
   const dc = config.discord;
-  if (!tg || !dc) return <div className="page-pad empty">loading…</div>;
-  const tgStatus = status.find((s) => s.name === "telegram");
-  const dcStatus = status.find((s) => s.name === "discord");
+  if (!tg || !dc) return <div className="page empty">loading…</div>;
 
   return (
-    <div className="page-pad">
-      <h2>Plugins</h2>
+    <div className="page fade-in">
+      <div className="page-head">
+        <div className="crumb">~/plugins</div>
+        <h2>Plugins</h2>
+      </div>
       <PluginPanel
-        title="Telegram"
+        name="telegram"
         cfg={tg}
-        idsLabel="allowed chat ids (comma)"
+        status={status.find((s) => s.name === "telegram")}
+        idsLabel="allowed chat ids"
         idsKey="allowedChatIds"
         idsParse={(s) => s.split(",").map((x) => Number(x.trim())).filter((n) => Number.isFinite(n))}
         userIdsParse={(s) => s.split(",").map((x) => Number(x.trim())).filter((n) => Number.isFinite(n))}
-        status={tgStatus}
-        busy={busy === "telegram"}
-        onPatch={patchTelegram}
+        onError={onError}
+        onInfo={onInfo}
       />
       <PluginPanel
-        title="Discord"
+        name="discord"
         cfg={dc}
-        idsLabel="allowed channel ids (comma)"
+        status={status.find((s) => s.name === "discord")}
+        idsLabel="allowed channel ids"
         idsKey="allowedChannelIds"
         idsParse={(s) => s.split(",").map((x) => x.trim()).filter(Boolean)}
         userIdsParse={(s) => s.split(",").map((x) => x.trim()).filter(Boolean)}
-        status={dcStatus}
-        busy={busy === "discord"}
-        onPatch={patchDiscord}
+        onError={onError}
+        onInfo={onInfo}
       />
     </div>
   );
 }
 
 function PluginPanel<S extends number | string>({
-  title,
+  name,
   cfg,
+  status,
   idsLabel,
   idsKey,
   idsParse,
   userIdsParse,
-  status,
-  busy,
-  onPatch,
+  onError,
+  onInfo,
 }: {
-  title: string;
+  name: "telegram" | "discord";
   cfg: PluginConfigRaw;
+  status: PluginStatus | undefined;
   idsLabel: string;
   idsKey: "allowedChatIds" | "allowedChannelIds";
   idsParse: (raw: string) => S[];
   userIdsParse: (raw: string) => S[];
-  status: PluginStatus | undefined;
-  busy: boolean;
-  onPatch: (patch: Record<string, unknown>) => Promise<void>;
+  onError: (m: string) => void;
+  onInfo: (m: string) => void;
 }) {
   const [token, setToken] = useState(cfg.botToken);
   const [users, setUsers] = useState((cfg.allowedUserIds ?? []).join(","));
@@ -125,16 +85,45 @@ function PluginPanel<S extends number | string>({
   );
   const [repo, setRepo] = useState(cfg.defaultRepo ?? "");
 
+  const patchTg = usePatchTelegram();
+  const patchDc = usePatchDiscord();
+  const mutate = name === "telegram" ? patchTg : patchDc;
+
+  async function apply(enabled: boolean) {
+    try {
+      const patch: Record<string, unknown> = { enabled };
+      if (enabled) {
+        if (token) patch.botToken = token;
+        patch.allowedUserIds = userIdsParse(users);
+        patch[idsKey] = idsParse(scopes);
+        patch.defaultRepo = repo || null;
+      }
+      await mutate.mutateAsync(patch as never);
+      onInfo(`${name} ${enabled ? "saved" : "disabled"}`);
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  }
+
+  const stateLabel = cfg.enabled
+    ? status?.running
+      ? `running (pid ${status.pid})`
+      : status?.lastError ?? "stopped"
+    : "disabled";
+  const stateClass = cfg.enabled ? (status?.running ? "ok" : "err") : "mute";
+
   return (
-    <div className="form">
-      <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
-        <h3 style={{ margin: 0, flex: 1 }}>{title}</h3>
-        <span style={{ fontSize: 12, color: "var(--muted)" }}>
-          {cfg.enabled
-            ? status?.running
-              ? `running (pid ${status.pid})`
-              : status?.lastError ?? "stopped"
-            : "disabled"}
+    <form
+      className="panel"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void apply(true);
+      }}
+    >
+      <div className="title">
+        <span style={{ color: "var(--ink)", fontWeight: 700 }}>{name.toUpperCase()}</span>
+        <span className={`pill ${stateClass}`} style={{ marginLeft: "auto" }}>
+          {stateLabel}
         </span>
       </div>
       <div className="row">
@@ -144,6 +133,7 @@ function PluginPanel<S extends number | string>({
           value={token}
           onChange={(e) => setToken(e.target.value)}
           placeholder="••••••"
+          spellCheck={false}
         />
       </div>
       <div className="row">
@@ -167,33 +157,13 @@ function PluginPanel<S extends number | string>({
         <input value={repo} onChange={(e) => setRepo(e.target.value)} />
       </div>
       <div className="actions">
-        <button
-          onClick={() =>
-            void onPatch({
-              enabled: false,
-            })
-          }
-          disabled={busy}
-        >
+        <button onClick={() => void apply(false)} disabled={mutate.isPending} type="button">
           disable
         </button>
-        <button
-          className="primary"
-          style={{ marginLeft: 8 }}
-          onClick={() =>
-            void onPatch({
-              enabled: true,
-              ...(token ? { botToken: token } : {}),
-              allowedUserIds: userIdsParse(users),
-              [idsKey]: idsParse(scopes),
-              defaultRepo: repo || null,
-            })
-          }
-          disabled={busy}
-        >
-          {busy ? "…" : "enable + save"}
+        <button className="primary" type="submit" disabled={mutate.isPending}>
+          {mutate.isPending ? "saving…" : "› enable + save"}
         </button>
       </div>
-    </div>
+    </form>
   );
 }

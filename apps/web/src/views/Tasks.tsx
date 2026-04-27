@@ -1,25 +1,37 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, useNavigate, useParams } from "react-router-dom";
-import type { AgentdClient } from "@agentd/client";
+import { useQueryClient } from "@tanstack/react-query";
 import type { Task, Message, AgentEvent } from "@agentd/contracts";
-import { usePoll, useTaskStream } from "../api";
-import { useApp, useClient } from "../AppContext";
+import { useApp } from "../AppContext";
+import {
+  qk,
+  useCreateTask,
+  useDiff,
+  useFile,
+  useFiles,
+  useLog,
+  useRemoveTask,
+  useRevertCommit,
+  useSendInput,
+  useStopTask,
+  useTask,
+  useTaskStream,
+  useTasks,
+} from "../queries";
 
-// xterm.js is heavy (~80KB gzipped) and only needed for the terminal tab —
-// lazy-load so it doesn't bloat the initial Tasks chunk.
+// xterm.js is heavy (~73 KB gzipped) and only used for the terminal tab.
 const Terminal = lazy(() => import("./Terminal").then((m) => ({ default: m.Terminal })));
 
 type Tab = "chat" | "files" | "diff" | "log" | "term";
 
 export function Tasks() {
-  const client = useClient();
   const { toast } = useApp();
   const onError = (m: string) => toast(m, true);
   const navigate = useNavigate();
   const { taskId: routeTaskId } = useParams<{ taskId: string }>();
 
-  const tasksPoll = usePoll(() => client.listTasks(), { tasks: [] as Task[] }, 4000);
-  const tasks = tasksPoll.data.tasks;
+  const tasksQ = useTasks();
+  const tasks = tasksQ.data?.tasks ?? [];
   const active = useMemo(
     () => tasks.find((t) => t.id === routeTaskId) ?? null,
     [tasks, routeTaskId],
@@ -29,53 +41,27 @@ export function Tasks() {
     <div className={`body${active ? " has-detail" : ""}`}>
       <aside className="left">
         <SpawnForm
-          client={client}
           onError={onError}
-          onSpawned={async (id) => {
-            await tasksPoll.refresh();
-            navigate(`/tasks/${id}`);
-          }}
+          onSpawned={(id) => navigate(`/tasks/${id}`)}
         />
         <div className="list">
           {tasks.length === 0 ? (
-            <div className="empty">No tasks yet.</div>
+            <div className="empty">no tasks yet</div>
           ) : (
-            tasks.map((t) => (
-              <NavLink
-                key={t.id}
-                to={`/tasks/${t.id}`}
-                className={({ isActive }) => `row${isActive ? " active" : ""}`}
-                style={{ display: "block", color: "inherit", textDecoration: "none" }}
-              >
-                <div className="top">
-                  <span className="agent">{t.agent}</span>
-                  <span className={`status ${t.status}`}>{t.status}</span>
-                </div>
-                <div className="title">{t.title}</div>
-                <div className="branch">{t.branch}</div>
-                {(t.totalInputTokens || t.totalOutputTokens || t.totalCostUsd) && (
-                  <div className="meta">
-                    {(t.totalInputTokens ?? 0) + (t.totalOutputTokens ?? 0)} tok
-                    {t.totalCostUsd != null ? ` · $${t.totalCostUsd.toFixed(4)}` : ""}
-                  </div>
-                )}
-              </NavLink>
-            ))
+            tasks.map((t) => <TaskRow key={t.id} task={t} />)
           )}
         </div>
       </aside>
       <main className="right">
         {active ? (
           <TaskDetail
-            client={client}
             task={active}
             onError={onError}
             onClose={() => navigate("/tasks")}
-            onTaskChanged={() => void tasksPoll.refresh()}
           />
         ) : (
           <div className="empty" style={{ margin: "auto" }}>
-            Select or spawn a task.
+            select or spawn a task
           </div>
         )}
       </main>
@@ -83,14 +69,37 @@ export function Tasks() {
   );
 }
 
+function TaskRow({ task: t }: { task: Task }) {
+  return (
+    <NavLink
+      to={`/tasks/${t.id}`}
+      className={({ isActive }) => `row${isActive ? " active" : ""}`}
+    >
+      <div className="top">
+        <span className="agent">{t.agent}</span>
+        <span className="id">
+          <strong>{t.id.slice(-8)}</strong>
+        </span>
+        <span className={`status ${t.status}`}>{t.status}</span>
+      </div>
+      <div className="title">{t.title}</div>
+      <div className="branch">{t.branch}</div>
+      {(t.totalInputTokens || t.totalOutputTokens || t.totalCostUsd) ? (
+        <div className="meta">
+          {(t.totalInputTokens ?? 0) + (t.totalOutputTokens ?? 0)} tok
+          {t.totalCostUsd != null ? ` · $${t.totalCostUsd.toFixed(4)}` : ""}
+        </div>
+      ) : null}
+    </NavLink>
+  );
+}
+
 function SpawnForm({
-  client,
   onError,
   onSpawned,
 }: {
-  client: AgentdClient;
   onError: (m: string) => void;
-  onSpawned: (id: string) => Promise<void>;
+  onSpawned: (id: string) => void;
 }) {
   const [repo, setRepo] = useState("");
   const [agent, setAgent] = useState<"claude" | "codex">("claude");
@@ -98,7 +107,7 @@ function SpawnForm({
   const [push, setPush] = useState(false);
   const [pr, setPr] = useState(false);
   const [prompt, setPrompt] = useState("");
-  const [busy, setBusy] = useState(false);
+  const create = useCreateTask();
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -106,9 +115,8 @@ function SpawnForm({
       onError("repo and prompt required");
       return;
     }
-    setBusy(true);
     try {
-      const { task } = await client.createTask({
+      const { task } = await create.mutateAsync({
         agent,
         repoPath: repo,
         baseBranch: base || "main",
@@ -116,16 +124,14 @@ function SpawnForm({
         ...(pr ? { autoPush: true, autoPr: true } : push ? { autoPush: true } : {}),
       });
       setPrompt("");
-      await onSpawned(task.id);
+      onSpawned(task.id);
     } catch (e) {
       onError(`spawn: ${(e as Error).message}`);
-    } finally {
-      setBusy(false);
     }
   }
 
   return (
-    <form className="new-form" onSubmit={submit}>
+    <form className="spawn" onSubmit={submit}>
       <input
         placeholder="/path/to/git/repo"
         value={repo}
@@ -145,78 +151,75 @@ function SpawnForm({
         />
       </div>
       <textarea
-        placeholder="What should the agent do?"
+        placeholder="what should the agent do?"
         value={prompt}
         onChange={(e) => setPrompt(e.target.value)}
         required
+        rows={3}
       />
-      <div style={{ display: "flex", gap: 12 }}>
-        <label className="toggle">
+      <div className="toggles">
+        <label>
           <input type="checkbox" checked={push} onChange={(e) => setPush(e.target.checked)} />
-          push
+          auto-push
         </label>
-        <label className="toggle">
+        <label>
           <input type="checkbox" checked={pr} onChange={(e) => setPr(e.target.checked)} />
-          PR
+          auto-pr
         </label>
       </div>
-      <button className="primary" type="submit" disabled={busy}>
-        {busy ? "spawning…" : "spawn"}
+      <button className="primary" type="submit" disabled={create.isPending}>
+        {create.isPending ? "spawning…" : "› SPAWN"}
       </button>
     </form>
   );
 }
 
 interface DetailProps {
-  client: AgentdClient;
   task: Task;
   onError: (m: string) => void;
   onClose: () => void;
-  onTaskChanged: () => void;
 }
 
-function TaskDetail({ client, task, onError, onClose, onTaskChanged }: DetailProps) {
+function TaskDetail({ task, onError, onClose }: DetailProps) {
   const [tab, setTab] = useState<Tab>("chat");
   const [messages, setMessages] = useState<Message[]>([]);
-  const [loaded, setLoaded] = useState<string | null>(null);
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  const taskQ = useTask(task.id);
+  const stop = useStopTask(task.id);
+  const remove = useRemoveTask();
+  const qc = useQueryClient();
+  void taskQ; // hydrate-once via useEffect below; query stays subscribed
 
-  // load history when active task changes
+  // Hydrate the message list from the persisted history when the active task
+  // changes; subsequent live events just append.
   useEffect(() => {
-    if (loaded === task.id) return;
-    void (async () => {
-      try {
-        const { messages } = await client.getTask(task.id);
-        setMessages(messages);
-        setLoaded(task.id);
-      } catch (e) {
-        onError((e as Error).message);
-      }
-    })();
-  }, [client, task.id, loaded, onError]);
+    if (loadedFor === task.id) return;
+    if (!taskQ.data) return;
+    setMessages(taskQ.data.messages);
+    setLoadedFor(task.id);
+  }, [task.id, taskQ.data, loadedFor]);
 
-  // subscribe to live events for the active task
   const handleEvent = useCallback(
-    ({ event }: { taskId: string; event: AgentEvent; ts: number }) => {
+    ({ event, taskId: evTaskId }: { taskId: string; event: AgentEvent; ts: number }) => {
+      if (evTaskId !== task.id) return;
       if (event.kind === "message") {
         appendLocal(event.role, event.text);
       } else if (event.kind === "tool_call") {
-        appendLocal(
-          "tool",
-          `[call ${event.tool}] ${JSON.stringify(event.args).slice(0, 400)}`,
-        );
+        appendLocal("tool", `[${event.tool}] ${JSON.stringify(event.args).slice(0, 400)}`);
       } else if (event.kind === "tool_result") {
         appendLocal(
           "tool",
-          `[result ${event.tool}] ${event.ok ? "ok" : "err"}: ${String(event.output).slice(0, 400)}`,
+          `[${event.tool}] ${event.ok ? "ok" : "err"}: ${String(event.output).slice(0, 400)}`,
         );
       } else if (event.kind === "raw") {
         appendLocal("system", event.text);
       } else if (event.kind === "status" || event.kind === "exit" || event.kind === "usage") {
-        // bubble out so the header re-renders
-        onTaskChanged();
+        // server-side state changed; refetch the task list + this task summary
+        void qc.invalidateQueries({ queryKey: qk.tasks() });
+        void qc.invalidateQueries({ queryKey: qk.task(task.id) });
       }
     },
-    [onTaskChanged],
+    [task.id, qc],
   );
 
   function appendLocal(role: Message["role"], content: string) {
@@ -226,65 +229,72 @@ function TaskDetail({ client, task, onError, onClose, onTaskChanged }: DetailPro
     ]);
   }
 
-  const { live } = useTaskStream(client, task.id, handleEvent);
-
-  async function send(text: string) {
-    if (!text.trim()) return;
-    appendLocal("user", text);
-    try {
-      await client.sendInput(task.id, text);
-    } catch (e) {
-      onError((e as Error).message);
-    }
-  }
-
-  async function stop() {
-    try {
-      await client.stopTask(task.id);
-    } catch (e) {
-      onError((e as Error).message);
-    }
-  }
-  async function rm() {
-    if (!confirm("Remove task and worktree?")) return;
-    try {
-      await client.removeTask(task.id);
-      onClose();
-      onTaskChanged();
-    } catch (e) {
-      onError((e as Error).message);
-    }
-  }
+  const { live } = useTaskStream(task.id, handleEvent);
 
   return (
     <>
-      <header className="bar">
-        <button className="back ghost" onClick={onClose}>
-          ←
-        </button>
-        <div className="title">{task.title}</div>
-        <span className={`conn${live ? " live" : ""}`}>{live ? "live" : "off"}</span>
-        <span className="meta">
-          {task.agent} · {task.status} · {task.branch}
-        </span>
-        {(task.totalInputTokens || task.totalOutputTokens) && (
-          <span className="usage-pill">
-            <span>in {task.totalInputTokens ?? 0}</span>
-            <span>out {task.totalOutputTokens ?? 0}</span>
-            {task.totalCostUsd != null && (
-              <span className="cost">${task.totalCostUsd.toFixed(4)}</span>
+      <header className="detail-head">
+        <div className="top">
+          <button className="back" onClick={onClose}>
+            ←
+          </button>
+          <h2>{task.title}</h2>
+          <span className={`chip${live ? " live" : ""}`}>{live ? "live" : "off"}</span>
+          <div className="actions">
+            {task.prUrl && (
+              <a href={task.prUrl} target="_blank" rel="noreferrer">
+                <button>↗ PR</button>
+              </a>
             )}
-          </span>
-        )}
-        {task.prUrl && (
-          <a href={task.prUrl} target="_blank" rel="noreferrer">
-            PR ↗
-          </a>
-        )}
-        <button onClick={stop}>stop</button>
-        <button className="danger" onClick={rm}>
-          rm
-        </button>
+            <button onClick={() => stop.mutate()} disabled={stop.isPending}>
+              stop
+            </button>
+            <button
+              className="danger"
+              onClick={async () => {
+                if (!confirm("Remove task and worktree?")) return;
+                await remove.mutateAsync(task.id);
+                onClose();
+              }}
+            >
+              rm
+            </button>
+          </div>
+        </div>
+        <div className="stats">
+          <div className="stat">
+            <div className={`v ${statusColor(task.status)}`}>{task.status}</div>
+            <div className="l">status</div>
+          </div>
+          <div className="stat">
+            <div className="v">{task.agent}</div>
+            <div className="l">agent</div>
+          </div>
+          <div className="stat">
+            <div className="v" style={{ fontSize: 13, fontWeight: 500 }}>{task.branch}</div>
+            <div className="l">branch</div>
+          </div>
+          {(task.totalInputTokens != null || task.totalOutputTokens != null) && (
+            <div className="stat">
+              <div className="v">
+                {((task.totalInputTokens ?? 0) + (task.totalOutputTokens ?? 0)).toLocaleString()}
+              </div>
+              <div className="l">tokens</div>
+            </div>
+          )}
+          {task.totalCostUsd != null && (
+            <div className="stat">
+              <div className="v red">${task.totalCostUsd.toFixed(4)}</div>
+              <div className="l">cost</div>
+            </div>
+          )}
+          <div className="stat">
+            <div className="v" style={{ fontSize: 12, fontWeight: 500, color: "var(--ink-mute)" }}>
+              {task.id.slice(-12)}
+            </div>
+            <div className="l">id</div>
+          </div>
+        </div>
       </header>
       <nav className="tabs">
         {(["chat", "files", "diff", "log", "term"] as const).map((t) => (
@@ -293,13 +303,13 @@ function TaskDetail({ client, task, onError, onClose, onTaskChanged }: DetailPro
           </button>
         ))}
       </nav>
-      <div className="content">
-        {tab === "chat" && <ChatView messages={messages} onSend={send} />}
-        {tab === "files" && <FilesView client={client} taskId={task.id} onError={onError} />}
-        {tab === "diff" && <DiffView client={client} taskId={task.id} onError={onError} />}
-        {tab === "log" && (
-          <LogView client={client} taskId={task.id} onError={onError} />
+      <div className="content fade-in">
+        {tab === "chat" && (
+          <ChatView messages={messages} taskId={task.id} onError={onError} appendLocal={appendLocal} />
         )}
+        {tab === "files" && <FilesView taskId={task.id} onError={onError} />}
+        {tab === "diff" && <DiffView taskId={task.id} />}
+        {tab === "log" && <LogView taskId={task.id} onError={onError} />}
         {tab === "term" && (
           <Suspense fallback={<div className="empty">loading terminal…</div>}>
             <Terminal taskId={task.id} onError={onError} />
@@ -310,15 +320,27 @@ function TaskDetail({ client, task, onError, onClose, onTaskChanged }: DetailPro
   );
 }
 
+function statusColor(s: string): string {
+  if (s === "done") return "ok";
+  if (s === "running") return "warn";
+  if (s === "failed" || s === "stopped") return "red";
+  return "";
+}
+
 function ChatView({
   messages,
-  onSend,
+  taskId,
+  onError,
+  appendLocal,
 }: {
   messages: Message[];
-  onSend: (text: string) => void;
+  taskId: string;
+  onError: (m: string) => void;
+  appendLocal: (role: Message["role"], content: string) => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [text, setText] = useState("");
+  const send = useSendInput(taskId);
 
   useEffect(() => {
     const el = ref.current;
@@ -331,9 +353,16 @@ function ChatView({
       submit();
     }
   }
-  function submit() {
-    onSend(text);
+  async function submit() {
+    if (!text.trim()) return;
+    const msg = text;
     setText("");
+    appendLocal("user", msg);
+    try {
+      await send.mutateAsync(msg);
+    } catch (e) {
+      onError((e as Error).message);
+    }
   }
 
   return (
@@ -350,17 +379,17 @@ function ChatView({
         className="input-row"
         onSubmit={(e) => {
           e.preventDefault();
-          submit();
+          void submit();
         }}
       >
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKey}
-          placeholder="Send input… (Cmd/Ctrl+Enter to send)"
+          placeholder="send input…  ⌘/ctrl + ↵ to send"
           rows={2}
         />
-        <button className="primary" type="submit">
+        <button className="primary" type="submit" disabled={send.isPending}>
           send
         </button>
       </form>
@@ -368,44 +397,28 @@ function ChatView({
   );
 }
 
-function FilesView({
-  client,
-  taskId,
-  onError,
-}: {
-  client: AgentdClient;
-  taskId: string;
-  onError: (m: string) => void;
-}) {
-  const filesPoll = usePoll(
-    () => client.listFiles(taskId),
-    { files: [] as string[] },
-    8000,
-  );
+function FilesView({ taskId, onError }: { taskId: string; onError: (m: string) => void }) {
+  const filesQ = useFiles(taskId);
   const [path, setPath] = useState<string | null>(null);
-  const [content, setContent] = useState<string>("");
+  const fileQ = useFile(taskId, path);
 
-  async function open(p: string) {
-    try {
-      const r = await client.getFile(taskId, p);
-      setPath(p);
-      setContent(r.content);
-    } catch (e) {
-      onError((e as Error).message);
-    }
-  }
+  useEffect(() => {
+    if (fileQ.error) onError((fileQ.error as Error).message);
+  }, [fileQ.error, onError]);
 
   return (
     <div className={`files-pane${path ? " has-file" : ""}`}>
       <div className="file-tree">
-        {filesPoll.data.files.length === 0 ? (
-          <div className="empty">(loading)</div>
+        {!filesQ.data ? (
+          <div className="empty">loading…</div>
+        ) : filesQ.data.files.length === 0 ? (
+          <div className="empty">no files</div>
         ) : (
-          filesPoll.data.files.map((f) => (
+          filesQ.data.files.map((f) => (
             <div
               key={f}
               className={`file${f === path ? " active" : ""}`}
-              onClick={() => void open(f)}
+              onClick={() => setPath(f)}
             >
               {f}
             </div>
@@ -421,48 +434,27 @@ function FilesView({
                 close
               </button>
             </div>
-            <pre>{content}</pre>
+            <pre>{fileQ.data?.content ?? "loading…"}</pre>
           </>
         ) : (
-          <div className="empty">Select a file</div>
+          <div className="empty">select a file</div>
         )}
       </div>
     </div>
   );
 }
 
-function DiffView({
-  client,
-  taskId,
-  onError,
-}: {
-  client: AgentdClient;
-  taskId: string;
-  onError: (m: string) => void;
-}) {
-  const [diff, setDiff] = useState<{ stat: string; diff: string; baseRef: string } | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const d = await client.getDiff(taskId);
-        if (!cancelled) setDiff(d);
-      } catch (e) {
-        if (!cancelled) onError((e as Error).message);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [client, taskId, onError]);
-
-  if (!diff) return <div className="diff-pane empty">loading…</div>;
+function DiffView({ taskId }: { taskId: string }) {
+  const diffQ = useDiff(taskId);
+  if (!diffQ.data) return <div className="diff-pane empty">loading…</div>;
   return (
     <div className="diff-pane">
-      <div style={{ color: "var(--muted)", marginBottom: 8 }}>vs {diff.baseRef}</div>
+      <div style={{ color: "var(--ink-mute)", marginBottom: 12, fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+        vs <code>{diffQ.data.baseRef}</code>
+      </div>
       <pre>
-        {diff.stat ? <span>{diff.stat + "\n"}</span> : null}
-        {colorDiff(diff.diff || "(no changes)")}
+        {diffQ.data.stat ? <span>{diffQ.data.stat + "\n"}</span> : null}
+        {colorDiff(diffQ.data.diff || "(no changes)")}
       </pre>
     </div>
   );
@@ -482,42 +474,38 @@ function colorDiff(text: string): React.ReactNode[] {
   });
 }
 
-function LogView({
-  client,
-  taskId,
-  onError,
-}: {
-  client: AgentdClient;
-  taskId: string;
-  onError: (m: string) => void;
-}) {
-  const logPoll = usePoll(
-    () => client.getLog(taskId, 50),
-    { log: [] as Awaited<ReturnType<typeof client.getLog>>["log"] },
-    6000,
-  );
+function LogView({ taskId, onError }: { taskId: string; onError: (m: string) => void }) {
+  const logQ = useLog(taskId);
+  const revert = useRevertCommit(taskId);
 
-  async function revert(sha: string) {
+  async function doRevert(sha: string) {
     if (!confirm(`Revert ${sha.slice(0, 7)}?`)) return;
     try {
-      await client.revert(taskId, sha);
-      await logPoll.refresh();
+      await revert.mutateAsync(sha);
     } catch (e) {
       onError((e as Error).message);
     }
   }
 
-  if (logPoll.data.log.length === 0) return <div className="log-pane empty">no commits</div>;
+  if (!logQ.data) return <div className="log-pane empty">loading…</div>;
+  if (logQ.data.log.length === 0) return <div className="log-pane empty">no commits</div>;
   return (
     <div className="log-pane">
-      {logPoll.data.log.map((c) => (
+      {logQ.data.log.map((c) => (
         <div key={c.sha} className="commit">
-          <div className="sha">
-            {c.sha.slice(0, 12)} · {c.author} · {new Date(c.ts).toLocaleString()}
+          <div>
+            <div className="sha">{c.sha.slice(0, 7)}</div>
           </div>
-          <div className="subject">{c.subject}</div>
-          <div className="actions">
-            <button onClick={() => void revert(c.sha)}>revert</button>
+          <div className="body">
+            <div className="subject">{c.subject}</div>
+            <div className="meta">
+              {c.author} · {new Date(c.ts).toLocaleString()}
+            </div>
+          </div>
+          <div>
+            <button onClick={() => void doRevert(c.sha)} disabled={revert.isPending}>
+              revert
+            </button>
           </div>
         </div>
       ))}

@@ -1,24 +1,28 @@
 import { useState } from "react";
-import type { AgentdClient } from "@agentd/client";
 import type { Schedule, Template } from "@agentd/contracts";
-import { usePoll } from "../api";
-import { useApp, useClient } from "../AppContext";
+import { useApp } from "../AppContext";
+import {
+  useCreateSchedule,
+  useDeleteSchedule,
+  useSchedules,
+  useTemplates,
+  useToggleSchedule,
+} from "../queries";
 
 export function Schedules() {
-  const client = useClient();
   const { toast } = useApp();
   const onError = (m: string) => toast(m, true);
   const onInfo = (m: string) => toast(m);
-  const sched = usePoll(() => client.listSchedules(), { schedules: [] as Schedule[] }, 6000);
-  const tpl = usePoll(() => client.listTemplates(), { templates: [] as Template[] }, 30_000);
+  const schQ = useSchedules();
+  const tplQ = useTemplates({ refetchInterval: 30_000 });
+  const toggle = useToggleSchedule();
+  const del = useDeleteSchedule();
   const [showForm, setShowForm] = useState(false);
 
-  async function toggle(s: Schedule) {
+  async function flip(s: Schedule) {
     try {
-      if (s.enabled) await client.disableSchedule(s.id);
-      else await client.enableSchedule(s.id);
+      await toggle.mutateAsync({ id: s.id, enabled: !s.enabled });
       onInfo(`${s.name} ${s.enabled ? "disabled" : "enabled"}`);
-      await sched.refresh();
     } catch (e) {
       onError((e as Error).message);
     }
@@ -26,64 +30,68 @@ export function Schedules() {
   async function rm(s: Schedule) {
     if (!confirm(`delete schedule '${s.name}'?`)) return;
     try {
-      await client.deleteSchedule(s.id);
-      await sched.refresh();
+      await del.mutateAsync(s.id);
     } catch (e) {
       onError((e as Error).message);
     }
   }
 
   return (
-    <div className="page-pad">
-      <h2>
-        Schedules{" "}
-        <button className="ghost" onClick={() => setShowForm((v) => !v)}>
-          {showForm ? "cancel" : "+ new"}
-        </button>
-      </h2>
+    <div className="page fade-in">
+      <div className="page-head">
+        <div className="crumb">~/schedules</div>
+        <h2>Schedules</h2>
+        <div className="actions">
+          <button className="primary" onClick={() => setShowForm((v) => !v)}>
+            {showForm ? "× cancel" : "+ new schedule"}
+          </button>
+        </div>
+      </div>
+
       {showForm && (
         <CreateForm
-          client={client}
-          templates={tpl.data.templates}
+          templates={(tplQ.data?.templates as Template[]) ?? []}
           onError={onError}
-          onCreated={async () => {
-            setShowForm(false);
-            await sched.refresh();
-          }}
+          onCreated={() => setShowForm(false)}
         />
       )}
+
       <table className="table">
         <thead>
           <tr>
-            <th>name</th>
-            <th>cron</th>
+            <th style={{ width: 160 }}>name</th>
+            <th style={{ width: 140 }}>cron</th>
             <th>template</th>
-            <th>state</th>
+            <th style={{ width: 90 }}>state</th>
             <th>last</th>
             <th>next</th>
             <th className="actions">actions</th>
           </tr>
         </thead>
         <tbody>
-          {sched.data.schedules.length === 0 ? (
-            <tr>
-              <td colSpan={7}>
-                <div className="empty">No schedules.</div>
-              </td>
-            </tr>
+          {!schQ.data ? (
+            <tr><td colSpan={7}><div className="empty">loading…</div></td></tr>
+          ) : schQ.data.schedules.length === 0 ? (
+            <tr><td colSpan={7}><div className="empty">no schedules</div></td></tr>
           ) : (
-            sched.data.schedules.map((s) => (
+            schQ.data.schedules.map((s) => (
               <tr key={s.id}>
-                <td>{s.name}</td>
-                <td>
-                  <code>{s.cron}</code>
-                </td>
+                <td><strong>{s.name}</strong></td>
+                <td><code>{s.cron}</code></td>
                 <td>{s.templateId}</td>
-                <td>{s.enabled ? "enabled" : "disabled"}</td>
-                <td>{s.lastRunAt ? new Date(s.lastRunAt).toLocaleString() : "—"}</td>
-                <td>{s.nextRunAt ? new Date(s.nextRunAt).toLocaleString() : "—"}</td>
+                <td>
+                  <span className={`pill ${s.enabled ? "ok" : "mute"}`}>
+                    {s.enabled ? "enabled" : "disabled"}
+                  </span>
+                </td>
+                <td style={{ color: "var(--ink-mute)", fontSize: 11 }}>
+                  {s.lastRunAt ? new Date(s.lastRunAt).toLocaleString() : "—"}
+                </td>
+                <td style={{ fontSize: 11 }}>
+                  {s.nextRunAt ? new Date(s.nextRunAt).toLocaleString() : "—"}
+                </td>
                 <td className="actions">
-                  <button onClick={() => void toggle(s)}>
+                  <button onClick={() => void flip(s)} disabled={toggle.isPending}>
                     {s.enabled ? "disable" : "enable"}
                   </button>
                   <button className="danger" onClick={() => void rm(s)}>
@@ -100,21 +108,19 @@ export function Schedules() {
 }
 
 function CreateForm({
-  client,
   templates,
   onError,
   onCreated,
 }: {
-  client: AgentdClient;
   templates: Template[];
   onError: (m: string) => void;
-  onCreated: () => void | Promise<void>;
+  onCreated: () => void;
 }) {
   const [name, setName] = useState("");
   const [cron, setCron] = useState("0 * * * *");
   const [templateId, setTemplateId] = useState(templates[0]?.id ?? "");
   const [args, setArgs] = useState("");
-  const [busy, setBusy] = useState(false);
+  const create = useCreateSchedule();
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -122,37 +128,35 @@ function CreateForm({
       onError("create a template first");
       return;
     }
-    setBusy(true);
+    const argMap: Record<string, string> = {};
+    for (const part of args.split(/\s+/).filter(Boolean)) {
+      const eq = part.indexOf("=");
+      if (eq > 0) argMap[part.slice(0, eq)] = part.slice(eq + 1);
+    }
     try {
-      const argMap: Record<string, string> = {};
-      for (const part of args.split(/\s+/).filter(Boolean)) {
-        const eq = part.indexOf("=");
-        if (eq > 0) argMap[part.slice(0, eq)] = part.slice(eq + 1);
-      }
-      await client.createSchedule({
+      await create.mutateAsync({
         name,
         cron,
         templateId,
         templateArgs: argMap,
         enabled: true,
       });
-      await onCreated();
+      onCreated();
     } catch (e) {
       onError((e as Error).message);
-    } finally {
-      setBusy(false);
     }
   }
 
   return (
-    <form className="form" onSubmit={submit}>
+    <form className="panel" onSubmit={submit}>
+      <div className="title">NEW SCHEDULE</div>
       <div className="row">
         <label>name</label>
         <input value={name} onChange={(e) => setName(e.target.value)} required />
       </div>
       <div className="row">
         <label>cron (5-field)</label>
-        <input value={cron} onChange={(e) => setCron(e.target.value)} required />
+        <input value={cron} onChange={(e) => setCron(e.target.value)} required spellCheck={false} />
       </div>
       <div className="row">
         <label>template</label>
@@ -169,12 +173,12 @@ function CreateForm({
         <input
           value={args}
           onChange={(e) => setArgs(e.target.value)}
-          placeholder="key=value space-separated, e.g. branch=main since=24h"
+          placeholder="key=value space-separated"
         />
       </div>
       <div className="actions">
-        <button type="submit" className="primary" disabled={busy}>
-          create
+        <button type="submit" className="primary" disabled={create.isPending}>
+          {create.isPending ? "creating…" : "› create"}
         </button>
       </div>
     </form>
