@@ -1,0 +1,15 @@
+{
+  "name": "@agentd/telegram",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "dev": "bun --watch src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentd/contracts": "workspace:*",
+    "@agentd/client": "workspace:*",
+    "grammy": "^1.32.0"
+  }
+}
