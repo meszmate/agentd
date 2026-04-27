@@ -1,0 +1,46 @@
+# /agentd — dev compose override
+#
+# Layered on top of docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Differences from prod:
+#   - Bind-mounts the source tree so edits inside apps/ and packages/ trigger
+#     a reload via `bun --watch`.
+#   - Exposes the Vite dev server on 5173 alongside the daemon on 3773.
+#   - Disables auto-restart so a fatal error stops the container instead of
+#     looping silently.
+
+services:
+  agentd:
+    image: agentd:local
+    restart: "no"
+    command: >
+      bun --watch apps/daemon/src/index.ts
+    volumes:
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+      # Keep node_modules from the image so we don't shadow it with the host's
+      # platform-specific binaries (e.g. macOS native modules).
+      - /app/node_modules
+      - agentd-data:/data
+      - "${REPOS_DIR:-./repos}:/repos"
+
+  web-dev:
+    image: agentd:local
+    container_name: agentd-web-dev
+    init: true
+    restart: "no"
+    working_dir: /app/apps/web
+    command: >
+      bun run dev --host 0.0.0.0
+    ports:
+      - "5173:5173"
+    environment:
+      AGENTD_DEV_DAEMON: http://agentd:3773
+    volumes:
+      - ./apps/web:/app/apps/web
+      - ./packages:/app/packages
+      - /app/node_modules
+      - /app/apps/web/node_modules
+    depends_on:
+      - agentd

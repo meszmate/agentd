@@ -1,0 +1,32 @@
+# Don't ship the host's node_modules; the build stage installs from lockfile.
+**/node_modules
+**/dist
+**/.tsbuildcache
+**/*.tsbuildinfo
+
+# Local state — never bake user data into the image.
+.agentd
+data
+worktrees
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Editor + OS junk.
+.git
+.github
+.vscode
+.idea
+.DS_Store
+*.log
+.env
+.env.local
+
+# Docs that aren't needed in the image.
+README.md
+CONTRIBUTING.md
+LICENSE
+docs
+assets
+.github

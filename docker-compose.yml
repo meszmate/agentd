@@ -1,0 +1,56 @@
+# /agentd — production compose file
+#
+# Bring up:
+#   docker compose up -d
+#
+# Tear down (state survives unless you also drop the volume):
+#   docker compose down
+#   docker compose down -v   # also wipe the SQLite + worktrees
+#
+# Override paths and ports via .env (see .env.example).
+#
+# Auth:
+#   - Easiest: ANTHROPIC_API_KEY / OPENAI_API_KEY env vars (set in .env).
+#   - More featureful: mount your host's CLI configs (see docs/docker.md).
+
+name: agentd
+
+services:
+  agentd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agentd:local
+    container_name: agentd
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${AGENTD_PORT:-3773}:3773"
+    volumes:
+      # Persistent state: SQLite, worktrees, config.json (with bot tokens).
+      - agentd-data:/data
+      # Mount the host directory that holds the git repos you want agents to
+      # work on. Reference them inside the container by /repos/<name>.
+      - "${REPOS_DIR:-./repos}:/repos"
+    environment:
+      # Daemon configuration
+      AGENTD_HOST: 0.0.0.0
+      AGENTD_PORT: 3773
+      AGENTD_ROOT: /data
+      # Agent CLI auth — fill these in via .env
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      # gh CLI for auto-PR (a personal access token with `repo` scope)
+      GH_TOKEN: "${GH_TOKEN:-}"
+    # Healthcheck is also baked into the Dockerfile; this is the compose-side
+    # mirror so `docker compose ps` shows the result.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3773/health || exit 1"]
+      interval: 15s
+      timeout: 4s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  agentd-data:
+    name: agentd-data

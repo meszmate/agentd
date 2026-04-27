@@ -21,6 +21,7 @@
 
   <p>
     <a href="./docs/quickstart.md">Quickstart</a> ·
+    <a href="./docs/docker.md">Docker</a> ·
     <a href="./docs/architecture.md">Architecture</a> ·
     <a href="./CONTRIBUTING.md">Contributing</a>
   </p>
@@ -83,6 +84,18 @@ bun apps/daemon/src/index.ts --host $(tailscale ip -4)
 # alternative bind options
 bun apps/daemon/src/index.ts --host 0.0.0.0 --port 8080 --root /var/lib/agentd
 ```
+
+### Or with Docker
+
+```bash
+cp .env.example .env       # fill in API keys + repos dir
+docker compose up -d --build
+```
+
+State persists in the `agentd-data` volume; mount your repos at
+`${REPOS_DIR}` and reference them inside the container by `/repos/<name>`.
+Full instructions, including dev compose with Vite hot reload, multi-arch
+build, and the auth options, are in [docs/docker.md](./docs/docker.md).
 
 The daemon prints a one-time pairing token + QR code on startup. Pair the CLI:
 
