@@ -1,15 +1,21 @@
 import type { AgentEvent, Task, AgentKind } from "@agentd/contracts";
 import {
+  addTaskUsage,
   appendMessage,
   autoCommit,
+  createPr,
   createTask,
   detectDefaultBranch,
   EventBus,
   getTask,
   listTasks,
   listMessages,
+  loadConfig,
   newId,
+  pushBranch,
   removeWorktree,
+  renderConfigTemplate,
+  setTaskPrUrl,
   slugify,
   updateTaskStatus,
   createWorktree,
@@ -33,6 +39,10 @@ export interface CreateTaskParams {
   baseBranch?: string;
   prompt: string;
   title?: string;
+  autoPush?: boolean;
+  autoPr?: boolean;
+  templateId?: string | null;
+  scheduleId?: string | null;
 }
 
 export class TaskManager {
@@ -78,6 +88,10 @@ export class TaskManager {
       worktreePath,
       branch,
       baseBranch,
+      templateId: params.templateId ?? null,
+      scheduleId: params.scheduleId ?? null,
+      autoPush: params.autoPush ?? false,
+      autoPr: params.autoPr ?? false,
     });
     appendMessage(this.db, task.id, "user", params.prompt);
     await this.spawnRunner(task, params.prompt, false);
@@ -136,8 +150,16 @@ export class TaskManager {
       event: { kind: "status", status: "running" },
       ts: Date.now(),
     });
+    const cfg = loadConfig(this.paths.root);
     try {
-      await runner.start({ prompt, cwd: task.worktreePath, resume });
+      await runner.start({
+        prompt,
+        cwd: task.worktreePath,
+        resume,
+        ...(cfg.agentInstructions
+          ? { appendSystemPrompt: cfg.agentInstructions }
+          : {}),
+      });
     } catch (err) {
       const msg = (err as Error).message;
       this.bus.publish({
@@ -167,23 +189,43 @@ export class TaskManager {
       );
     } else if (event.kind === "status") {
       updateTaskStatus(this.db, taskId, event.status);
+    } else if (event.kind === "usage") {
+      addTaskUsage(this.db, taskId, {
+        inputTokens: event.inputTokens,
+        outputTokens: event.outputTokens,
+        cacheReadTokens: event.cacheReadTokens,
+        cacheWriteTokens: event.cacheWriteTokens,
+        costUsd: event.costUsd,
+      });
     } else if (event.kind === "exit") {
       const session = this.running.get(taskId);
       if (session) {
         session.unsubscribe();
         this.running.delete(taskId);
       }
-      // Fire-and-forget; auto-commit runs after the agent process exits.
-      void this.maybeAutoCommit(taskId);
+      // Fire-and-forget; commit + push + PR all run after the agent exits.
+      void this.runCompletionHooks(taskId);
     }
     this.bus.publish({ taskId, event, ts: Date.now() });
   }
 
-  private async maybeAutoCommit(taskId: string): Promise<void> {
+  private async runCompletionHooks(taskId: string): Promise<void> {
     const task = getTask(this.db, taskId);
     if (!task) return;
+    const committed = await this.maybeAutoCommit(taskId, task);
+    if (!committed) return;
+    if (task.autoPush || task.autoPr) {
+      await this.maybePush(taskId, task);
+    }
+    if (task.autoPr) {
+      await this.maybeOpenPr(taskId, task);
+    }
+  }
+
+  private async maybeAutoCommit(taskId: string, task: Task): Promise<boolean> {
     const lastUserMsg = findLastUserMessage(this.db, taskId);
-    const title = `agent: ${task.title}`.slice(0, 72);
+    const cfg = loadConfig(this.paths.root);
+    const title = `${cfg.commitPrefix}${task.title}`.slice(0, 72);
     try {
       const result = await autoCommit({
         cwd: task.worktreePath,
@@ -207,6 +249,7 @@ export class TaskManager {
           ts: Date.now(),
         });
       }
+      return result.committed;
     } catch (e) {
       appendMessage(
         this.db,
@@ -214,6 +257,46 @@ export class TaskManager {
         "system",
         `auto-commit failed: ${(e as Error).message}`,
       );
+      return false;
+    }
+  }
+
+  private async maybePush(taskId: string, task: Task): Promise<void> {
+    try {
+      const r = await pushBranch(task.worktreePath);
+      appendMessage(this.db, taskId, "system", `pushed ${r.branch} → ${r.remote}`);
+    } catch (e) {
+      appendMessage(this.db, taskId, "system", `auto-push failed: ${(e as Error).message}`);
+    }
+  }
+
+  private async maybeOpenPr(taskId: string, task: Task): Promise<void> {
+    try {
+      const lastUserMsg = findLastUserMessage(this.db, taskId);
+      const cfg = loadConfig(this.paths.root);
+      const ctx = {
+        prompt: lastUserMsg ?? "",
+        task_id: task.id,
+        branch: task.branch,
+        title: task.title,
+      };
+      const body = cfg.prBodyTemplate
+        ? renderConfigTemplate(cfg.prBodyTemplate, ctx)
+        : (lastUserMsg ?? "");
+      const r = await createPr({
+        cwd: task.worktreePath,
+        title: `${cfg.prTitlePrefix}${task.title}`.slice(0, 200),
+        body,
+        baseBranch: task.baseBranch,
+      });
+      if (r.url) {
+        setTaskPrUrl(this.db, taskId, r.url);
+        appendMessage(this.db, taskId, "system", `opened PR: ${r.url}`);
+      } else {
+        appendMessage(this.db, taskId, "system", `gh pr create succeeded but no URL parsed: ${r.output.slice(0, 200)}`);
+      }
+    } catch (e) {
+      appendMessage(this.db, taskId, "system", `auto-PR failed: ${(e as Error).message}`);
     }
   }
 }

@@ -7,16 +7,36 @@ import { loadCliConfig, saveCliConfig } from "./config.ts";
 
 const HELP = `agentd — remote coding-agent orchestrator
 
-Usage:
+Tasks:
   agentd pair --server <url> --token <pairing-token>
   agentd ls
-  agentd new --repo <path> [--agent claude|codex] [--base <branch>] [--title <s>] <prompt...>
+  agentd new --repo <path> [--agent claude|codex] [--base <branch>] [--title <s>] [--push] [--pr] <prompt...>
   agentd show <task-id>
   agentd input <task-id> <text...>
   agentd attach <task-id>
   agentd stop <task-id>
   agentd rm <task-id>
   agentd config
+
+Templates (reusable named prompts; substitute {placeholders}):
+  agentd template ls
+  agentd template add <name> --repo <path> [--agent claude] [--base main] [--push] [--pr] <prompt...>
+  agentd template show <name>
+  agentd template run <name> [--arg key=value ...]
+  agentd template rm <name>
+
+Schedules (cron-driven template runs):
+  agentd schedule ls
+  agentd schedule add <name> --cron "<5-field-cron>" --template <name> [--arg k=v]
+  agentd schedule enable <name|id>
+  agentd schedule disable <name|id>
+  agentd schedule rm <name|id>
+
+Settings (daemon-side, edit the system prompt agents see + commit/PR templates):
+  agentd settings show
+  agentd settings set <agentInstructions|commitPrefix|prTitlePrefix|prBodyTemplate> <value>
+
+Plugins:
   agentd plugin status
   agentd plugin enable telegram --token <bot-token> [--allow-user 1,2] [--allow-chat 3,4] [--default-repo <path>]
   agentd plugin enable discord  --token <bot-token> [--allow-user a,b] [--allow-channel c,d] [--default-repo <path>]
@@ -79,6 +99,8 @@ async function cmdNew(argv: string[]) {
       agent: { type: "string" },
       base: { type: "string" },
       title: { type: "string" },
+      push: { type: "boolean" },
+      pr: { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -99,12 +121,17 @@ async function cmdNew(argv: string[]) {
     baseBranch: values.base ? String(values.base) : "main",
     prompt,
     ...(values.title ? { title: String(values.title) } : {}),
+    ...(values.push ? { autoPush: true } : {}),
+    ...(values.pr ? { autoPush: true, autoPr: true } : {}),
   };
   const { task } = await client().createTask(req);
   console.log(`created task ${task.id}`);
   console.log(`branch:   ${task.branch}`);
   console.log(`worktree: ${task.worktreePath}`);
   console.log(`status:   ${task.status}`);
+  if (req.autoPush || req.autoPr) {
+    console.log(`hooks:    ${req.autoPr ? "auto-push + auto-PR" : "auto-push"}`);
+  }
   console.log("");
   console.log(`attach: agentd attach ${task.id}`);
 }
@@ -320,6 +347,204 @@ async function cmdPlugin(argv: string[]) {
   process.exit(2);
 }
 
+// ───────────── templates ─────────────
+
+function parseArgPairs(args: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const a of args) {
+    const eq = a.indexOf("=");
+    if (eq < 0) continue;
+    out[a.slice(0, eq)] = a.slice(eq + 1);
+  }
+  return out;
+}
+
+async function cmdTemplate(argv: string[]) {
+  const sub = argv[0];
+  const c = client();
+  if (!sub || sub === "ls" || sub === "list") {
+    const { templates } = await c.listTemplates();
+    if (templates.length === 0) return console.log("(no templates)");
+    for (const t of templates) {
+      const flags = `${t.autoPush ? " push" : ""}${t.autoPr ? " pr" : ""}`.trim();
+      console.log(`${t.name.padEnd(20)} ${t.agent.padEnd(7)} ${t.repoPath} ${flags ? "[" + flags + "]" : ""}`);
+      console.log(`                     base=${t.baseBranch}  prompt: ${t.promptTemplate.slice(0, 80)}${t.promptTemplate.length > 80 ? "…" : ""}`);
+    }
+    return;
+  }
+  if (sub === "show") {
+    const name = argv[1];
+    if (!name) { console.error("usage: agentd template show <name>"); process.exit(2); }
+    const { template: t } = await c.getTemplate(name);
+    console.log(JSON.stringify(t, null, 2));
+    return;
+  }
+  if (sub === "rm" || sub === "delete") {
+    const name = argv[1];
+    if (!name) { console.error("usage: agentd template rm <name>"); process.exit(2); }
+    await c.deleteTemplate(name);
+    console.log(`removed ${name}`);
+    return;
+  }
+  if (sub === "add" || sub === "create") {
+    const name = argv[1];
+    if (!name) { console.error("usage: agentd template add <name> --repo <path> ... <prompt>"); process.exit(2); }
+    const { values, positionals } = parseArgs({
+      args: argv.slice(2),
+      options: {
+        repo: { type: "string" },
+        agent: { type: "string" },
+        base: { type: "string" },
+        push: { type: "boolean" },
+        pr: { type: "boolean" },
+      },
+      allowPositionals: true,
+    });
+    if (!values.repo) { console.error("--repo is required"); process.exit(2); }
+    if (positionals.length === 0) { console.error("prompt is required"); process.exit(2); }
+    const req = {
+      name,
+      agent: (values.agent === "codex" ? "codex" : "claude") as "claude" | "codex",
+      repoPath: resolve(String(values.repo)),
+      baseBranch: values.base ? String(values.base) : "main",
+      promptTemplate: positionals.join(" "),
+      autoPush: !!values.push || !!values.pr,
+      autoPr: !!values.pr,
+    };
+    const { template } = await c.createTemplate(req);
+    console.log(`created template '${template.name}' (${template.id})`);
+    return;
+  }
+  if (sub === "run" || sub === "fire") {
+    const name = argv[1];
+    if (!name) { console.error("usage: agentd template run <name> [--arg k=v ...]"); process.exit(2); }
+    const argFlags: string[] = [];
+    const rest = argv.slice(2);
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === "--arg" && rest[i + 1]) {
+        argFlags.push(rest[i + 1]!);
+        i++;
+      }
+    }
+    const args = parseArgPairs(argFlags);
+    const { task } = await c.runTemplate(name, { args });
+    console.log(`fired template '${name}' → task ${task.id}`);
+    console.log(`attach: agentd attach ${task.id}`);
+    return;
+  }
+  console.error(`unknown template subcommand: ${sub}`);
+  process.exit(2);
+}
+
+// ───────────── schedules ─────────────
+
+async function cmdSchedule(argv: string[]) {
+  const sub = argv[0];
+  const c = client();
+  if (!sub || sub === "ls" || sub === "list") {
+    const { schedules } = await c.listSchedules();
+    if (schedules.length === 0) return console.log("(no schedules)");
+    for (const s of schedules) {
+      const next = s.nextRunAt ? new Date(s.nextRunAt).toLocaleString() : "—";
+      const last = s.lastRunAt ? new Date(s.lastRunAt).toLocaleString() : "—";
+      const state = s.enabled ? "enabled" : "disabled";
+      console.log(`${s.name.padEnd(20)} ${state.padEnd(9)} cron='${s.cron}' template=${s.templateId}`);
+      console.log(`                     next=${next}  last=${last}`);
+    }
+    return;
+  }
+  if (sub === "add" || sub === "create") {
+    const name = argv[1];
+    if (!name) { console.error("usage: agentd schedule add <name> --cron \"...\" --template <name> [--arg k=v ...]"); process.exit(2); }
+    const argFlags: string[] = [];
+    const passed = argv.slice(2);
+    const filtered: string[] = [];
+    for (let i = 0; i < passed.length; i++) {
+      if (passed[i] === "--arg" && passed[i + 1]) {
+        argFlags.push(passed[i + 1]!);
+        i++;
+      } else {
+        filtered.push(passed[i]!);
+      }
+    }
+    const { values } = parseArgs({
+      args: filtered,
+      options: {
+        cron: { type: "string" },
+        template: { type: "string" },
+      },
+      allowPositionals: false,
+    });
+    if (!values.cron || !values.template) { console.error("--cron and --template are required"); process.exit(2); }
+    const args = parseArgPairs(argFlags);
+    const { schedule } = await c.createSchedule({
+      name,
+      cron: String(values.cron),
+      templateId: String(values.template),
+      templateArgs: args,
+      enabled: true,
+    });
+    console.log(`created schedule '${schedule.name}' (${schedule.id}) — next run ${schedule.nextRunAt ? new Date(schedule.nextRunAt).toLocaleString() : "never"}`);
+    return;
+  }
+  if (sub === "enable") {
+    const id = argv[1];
+    if (!id) { console.error("usage: agentd schedule enable <id>"); process.exit(2); }
+    const { schedule } = await c.enableSchedule(id);
+    console.log(`enabled ${schedule.name}`);
+    return;
+  }
+  if (sub === "disable") {
+    const id = argv[1];
+    if (!id) { console.error("usage: agentd schedule disable <id>"); process.exit(2); }
+    const { schedule } = await c.disableSchedule(id);
+    console.log(`disabled ${schedule.name}`);
+    return;
+  }
+  if (sub === "rm" || sub === "delete") {
+    const id = argv[1];
+    if (!id) { console.error("usage: agentd schedule rm <id>"); process.exit(2); }
+    await c.deleteSchedule(id);
+    console.log(`removed ${id}`);
+    return;
+  }
+  console.error(`unknown schedule subcommand: ${sub}`);
+  process.exit(2);
+}
+
+// ───────────── settings ─────────────
+
+const SETTINGS_KEYS = ["agentInstructions", "commitPrefix", "prTitlePrefix", "prBodyTemplate"] as const;
+type SettingKey = (typeof SETTINGS_KEYS)[number];
+
+async function cmdSettings(argv: string[]) {
+  const sub = argv[0];
+  const c = client();
+  if (!sub || sub === "show" || sub === "ls") {
+    const s = await c.getSettings();
+    console.log(JSON.stringify(s, null, 2));
+    return;
+  }
+  if (sub === "set") {
+    const key = argv[1] as SettingKey | undefined;
+    const value = argv.slice(2).join(" ");
+    if (!key || !SETTINGS_KEYS.includes(key)) {
+      console.error(`usage: agentd settings set <${SETTINGS_KEYS.join("|")}> <value>`);
+      process.exit(2);
+    }
+    if (value === "") {
+      console.error("value required (use empty quotes if you really want '')");
+      process.exit(2);
+    }
+    const r = await c.patchSettings({ [key]: value });
+    console.log(`updated ${key}.`);
+    console.log(JSON.stringify(r.settings, null, 2));
+    return;
+  }
+  console.error(`unknown settings subcommand: ${sub}`);
+  process.exit(2);
+}
+
 async function main() {
   const [, , cmd, ...rest] = process.argv;
   switch (cmd) {
@@ -344,6 +569,15 @@ async function main() {
     case "plugin":
     case "plugins":
       return cmdPlugin(rest);
+    case "template":
+    case "templates":
+      return cmdTemplate(rest);
+    case "schedule":
+    case "schedules":
+    case "cron":
+      return cmdSchedule(rest);
+    case "settings":
+      return cmdSettings(rest);
     case undefined:
     case "help":
     case "-h":

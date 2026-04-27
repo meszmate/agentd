@@ -146,3 +146,70 @@ export async function revertCommit(cwd: string, sha: string): Promise<void> {
     throw new Error(`git revert failed: ${r.stderr || r.stdout}`);
   }
 }
+
+export interface PushResult {
+  pushed: boolean;
+  remote: string;
+  branch: string;
+  output: string;
+}
+
+export async function pushBranch(
+  cwd: string,
+  remote = "origin",
+): Promise<PushResult> {
+  const branchOut = await run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd);
+  const branch = branchOut.stdout.trim();
+  if (!branch || branch === "HEAD") {
+    throw new Error("not on a named branch; cannot push");
+  }
+  const r = await run(["git", "push", "-u", remote, branch], cwd);
+  if (r.exitCode !== 0) {
+    throw new Error(`git push failed: ${r.stderr || r.stdout}`);
+  }
+  return {
+    pushed: true,
+    remote,
+    branch,
+    output: r.stdout + r.stderr,
+  };
+}
+
+export interface CreatePrInput {
+  cwd: string;
+  title: string;
+  body: string;
+  baseBranch: string;
+  draft?: boolean;
+}
+
+export interface CreatePrResult {
+  url: string;
+  output: string;
+}
+
+/**
+ * Uses the gh CLI to open a PR for the current branch. Requires `gh auth status`
+ * to be set up on the host. Returns the PR URL parsed from gh's stdout.
+ */
+export async function createPr(input: CreatePrInput): Promise<CreatePrResult> {
+  const args = [
+    "gh",
+    "pr",
+    "create",
+    "--base",
+    input.baseBranch,
+    "--title",
+    input.title,
+    "--body",
+    input.body || "Opened automatically by agentd.",
+  ];
+  if (input.draft) args.push("--draft");
+  const r = await run(args, input.cwd);
+  if (r.exitCode !== 0) {
+    throw new Error(`gh pr create failed: ${r.stderr || r.stdout}`);
+  }
+  // gh prints the URL on stdout when creation succeeds
+  const url = (r.stdout.match(/https?:\/\/\S+/) || [""])[0];
+  return { url, output: r.stdout + r.stderr };
+}

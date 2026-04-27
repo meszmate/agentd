@@ -11,6 +11,8 @@ export interface RunnerStartOptions {
   cwd: string;
   resume?: boolean;
   permissionMode?: PermissionMode;
+  /** Appended to the agent's system prompt for this run. */
+  appendSystemPrompt?: string;
 }
 
 export type RunnerEventListener = (event: AgentEvent) => void;

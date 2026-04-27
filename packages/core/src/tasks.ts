@@ -12,24 +12,65 @@ export interface CreateTaskInput {
   worktreePath: string;
   branch: string;
   baseBranch: string;
+  templateId?: string | null;
+  scheduleId?: string | null;
+  autoPush?: boolean;
+  autoPr?: boolean;
+}
+
+function rowToTask(row: typeof tasks.$inferSelect): Task {
+  return {
+    id: row.id,
+    title: row.title,
+    agent: row.agent as Task["agent"],
+    repoPath: row.repoPath,
+    worktreePath: row.worktreePath,
+    branch: row.branch,
+    baseBranch: row.baseBranch,
+    status: row.status as TaskStatus,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    templateId: row.templateId ?? null,
+    scheduleId: row.scheduleId ?? null,
+    autoPush: row.autoPush === 1,
+    autoPr: row.autoPr === 1,
+    prUrl: row.prUrl ?? null,
+    totalInputTokens: row.totalInputTokens ?? 0,
+    totalOutputTokens: row.totalOutputTokens ?? 0,
+    totalCacheReadTokens: row.totalCacheReadTokens ?? 0,
+    totalCacheWriteTokens: row.totalCacheWriteTokens ?? 0,
+    totalCostUsd: row.totalCostUsd != null ? Number(row.totalCostUsd) : null,
+  };
 }
 
 export function createTask(db: Db, input: CreateTaskInput): Task {
   const now = Date.now();
-  const task: Task = {
-    id: input.id ?? newId("task"),
-    title: input.title,
-    agent: input.agent,
-    repoPath: input.repoPath,
-    worktreePath: input.worktreePath,
-    branch: input.branch,
-    baseBranch: input.baseBranch,
-    status: "pending",
-    createdAt: now,
-    updatedAt: now,
-  };
-  db.insert(tasks).values(task).run();
-  return task;
+  const id = input.id ?? newId("task");
+  db.insert(tasks)
+    .values({
+      id,
+      title: input.title,
+      agent: input.agent,
+      repoPath: input.repoPath,
+      worktreePath: input.worktreePath,
+      branch: input.branch,
+      baseBranch: input.baseBranch,
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+      templateId: input.templateId ?? null,
+      scheduleId: input.scheduleId ?? null,
+      autoPush: input.autoPush ? 1 : 0,
+      autoPr: input.autoPr ? 1 : 0,
+      prUrl: null,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCacheReadTokens: 0,
+      totalCacheWriteTokens: 0,
+      totalCostUsd: null,
+    })
+    .run();
+  return getTask(db, id)!;
 }
 
 export function updateTaskStatus(
@@ -45,9 +86,46 @@ export function updateTaskStatus(
   return getTask(db, id);
 }
 
+export function setTaskPrUrl(db: Db, id: string, prUrl: string): void {
+  db.update(tasks)
+    .set({ prUrl, updatedAt: Date.now() })
+    .where(eq(tasks.id, id))
+    .run();
+}
+
+export interface UsageDelta {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  costUsd?: number;
+}
+
+export function addTaskUsage(db: Db, id: string, delta: UsageDelta): void {
+  const cur = getTask(db, id);
+  if (!cur) return;
+  const inT = (cur.totalInputTokens ?? 0) + (delta.inputTokens ?? 0);
+  const outT = (cur.totalOutputTokens ?? 0) + (delta.outputTokens ?? 0);
+  const cacheR = (cur.totalCacheReadTokens ?? 0) + (delta.cacheReadTokens ?? 0);
+  const cacheW = (cur.totalCacheWriteTokens ?? 0) + (delta.cacheWriteTokens ?? 0);
+  const costPrev = cur.totalCostUsd ?? 0;
+  const costNext = delta.costUsd != null ? costPrev + delta.costUsd : costPrev;
+  db.update(tasks)
+    .set({
+      totalInputTokens: inT,
+      totalOutputTokens: outT,
+      totalCacheReadTokens: cacheR,
+      totalCacheWriteTokens: cacheW,
+      totalCostUsd: delta.costUsd != null ? String(costNext) : cur.totalCostUsd != null ? String(cur.totalCostUsd) : null,
+      updatedAt: Date.now(),
+    })
+    .where(eq(tasks.id, id))
+    .run();
+}
+
 export function getTask(db: Db, id: string): Task | null {
   const row = db.select().from(tasks).where(eq(tasks.id, id)).get();
-  return (row as Task | undefined) ?? null;
+  return row ? rowToTask(row) : null;
 }
 
 export function listTasks(db: Db): Task[] {
@@ -55,7 +133,8 @@ export function listTasks(db: Db): Task[] {
     .select()
     .from(tasks)
     .orderBy(desc(tasks.createdAt))
-    .all() as Task[];
+    .all()
+    .map(rowToTask);
 }
 
 export function deleteTask(db: Db, id: string): void {

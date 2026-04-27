@@ -1,8 +1,13 @@
 import type {
+  CreateScheduleRequest,
   CreateTaskRequest,
+  CreateTemplateRequest,
   PairExchangeRequest,
   PairExchangeResponse,
+  RunTemplateRequest,
+  Schedule,
   Task,
+  Template,
   Message,
   WsServerEvent,
 } from "@agentd/contracts";
@@ -172,6 +177,68 @@ export class AgentdClient {
     patch: TelegramPluginPatch | DiscordPluginPatch,
   ): Promise<{ ok: boolean; plugin: unknown; status: PluginStatus[] }> {
     return this.req(`/api/admin/plugins/${name}`, {
+      method: "POST",
+      body: JSON.stringify(patch),
+    });
+  }
+
+  // ── templates ──
+  async listTemplates(): Promise<{ templates: Template[] }> {
+    return this.req("/api/templates");
+  }
+  async createTemplate(req: CreateTemplateRequest): Promise<{ template: Template }> {
+    return this.req("/api/templates", { method: "POST", body: JSON.stringify(req) });
+  }
+  async getTemplate(idOrName: string): Promise<{ template: Template }> {
+    return this.req(`/api/templates/${encodeURIComponent(idOrName)}`);
+  }
+  async deleteTemplate(idOrName: string): Promise<void> {
+    await this.req(`/api/templates/${encodeURIComponent(idOrName)}`, { method: "DELETE" });
+  }
+  async runTemplate(
+    idOrName: string,
+    req: RunTemplateRequest = { args: {} },
+  ): Promise<{ task: Task }> {
+    return this.req(`/api/templates/${encodeURIComponent(idOrName)}/run`, {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+
+  // ── schedules ──
+  async listSchedules(): Promise<{ schedules: Schedule[] }> {
+    return this.req("/api/schedules");
+  }
+  async createSchedule(req: CreateScheduleRequest): Promise<{ schedule: Schedule }> {
+    return this.req("/api/schedules", { method: "POST", body: JSON.stringify(req) });
+  }
+  async enableSchedule(id: string): Promise<{ schedule: Schedule }> {
+    return this.req(`/api/schedules/${encodeURIComponent(id)}/enable`, { method: "POST" });
+  }
+  async disableSchedule(id: string): Promise<{ schedule: Schedule }> {
+    return this.req(`/api/schedules/${encodeURIComponent(id)}/disable`, { method: "POST" });
+  }
+  async deleteSchedule(id: string): Promise<void> {
+    await this.req(`/api/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  // ── settings ──
+  async getSettings(): Promise<{
+    agentInstructions: string;
+    commitPrefix: string;
+    prTitlePrefix: string;
+    prBodyTemplate: string;
+  }> {
+    return this.req("/api/admin/settings");
+  }
+
+  async patchSettings(patch: Partial<{
+    agentInstructions: string;
+    commitPrefix: string;
+    prTitlePrefix: string;
+    prBodyTemplate: string;
+  }>): Promise<{ ok: boolean; settings: Record<string, string> }> {
+    return this.req("/api/admin/settings", {
       method: "POST",
       body: JSON.stringify(patch),
     });

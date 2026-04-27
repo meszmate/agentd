@@ -7,6 +7,13 @@ import type {
 } from "./types.ts";
 import { readLines } from "./lineStream.ts";
 
+interface ClaudeUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+}
+
 interface ClaudeStreamMessage {
   type?: string;
   subtype?: string;
@@ -18,11 +25,15 @@ interface ClaudeStreamMessage {
       name?: string;
       input?: unknown;
     }>;
+    usage?: ClaudeUsage;
   };
   result?: string;
   is_error?: boolean;
   tool_use_id?: string;
   content?: unknown;
+  usage?: ClaudeUsage;
+  total_cost_usd?: number;
+  cost_usd?: number;
   [key: string]: unknown;
 }
 
@@ -83,6 +94,9 @@ export class ClaudeRunner implements AgentRunner {
     args.push("--permission-mode", mode);
     if (mode === "bypassPermissions") {
       args.push("--allow-dangerously-skip-permissions");
+    }
+    if (opts.appendSystemPrompt && opts.appendSystemPrompt.trim().length > 0) {
+      args.push("--append-system-prompt", opts.appendSystemPrompt);
     }
     if (this.opts.model) args.push("--model", this.opts.model);
     if (this.opts.extraArgs) args.push(...this.opts.extraArgs);
@@ -158,6 +172,16 @@ export class ClaudeRunner implements AgentRunner {
           });
         }
       }
+      const usage = parsed.message.usage;
+      if (usage) {
+        this.emit({
+          kind: "usage",
+          inputTokens: usage.input_tokens,
+          outputTokens: usage.output_tokens,
+          cacheReadTokens: usage.cache_read_input_tokens,
+          cacheWriteTokens: usage.cache_creation_input_tokens,
+        });
+      }
       return;
     }
     if (type === "user" && parsed.message?.content) {
@@ -181,6 +205,23 @@ export class ClaudeRunner implements AgentRunner {
     if (type === "result") {
       if (typeof parsed.result === "string") {
         this.emit({ kind: "message", role: "system", text: parsed.result });
+      }
+      const cost =
+        typeof parsed.total_cost_usd === "number"
+          ? parsed.total_cost_usd
+          : typeof parsed.cost_usd === "number"
+            ? parsed.cost_usd
+            : undefined;
+      if (parsed.usage || cost != null) {
+        const usage = parsed.usage ?? {};
+        this.emit({
+          kind: "usage",
+          inputTokens: usage.input_tokens,
+          outputTokens: usage.output_tokens,
+          cacheReadTokens: usage.cache_read_input_tokens,
+          cacheWriteTokens: usage.cache_creation_input_tokens,
+          ...(cost != null ? { costUsd: cost } : {}),
+        });
       }
       return;
     }

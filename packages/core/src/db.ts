@@ -17,6 +17,42 @@ export const tasks = sqliteTable("tasks", {
   status: text("status").notNull(),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
+  templateId: text("template_id"),
+  scheduleId: text("schedule_id"),
+  autoPush: integer("auto_push").notNull().default(0),
+  autoPr: integer("auto_pr").notNull().default(0),
+  prUrl: text("pr_url"),
+  totalInputTokens: integer("total_input_tokens").notNull().default(0),
+  totalOutputTokens: integer("total_output_tokens").notNull().default(0),
+  totalCacheReadTokens: integer("total_cache_read_tokens").notNull().default(0),
+  totalCacheWriteTokens: integer("total_cache_write_tokens").notNull().default(0),
+  totalCostUsd: text("total_cost_usd"),
+});
+
+export const templates = sqliteTable("templates", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull().unique(),
+  agent: text("agent").notNull(),
+  repoPath: text("repo_path").notNull(),
+  baseBranch: text("base_branch").notNull(),
+  promptTemplate: text("prompt_template").notNull(),
+  autoPush: integer("auto_push").notNull().default(0),
+  autoPr: integer("auto_pr").notNull().default(0),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const schedules = sqliteTable("schedules", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull().unique(),
+  cron: text("cron").notNull(),
+  templateId: text("template_id").notNull(),
+  templateArgsJson: text("template_args_json").notNull().default("{}"),
+  enabled: integer("enabled").notNull().default(1),
+  lastRunAt: integer("last_run_at"),
+  lastTaskId: text("last_task_id"),
+  nextRunAt: integer("next_run_at"),
+  createdAt: integer("created_at").notNull(),
 });
 
 export const messages = sqliteTable("messages", {
@@ -72,7 +108,43 @@ CREATE TABLE IF NOT EXISTS tasks (
   base_branch TEXT NOT NULL,
   status TEXT NOT NULL,
   created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  template_id TEXT,
+  schedule_id TEXT,
+  auto_push INTEGER NOT NULL DEFAULT 0,
+  auto_pr INTEGER NOT NULL DEFAULT 0,
+  pr_url TEXT,
+  total_input_tokens INTEGER NOT NULL DEFAULT 0,
+  total_output_tokens INTEGER NOT NULL DEFAULT 0,
+  total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  total_cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  total_cost_usd TEXT
+);
+
+CREATE TABLE IF NOT EXISTS templates (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  agent TEXT NOT NULL,
+  repo_path TEXT NOT NULL,
+  base_branch TEXT NOT NULL,
+  prompt_template TEXT NOT NULL,
+  auto_push INTEGER NOT NULL DEFAULT 0,
+  auto_pr INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schedules (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  cron TEXT NOT NULL,
+  template_id TEXT NOT NULL,
+  template_args_json TEXT NOT NULL DEFAULT '{}',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_run_at INTEGER,
+  last_task_id TEXT,
+  next_run_at INTEGER,
+  created_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -120,6 +192,32 @@ CREATE TABLE IF NOT EXISTS chat_links (
 );
 `;
 
+// Idempotent column additions for installs that pre-date a column.
+// Each statement is wrapped in its own try/catch in `migrate()`.
+const COLUMN_ADDITIONS: string[] = [
+  "ALTER TABLE tasks ADD COLUMN template_id TEXT",
+  "ALTER TABLE tasks ADD COLUMN schedule_id TEXT",
+  "ALTER TABLE tasks ADD COLUMN auto_push INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE tasks ADD COLUMN auto_pr INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE tasks ADD COLUMN pr_url TEXT",
+  "ALTER TABLE tasks ADD COLUMN total_input_tokens INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE tasks ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE tasks ADD COLUMN total_cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE tasks ADD COLUMN total_cache_write_tokens INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE tasks ADD COLUMN total_cost_usd TEXT",
+];
+
+function migrate(sqlite: Database): void {
+  for (const stmt of COLUMN_ADDITIONS) {
+    try {
+      sqlite.exec(stmt);
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (!/duplicate column name/i.test(msg)) throw e;
+    }
+  }
+}
+
 export type Db = ReturnType<typeof drizzle>;
 
 export function openDb(path: string): { sqlite: Database; db: Db } {
@@ -127,6 +225,7 @@ export function openDb(path: string): { sqlite: Database; db: Db } {
   sqlite.exec("PRAGMA journal_mode = WAL;");
   sqlite.exec("PRAGMA foreign_keys = ON;");
   sqlite.exec(SCHEMA_SQL);
+  migrate(sqlite);
   const db = drizzle(sqlite);
   return { sqlite, db };
 }

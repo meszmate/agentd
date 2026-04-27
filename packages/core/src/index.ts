@@ -6,3 +6,6 @@ export * from "./auth.ts";
 export * from "./tasks.ts";
 export * from "./git.ts";
 export * from "./config.ts";
+export * from "./templates.ts";
+export * from "./schedules.ts";
+export * from "./cron.ts";

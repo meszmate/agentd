@@ -13,6 +13,7 @@ import { loadConfig } from "./config.ts";
 import { buildServer } from "./server.ts";
 import { TaskManager } from "./taskManager.ts";
 import { PluginManager } from "./pluginManager.ts";
+import { Scheduler } from "./scheduler.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WEB_INDEX = resolve(HERE, "..", "..", "web", "index.html");
@@ -68,6 +69,10 @@ async function main() {
   console.log(`config:    ${paths.root}/config.json`);
   console.log("");
 
+  const scheduler = new Scheduler(db, tasks);
+  scheduler.start();
+  console.log("scheduler: ticking once per minute");
+
   plugins.startAll();
   const pluginStatuses = plugins.status();
   for (const p of pluginStatuses) {
@@ -81,6 +86,7 @@ async function main() {
 
   const shutdown = async (sig: string) => {
     console.log(`\nreceived ${sig}, shutting down...`);
+    scheduler.stop();
     await plugins.stopAll();
     server.stop();
     process.exit(0);

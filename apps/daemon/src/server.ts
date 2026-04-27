@@ -3,13 +3,22 @@ import { cors } from "hono/cors";
 import type { ServerWebSocket } from "bun";
 import {
   ApprovePermissionRequest,
+  CreateScheduleRequest,
   CreateTaskRequest,
+  CreateTemplateRequest,
   PairExchangeRequest,
+  RunTemplateRequest,
   SendInputRequest,
   type WsServerEvent,
 } from "@agentd/contracts";
 import { join, normalize, relative } from "node:path";
 import { existsSync, statSync, readFileSync } from "node:fs";
+import {
+  startPty,
+  handlePtyClientMessage,
+  closePty,
+  type PtyAttachData,
+} from "./pty.ts";
 import {
   EventBus,
   exchangePairingToken,
@@ -24,6 +33,17 @@ import {
   saveConfig,
   TelegramPluginConfig,
   DiscordPluginConfig,
+  createTemplate,
+  deleteTemplate,
+  getTemplate,
+  getTemplateByName,
+  listTemplates,
+  renderTemplate,
+  createSchedule,
+  deleteSchedule,
+  getSchedule,
+  listSchedules,
+  setScheduleEnabled,
   type AgentdPaths,
   type Db,
   type PluginName,
@@ -32,11 +52,16 @@ import type { PluginManager } from "./pluginManager.ts";
 import { requireSession, bearerOrHeader } from "./auth.ts";
 import type { TaskManager } from "./taskManager.ts";
 
-interface WsData {
+interface EventsWsData {
+  kind: "events";
   sessionId: string;
   taskId: string | null;
   unsubscribe: (() => void) | null;
 }
+
+type PtyWsData = { kind: "pty" } & PtyAttachData;
+
+type WsData = EventsWsData | PtyWsData;
 
 export interface BuildServerOptions {
   db: Db;
@@ -87,7 +112,15 @@ export function buildServer(opts: BuildServerOptions) {
       return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
     }
     try {
-      const task = await tasks.create(parsed.data);
+      const task = await tasks.create({
+        agent: parsed.data.agent,
+        repoPath: parsed.data.repoPath,
+        baseBranch: parsed.data.baseBranch,
+        prompt: parsed.data.prompt,
+        ...(parsed.data.title ? { title: parsed.data.title } : {}),
+        ...(parsed.data.autoPush != null ? { autoPush: parsed.data.autoPush } : {}),
+        ...(parsed.data.autoPr != null ? { autoPr: parsed.data.autoPr } : {}),
+      });
       return c.json({ task });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
@@ -199,6 +232,106 @@ export function buildServer(opts: BuildServerOptions) {
     }
   });
 
+  // ──────────────────────── templates ────────────────────────
+  api.get("/templates", (c) => c.json({ templates: listTemplates(db) }));
+
+  api.post("/templates", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = CreateTemplateRequest.safeParse(body);
+    if (!parsed.success)
+      return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
+    if (getTemplateByName(db, parsed.data.name)) {
+      return c.json({ error: "template name already exists" }, 409);
+    }
+    const tpl = createTemplate(db, parsed.data);
+    return c.json({ template: tpl });
+  });
+
+  api.get("/templates/:id", (c) => {
+    const tpl = getTemplate(db, c.req.param("id")) ?? getTemplateByName(db, c.req.param("id"));
+    if (!tpl) return c.json({ error: "not found" }, 404);
+    return c.json({ template: tpl });
+  });
+
+  api.delete("/templates/:id", (c) => {
+    const tpl = getTemplate(db, c.req.param("id")) ?? getTemplateByName(db, c.req.param("id"));
+    if (!tpl) return c.json({ error: "not found" }, 404);
+    deleteTemplate(db, tpl.id);
+    return c.json({ ok: true });
+  });
+
+  api.post("/templates/:id/run", async (c) => {
+    const tpl = getTemplate(db, c.req.param("id")) ?? getTemplateByName(db, c.req.param("id"));
+    if (!tpl) return c.json({ error: "not found" }, 404);
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = RunTemplateRequest.safeParse(body);
+    if (!parsed.success)
+      return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
+    const prompt = renderTemplate(tpl.promptTemplate, parsed.data.args);
+    try {
+      const task = await tasks.create({
+        agent: tpl.agent,
+        repoPath: tpl.repoPath,
+        baseBranch: tpl.baseBranch,
+        prompt,
+        title: parsed.data.titleOverride ?? tpl.name,
+        autoPush: tpl.autoPush,
+        autoPr: tpl.autoPr,
+        templateId: tpl.id,
+      });
+      return c.json({ task });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  // ──────────────────────── schedules ────────────────────────
+  api.get("/schedules", (c) => c.json({ schedules: listSchedules(db) }));
+
+  api.post("/schedules", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = CreateScheduleRequest.safeParse(body);
+    if (!parsed.success)
+      return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
+    // template must exist
+    const tpl = getTemplate(db, parsed.data.templateId) ?? getTemplateByName(db, parsed.data.templateId);
+    if (!tpl) return c.json({ error: `unknown template: ${parsed.data.templateId}` }, 400);
+    try {
+      const sched = createSchedule(db, {
+        ...parsed.data,
+        templateId: tpl.id,
+      });
+      return c.json({ schedule: sched });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  api.get("/schedules/:id", (c) => {
+    const sch = getSchedule(db, c.req.param("id"));
+    if (!sch) return c.json({ error: "not found" }, 404);
+    return c.json({ schedule: sch });
+  });
+
+  api.post("/schedules/:id/enable", (c) => {
+    const sch = setScheduleEnabled(db, c.req.param("id"), true);
+    if (!sch) return c.json({ error: "not found" }, 404);
+    return c.json({ schedule: sch });
+  });
+
+  api.post("/schedules/:id/disable", (c) => {
+    const sch = setScheduleEnabled(db, c.req.param("id"), false);
+    if (!sch) return c.json({ error: "not found" }, 404);
+    return c.json({ schedule: sch });
+  });
+
+  api.delete("/schedules/:id", (c) => {
+    const sch = getSchedule(db, c.req.param("id"));
+    if (!sch) return c.json({ error: "not found" }, 404);
+    deleteSchedule(db, sch.id);
+    return c.json({ ok: true });
+  });
+
   api.post("/admin/pair", (c) => {
     // Issue an additional pairing token from an authenticated session.
     const issued = issuePairingToken(db);
@@ -208,6 +341,48 @@ export function buildServer(opts: BuildServerOptions) {
   api.get("/admin/plugins", (c) => {
     const cfg = loadConfig(paths.root);
     return c.json({ plugins: plugins.status(), config: cfg.plugins });
+  });
+
+  api.get("/admin/settings", (c) => {
+    const cfg = loadConfig(paths.root);
+    return c.json({
+      agentInstructions: cfg.agentInstructions,
+      commitPrefix: cfg.commitPrefix,
+      prTitlePrefix: cfg.prTitlePrefix,
+      prBodyTemplate: cfg.prBodyTemplate,
+    });
+  });
+
+  api.post("/admin/settings", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body !== "object") {
+      return c.json({ error: "json body required" }, 400);
+    }
+    const cfg = loadConfig(paths.root);
+    const next = { ...cfg };
+    const allowed = ["agentInstructions", "commitPrefix", "prTitlePrefix", "prBodyTemplate"] as const;
+    let changed = false;
+    for (const key of allowed) {
+      if (key in body) {
+        const v = body[key];
+        if (typeof v !== "string") {
+          return c.json({ error: `${key} must be a string` }, 400);
+        }
+        (next as Record<string, unknown>)[key] = v;
+        changed = true;
+      }
+    }
+    if (!changed) return c.json({ error: "no valid keys in patch" }, 400);
+    saveConfig(paths.root, next);
+    return c.json({
+      ok: true,
+      settings: {
+        agentInstructions: next.agentInstructions,
+        commitPrefix: next.commitPrefix,
+        prTitlePrefix: next.prTitlePrefix,
+        prBodyTemplate: next.prBodyTemplate,
+      },
+    });
   });
 
   const PluginPatchTelegram = TelegramPluginConfig.partial();
@@ -239,7 +414,12 @@ export function buildServer(opts: BuildServerOptions) {
 
   const wsHandler = {
     open(ws: ServerWebSocket<WsData>) {
-      const taskId = ws.data.taskId;
+      if (ws.data.kind === "pty") {
+        startPty(ws as ServerWebSocket<PtyAttachData>);
+        return;
+      }
+      const evData = ws.data;
+      const taskId = evData.taskId;
       const send = (event: WsServerEvent) => {
         try {
           ws.send(JSON.stringify(event));
@@ -255,12 +435,22 @@ export function buildServer(opts: BuildServerOptions) {
         : bus.subscribeAll((env) =>
             send({ type: "event", taskId: env.taskId, event: env.event, ts: env.ts }),
           );
-      ws.data.unsubscribe = sub;
+      evData.unsubscribe = sub;
     },
-    message(_ws: ServerWebSocket<WsData>, _msg: string | Buffer) {
-      // No client→server messages over WS in MVP. All inputs go via HTTP.
+    message(ws: ServerWebSocket<WsData>, msg: string | Buffer) {
+      if (ws.data.kind === "pty") {
+        handlePtyClientMessage(
+          ws as ServerWebSocket<PtyAttachData>,
+          typeof msg === "string" ? msg : msg.toString(),
+        );
+      }
+      // /ws (events) is server→client only.
     },
     close(ws: ServerWebSocket<WsData>) {
+      if (ws.data.kind === "pty") {
+        closePty(ws as ServerWebSocket<PtyAttachData>);
+        return;
+      }
       ws.data.unsubscribe?.();
       ws.data.unsubscribe = null;
     },
@@ -269,18 +459,31 @@ export function buildServer(opts: BuildServerOptions) {
 
   function upgradeRequest(req: Request, server: Bun.Server<WsData>): Response | undefined {
     const url = new URL(req.url);
-    if (url.pathname !== "/ws") return undefined;
     const token = url.searchParams.get("session") ?? "";
     const session = resolveSession(db, token);
-    if (!session) return new Response("unauthorized", { status: 401 });
-    const taskId = url.searchParams.get("task");
-    const data: WsData = {
-      sessionId: session.sessionId,
-      taskId,
-      unsubscribe: null,
-    };
-    if (server.upgrade(req, { data })) return undefined;
-    return new Response("upgrade failed", { status: 500 });
+    if (url.pathname === "/ws") {
+      if (!session) return new Response("unauthorized", { status: 401 });
+      const taskId = url.searchParams.get("task");
+      const data: WsData = {
+        kind: "events",
+        sessionId: session.sessionId,
+        taskId,
+        unsubscribe: null,
+      };
+      if (server.upgrade(req, { data })) return undefined;
+      return new Response("upgrade failed", { status: 500 });
+    }
+    const ptyMatch = url.pathname.match(/^\/pty\/([^/]+)$/);
+    if (ptyMatch) {
+      if (!session) return new Response("unauthorized", { status: 401 });
+      const taskId = ptyMatch[1]!;
+      const task = tasks.get(taskId);
+      if (!task) return new Response("task not found", { status: 404 });
+      const data: WsData = { kind: "pty", taskId, task, proc: null };
+      if (server.upgrade(req, { data })) return undefined;
+      return new Response("upgrade failed", { status: 500 });
+    }
+    return undefined;
   }
 
   return { app, wsHandler, upgradeRequest, bearerOrHeader };
