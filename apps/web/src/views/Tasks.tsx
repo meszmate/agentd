@@ -367,11 +367,23 @@ function ChatView({
 
   return (
     <>
-      <div className="chat" ref={ref}>
+      <div
+        className="chat"
+        ref={ref}
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions text"
+        aria-label="Conversation"
+      >
         {messages.map((m) => (
           <div key={m.id} className={`msg ${m.role}`}>
-            <div className="role">{m.role}</div>
-            <div className="body">{m.content}</div>
+            <div className="role" aria-hidden="true">
+              {m.role}
+            </div>
+            <div className="body">
+              <span className="sr-only">{m.role}: </span>
+              {m.content}
+            </div>
           </div>
         ))}
       </div>
@@ -381,6 +393,7 @@ function ChatView({
           e.preventDefault();
           void submit();
         }}
+        aria-label="Send input to agent"
       >
         <textarea
           value={text}
@@ -388,6 +401,7 @@ function ChatView({
           onKeyDown={handleKey}
           placeholder="send input…  ⌘/ctrl + ↵ to send"
           rows={2}
+          aria-label="Message"
         />
         <button className="primary" type="submit" disabled={send.isPending}>
           send

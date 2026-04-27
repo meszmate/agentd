@@ -71,10 +71,14 @@ async function main() {
       return null;
     }
 
-    // 1. Static assets.
+    // 1. Static assets — Vite-hashed assets, plus root-level files (PWA
+    //    manifest, icons, favicon). The PWA manifest.json must be served
+    //    from the root, so we explicitly include `.json` and `.webmanifest`.
     const assetMatch =
       url.pathname.startsWith("/assets/") ||
-      /\.(js|css|map|svg|png|webp|ico|woff2?)$/.test(url.pathname);
+      url.pathname.startsWith("/icons/") ||
+      url.pathname === "/manifest.json" ||
+      /\.(js|css|map|svg|png|webp|ico|woff2?|webmanifest|json|txt)$/.test(url.pathname);
     if (assetMatch) {
       const safe = resolve(WEB_DIST, "." + url.pathname);
       if (!safe.startsWith(WEB_DIST) || !existsSync(safe)) return null;

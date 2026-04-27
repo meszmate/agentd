@@ -87,6 +87,76 @@
 * { box-sizing: border-box; }
 *::selection { background: var(--red); color: var(--paper); }
 
+/* ── Reduced motion: honor the user's preference ───────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── High contrast: kick the rules a notch darker so they remain visible ─ */
+@media (prefers-contrast: more) {
+  :root {
+    --rule: var(--ink-3);
+    --rule-strong: var(--ink-2);
+    --ink-mute: var(--ink-2);
+  }
+}
+
+/* ── Screen-reader-only text — visually hidden but read out ─────────── */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Skip link: first focusable element on the page; jumps past the nav ── */
+.skip-link {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 200;
+  padding: 8px 14px;
+  background: var(--ink);
+  color: var(--paper);
+  text-decoration: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  border: 2px solid var(--red);
+  transform: translateY(-200%);
+  transition: transform 0.12s ease-out;
+}
+.skip-link:focus { transform: translateY(0); }
+
+/* ── Focus rings: visible ONLY when the user is keyboarding ─────────── */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--red);
+  outline-offset: 2px;
+}
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--red);
+  outline-offset: 2px;
+}
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--red);
+  outline-offset: -1px;
+}
+
 html, body, #root {
   margin: 0;
   height: 100%;
@@ -1218,6 +1288,148 @@ pre { font-family: var(--mono); margin: 0; }
   border: 2px solid var(--paper);
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--ink-mute); }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Command palette (⌘K)
+   ───────────────────────────────────────────────────────────────────────── */
+.cmdk-backdrop {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--ink) 40%, transparent);
+  z-index: 200;
+  display: grid;
+  place-items: start center;
+  padding: 80px 16px 16px;
+  animation: cmdk-fade 0.12s ease-out;
+}
+@keyframes cmdk-fade { from { opacity: 0; } to { opacity: 1; } }
+
+.cmdk {
+  width: min(640px, 100%);
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  position: relative;
+  font-family: var(--mono);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+}
+.cmdk::before, .cmdk::after {
+  content: "+";
+  position: absolute;
+  font-size: 14px;
+  color: var(--red);
+  line-height: 1;
+}
+.cmdk::before { top: -8px; left: -8px; }
+.cmdk::after { bottom: -8px; right: -8px; }
+
+.cmdk__input {
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  padding: 16px 18px;
+  font-size: 14px;
+  background: transparent;
+  width: 100%;
+}
+.cmdk__input:focus { box-shadow: none; }
+.cmdk__input::placeholder { color: var(--ink-fade); }
+
+.cmdk__list {
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.cmdk__group-label {
+  padding: 10px 16px 4px;
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.cmdk__item {
+  padding: 8px 16px;
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  width: 100%;
+  text-align: left;
+  border-radius: 0;
+}
+.cmdk__item .glyph {
+  color: var(--ink-mute);
+  text-align: center;
+}
+.cmdk__item .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmdk__item .sub { color: var(--ink-mute); font-size: 11px; }
+.cmdk__item.selected,
+.cmdk__item:hover {
+  background: var(--paper-2);
+}
+.cmdk__item.selected {
+  border-left: 3px solid var(--red);
+  padding-left: 13px;
+}
+.cmdk__item.selected .glyph { color: var(--red); }
+.cmdk__empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--ink-mute);
+  font-size: 12px;
+}
+.cmdk__foot {
+  padding: 8px 16px;
+  border-top: 1px solid var(--rule);
+  font-size: 10px;
+  color: var(--ink-mute);
+  display: flex;
+  gap: 16px;
+  letter-spacing: 0.04em;
+}
+.cmdk__foot .kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper-2);
+  font: 10px var(--mono);
+  margin: 0 4px;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Help overlay (?)
+   ───────────────────────────────────────────────────────────────────────── */
+.help-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  padding: 20px;
+}
+.help-grid h4 {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--red);
+  margin-bottom: 8px;
+}
+.help-grid dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; }
+.help-grid dt { font-size: 12px; color: var(--ink-mute); white-space: nowrap; }
+.help-grid dd { font-size: 12px; margin: 0; color: var(--ink); }
+.help-grid dt .kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper-2);
+  font: 10px var(--mono);
+  margin-right: 2px;
+}
+
+@media (max-width: 760px) { .help-grid { grid-template-columns: 1fr; } }
 
 /* ── Responsive bits ────────────────────────────────────────────────── */
 @media (max-width: 760px) {
