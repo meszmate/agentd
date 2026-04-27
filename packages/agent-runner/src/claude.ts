@@ -1,6 +1,7 @@
 import type { AgentEvent } from "@agentd/contracts";
 import type {
   AgentRunner,
+  PermissionMode,
   RunnerEventListener,
   RunnerStartOptions,
 } from "./types.ts";
@@ -27,7 +28,7 @@ interface ClaudeStreamMessage {
 
 export interface ClaudeRunnerOptions {
   binary?: string;
-  permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | "plan";
+  defaultPermissionMode?: PermissionMode;
   model?: string;
   extraArgs?: string[];
   env?: Record<string, string | undefined>;
@@ -75,8 +76,14 @@ export class ClaudeRunner implements AgentRunner {
       "--verbose",
     ];
     if (opts.resume) args.push("--continue");
-    if (this.opts.permissionMode)
-      args.push("--permission-mode", this.opts.permissionMode);
+    const mode =
+      opts.permissionMode ??
+      this.opts.defaultPermissionMode ??
+      "bypassPermissions";
+    args.push("--permission-mode", mode);
+    if (mode === "bypassPermissions") {
+      args.push("--allow-dangerously-skip-permissions");
+    }
     if (this.opts.model) args.push("--model", this.opts.model);
     if (this.opts.extraArgs) args.push(...this.opts.extraArgs);
 

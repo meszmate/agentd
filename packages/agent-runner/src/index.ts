@@ -3,7 +3,12 @@ import type { AgentRunner } from "./types.ts";
 import { ClaudeRunner } from "./claude.ts";
 import { CodexRunner } from "./codex.ts";
 
-export type { AgentRunner, RunnerStartOptions, RunnerEventListener } from "./types.ts";
+export type {
+  AgentRunner,
+  RunnerStartOptions,
+  RunnerEventListener,
+  PermissionMode,
+} from "./types.ts";
 export { ClaudeRunner } from "./claude.ts";
 export { CodexRunner } from "./codex.ts";
 

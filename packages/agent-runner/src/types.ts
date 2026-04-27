@@ -1,9 +1,16 @@
 import type { AgentEvent, AgentKind } from "@agentd/contracts";
 
+export type PermissionMode =
+  | "default"
+  | "acceptEdits"
+  | "bypassPermissions"
+  | "plan";
+
 export interface RunnerStartOptions {
   prompt: string;
   cwd: string;
   resume?: boolean;
+  permissionMode?: PermissionMode;
 }
 
 export type RunnerEventListener = (event: AgentEvent) => void;

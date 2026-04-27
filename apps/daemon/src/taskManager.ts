@@ -1,11 +1,13 @@
 import type { AgentEvent, Task, AgentKind } from "@agentd/contracts";
 import {
   appendMessage,
+  autoCommit,
   createTask,
   detectDefaultBranch,
   EventBus,
   getTask,
   listTasks,
+  listMessages,
   newId,
   removeWorktree,
   slugify,
@@ -171,7 +173,56 @@ export class TaskManager {
         session.unsubscribe();
         this.running.delete(taskId);
       }
+      // Fire-and-forget; auto-commit runs after the agent process exits.
+      void this.maybeAutoCommit(taskId);
     }
     this.bus.publish({ taskId, event, ts: Date.now() });
   }
+
+  private async maybeAutoCommit(taskId: string): Promise<void> {
+    const task = getTask(this.db, taskId);
+    if (!task) return;
+    const lastUserMsg = findLastUserMessage(this.db, taskId);
+    const title = `agent: ${task.title}`.slice(0, 72);
+    try {
+      const result = await autoCommit({
+        cwd: task.worktreePath,
+        title,
+        body: lastUserMsg ?? undefined,
+      });
+      if (result.committed) {
+        appendMessage(
+          this.db,
+          taskId,
+          "system",
+          `auto-committed ${result.sha?.slice(0, 7)}: ${result.message}`,
+        );
+        this.bus.publish({
+          taskId,
+          event: {
+            kind: "raw",
+            stream: "stdout",
+            text: `[auto-commit ${result.sha?.slice(0, 7)}] ${result.message}`,
+          },
+          ts: Date.now(),
+        });
+      }
+    } catch (e) {
+      appendMessage(
+        this.db,
+        taskId,
+        "system",
+        `auto-commit failed: ${(e as Error).message}`,
+      );
+    }
+  }
+}
+
+function findLastUserMessage(db: Db, taskId: string): string | null {
+  const all = listMessages(db, taskId, 200);
+  for (let i = all.length - 1; i >= 0; i--) {
+    const m = all[i]!;
+    if (m.role === "user") return m.content;
+  }
+  return null;
 }
