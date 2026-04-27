@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="/agentd">
+  <title>/agentd</title>
+  <rect width="1024" height="1024" fill="#fafafa"/>
+  <text
+    x="512"
+    y="512"
+    text-anchor="middle"
+    dominant-baseline="central"
+    font-family="Inter, 'Helvetica Neue', 'Arial Black', Arial, sans-serif"
+    font-weight="700"
+    font-size="180"
+    letter-spacing="-8">
+    <tspan fill="#dc2626">/</tspan><tspan fill="#0a0a0a">agentd</tspan>
+  </text>
+</svg>

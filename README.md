@@ -1,8 +1,32 @@
-# agentd
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/logo-dark.svg">
+    <img src="./assets/logo.svg" alt="/agentd" width="320">
+  </picture>
 
-A self-hosted orchestrator for coding agents. Spawn parallel agents, each in its own
-git worktree; chat with them from a web UI, terminal, Telegram, or Discord; auto-commit
-their work, auto-push, auto-open a PR; schedule recurring runs with cron.
+  <p>
+    <strong>A self-hosted orchestrator for coding agents.</strong><br>
+    Spawn parallel agents, each in its own git worktree.<br>
+    Chat from web, terminal, Telegram, or Discord.<br>
+    Auto-commit, auto-push, auto-PR. Cron schedules. Templates.<br>
+  </p>
+
+  <p>
+    <a href="https://github.com/meszmate/agentd/actions/workflows/ci.yml"><img src="https://github.com/meszmate/agentd/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT"></a>
+    <img src="https://img.shields.io/badge/runtime-bun-000000?logo=bun&logoColor=white" alt="Bun">
+    <img src="https://img.shields.io/badge/typescript-strict-3178c6?logo=typescript&logoColor=white" alt="TypeScript">
+    <a href="https://github.com/meszmate/agentd/stargazers"><img src="https://img.shields.io/github/stars/meszmate/agentd?style=flat&color=yellow" alt="Stars"></a>
+  </p>
+
+  <p>
+    <a href="./docs/quickstart.md">Quickstart</a> ·
+    <a href="./docs/architecture.md">Architecture</a> ·
+    <a href="./CONTRIBUTING.md">Contributing</a>
+  </p>
+</div>
+
+---
 
 Designed for one operator with many devices. Reachable from anywhere over Tailscale
 (or any other private network) without exposing your repos to the public internet.
