@@ -18,7 +18,7 @@ codex login
 
 ```bash
 curl -fsSL https://bun.sh/install | bash       # bun
-git clone https://github.com/<you>/agentd ~/agentd
+git clone https://github.com/meszmate/agentd ~/agentd
 cd ~/agentd
 bun install
 bun --filter @agentd/web build

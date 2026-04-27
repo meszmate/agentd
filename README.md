@@ -41,7 +41,7 @@ Designed for one operator with many devices. Reachable from anywhere over Tailsc
 ## Install
 
 ```bash
-git clone https://github.com/<you>/agentd ~/agentd
+git clone https://github.com/meszmate/agentd ~/agentd
 cd ~/agentd
 bun install
 bun --filter @agentd/web build
