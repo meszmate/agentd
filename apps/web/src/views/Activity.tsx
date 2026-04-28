@@ -9,6 +9,13 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  Count,
+  Kicker,
+  PageTopbar,
+  Spacer,
+  VRule,
+} from "@/components/ui/page-topbar";
 import { useClient } from "@/AppContext";
 import { useTasks } from "@/queries";
 import {
@@ -27,7 +34,6 @@ interface FlatEvent {
   taskAgent: "claude" | "codex";
   kind: Kind;
   ts: number;
-  // Pre-rendered text for display.
   primary: string;
   secondary?: string;
 }
@@ -91,8 +97,7 @@ function renderEvent(ev: AgentEvent): { primary: string; secondary?: string } {
       return { primary: `code ${ev.code ?? "?"}` };
     case "usage": {
       const tok = (ev.inputTokens ?? 0) + (ev.outputTokens ?? 0);
-      const cost =
-        ev.costUsd != null ? `$${ev.costUsd.toFixed(4)}` : "";
+      const cost = ev.costUsd != null ? `$${ev.costUsd.toFixed(4)}` : "";
       return { primary: `${tok} tok ${cost}`.trim() };
     }
     case "raw":
@@ -110,6 +115,8 @@ export function Activity() {
     () => new Set(ALL_KINDS),
   );
   const [taskFilter, setTaskFilter] = useState<string>("all");
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
 
   const meta = useRef(new Map<string, { title: string; agent: "claude" | "codex" }>());
   useEffect(() => {
@@ -119,7 +126,6 @@ export function Activity() {
     }
   }, [tasksQ.data]);
 
-  // WS firehose.
   useEffect(() => {
     let ws: WebSocket | null = null;
     let closed = false;
@@ -128,6 +134,7 @@ export function Activity() {
     const open = () => {
       ws = client.watch(null, (msg: WsServerEvent) => {
         if (msg.type !== "event") return;
+        if (pausedRef.current) return;
         const m = meta.current.get(msg.taskId);
         const r = renderEvent(msg.event);
         const e: FlatEvent = {
@@ -162,13 +169,15 @@ export function Activity() {
     };
   }, [client]);
 
-  const filtered = useMemo(() => {
-    return events.filter((e) => {
-      if (!enabledKinds.has(e.kind)) return false;
-      if (taskFilter !== "all" && e.taskId !== taskFilter) return false;
-      return true;
-    });
-  }, [events, enabledKinds, taskFilter]);
+  const filtered = useMemo(
+    () =>
+      events.filter((e) => {
+        if (!enabledKinds.has(e.kind)) return false;
+        if (taskFilter !== "all" && e.taskId !== taskFilter) return false;
+        return true;
+      }),
+    [events, enabledKinds, taskFilter],
+  );
 
   const toggleKind = useCallback((k: Kind) => {
     setEnabledKinds((prev) => {
@@ -203,171 +212,160 @@ export function Activity() {
   }, [events]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* Header band */}
-      <div className="border-b border-ink-900/10 dark:border-ink-50/10 px-6 lg:px-10 py-6">
-        <div className="mx-auto max-w-6xl">
-          <div className="flex items-end justify-between gap-4 mb-3">
-            <div>
-              <div className="label-section mb-2">Observe</div>
-              <h1 className="display text-4xl text-ink-900 dark:text-ink-50">
-                Activity
-              </h1>
-              <p className="mt-1 max-w-2xl text-sm text-ink-500 dark:text-ink-400">
-                Cross-task event firehose. {events.length} events in buffer.
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <span
-                className={cn(
-                  "flex items-center gap-1.5 font-mono text-2xs uppercase tracking-[0.12em]",
-                  live
-                    ? "text-vermilion-600 dark:text-vermilion-400"
-                    : "text-ink-400 dark:text-ink-500",
-                )}
-              >
-                <span
-                  className={cn(
-                    "h-1.5 w-1.5 rounded-full",
-                    live
-                      ? paused
-                        ? "bg-amber-500"
-                        : "bg-vermilion-500 animate-blink"
-                      : "bg-ink-300 dark:bg-ink-600",
-                  )}
-                />
-                {!live ? "off" : paused ? "paused" : "live"}
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPaused((p) => !p)}
-              >
-                {paused ? (
-                  <Play className="h-3.5 w-3.5" />
-                ) : (
-                  <Pause className="h-3.5 w-3.5" />
-                )}
-                {paused ? "Resume" : "Pause"}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setEvents([])}
-                disabled={events.length === 0}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                Clear
-              </Button>
-            </div>
-          </div>
+    <div className="flex h-full flex-col">
+      <PageTopbar>
+        <Kicker>observe</Kicker>
+        <VRule />
+        <span className="text-[13px] text-ink-900 dark:text-ink-50 font-medium">
+          Activity
+        </span>
+        <Count>{events.length}</Count>
+        <span className="text-ink-300 dark:text-ink-600">·</span>
+        <span
+          className={cn(
+            "flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.12em]",
+            !live
+              ? "text-ink-400 dark:text-ink-500"
+              : paused
+              ? "text-amber-700 dark:text-amber-300"
+              : "text-vermilion-700 dark:text-vermilion-300",
+          )}
+        >
+          <span
+            className={cn(
+              "h-1.5 w-1.5 rounded-full",
+              !live
+                ? "bg-ink-300 dark:bg-ink-600"
+                : paused
+                ? "bg-amber-500"
+                : "bg-vermilion-500 animate-blink",
+            )}
+          />
+          {!live ? "off" : paused ? "paused" : "live"}
+        </span>
+        <Spacer />
+        <Button
+          variant="outline"
+          size="xs"
+          onClick={() => setPaused((p) => !p)}
+        >
+          {paused ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
+          {paused ? "Resume" : "Pause"}
+        </Button>
+        <Button
+          variant="outline"
+          size="xs"
+          onClick={() => setEvents([])}
+          disabled={events.length === 0}
+        >
+          <Trash2 className="h-3 w-3" />
+          Clear
+        </Button>
+      </PageTopbar>
 
-          <div className="flex flex-wrap items-center gap-2">
-            {ALL_KINDS.map((k) => {
-              const on = enabledKinds.has(k);
-              return (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => toggleKind(k)}
-                  className={cn(
-                    "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-2xs uppercase tracking-[0.06em] transition-colors",
-                    on
-                      ? "border-ink-900/15 bg-ink-900/[0.05] text-ink-900 dark:border-ink-50/15 dark:bg-ink-50/[0.05] dark:text-ink-50"
-                      : "border-ink-900/10 bg-transparent text-ink-400 hover:bg-ink-900/[0.03] dark:border-ink-50/10 dark:text-ink-500 dark:hover:bg-ink-50/[0.03]",
-                  )}
-                >
-                  {KIND_LABEL[k]}
-                  <span className="font-mono text-2xs text-ink-400 dark:text-ink-500">
-                    {counts[k] || 0}
-                  </span>
-                </button>
-              );
-            })}
-
-            <div className="ml-auto flex items-center gap-2">
-              <span className="font-mono text-2xs uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
-                task
+      {/* Filter bar */}
+      <div className="flex flex-wrap items-center gap-2 px-5 py-2 border-b border-ink-900/10 dark:border-ink-50/10 bg-cream-100/30 dark:bg-ink-50/[0.015] shrink-0">
+        {ALL_KINDS.map((k) => {
+          const on = enabledKinds.has(k);
+          return (
+            <button
+              key={k}
+              type="button"
+              onClick={() => toggleKind(k)}
+              className={cn(
+                "inline-flex items-center gap-1.5 h-6 px-2 rounded-md font-mono text-[10px] uppercase tracking-[0.06em] transition-colors",
+                on
+                  ? "bg-ink-900/[0.06] text-ink-900 dark:bg-ink-50/[0.06] dark:text-ink-50"
+                  : "text-ink-400 hover:bg-ink-900/[0.03] dark:text-ink-500 dark:hover:bg-ink-50/[0.03]",
+              )}
+            >
+              {KIND_LABEL[k]}
+              <span className="font-mono tabular-nums text-[10px] text-ink-400 dark:text-ink-500">
+                {counts[k] || 0}
               </span>
-              <select
-                value={taskFilter}
-                onChange={(e) => setTaskFilter(e.target.value)}
-                className="h-7 rounded-md border border-ink-900/15 bg-cream-50 px-2 font-mono text-xs text-ink-900 dark:border-ink-50/15 dark:bg-ink-800 dark:text-ink-50"
-              >
-                <option value="all">all</option>
-                {taskOptions.map(([id, title]) => (
-                  <option key={id} value={id}>
-                    {title.slice(0, 30)} ({shortId(id)})
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
+            </button>
+          );
+        })}
+        <div className="ml-auto flex items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+            task
+          </span>
+          <select
+            value={taskFilter}
+            onChange={(e) => setTaskFilter(e.target.value)}
+            className="h-6 rounded-md border border-ink-900/10 bg-cream-50 px-2 font-mono text-[11px] text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-50 focus:outline-none focus:border-ink-900/30"
+          >
+            <option value="all">all</option>
+            {taskOptions.map(([id, title]) => (
+              <option key={id} value={id}>
+                {title.slice(0, 30)} ({shortId(id)})
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
-      {/* Event stream */}
+      {/* Stream */}
       <div className="flex-1 min-h-0 overflow-y-auto">
-        <div className="mx-auto max-w-6xl px-6 lg:px-10 py-4">
-          {filtered.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-ink-900/10 dark:border-ink-50/10 px-5 py-16 text-center">
-              <p className="text-sm text-ink-500 dark:text-ink-400">
-                {events.length === 0
-                  ? live
-                    ? "Waiting for events…"
-                    : "Connecting…"
-                  : "No events match the current filter."}
-              </p>
-            </div>
-          ) : (
-            <ul className="divide-y divide-ink-900/10 dark:divide-ink-50/10">
-              {filtered.map((e) => (
-                <li
-                  key={e.id}
-                  className="grid grid-cols-[80px_120px_1fr] items-baseline gap-3 py-2.5"
-                >
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span className="font-mono text-2xs uppercase tracking-[0.06em] text-ink-400 dark:text-ink-500 cursor-help">
-                          {formatTs(e.ts)}
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent>{formatTsAbsolute(e.ts)}</TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-
-                  <Link
-                    to={`/tasks/${e.taskId}`}
-                    className="truncate text-xs text-ink-900 hover:text-vermilion-600 dark:text-ink-50 dark:hover:text-vermilion-400"
-                    title={e.taskTitle}
-                  >
-                    <span className="font-medium">{e.taskTitle}</span>
-                  </Link>
-
-                  <div className="min-w-0 flex flex-wrap items-baseline gap-2">
-                    <span
-                      className={cn(
-                        "shrink-0 font-mono text-2xs uppercase tracking-[0.06em]",
-                        KIND_TONE[e.kind],
-                      )}
-                    >
-                      {KIND_LABEL[e.kind]}
-                    </span>
-                    <span className="text-sm text-ink-700 dark:text-ink-200 break-words">
-                      {e.primary}
-                    </span>
-                    {e.secondary && (
-                      <span className="font-mono text-2xs text-ink-400 dark:text-ink-500 break-words">
-                        {e.secondary}
+        {filtered.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-[12px] text-ink-500 dark:text-ink-400">
+            {events.length === 0
+              ? live
+                ? "Waiting for events…"
+                : "Connecting…"
+              : "No events match the current filter."}
+          </div>
+        ) : (
+          <ul className="divide-y divide-ink-900/[0.06] dark:divide-ink-50/[0.06]">
+            {filtered.map((e) => (
+              <li
+                key={e.id}
+                className="grid grid-cols-[60px_180px_80px_1fr] items-baseline gap-3 px-5 py-2 hover:bg-cream-100/40 transition-colors dark:hover:bg-ink-50/[0.02]"
+              >
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-400 dark:text-ink-500 cursor-help">
+                        {formatTs(e.ts)}
                       </span>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {formatTsAbsolute(e.ts)}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+
+                <Link
+                  to={`/tasks/${e.taskId}`}
+                  className="truncate text-[12px] font-medium text-ink-900 hover:text-vermilion-600 dark:text-ink-50 dark:hover:text-vermilion-400"
+                  title={e.taskTitle}
+                >
+                  {e.taskTitle}
+                </Link>
+
+                <span
+                  className={cn(
+                    "shrink-0 font-mono text-[10px] uppercase tracking-[0.06em]",
+                    KIND_TONE[e.kind],
+                  )}
+                >
+                  {KIND_LABEL[e.kind]}
+                </span>
+
+                <div className="min-w-0">
+                  <span className="text-[12px] text-ink-700 dark:text-ink-200 break-words">
+                    {e.primary}
+                  </span>
+                  {e.secondary && (
+                    <span className="ml-2 font-mono text-[10px] text-ink-400 dark:text-ink-500 break-words">
+                      {e.secondary}
+                    </span>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );

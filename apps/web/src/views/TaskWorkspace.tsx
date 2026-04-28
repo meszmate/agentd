@@ -1,12 +1,11 @@
 import { lazy, Suspense, useState } from "react";
-import {
-  FileText,
-  GitCommit,
-  GitPullRequest,
-  Terminal as TerminalIcon,
-} from "lucide-react";
 import type { Task } from "@agentd/contracts";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
 import { TaskFiles } from "@/views/TaskFiles";
 import { TaskDiff } from "@/views/TaskDiff";
 import { TaskLog } from "@/views/TaskLog";
@@ -33,40 +32,45 @@ export function TaskWorkspace({
         onValueChange={(v) => setTab(v as Tab)}
         className="flex h-full min-h-0 flex-col"
       >
-        <div className="flex items-center justify-between px-3 shrink-0">
-          <TabsList className="border-b-0">
-            <TabsTrigger value="files">
-              <FileText className="h-3 w-3" />
-              Files
+        {/* h-9 tab strip with stretched underline tabs */}
+        <div className="flex h-9 items-stretch border-b border-ink-900/10 dark:border-ink-50/10 px-1 shrink-0 overflow-x-auto">
+          <TabsList variant="stretch" className="h-9">
+            <TabsTrigger value="files" variant="stretch">
+              <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
+                Files
+              </span>
             </TabsTrigger>
-            <TabsTrigger value="diff">
-              <GitPullRequest className="h-3 w-3" />
-              Diff
+            <TabsTrigger value="diff" variant="stretch">
+              <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
+                Diff
+              </span>
             </TabsTrigger>
-            <TabsTrigger value="log">
-              <GitCommit className="h-3 w-3" />
-              Log
+            <TabsTrigger value="log" variant="stretch">
+              <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
+                Log
+              </span>
             </TabsTrigger>
-            <TabsTrigger value="term">
-              <TerminalIcon className="h-3 w-3" />
-              Term
+            <TabsTrigger value="term" variant="stretch">
+              <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
+                Term
+              </span>
             </TabsTrigger>
           </TabsList>
-          <span className="hidden md:inline truncate max-w-[24ch] font-mono text-2xs text-ink-400 dark:text-ink-500">
+          <span className="ml-auto self-center font-mono text-[10px] text-ink-400 dark:text-ink-500 truncate max-w-[28ch] hidden md:inline">
             {task.worktreePath}
           </span>
         </div>
 
-        <TabsContent value="files" className="flex-1 min-h-0 mt-0 overflow-hidden border-t border-ink-900/10 dark:border-ink-50/10">
+        <TabsContent value="files" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskFiles taskId={task.id} onError={onError} />
         </TabsContent>
-        <TabsContent value="diff" className="flex-1 min-h-0 mt-0 overflow-hidden border-t border-ink-900/10 dark:border-ink-50/10">
+        <TabsContent value="diff" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskDiff taskId={task.id} />
         </TabsContent>
-        <TabsContent value="log" className="flex-1 min-h-0 mt-0 overflow-hidden border-t border-ink-900/10 dark:border-ink-50/10">
+        <TabsContent value="log" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskLog taskId={task.id} onError={onError} />
         </TabsContent>
-        <TabsContent value="term" className="flex-1 min-h-0 mt-0 overflow-hidden border-t border-ink-900/10 dark:border-ink-50/10">
+        <TabsContent value="term" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <Suspense fallback={<TermLoading />}>
             <Terminal taskId={task.id} onError={onError} />
           </Suspense>
@@ -79,7 +83,9 @@ export function TaskWorkspace({
 function TermLoading() {
   return (
     <div className="flex h-full items-center justify-center">
-      <div className="text-xs text-ink-500 dark:text-ink-400">Loading terminal…</div>
+      <div className="font-mono text-[11px] text-ink-500 dark:text-ink-400">
+        Loading terminal…
+      </div>
     </div>
   );
 }

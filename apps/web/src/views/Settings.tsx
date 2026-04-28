@@ -1,20 +1,17 @@
 import { useEffect, useId, useRef, useState } from "react";
-import {
-  Bell,
-  BellOff,
-  GitCommit,
-  GitPullRequest,
-  Loader2,
-  Save,
-  Sparkles,
-} from "lucide-react";
+import { Bell, BellOff, Loader2, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { Badge } from "@/components/ui/badge";
-import { Kbd } from "@/components/ui/kbd";
+import {
+  Count,
+  Kicker,
+  PageTopbar,
+  Spacer,
+  VRule,
+} from "@/components/ui/page-topbar";
+import { SectionHeader } from "@/components/ui/section-header";
+import { InfoRow, ToggleRow } from "@/components/ui/info-row";
 import { usePatchSettings, useSettings } from "@/queries";
 import { useApp } from "@/AppContext";
 import {
@@ -22,6 +19,19 @@ import {
   requestNotifPermission,
   setNotifPref,
 } from "@/useNotifications";
+import { cn } from "@/lib/utils";
+
+interface RailItem {
+  id: string;
+  glyph: string;
+  label: string;
+}
+
+const SECTIONS: RailItem[] = [
+  { id: "agent", glyph: "§", label: "Agent policy" },
+  { id: "commits", glyph: "◆", label: "Commits & PRs" },
+  { id: "browser", glyph: "▢", label: "Browser" },
+];
 
 export function Settings() {
   const { toast } = useApp();
@@ -34,6 +44,8 @@ export function Settings() {
   const [prBodyTemplate, setPrBodyTemplate] = useState("");
   const [hydrated, setHydrated] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [active, setActive] = useState<string>("agent");
+  const [savedFlash, setSavedFlash] = useState(false);
 
   const aiId = useId();
   const cpId = useId();
@@ -79,6 +91,24 @@ export function Settings() {
     return () => window.removeEventListener("keydown", onKey);
   }, [dirty]);
 
+  // Scroll-spy for rail
+  useEffect(() => {
+    const ids = SECTIONS.map((s) => s.id);
+    const onScroll = () => {
+      let cur = ids[0]!;
+      for (const id of ids) {
+        const el = document.getElementById(`section-${id}`);
+        if (!el) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.top <= 80) cur = id;
+      }
+      setActive(cur);
+    };
+    const main = document.getElementById("settings-scroll");
+    main?.addEventListener("scroll", onScroll, { passive: true });
+    return () => main?.removeEventListener("scroll", onScroll);
+  }, []);
+
   async function save() {
     try {
       await patch.mutateAsync({
@@ -87,6 +117,8 @@ export function Settings() {
         prTitlePrefix,
         prBodyTemplate,
       });
+      setSavedFlash(true);
+      window.setTimeout(() => setSavedFlash(false), 2000);
       toast("Settings saved");
     } catch (e) {
       toast((e as Error).message, true);
@@ -95,55 +127,103 @@ export function Settings() {
 
   if (!hydrated) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-ink-500 dark:text-ink-400">
+      <div className="flex h-full items-center justify-center text-[12px] text-ink-500 dark:text-ink-400">
         Loading settings…
       </div>
     );
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-3xl px-6 lg:px-10 py-8 lg:py-10">
-        <header className="rise rise-1 flex items-end justify-between gap-4 mb-8">
-          <div>
-            <div className="label-section mb-2">Account</div>
-            <h1 className="display text-4xl sm:text-5xl text-ink-900 dark:text-ink-50">
-              Settings
-            </h1>
-            <p className="mt-2 max-w-2xl text-sm text-ink-500 dark:text-ink-400">
-              Server-side daemon configuration. Changes apply to all future
-              agent runs.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {dirty && <Badge variant="vermilion">unsaved</Badge>}
-            <Button onClick={save} disabled={patch.isPending || !dirty}>
-              {patch.isPending ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Save className="h-3.5 w-3.5" />
-              )}
-              Save
-              <Kbd className="ml-1 border-cream-50/20 bg-cream-50/10 text-cream-50/80">
-                ⌘S
-              </Kbd>
-            </Button>
-          </div>
-        </header>
+    <div className="flex h-full flex-col">
+      <PageTopbar>
+        <Kicker>account</Kicker>
+        <VRule />
+        <span className="text-[13px] text-ink-900 dark:text-ink-50 font-medium">
+          Settings
+        </span>
+        <Count>server-side · applies to next agent run</Count>
+        <Spacer />
+        {dirty && (
+          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-vermilion-700 dark:text-vermilion-300">
+            unsaved
+          </span>
+        )}
+        {savedFlash && (
+          <span className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.08em] text-emerald-700 dark:text-emerald-300">
+            <span className="size-1.5 rounded-full bg-emerald-500" /> saved
+          </span>
+        )}
+      </PageTopbar>
 
-        <div className="rise rise-2 space-y-10">
-          <Section
-            icon={<Sparkles className="h-4 w-4" />}
-            title="Agent policy"
-            description={
-              <>
-                Appended to every agent run via{" "}
-                <span className="font-mono">--append-system-prompt</span>.
-              </>
-            }
-          >
-            <Field>
-              <Label htmlFor={aiId}>System prompt suffix</Label>
+      {/* Body: rail + content */}
+      <div className="flex flex-1 min-h-0">
+        <aside className="hidden md:flex w-52 shrink-0 flex-col bg-cream-100/30 dark:bg-ink-50/[0.015] border-r border-ink-900/10 dark:border-ink-50/10">
+          <div className="flex h-9 items-center justify-between px-4 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06]">
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500">
+              Sections
+            </span>
+            <span
+              className={cn(
+                "font-mono text-[10px]",
+                dirty
+                  ? "text-vermilion-700 dark:text-vermilion-300"
+                  : "text-ink-300 dark:text-ink-600",
+              )}
+            >
+              {dirty ? "•" : "ok"}
+            </span>
+          </div>
+          <nav className="flex-1 py-1.5">
+            {SECTIONS.map((s) => (
+              <a
+                key={s.id}
+                href={`#section-${s.id}`}
+                onClick={(e) => {
+                  e.preventDefault();
+                  setActive(s.id);
+                  document
+                    .getElementById(`section-${s.id}`)
+                    ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                }}
+                className={cn(
+                  "h-8 pl-[14px] pr-4 flex items-center gap-2.5 text-[12px] transition-colors border-l-2",
+                  active === s.id
+                    ? "bg-cream-50 text-ink-900 border-vermilion-500 font-medium dark:bg-ink-50/[0.05] dark:text-ink-50"
+                    : "text-ink-500 hover:bg-cream-50/60 hover:text-ink-900 border-transparent dark:text-ink-400 dark:hover:bg-ink-50/[0.03]",
+                )}
+              >
+                <span
+                  className={cn(
+                    "font-mono text-[11px] w-3 shrink-0",
+                    active === s.id
+                      ? "text-vermilion-500"
+                      : "text-ink-400 dark:text-ink-500",
+                  )}
+                >
+                  {s.glyph}
+                </span>
+                <span>{s.label}</span>
+              </a>
+            ))}
+          </nav>
+        </aside>
+
+        <div
+          id="settings-scroll"
+          className="flex-1 min-h-0 overflow-y-auto"
+        >
+          {/* Agent policy */}
+          <div id="section-agent">
+            <SectionHeader
+              label="Agent policy"
+              hint="appended via --append-system-prompt"
+              sticky
+            />
+            <InfoRow
+              label="System prompt suffix"
+              hint="Appended to every run."
+              top
+            >
               <Textarea
                 id={aiId}
                 rows={6}
@@ -152,46 +232,59 @@ export function Settings() {
                 className="font-mono text-xs"
                 placeholder="Suppress model self-references and attribution trailers in any output."
               />
-            </Field>
-          </Section>
+            </InfoRow>
+          </div>
 
-          <Section
-            icon={<GitCommit className="h-4 w-4" />}
-            title="Commits & PRs"
-            description={
-              <>
-                Templates used for auto-commit messages and{" "}
-                <span className="font-mono">gh pr create</span>.
-              </>
-            }
-          >
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Field>
-                <Label htmlFor={cpId}>Commit prefix</Label>
-                <Input
-                  id={cpId}
-                  value={commitPrefix}
-                  onChange={(e) => setCommitPrefix(e.target.value)}
-                  placeholder="agentd: "
-                  className="font-mono"
-                />
-              </Field>
-              <Field>
-                <Label htmlFor={prtId}>PR title prefix</Label>
-                <Input
-                  id={prtId}
-                  value={prTitlePrefix}
-                  onChange={(e) => setPrTitlePrefix(e.target.value)}
-                  placeholder="agentd: "
-                  className="font-mono"
-                />
-              </Field>
-            </div>
-            <Field>
-              <Label htmlFor={prbId} className="flex items-center gap-2">
-                <GitPullRequest className="h-3 w-3" />
-                PR body template
-              </Label>
+          {/* Commits & PRs */}
+          <div id="section-commits">
+            <SectionHeader
+              label="Commits & PRs"
+              hint="auto-commit messages and gh pr create body"
+              sticky
+            />
+            <InfoRow
+              label="Commit prefix"
+              hint="prepended to every auto-commit"
+            >
+              <Input
+                id={cpId}
+                value={commitPrefix}
+                onChange={(e) => setCommitPrefix(e.target.value)}
+                placeholder="agentd: "
+                className="font-mono"
+              />
+            </InfoRow>
+            <InfoRow
+              label="PR title prefix"
+              hint="prepended to gh pr create"
+            >
+              <Input
+                id={prtId}
+                value={prTitlePrefix}
+                onChange={(e) => setPrTitlePrefix(e.target.value)}
+                placeholder="agentd: "
+                className="font-mono"
+              />
+            </InfoRow>
+            <InfoRow
+              label="PR body template"
+              hint={
+                <>
+                  Placeholders:{" "}
+                  {["{prompt}", "{title}", "{task_id}", "{branch}"].map(
+                    (p) => (
+                      <code
+                        key={p}
+                        className="font-mono text-[10px] text-ink-700 dark:text-ink-200"
+                      >
+                        {p}{" "}
+                      </code>
+                    ),
+                  )}
+                </>
+              }
+              top
+            >
               <Textarea
                 id={prbId}
                 rows={6}
@@ -199,65 +292,51 @@ export function Settings() {
                 onChange={(e) => setPrBodyTemplate(e.target.value)}
                 className="font-mono text-xs"
               />
-              <div className="flex flex-wrap items-center gap-1 pt-1">
-                <span className="text-2xs text-ink-500 dark:text-ink-400">
-                  Placeholders:
-                </span>
-                {["{prompt}", "{title}", "{task_id}", "{branch}"].map((p) => (
-                  <code
-                    key={p}
-                    className="rounded border border-ink-900/10 bg-ink-900/[0.04] px-1 py-0.5 font-mono text-2xs text-ink-700 dark:border-ink-50/10 dark:bg-ink-50/[0.04] dark:text-ink-300"
-                  >
-                    {p}
-                  </code>
-                ))}
-              </div>
-            </Field>
-          </Section>
+            </InfoRow>
+          </div>
 
-          <Section
-            icon={<Bell className="h-4 w-4" />}
-            title="Browser"
-            description="Local-only preferences for this device."
-          >
+          {/* Browser */}
+          <div id="section-browser">
+            <SectionHeader
+              label="Browser"
+              hint="local-only, this device"
+              sticky
+            />
             <NotificationsRow />
-          </Section>
+          </div>
+
+          {/* Spacer to allow last section to scroll into view */}
+          <div className="h-24" />
         </div>
       </div>
-    </div>
-  );
-}
 
-function Section({
-  icon,
-  title,
-  description,
-  children,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  description?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <section>
-      <header className="mb-4 flex items-start gap-3">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-ink-900/10 bg-ink-900/[0.03] text-ink-500 dark:border-ink-50/10 dark:bg-ink-50/[0.03] dark:text-ink-400">
-          {icon}
-        </div>
-        <div>
-          <h2 className="display text-2xl text-ink-900 dark:text-ink-50">
-            {title}
-          </h2>
-          {description && (
-            <p className="mt-0.5 text-xs text-ink-500 dark:text-ink-400">
-              {description}
-            </p>
+      {/* Sticky save bar */}
+      <div className="flex h-9 items-center gap-3 px-5 border-t border-ink-900/10 bg-cream-100/40 dark:border-ink-50/10 dark:bg-ink-50/[0.02] shrink-0">
+        <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+          config.json
+        </span>
+        <span className="text-ink-300 dark:text-ink-600">·</span>
+        <span className="text-[10px] text-ink-400 dark:text-ink-500 truncate">
+          applies to next agent run
+        </span>
+        <Spacer />
+        <span className="hidden sm:flex items-center gap-1 font-mono text-[10px] text-ink-400 dark:text-ink-500">
+          ⌘ S
+        </span>
+        <Button
+          size="xs"
+          onClick={save}
+          disabled={patch.isPending || !dirty}
+        >
+          {patch.isPending ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <Save className="h-3 w-3" />
           )}
-        </div>
-      </header>
-      <div className="space-y-4 pl-11">{children}</div>
-    </section>
+          Save
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -281,30 +360,18 @@ function NotificationsRow() {
   }
 
   return (
-    <label className="flex items-center justify-between gap-3 rounded-xl border border-ink-900/10 bg-ink-900/[0.02] p-3 cursor-pointer dark:border-ink-50/10 dark:bg-ink-50/[0.02]">
-      <div className="flex gap-3 items-start">
-        <div className="mt-0.5">
-          {enabled ? (
-            <Bell className="h-4 w-4 text-vermilion-500" />
-          ) : (
-            <BellOff className="h-4 w-4 text-ink-400 dark:text-ink-500" />
-          )}
-        </div>
-        <div>
-          <div className="text-sm font-medium">Desktop notifications</div>
-          <div className="text-2xs text-ink-500 dark:text-ink-400 mt-0.5">
-            Ping me when a task transitions to{" "}
-            <span className="font-mono">done</span> /{" "}
-            <span className="font-mono">failed</span> /{" "}
-            <span className="font-mono">stopped</span> while the tab is hidden.
-          </div>
-        </div>
-      </div>
-      <Switch checked={enabled} onCheckedChange={(v) => void toggle(v)} />
-    </label>
+    <ToggleRow
+      label="Desktop notifications"
+      hint={
+        enabled
+          ? "Pings on done · failed · stopped (when tab is hidden)."
+          : "Disabled — agentd won't show OS notifications."
+      }
+      value={enabled}
+      onChange={(v) => void toggle(v)}
+    />
   );
 }
 
-function Field({ children }: { children: React.ReactNode }) {
-  return <div className="space-y-1.5">{children}</div>;
-}
+void Bell;
+void BellOff;

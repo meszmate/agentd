@@ -1,18 +1,16 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowRight, Inbox, Search } from "lucide-react";
 import type { Task, TaskStatus } from "@agentd/contracts";
 import { Input } from "@/components/ui/input";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { StatusPill } from "@/components/ui/status-dot";
-import { Badge } from "@/components/ui/badge";
-import { Kbd } from "@/components/ui/kbd";
+  Count,
+  Kicker,
+  PageTopbar,
+  Spacer,
+  VRule,
+} from "@/components/ui/page-topbar";
+import { SectionHeader } from "@/components/ui/section-header";
+import { FilterPills } from "@/components/ui/filter-pills";
 import { useTasks } from "@/queries";
 import {
   cn,
@@ -38,35 +36,63 @@ export function Tasks() {
 
   if (taskId) {
     const task = tasksQ.data?.tasks.find((t) => t.id === taskId);
-    if (tasksQ.isLoading && !task) return <CenterMessage>Loading task…</CenterMessage>;
-    if (!task)
+    if (tasksQ.isLoading && !task) {
       return (
-        <CenterMessage>
-          <span className="font-medium text-ink-900 dark:text-ink-50">
-            Task not found.
-          </span>{" "}
+        <div className="flex h-full items-center justify-center text-[12px] text-ink-500 dark:text-ink-400">
+          Loading task…
+        </div>
+      );
+    }
+    if (!task) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center gap-2 text-[12px] text-ink-500 dark:text-ink-400">
+          <span>
+            Task <span className="font-mono">{shortId(taskId)}</span> not
+            found.
+          </span>
           <Link to="/tasks" className="text-vermilion-600 hover:underline">
             Back to tasks
           </Link>
-        </CenterMessage>
+        </div>
       );
+    }
     return <TaskDetail key={task.id} task={task} />;
   }
 
-  return <TasksList tasks={tasksQ.data?.tasks ?? []} loading={tasksQ.isLoading} />;
+  return (
+    <TasksList tasks={tasksQ.data?.tasks ?? []} loading={tasksQ.isLoading} />
+  );
 }
 
 function TasksList({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [agentFilter, setAgentFilter] = useState<"all" | "claude" | "codex">("all");
+  const [agentFilter, setAgentFilter] = useState<"all" | "claude" | "codex">(
+    "all",
+  );
   const [repoQuery, setRepoQuery] = useState("");
+
+  const counts = useMemo(() => {
+    let active = 0;
+    let done = 0;
+    let failed = 0;
+    for (const t of tasks) {
+      if (ACTIVE_STATUSES.includes(t.status)) active++;
+      else if (t.status === "done") done++;
+      else if (t.status === "failed" || t.status === "stopped") failed++;
+    }
+    return { all: tasks.length, active, done, failed };
+  }, [tasks]);
 
   const filtered = useMemo(() => {
     return tasks.filter((t) => {
       if (statusFilter === "active" && !ACTIVE_STATUSES.includes(t.status))
         return false;
       if (statusFilter === "done" && t.status !== "done") return false;
-      if (statusFilter === "failed" && t.status !== "failed" && t.status !== "stopped")
+      if (
+        statusFilter === "failed" &&
+        t.status !== "failed" &&
+        t.status !== "stopped"
+      )
         return false;
       if (agentFilter !== "all" && t.agent !== agentFilter) return false;
       if (repoQuery) {
@@ -97,95 +123,90 @@ function TasksList({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
   }, [filtered]);
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-7xl px-6 lg:px-10 py-8 lg:py-10">
-        {/* Header */}
-        <header className="rise rise-1 flex items-end justify-between gap-4 mb-8">
-          <div>
-            <div className="label-section mb-2">Workspace</div>
-            <h1 className="display text-4xl sm:text-5xl text-ink-900 dark:text-ink-50">
-              Tasks
-            </h1>
-            <p className="mt-2 max-w-2xl text-sm text-ink-500 dark:text-ink-400">
-              {tasks.length === 0
-                ? "Spawn an agent to get started."
-                : `${tasks.length} total · ${lanes.active.length} active · ${lanes.recent.length} in last 24h`}
-            </p>
-          </div>
-        </header>
-
-        {/* Filter strip */}
-        {tasks.length > 0 && (
-          <div className="rise rise-2 mb-8 flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1 rounded-lg border border-ink-900/10 bg-cream-50 p-1 dark:border-ink-50/10 dark:bg-ink-800">
-              {(["all", "active", "done", "failed"] as StatusFilter[]).map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setStatusFilter(s)}
-                  className={cn(
-                    "rounded-md px-3 h-7 font-mono text-2xs uppercase tracking-[0.08em] transition-colors",
-                    statusFilter === s
-                      ? "bg-ink-900 text-cream-50 dark:bg-vermilion-500"
-                      : "text-ink-500 hover:text-ink-900 dark:text-ink-400 dark:hover:text-ink-50",
-                  )}
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-
-            <Select
-              value={agentFilter}
-              onValueChange={(v) => setAgentFilter(v as typeof agentFilter)}
-            >
-              <SelectTrigger className="h-9 w-[140px] text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All agents</SelectItem>
-                <SelectItem value="claude">Claude</SelectItem>
-                <SelectItem value="codex">Codex</SelectItem>
-              </SelectContent>
-            </Select>
-
-            <div className="relative ml-auto w-full max-w-xs">
-              <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-ink-400 dark:text-ink-500" />
-              <Input
-                value={repoQuery}
-                onChange={(e) => setRepoQuery(e.target.value)}
-                placeholder="Filter title, repo, branch…"
-                className="pl-8"
-              />
-            </div>
-          </div>
+    <div className="flex h-full flex-col">
+      {/* Topbar with title + counts */}
+      <PageTopbar>
+        <Kicker>workspace</Kicker>
+        <VRule />
+        <span className="text-[13px] text-ink-900 dark:text-ink-50 font-medium">
+          Tasks
+        </span>
+        <Count>{tasks.length}</Count>
+        {counts.active > 0 && (
+          <>
+            <span className="text-ink-300 dark:text-ink-600">·</span>
+            <span className="font-mono text-[11px] tabular-nums text-vermilion-700 dark:text-vermilion-300">
+              {counts.active} active
+            </span>
+          </>
         )}
+        <Spacer />
+      </PageTopbar>
 
+      {/* Filter strip */}
+      <div className="flex items-center gap-3 border-b border-ink-900/10 dark:border-ink-50/10 px-5 py-2 shrink-0 bg-cream-100/30 dark:bg-ink-50/[0.015]">
+        <FilterPills
+          options={[
+            { key: "all", label: "All", count: counts.all },
+            { key: "active", label: "Active", count: counts.active },
+            { key: "done", label: "Done", count: counts.done },
+            { key: "failed", label: "Failed", count: counts.failed },
+          ]}
+          value={statusFilter}
+          onChange={setStatusFilter}
+        />
+
+        <span className="vrule h-5" />
+
+        <FilterPills
+          options={[
+            { key: "all", label: "Any agent" },
+            { key: "claude", label: "Claude" },
+            { key: "codex", label: "Codex" },
+          ]}
+          value={agentFilter}
+          onChange={setAgentFilter}
+        />
+
+        <div className="ml-auto relative w-full max-w-[260px]">
+          <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 font-mono text-[10px] text-ink-400 dark:text-ink-500">
+            ⌕
+          </span>
+          <Input
+            value={repoQuery}
+            onChange={(e) => setRepoQuery(e.target.value)}
+            placeholder="title, repo, branch…"
+            className="h-7 pl-7 text-[12px]"
+          />
+        </div>
+      </div>
+
+      {/* Lanes */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
         {loading && tasks.length === 0 ? (
-          <div className="text-center py-16 text-sm text-ink-500 dark:text-ink-400">
+          <div className="flex h-full items-center justify-center text-[12px] text-ink-500 dark:text-ink-400">
             Loading tasks…
           </div>
         ) : tasks.length === 0 ? (
           <EmptyState />
         ) : filtered.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-ink-900/10 dark:border-ink-50/10 p-10 text-center">
-            <p className="text-sm text-ink-500 dark:text-ink-400">
-              No tasks match the filters.
-            </p>
+          <div className="flex items-center justify-center py-16 text-[12px] text-ink-500 dark:text-ink-400">
+            No tasks match the filters.
           </div>
         ) : (
-          <div className="rise rise-3 space-y-10">
+          <>
             {lanes.active.length > 0 && (
               <Lane
                 heading="Active"
                 count={lanes.active.length}
-                accent
                 tasks={lanes.active}
+                accent
               />
             )}
             {lanes.recent.length > 0 && (
               <Lane
                 heading="Recent"
+                hint="last 24 hours"
                 count={lanes.recent.length}
                 tasks={lanes.recent}
               />
@@ -198,7 +219,7 @@ function TasksList({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
                 muted
               />
             )}
-          </div>
+          </>
         )}
       </div>
     </div>
@@ -207,117 +228,120 @@ function TasksList({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
 
 function Lane({
   heading,
+  hint,
   count,
   tasks,
   accent,
   muted,
 }: {
   heading: string;
+  hint?: string;
   count: number;
   tasks: Task[];
   accent?: boolean;
   muted?: boolean;
 }) {
   return (
-    <section>
-      <header className="mb-4 flex items-baseline gap-3">
-        <h2
-          className={cn(
-            "display text-2xl",
-            accent
-              ? "text-vermilion-600 dark:text-vermilion-400"
-              : "text-ink-900 dark:text-ink-50",
-            muted && "text-ink-500 dark:text-ink-400",
-          )}
-        >
-          {heading}
-        </h2>
-        <span className="num text-base text-ink-400 dark:text-ink-500">
-          {count}
-        </span>
-        <span className="ml-auto rule" />
-      </header>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+    <section className={muted ? "opacity-80" : undefined}>
+      <SectionHeader
+        label={heading}
+        hint={hint}
+        right={
+          <span
+            className={cn(
+              "font-mono text-[10px] tabular-nums",
+              accent
+                ? "text-vermilion-700 dark:text-vermilion-300"
+                : "text-ink-400 dark:text-ink-500",
+            )}
+          >
+            {count}
+          </span>
+        }
+        sticky={false}
+      />
+      <ul className="divide-y divide-ink-900/[0.06] dark:divide-ink-50/[0.06]">
         {tasks.map((t) => (
-          <TaskCard key={t.id} task={t} muted={muted} />
+          <TaskRow key={t.id} task={t} />
         ))}
-      </div>
+      </ul>
     </section>
   );
 }
 
-function TaskCard({ task, muted }: { task: Task; muted?: boolean }) {
+function TaskRow({ task }: { task: Task }) {
   const totalTok =
     (task.totalInputTokens ?? 0) + (task.totalOutputTokens ?? 0);
 
   return (
-    <Link
-      to={`/tasks/${task.id}`}
-      className={cn(
-        "group flex h-full flex-col gap-3 rounded-2xl border border-ink-900/10 bg-cream-50 p-4 shadow-edit transition-all hover:-translate-y-0.5 hover:shadow-deep dark:border-ink-50/10 dark:bg-ink-800",
-        muted && "opacity-80 hover:opacity-100",
-      )}
-    >
-      <div className="flex items-start justify-between gap-2">
-        <StatusPill status={task.status} />
-        <span className="font-mono text-2xs text-ink-400 dark:text-ink-500">
+    <li>
+      <Link
+        to={`/tasks/${task.id}`}
+        className="group h-12 px-5 flex items-center gap-3 hover:bg-cream-100/40 transition-colors dark:hover:bg-ink-50/[0.02]"
+      >
+        <StatusDotSm status={task.status} />
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <span className="text-[13px] font-medium text-ink-900 dark:text-ink-50 truncate shrink-0 max-w-[42ch]">
+            {task.title}
+          </span>
+          <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 shrink-0">
+            {task.agent}
+          </span>
+          <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
+          <span className="font-mono text-[11px] text-ink-400 dark:text-ink-500 truncate min-w-0">
+            {task.branch}
+          </span>
+          {task.prUrl && (
+            <span className="shrink-0 inline-flex h-4 px-1 rounded text-[9px] font-medium uppercase tracking-[0.08em] bg-vermilion-500/10 text-vermilion-700 dark:text-vermilion-300">
+              pr
+            </span>
+          )}
+        </div>
+
+        <div className="hidden md:flex items-baseline gap-3 shrink-0 font-mono text-[11px] tabular-nums text-ink-400 dark:text-ink-500">
+          <span title="tokens">{formatTokens(totalTok)}</span>
+          <span title="cost">{formatCost(task.totalCostUsd)}</span>
+        </div>
+
+        <span className="font-mono text-[10px] tabular-nums text-ink-300 dark:text-ink-600 w-14 text-right shrink-0">
           {formatTs(task.updatedAt)}
         </span>
-      </div>
-
-      <h3 className="display text-lg leading-tight text-ink-900 line-clamp-2 dark:text-ink-50 group-hover:text-vermilion-600 dark:group-hover:text-vermilion-400 transition-colors">
-        {task.title}
-      </h3>
-
-      <div className="flex items-center gap-1.5 flex-wrap">
-        <Badge variant="secondary">{task.agent}</Badge>
-        <Badge variant="outline" className="font-mono normal-case">
-          {task.branch}
-        </Badge>
-        {task.prUrl && <Badge variant="vermilion">pr</Badge>}
-      </div>
-
-      <div className="font-mono text-2xs text-ink-500 dark:text-ink-400 truncate">
-        {task.repoPath}
-      </div>
-
-      <div className="mt-auto flex items-center justify-between border-t border-ink-900/10 dark:border-ink-50/10 pt-2.5">
-        <div className="flex items-baseline gap-3">
-          <span className="num text-base text-ink-900 dark:text-ink-50">
-            {formatTokens(totalTok)}
-          </span>
-          <span className="text-2xs text-ink-400 dark:text-ink-500">tok</span>
-          <span className="num text-base text-ink-900 dark:text-ink-50">
-            {formatCost(task.totalCostUsd)}
-          </span>
-        </div>
-        <ArrowRight className="h-3.5 w-3.5 text-ink-400 group-hover:text-vermilion-500 group-hover:translate-x-0.5 transition-all" />
-      </div>
-    </Link>
+      </Link>
+    </li>
   );
+}
+
+function StatusDotSm({ status }: { status: TaskStatus }) {
+  const tone =
+    status === "running"
+      ? "bg-vermilion-500 animate-blink"
+      : status === "done"
+      ? "bg-emerald-500"
+      : status === "failed"
+      ? "bg-red-500"
+      : status === "waiting_input" || status === "waiting_perm"
+      ? "bg-amber-500 animate-blink"
+      : "bg-ink-300 dark:bg-ink-600";
+  return <span className={cn("inline-block size-1.5 rounded-full shrink-0", tone)} />;
 }
 
 function EmptyState() {
   return (
-    <div className="rounded-3xl border border-dashed border-ink-900/10 p-16 text-center dark:border-ink-50/10">
-      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-vermilion-500/10 text-vermilion-600 dark:text-vermilion-400">
-        <Inbox className="h-5 w-5" />
-      </div>
-      <h2 className="mt-5 display text-2xl text-ink-900 dark:text-ink-50">
+    <div className="flex h-full flex-col items-center justify-center gap-3 px-6 py-16">
+      <span className="font-mono text-[24px] text-ink-300 dark:text-ink-600">
+        ◆
+      </span>
+      <div className="text-[13px] text-ink-700 dark:text-ink-200 font-medium">
         No tasks yet
-      </h2>
-      <p className="mt-2 max-w-sm mx-auto text-sm text-ink-500 dark:text-ink-400">
-        Tap <Kbd>⌘N</Kbd> or use the <span className="font-medium text-ink-700 dark:text-ink-200">New task</span> button to spawn an agent in a fresh git worktree.
+      </div>
+      <p className="max-w-sm text-center text-[12px] text-ink-500 dark:text-ink-400">
+        Tap{" "}
+        <kbd className="rounded border border-ink-900/15 bg-ink-900/[0.04] px-1.5 py-0.5 font-mono text-[10px] dark:border-ink-50/15 dark:bg-ink-50/[0.04]">
+          ⌘N
+        </kbd>{" "}
+        or use the sidebar's New task button to spawn an agent in a fresh git
+        worktree.
       </p>
     </div>
   );
 }
-
-function CenterMessage({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex h-full w-full items-center justify-center p-8 text-center text-sm text-ink-500 dark:text-ink-400">
-      {children}
-    </div>
-  );
-}
-

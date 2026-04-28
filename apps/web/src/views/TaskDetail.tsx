@@ -2,9 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowLeft,
   ExternalLink,
-  GitBranch,
   MoreHorizontal,
   PanelRight,
   PanelRightClose,
@@ -18,8 +16,11 @@ import {
 } from "react-resizable-panels";
 import type { AgentEvent, Message, Task } from "@agentd/contracts";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { StatusPill } from "@/components/ui/status-dot";
+import {
+  PageTopbar,
+  Spacer,
+  VRule,
+} from "@/components/ui/page-topbar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -165,105 +166,127 @@ export function TaskDetail({ task }: { task: Task }) {
     }
   };
 
+  const statusTone =
+    task.status === "running"
+      ? "bg-vermilion-500/10 text-vermilion-700 dark:text-vermilion-300"
+      : task.status === "done"
+      ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+      : task.status === "failed"
+      ? "bg-red-500/10 text-red-700 dark:text-red-300"
+      : task.status === "waiting_input" || task.status === "waiting_perm"
+      ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+      : "bg-ink-900/[0.05] text-ink-500 dark:bg-ink-50/[0.05] dark:text-ink-400";
+
   return (
     <div className="flex h-full flex-col">
-      {/* Detail header */}
-      <header className="border-b border-ink-900/10 dark:border-ink-50/10 px-6 py-4 shrink-0">
-        <div className="flex items-center gap-3">
-          <Link
-            to="/tasks"
-            className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 font-mono text-2xs uppercase tracking-[0.12em] text-ink-500 transition-colors hover:bg-ink-900/[0.04] hover:text-ink-900 dark:text-ink-400 dark:hover:bg-ink-50/[0.04] dark:hover:text-ink-50"
-          >
-            <ArrowLeft className="h-3 w-3" />
-            All tasks
-          </Link>
-          <span className="vrule h-4" />
-          <StatusPill status={task.status} />
-          <LiveBadge live={live} terminal={isTerminal} />
-          <div className="ml-auto flex items-center gap-1.5">
-            {task.prUrl && (
-              <Button asChild variant="outline" size="sm">
-                <a href={task.prUrl} target="_blank" rel="noreferrer">
-                  <ExternalLink className="h-3.5 w-3.5" />
-                  PR
-                </a>
-              </Button>
-            )}
-            {!isTerminal && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onStop}
-                disabled={stop.isPending}
-              >
-                <Square className="h-3.5 w-3.5" />
-                Stop
-              </Button>
-            )}
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={() => setWorkspaceOpen((v) => !v)}
-              aria-label={workspaceOpen ? "Close workspace" : "Open workspace"}
-              title={workspaceOpen ? "Close workspace" : "Open workspace"}
-            >
-              {workspaceOpen ? (
-                <PanelRightClose className="h-4 w-4" />
-              ) : (
-                <PanelRight className="h-4 w-4" />
-              )}
-            </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon-sm" aria-label="More">
-                  <MoreHorizontal className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="min-w-[12rem]">
-                <DropdownMenuLabel>Task</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={onRemove}
-                  className="text-red-700 focus:text-red-700 dark:text-red-300 dark:focus:text-red-300"
-                >
-                  <Trash2 /> Remove + worktree
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </div>
-
-        <h1 className="display text-3xl text-ink-900 dark:text-ink-50 mt-3 leading-tight">
+      {/* h-12 detail topbar */}
+      <PageTopbar>
+        <Link
+          to="/tasks"
+          className="text-[11px] text-ink-400 hover:text-ink-900 transition-colors dark:hover:text-ink-50"
+        >
+          ← Tasks
+        </Link>
+        <VRule />
+        <span className="text-[13px] text-ink-900 dark:text-ink-50 font-medium truncate max-w-[44ch]">
           {task.title}
-        </h1>
+        </span>
+        <span
+          className={cn(
+            "shrink-0 inline-flex items-center h-5 px-1.5 rounded font-mono text-[10px] font-medium uppercase tracking-[0.08em]",
+            statusTone,
+          )}
+        >
+          {task.status}
+        </span>
+        <LiveBadge live={live} terminal={isTerminal} />
 
-        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-2xs text-ink-500 dark:text-ink-400">
-          <Badge variant="secondary" className="font-mono">
-            {task.agent}
-          </Badge>
-          <span className="flex items-center gap-1.5">
-            <GitBranch className="h-3 w-3" />
-            <span className="text-ink-900 dark:text-ink-50">{task.branch}</span>
-            <span className="text-ink-400 dark:text-ink-500">←</span>
-            <span>{task.baseBranch}</span>
-          </span>
-          <Stat label="tok" value={totalTokens > 0 ? formatTokens(totalTokens) : "—"} />
-          <Stat label="cost" value={formatCost(task.totalCostUsd)} />
+        <Spacer />
+
+        {/* stats */}
+        <span className="hidden md:flex items-center gap-3 font-mono text-[11px] tabular-nums text-ink-400 dark:text-ink-500">
+          <span>{formatTokens(totalTokens)} tok</span>
+          <span>{formatCost(task.totalCostUsd)}</span>
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
-                <span className="cursor-help">id:{shortId(task.id)}</span>
+                <span className="cursor-help">{shortId(task.id)}</span>
               </TooltipTrigger>
               <TooltipContent>
-                <span className="font-mono text-2xs">{task.id}</span>
+                <span className="font-mono text-[10px]">{task.id}</span>
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
-          <span className="ml-auto truncate max-w-[40ch]">{task.repoPath}</span>
-        </div>
-      </header>
+        </span>
 
-      {/* Body — timeline + workspace drawer */}
+        {task.prUrl && (
+          <Button asChild variant="outline" size="xs">
+            <a href={task.prUrl} target="_blank" rel="noreferrer">
+              <ExternalLink className="h-3 w-3" /> PR
+            </a>
+          </Button>
+        )}
+        {!isTerminal && (
+          <Button
+            variant="outline"
+            size="xs"
+            onClick={onStop}
+            disabled={stop.isPending}
+          >
+            <Square className="h-3 w-3" /> Stop
+          </Button>
+        )}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          onClick={() => setWorkspaceOpen((v) => !v)}
+          aria-label={workspaceOpen ? "Hide workspace" : "Show workspace"}
+          title={workspaceOpen ? "Hide workspace" : "Show workspace"}
+        >
+          {workspaceOpen ? (
+            <PanelRightClose className="h-3.5 w-3.5" />
+          ) : (
+            <PanelRight className="h-3.5 w-3.5" />
+          )}
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon-sm" aria-label="More">
+              <MoreHorizontal className="h-3.5 w-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-[12rem]">
+            <DropdownMenuLabel>Task</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={onRemove}
+              className="text-red-700 focus:text-red-700 dark:text-red-300 dark:focus:text-red-300"
+            >
+              <Trash2 /> Remove + worktree
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </PageTopbar>
+
+      {/* Sub-strip: branch, repo, base */}
+      <div className="flex h-9 items-center gap-3 px-5 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-cream-100/30 dark:bg-ink-50/[0.015] shrink-0 overflow-x-auto">
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500 shrink-0">
+          {task.agent}
+        </span>
+        <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
+        <span className="font-mono text-[11px] text-ink-700 dark:text-ink-200 shrink-0">
+          {task.branch}
+        </span>
+        <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 shrink-0">
+          ← {task.baseBranch}
+        </span>
+        <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
+        <span className="font-mono text-[11px] text-ink-500 dark:text-ink-400 truncate">
+          {task.repoPath}
+        </span>
+      </div>
+
+      {/* Body */}
       <div className="flex-1 min-h-0">
         {workspaceOpen ? (
           <PanelGroup direction="horizontal" className="h-full">
@@ -276,21 +299,19 @@ export function TaskDetail({ task }: { task: Task }) {
                 disabled={isTerminal}
               />
             </Panel>
-            <PanelResizeHandle className="w-px bg-ink-900/10 dark:bg-ink-50/10 hover:bg-vermilion-500/40 transition-colors" />
+            <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-vermilion-500/40 transition-colors dark:bg-ink-50/10" />
             <Panel id={`ws-${task.id}`} defaultSize={48} minSize={28}>
               <TaskWorkspace task={task} onError={onError} />
             </Panel>
           </PanelGroup>
         ) : (
-          <div className="mx-auto h-full max-w-4xl">
-            <TaskTimeline
-              taskId={task.id}
-              messages={messages}
-              appendLocal={appendLocal}
-              onError={onError}
-              disabled={isTerminal}
-            />
-          </div>
+          <TaskTimeline
+            taskId={task.id}
+            messages={messages}
+            appendLocal={appendLocal}
+            onError={onError}
+            disabled={isTerminal}
+          />
         )}
       </div>
     </div>
@@ -300,7 +321,7 @@ export function TaskDetail({ task }: { task: Task }) {
 function LiveBadge({ live, terminal }: { live: boolean; terminal: boolean }) {
   if (terminal) {
     return (
-      <span className="font-mono text-2xs uppercase tracking-[0.08em] text-ink-400 dark:text-ink-500">
+      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-400 dark:text-ink-500">
         closed
       </span>
     );
@@ -308,9 +329,9 @@ function LiveBadge({ live, terminal }: { live: boolean; terminal: boolean }) {
   return (
     <span
       className={cn(
-        "flex items-center gap-1.5 font-mono text-2xs uppercase tracking-[0.08em]",
+        "flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.08em]",
         live
-          ? "text-vermilion-600 dark:text-vermilion-400"
+          ? "text-vermilion-700 dark:text-vermilion-300"
           : "text-ink-400 dark:text-ink-500",
       )}
     >
@@ -323,15 +344,6 @@ function LiveBadge({ live, terminal }: { live: boolean; terminal: boolean }) {
         )}
       />
       {live ? "live" : "off"}
-    </span>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <span className="flex items-center gap-1">
-      <span className="text-ink-400 dark:text-ink-500">{label}</span>
-      <span className="text-ink-900 dark:text-ink-50">{value}</span>
     </span>
   );
 }

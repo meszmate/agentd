@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Outlet, useNavigate } from "react-router-dom";
 import { Sidebar } from "@/components/sidebar";
-import { Topbar } from "@/components/topbar";
 import { CommandPalette } from "@/components/command-palette";
 import { HelpOverlay } from "@/components/help-overlay";
 import { SpawnSheet } from "@/components/spawn-sheet";
@@ -24,10 +23,6 @@ export function AppShell() {
           />
         </div>
         <div className="flex min-w-0 flex-1 flex-col">
-          <Topbar
-            onOpenPalette={() => setPaletteOpen(true)}
-            onSpawn={() => setSpawnOpen(true)}
-          />
           <main className="flex-1 min-h-0 overflow-hidden">
             <ErrorBoundary>
               <Outlet />
