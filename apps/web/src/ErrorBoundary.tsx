@@ -10,15 +10,6 @@ interface State {
   error: Error | null;
 }
 
-/**
- * Catches render-time errors from anywhere below in the tree. Without this,
- * a single bad fetch result or null deref blanks the whole app to a white
- * screen, which is the worst possible UX for a tool you reach for from your
- * phone at midnight.
- *
- * Reset is wired so the user can click "try again" and stay in the app
- * instead of having to refresh.
- */
 export class ErrorBoundary extends Component<Props, State> {
   state: State = { error: null };
 
@@ -39,15 +30,22 @@ export class ErrorBoundary extends Component<Props, State> {
     if (error) {
       if (this.props.fallback) return this.props.fallback(error, this.reset);
       return (
-        <div style={{ padding: 24 }}>
-          <h2 style={{ marginTop: 0, color: "var(--err)" }}>Something broke.</h2>
-          <pre style={{ background: "var(--panel)", padding: 12, borderRadius: 8, overflow: "auto" }}>
-            {error.message}
-            {error.stack ? "\n\n" + error.stack : ""}
-          </pre>
-          <button className="primary" onClick={this.reset}>
-            try again
-          </button>
+        <div className="flex h-full items-center justify-center p-6">
+          <div className="max-w-2xl w-full rounded-lg border border-destructive/40 bg-destructive/5 p-5">
+            <h2 className="font-display text-base font-semibold text-destructive">
+              Something broke.
+            </h2>
+            <pre className="mt-3 max-h-[40vh] overflow-auto rounded border border-border bg-surface-1 p-3 font-mono text-xs leading-relaxed">
+              {error.message}
+              {error.stack ? "\n\n" + error.stack : ""}
+            </pre>
+            <button
+              className="mt-3 inline-flex h-8 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+              onClick={this.reset}
+            >
+              Try again
+            </button>
+          </div>
         </div>
       );
     }

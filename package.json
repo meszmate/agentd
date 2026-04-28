@@ -10,6 +10,8 @@
   "scripts": {
     "daemon": "bun --filter @agentd/daemon dev",
     "cli": "bun --filter @agentd/cli start",
+    "dev": "bun --filter @agentd/web dev",
+    "web:build": "bun --filter @agentd/web build",
     "typecheck": "bun --filter '*' typecheck"
   },
   "devDependencies": {

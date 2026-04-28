@@ -1,0 +1,234 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ──────────────────────────────────────────────────────────────────────
+   /agentd — brae-inspired editorial palette.
+   Cream + ink + vermilion. Light is the canonical theme; dark is an
+   ink-base inversion with the same vermilion accent.
+   ────────────────────────────────────────────────────────────────────── */
+
+@layer base {
+  :root {
+    /* Light (canonical): cream paper, ink type, vermilion accent. */
+    --background: 41 31% 93%;        /* cream-100 #F5F1E8 */
+    --foreground: 0 0% 4%;           /* ink-900 #0A0A0A */
+
+    --card: 60 9% 98%;               /* ink-50 #FAFAF9 (cream paper for cards) */
+    --card-foreground: 0 0% 4%;
+
+    --popover: 60 9% 98%;
+    --popover-foreground: 0 0% 4%;
+
+    --primary: 0 0% 4%;              /* ink-900 — brae's default button */
+    --primary-foreground: 60 9% 98%; /* cream-50 */
+
+    --secondary: 32 32% 89%;         /* cream-200 ish */
+    --secondary-foreground: 0 0% 4%;
+
+    --muted: 32 32% 89%;
+    --muted-foreground: 36 6% 35%;   /* ink-600 */
+
+    --accent: 13 100% 58%;           /* vermilion-500 #FF5C28 */
+    --accent-foreground: 60 9% 98%;
+
+    --destructive: 0 72% 50%;
+    --destructive-foreground: 60 9% 98%;
+
+    --success: 142 60% 32%;
+    --warn: 13 100% 58%;
+    --info: 217 91% 50%;
+
+    --border: 0 0% 4%;               /* ink-900 — applied with /10 alpha */
+    --input: 0 0% 4%;
+    --ring: 13 100% 58%;             /* vermilion */
+
+    --radius: 0.625rem;
+  }
+
+  .dark {
+    /* Dark: ink paper, cream type, same vermilion accent. */
+    --background: 0 0% 4%;           /* ink-900 */
+    --foreground: 60 9% 98%;         /* ink-50 */
+
+    --card: 240 12% 8%;              /* ink-800 */
+    --card-foreground: 60 9% 98%;
+
+    --popover: 240 12% 8%;
+    --popover-foreground: 60 9% 98%;
+
+    --primary: 13 100% 58%;          /* in dark mode, primary = vermilion */
+    --primary-foreground: 0 0% 4%;
+
+    --secondary: 36 5% 11%;          /* ink-700 ish */
+    --secondary-foreground: 60 9% 98%;
+
+    --muted: 36 5% 11%;
+    --muted-foreground: 36 7% 60%;
+
+    --accent: 13 100% 58%;
+    --accent-foreground: 0 0% 4%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 60 9% 98%;
+
+    --success: 142 60% 50%;
+    --warn: 13 100% 58%;
+    --info: 217 91% 65%;
+
+    --border: 60 9% 98%;             /* cream-50 — applied with /10 alpha */
+    --input: 60 9% 98%;
+    --ring: 13 100% 58%;
+  }
+}
+
+@layer base {
+  * {
+    border-color: hsl(var(--border) / 0.1);
+  }
+
+  html,
+  body,
+  #root {
+    @apply h-full;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "ss01", "cv11";
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: "Geist", ui-sans-serif, system-ui, sans-serif;
+    font-feature-settings: "ss01";
+    background-image:
+      radial-gradient(circle at 0% 0%, rgba(255, 92, 40, 0.05), transparent 40%),
+      radial-gradient(circle at 100% 0%, rgba(10, 10, 10, 0.04), transparent 50%);
+    background-attachment: fixed;
+  }
+
+  .dark body {
+    background-image:
+      radial-gradient(circle at 0% 0%, rgba(255, 92, 40, 0.07), transparent 40%),
+      radial-gradient(circle at 100% 0%, rgba(255, 255, 255, 0.02), transparent 50%);
+  }
+
+  ::selection {
+    background: #ff5c28;
+    color: #fafaf9;
+  }
+
+  /* Editorial display class — Fraunces with stylistic alternates */
+  .display {
+    font-family: "Fraunces", ui-serif, Georgia, serif;
+    font-feature-settings: "ss01", "ss02", "ss03";
+    font-optical-sizing: auto;
+    letter-spacing: -0.035em;
+    line-height: 0.92;
+  }
+
+  /* Editorial number — tabular & lining nums for hero stats */
+  .num {
+    font-family: "Fraunces", ui-serif, Georgia, serif;
+    font-feature-settings: "tnum", "lnum";
+    font-optical-sizing: auto;
+  }
+
+  /* Sober scrollbars */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--foreground) / 0.12);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--foreground) / 0.25);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+  }
+}
+
+@layer components {
+  /* Hairline rules — used as inline section dividers */
+  .rule {
+    @apply h-px w-full bg-ink-900/10 dark:bg-ink-50/10;
+  }
+  .rule-strong {
+    @apply h-px w-full bg-ink-900/30 dark:bg-ink-50/30;
+  }
+  .vrule {
+    @apply w-px h-full bg-ink-900/10 dark:bg-ink-50/10;
+  }
+
+  /* Section label — small-caps mono tracking, used everywhere */
+  .label-section {
+    @apply font-mono text-2xs font-medium uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400;
+  }
+
+  /* Editorial chip */
+  .chip {
+    @apply inline-flex items-center gap-1.5 h-6 px-2 rounded-md
+           text-2xs font-medium tracking-[0.06em] uppercase
+           bg-ink-900/[0.05] text-ink-700 border border-ink-900/10
+           dark:bg-ink-50/[0.05] dark:text-ink-200 dark:border-ink-50/10;
+  }
+  .chip-vermilion {
+    @apply bg-vermilion-500/10 text-vermilion-700 border-vermilion-500/20
+           dark:bg-vermilion-500/15 dark:text-vermilion-300 dark:border-vermilion-500/25;
+  }
+  .chip-success {
+    @apply bg-emerald-500/10 text-emerald-700 border-emerald-500/20
+           dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/25;
+  }
+  .chip-info {
+    @apply bg-sky-500/10 text-sky-700 border-sky-500/20
+           dark:bg-sky-500/15 dark:text-sky-300 dark:border-sky-500/25;
+  }
+  .chip-mute {
+    @apply bg-ink-900/[0.04] text-ink-500 border-ink-900/10
+           dark:bg-ink-50/[0.04] dark:text-ink-400 dark:border-ink-50/10;
+  }
+
+  /* Diff coloring for the diff tab */
+  .diff-add {
+    color: #166534;
+    background: rgba(34, 197, 94, 0.08);
+  }
+  .diff-del {
+    color: #991b1b;
+    background: rgba(239, 68, 68, 0.08);
+  }
+  .dark .diff-add {
+    color: #4ade80;
+    background: rgba(34, 197, 94, 0.12);
+  }
+  .dark .diff-del {
+    color: #fca5a5;
+    background: rgba(239, 68, 68, 0.12);
+  }
+  .diff-hunk {
+    color: hsl(var(--info));
+    font-weight: 500;
+  }
+  .diff-meta {
+    color: hsl(var(--muted-foreground));
+  }
+}
+
+@layer utilities {
+  /* Staggered entry animations — borrowed from brae */
+  .rise-1 { animation-delay: 0.05s; }
+  .rise-2 { animation-delay: 0.18s; }
+  .rise-3 { animation-delay: 0.32s; }
+  .rise-4 { animation-delay: 0.46s; }
+  .rise-5 { animation-delay: 0.6s; }
+}

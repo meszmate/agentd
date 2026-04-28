@@ -1,22 +1,31 @@
 import { useEffect, useRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { loadStoredServer, loadStoredToken } from "../api";
+import "@xterm/xterm/css/xterm.css";
+import { loadStoredServer, loadStoredToken } from "@/api";
+import { useTheme } from "@/components/theme-provider";
 
 interface Props {
   taskId: string;
   onError: (m: string) => void;
 }
 
-/**
- * Embedded terminal view backed by the daemon's WS /pty/:taskId. Uses a
- * dumb shell (TERM=dumb) so it's safe to render full-color ANSI without a
- * real PTY underneath — line-oriented commands work great, full-screen
- * TUIs don't (yet). xterm.js is overkill for that today, but it sets us
- * up to swap to node-pty later without touching the UI.
- */
+const DARK_THEME = {
+  background: "#0a0a0a",
+  foreground: "#fafaf9",
+  cursor: "#ff5c28",
+  selectionBackground: "#ff5c2840",
+};
+const LIGHT_THEME = {
+  background: "#fbf8f1",
+  foreground: "#0a0a0a",
+  cursor: "#e84416",
+  selectionBackground: "#ff5c2840",
+};
+
 export function Terminal({ taskId, onError }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const { resolved } = useTheme();
 
   useEffect(() => {
     const container = containerRef.current;
@@ -24,13 +33,9 @@ export function Terminal({ taskId, onError }: Props) {
 
     const term = new XTerm({
       cursorBlink: true,
-      fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+      fontFamily: "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace",
       fontSize: 12,
-      theme: {
-        background: "#000000",
-        foreground: "#e7e9ee",
-        cursor: "#33d27a",
-      },
+      theme: resolved === "dark" ? DARK_THEME : LIGHT_THEME,
       convertEol: true,
     });
     const fit = new FitAddon();
@@ -45,7 +50,7 @@ export function Terminal({ taskId, onError }: Props) {
     if (tok) url.searchParams.set("session", tok);
     const ws = new WebSocket(url.toString());
 
-    ws.onopen = () => term.write("\r\n[connecting]\r\n");
+    ws.onopen = () => term.write("\r\n\x1b[2m[connecting]\x1b[0m\r\n");
     ws.onerror = () => onError("pty: connection error");
     ws.onmessage = (ev) => {
       try {
@@ -54,17 +59,21 @@ export function Terminal({ taskId, onError }: Props) {
           | { type: "output"; data: string }
           | { type: "exit"; code: number | null };
         if (msg.type === "ready") {
-          term.write(`\r\n[connected — ${msg.cwd}]\r\n`);
+          term.write(
+            `\r\n\x1b[33m[connected — ${msg.cwd}]\x1b[0m\r\n`,
+          );
         } else if (msg.type === "output") {
           term.write(msg.data);
         } else if (msg.type === "exit") {
-          term.write(`\r\n[shell exited code=${msg.code ?? "?"}]\r\n`);
+          term.write(
+            `\r\n\x1b[2m[shell exited code=${msg.code ?? "?"}]\x1b[0m\r\n`,
+          );
         }
       } catch {
         // ignore unparseable
       }
     };
-    ws.onclose = () => term.write("\r\n[disconnected]\r\n");
+    ws.onclose = () => term.write("\r\n\x1b[2m[disconnected]\x1b[0m\r\n");
 
     const dataDisp = term.onData((data) => {
       if (ws.readyState === WebSocket.OPEN) {
@@ -74,9 +83,12 @@ export function Terminal({ taskId, onError }: Props) {
 
     const onResize = () => fit.fit();
     window.addEventListener("resize", onResize);
+    const ro = new ResizeObserver(onResize);
+    ro.observe(container);
 
     return () => {
       window.removeEventListener("resize", onResize);
+      ro.disconnect();
       dataDisp.dispose();
       try {
         ws.close();
@@ -85,7 +97,11 @@ export function Terminal({ taskId, onError }: Props) {
       }
       term.dispose();
     };
-  }, [taskId, onError]);
+  }, [taskId, onError, resolved]);
 
-  return <div className="term-pane" ref={containerRef} />;
+  return (
+    <div className="h-full w-full bg-cream-50 dark:bg-ink-900 p-2">
+      <div ref={containerRef} className="h-full w-full" />
+    </div>
+  );
 }

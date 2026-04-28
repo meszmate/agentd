@@ -244,6 +244,11 @@ export class AgentdClient {
     });
   }
 
+  // ── pairing tokens ──
+  async issuePairToken(): Promise<{ token: string; expiresAt: number }> {
+    return this.req("/api/admin/pair", { method: "POST" });
+  }
+
   watch(taskId: string | null, onEvent: (e: WsServerEvent) => void): WebSocket {
     const url = new URL(this.server);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";

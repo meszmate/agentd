@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import path from "node:path";
 
 // During dev (`bun run dev`), the daemon's API + WS lives on a separate port.
 // We proxy /api, /ws, /pty, /pair, /health to it so the dev server "looks
@@ -8,6 +9,11 @@ const DAEMON = process.env.AGENTD_DEV_DAEMON ?? "http://127.0.0.1:3773";
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+    },
+  },
   server: {
     port: 5173,
     proxy: {

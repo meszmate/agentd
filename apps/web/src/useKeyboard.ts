@@ -63,7 +63,12 @@ export function useShortcuts(specs: ShortcutSpec[], sequences: Record<string, Sh
       const editable = inEditable(e.target);
 
       // Chord shortcuts (sequences) never fire inside editable elements.
-      if (!editable && /^[a-z]$/i.test(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      // Allow a-z to start a sequence; once buffer is primed, also allow
+      // punctuation (",", ".", etc.) as follow keys so shortcuts like `g,` work.
+      const isSeqKey =
+        /^[a-z]$/i.test(e.key) ||
+        (buffer.length > 0 && e.key.length === 1 && !/^[A-Z]$/.test(e.key));
+      if (!editable && isSeqKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
         buffer += e.key.toLowerCase();
         if (bufferTimer) clearTimeout(bufferTimer);
         bufferTimer = setTimeout(clearBuffer, 800);
