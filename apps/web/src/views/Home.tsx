@@ -30,6 +30,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ProjectPicker } from "@/components/project-picker";
+import {
+  WorkspaceSetup,
+  defaultWorkspaceSetup,
+  persistWorkspaceSetup,
+  type WorkspaceSetupValue,
+} from "@/components/workspace-setup";
 import { useApp, useClient } from "@/AppContext";
 import {
   useCreateTask,
@@ -284,8 +290,8 @@ function Composer({ firstRun }: { firstRun: boolean }) {
     () => localStorage.getItem(PROJECT_KEY) ?? "",
   );
   const [projectPath, setProjectPath] = useState<string>("");
-  const [base, setBase] = useState(
-    () => localStorage.getItem(BASE_KEY) ?? "main",
+  const [workspace, setWorkspace] = useState<WorkspaceSetupValue>(() =>
+    defaultWorkspaceSetup(localStorage.getItem(BASE_KEY) ?? "main"),
   );
   const [agent, setAgent] = useState<"claude" | "codex">(
     () => (localStorage.getItem(AGENT_KEY) as "claude" | "codex") ?? "claude",
@@ -317,15 +323,23 @@ function Composer({ firstRun }: { firstRun: boolean }) {
       return;
     }
     try {
+      const finalBase = workspace.baseBranch.trim() || "main";
       const res = await create.mutateAsync({
         agent,
         repoPath: path,
-        baseBranch: base.trim() || "main",
+        baseBranch: finalBase,
         prompt: p,
         permissionMode,
+        workspaceMode: workspace.workspaceMode,
+        branchMode: workspace.branchMode,
+        ...(workspace.branchName.trim()
+          ? { branchName: workspace.branchName.trim() }
+          : {}),
+        ...(workspace.pullLatest ? { pullLatest: true } : {}),
       });
+      persistWorkspaceSetup(workspace);
       localStorage.setItem(PROJECT_KEY, projectId);
-      localStorage.setItem(BASE_KEY, base.trim() || "main");
+      localStorage.setItem(BASE_KEY, finalBase);
       localStorage.setItem(AGENT_KEY, agent);
       localStorage.setItem(PERMS_KEY, permissionMode);
       setPrompt("");
@@ -425,7 +439,7 @@ function Composer({ firstRun }: { firstRun: boolean }) {
           onClick={() => setShowAdvanced((v) => !v)}
           className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 hover:text-ink-700 dark:text-ink-500 dark:hover:text-ink-200 inline-flex items-center gap-1 px-1"
         >
-          {showAdvanced ? "less" : "branch?"}
+          {showAdvanced ? "less" : "setup"}
           <ChevronDown
             className={cn(
               "h-3 w-3 transition-transform",
@@ -451,19 +465,15 @@ function Composer({ firstRun }: { firstRun: boolean }) {
       </div>
 
       {showAdvanced && (
-        <div className="flex items-center gap-2 border-t border-ink-900/[0.06] bg-paper-100/40 px-3 py-2 dark:border-ink-50/[0.06] dark:bg-ink-900/30">
-          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400 shrink-0">
-            base
-          </span>
-          <input
-            value={base}
-            onChange={(e) => setBase(e.target.value)}
-            placeholder="main"
-            spellCheck={false}
-            className="font-mono text-[12px] bg-transparent border-0 outline-none focus:ring-0 text-ink-900 dark:text-ink-50 placeholder:text-ink-400 w-32"
+        <div className="border-t border-ink-900/[0.06] bg-paper-100/40 px-3 py-2.5 dark:border-ink-50/[0.06] dark:bg-ink-900/30">
+          <WorkspaceSetup
+            value={workspace}
+            onChange={setWorkspace}
+            projectIdOrSlug={projectId || null}
           />
         </div>
       )}
+
     </section>
   );
 }

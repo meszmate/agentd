@@ -24,6 +24,12 @@ import {
 import { useCreateTask, useSkills } from "@/queries";
 import { useApp } from "@/AppContext";
 import { ProjectPicker } from "@/components/project-picker";
+import {
+  WorkspaceSetup,
+  defaultWorkspaceSetup,
+  persistWorkspaceSetup,
+  type WorkspaceSetupValue,
+} from "@/components/workspace-setup";
 import { BookText } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -99,6 +105,9 @@ export function SpawnSheet({
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(
     () => loadPermissionMode(),
   );
+  const [workspace, setWorkspace] = useState<WorkspaceSetupValue>(
+    () => defaultWorkspaceSetup(localStorage.getItem(BASE_KEY) ?? "main"),
+  );
   const [activeSkills, setActiveSkills] = useState<string[]>([]);
   const [autoFilledForPath, setAutoFilledForPath] = useState<string>("");
 
@@ -132,20 +141,28 @@ export function SpawnSheet({
       return;
     }
     try {
+      const finalBase = (workspace.baseBranch || baseBranch).trim() || "main";
       const res = await create.mutateAsync({
         agent,
         repoPath: repoPath.trim(),
-        baseBranch: baseBranch.trim() || "main",
+        baseBranch: finalBase,
         prompt: prompt.trim(),
         title: title.trim() || undefined,
         autoPush,
         autoPr,
         permissionMode,
+        workspaceMode: workspace.workspaceMode,
+        branchMode: workspace.branchMode,
+        ...(workspace.branchName.trim()
+          ? { branchName: workspace.branchName.trim() }
+          : {}),
+        ...(workspace.pullLatest ? { pullLatest: true } : {}),
         ...(activeSkills.length ? { skills: activeSkills } : {}),
       });
+      persistWorkspaceSetup(workspace);
       localStorage.setItem(REPO_KEY, repoPath.trim());
       if (projectId) localStorage.setItem(PROJECT_KEY, projectId);
-      localStorage.setItem(BASE_KEY, baseBranch.trim() || "main");
+      localStorage.setItem(BASE_KEY, finalBase);
       localStorage.setItem(AGENT_KEY, agent);
       localStorage.setItem(AUTOPUSH_KEY, autoPush ? "1" : "0");
       localStorage.setItem(AUTOPR_KEY, autoPr ? "1" : "0");
@@ -190,34 +207,33 @@ export function SpawnSheet({
               </p>
             </Field>
 
-            <div className="grid grid-cols-2 gap-3">
-              <Field>
-                <Label htmlFor="spawn-agent">Agent</Label>
-                <Select
-                  value={agent}
-                  onValueChange={(v) => setAgent(v as "claude" | "codex")}
-                >
-                  <SelectTrigger id="spawn-agent">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="claude">claude</SelectItem>
-                    <SelectItem value="codex">codex</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field>
-                <Label htmlFor="spawn-base">Base branch</Label>
-                <Input
-                  id="spawn-base"
-                  value={baseBranch}
-                  onChange={(e) => setBaseBranch(e.target.value)}
-                  placeholder="main"
-                  spellCheck={false}
-                  className="font-mono"
-                />
-              </Field>
-            </div>
+            <Field>
+              <Label htmlFor="spawn-agent">Agent</Label>
+              <Select
+                value={agent}
+                onValueChange={(v) => setAgent(v as "claude" | "codex")}
+              >
+                <SelectTrigger id="spawn-agent">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="claude">claude</SelectItem>
+                  <SelectItem value="codex">codex</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+
+            <Field>
+              <Label>Workspace</Label>
+              <WorkspaceSetup
+                value={workspace}
+                onChange={(next) => {
+                  setWorkspace(next);
+                  setBaseBranch(next.baseBranch);
+                }}
+                projectIdOrSlug={projectId || null}
+              />
+            </Field>
 
             <Field>
               <Label htmlFor="spawn-title">Title (optional)</Label>

@@ -386,6 +386,18 @@ export class AgentdClient {
     });
   }
 
+  async listProjectBranches(
+    idOrSlug: string,
+  ): Promise<{
+    current: string | null;
+    local: string[];
+    remote: { remote: string; ref: string }[];
+  }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/branches`,
+    );
+  }
+
   async getTaskContext(id: string): Promise<{
     agentInstructions: string;
     skills: { id: string; displayName: string; body: string }[];

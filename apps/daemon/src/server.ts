@@ -44,6 +44,7 @@ import {
   pushBranch,
   createPr,
   gitStatus,
+  listBranches,
   setTaskPrUrl,
   resolveSession,
   loadConfig,
@@ -173,6 +174,18 @@ export function buildServer(opts: BuildServerOptions) {
         ...(parsed.data.skills?.length ? { skills: parsed.data.skills } : {}),
         ...(parsed.data.permissionMode
           ? { permissionMode: parsed.data.permissionMode }
+          : {}),
+        ...(parsed.data.workspaceMode
+          ? { workspaceMode: parsed.data.workspaceMode }
+          : {}),
+        ...(parsed.data.branchMode
+          ? { branchMode: parsed.data.branchMode }
+          : {}),
+        ...(parsed.data.branchName
+          ? { branchName: parsed.data.branchName }
+          : {}),
+        ...(parsed.data.pullLatest != null
+          ? { pullLatest: parsed.data.pullLatest }
           : {}),
       });
       return c.json({ task });
@@ -938,6 +951,21 @@ export function buildServer(opts: BuildServerOptions) {
     if (!project) return c.json({ error: "not found" }, 404);
     deleteProject(db, project.id);
     return c.json({ ok: true });
+  });
+
+  // Branch list for the spawn picker. Local branches plus remote tracking
+  // refs grouped by remote.
+  api.get("/projects/:idOrSlug/branches", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    try {
+      const branches = await listBranches(project.path);
+      return c.json(branches);
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 500);
+    }
   });
 
   // ── Skills ──────────────────────────────────────────────────────────

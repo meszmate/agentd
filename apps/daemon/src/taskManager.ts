@@ -1,8 +1,10 @@
 import type {
   AgentEvent,
   AgentKind,
+  BranchMode,
   PermissionMode,
   Task,
+  WorkspaceMode,
 } from "@agentd/contracts";
 import {
   addTaskUsage,
@@ -54,6 +56,11 @@ export interface CreateTaskParams {
   scheduleId?: string | null;
   skills?: string[];
   permissionMode?: PermissionMode;
+  /** Workspace setup — see contracts WorkspaceMode + BranchMode for shapes. */
+  workspaceMode?: WorkspaceMode;
+  branchMode?: BranchMode;
+  branchName?: string;
+  pullLatest?: boolean;
 }
 
 export class TaskManager {
@@ -83,7 +90,17 @@ export class TaskManager {
       params.baseBranch ?? (await detectDefaultBranch(params.repoPath));
     const title = params.title ?? params.prompt.split("\n")[0]!.slice(0, 80);
     const taskId = newId("task");
-    const branch = `agentd/${slugify(title)}-${taskId.slice(-6)}`;
+    const workspaceMode = params.workspaceMode ?? "worktree";
+    const branchMode = params.branchMode ?? "new";
+    // Auto-name the branch when caller didn't provide one and we're creating.
+    // Auto-named branches default to `feature/<slug>-xxxxxx` — closer to
+    // gitflow / what most teams actually use. The user can override either
+    // by typing the full name or tapping a prefix chip in the UI.
+    const branch =
+      branchMode === "existing"
+        ? (params.branchName?.trim() || baseBranch)
+        : (params.branchName?.trim() ||
+            `feature/${slugify(title)}-${taskId.slice(-6)}`);
     // Auto-create or look up the project for this repo path. Tasks belong
     // to projects so the sidebar can group them and surface what's new.
     const project = ensureProjectForPath(this.db, params.repoPath);
@@ -93,6 +110,9 @@ export class TaskManager {
       taskId,
       baseBranch,
       branchName: branch,
+      workspaceMode,
+      branchMode,
+      pullLatest: params.pullLatest ?? false,
     });
     const task: Task = createTask(this.db, {
       id: taskId,
@@ -109,6 +129,7 @@ export class TaskManager {
       autoPr: params.autoPr ?? false,
       skills: params.skills ?? [],
       permissionMode: params.permissionMode ?? "bypassPermissions",
+      workspaceMode,
     });
     touchProject(this.db, project.id);
     appendMessage(this.db, task.id, "user", params.prompt);

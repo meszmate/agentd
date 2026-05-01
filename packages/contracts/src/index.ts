@@ -21,6 +21,26 @@ export const PermissionMode = z.enum([
 ]);
 export type PermissionMode = z.infer<typeof PermissionMode>;
 
+/**
+ * Where the agent's filesystem changes land.
+ *
+ *   worktree — agentd creates a fresh git worktree at
+ *     <root>/worktrees/<task-id>/ on a new branch off baseBranch. Default,
+ *     parallel-safe, doesn't touch the operator's checkout.
+ *   in_place — the agent works directly inside the project's repo. No
+ *     extra worktree. Useful for "just run a quick refactor on my actual
+ *     branch" but unsafe if the worktree has uncommitted changes.
+ */
+export const WorkspaceMode = z.enum(["worktree", "in_place"]);
+export type WorkspaceMode = z.infer<typeof WorkspaceMode>;
+
+/**
+ *   new      — create a fresh branch (auto-named or via `branchName`).
+ *   existing — switch the worktree onto an existing branch and work there.
+ */
+export const BranchMode = z.enum(["new", "existing"]);
+export type BranchMode = z.infer<typeof BranchMode>;
+
 export const TaskStatus = z.enum([
   "pending",
   "running",
@@ -57,6 +77,7 @@ export const Task = z.object({
   // Skill identifiers (`scope:slug`) that were activated when this task spawned.
   skills: z.array(z.string()).optional(),
   permissionMode: PermissionMode.optional(),
+  workspaceMode: WorkspaceMode.optional(),
 });
 export type Task = z.infer<typeof Task>;
 
@@ -171,6 +192,11 @@ export const CreateTaskRequest = z.object({
   // Skill ids of the form `scope:slug` to activate on spawn.
   skills: z.array(z.string()).optional(),
   permissionMode: PermissionMode.optional(),
+  // Workspace setup — how the agent's checkout is prepared.
+  workspaceMode: WorkspaceMode.optional(),
+  branchMode: BranchMode.optional(),
+  branchName: z.string().optional(),
+  pullLatest: z.boolean().optional(),
 });
 export type CreateTaskRequest = z.infer<typeof CreateTaskRequest>;
 

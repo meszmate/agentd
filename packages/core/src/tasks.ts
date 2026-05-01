@@ -4,6 +4,7 @@ import type {
   PermissionMode,
   Task,
   TaskStatus,
+  WorkspaceMode,
 } from "@agentd/contracts";
 import type { Db } from "./db.ts";
 import { tasks, messages } from "./db.ts";
@@ -24,6 +25,7 @@ export interface CreateTaskInput {
   autoPr?: boolean;
   skills?: string[];
   permissionMode?: PermissionMode;
+  workspaceMode?: WorkspaceMode;
 }
 
 function rowToTask(row: typeof tasks.$inferSelect): Task {
@@ -63,6 +65,8 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     skills: parsedSkills,
     permissionMode:
       (row.permissionMode as PermissionMode | undefined) ?? "bypassPermissions",
+    workspaceMode:
+      (row.workspaceMode as WorkspaceMode | undefined) ?? "worktree",
   };
 }
 
@@ -94,6 +98,7 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       totalCostUsd: null,
       skillsJson: JSON.stringify(input.skills ?? []),
       permissionMode: input.permissionMode ?? "bypassPermissions",
+      workspaceMode: input.workspaceMode ?? "worktree",
     })
     .run();
   return getTask(db, id)!;
