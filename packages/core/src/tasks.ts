@@ -150,6 +150,19 @@ export function updateTaskStatus(
   return getTask(db, id);
 }
 
+/** Update the task's reasoning effort. The next runner spawn picks it up. */
+export function setTaskThinkingLevel(
+  db: Db,
+  id: string,
+  level: ThinkingLevel,
+): Task | null {
+  db.update(tasks)
+    .set({ thinkingLevel: level, updatedAt: Date.now() })
+    .where(eq(tasks.id, id))
+    .run();
+  return getTask(db, id);
+}
+
 export function setTaskPrUrl(db: Db, id: string, prUrl: string): void {
   db.update(tasks)
     .set({ prUrl, updatedAt: Date.now() })

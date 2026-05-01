@@ -68,6 +68,12 @@ export interface CreateTaskParams {
 
 export class TaskManager {
   private running = new Map<string, RunningSession>();
+  /**
+   * Inputs typed while the agent was mid-turn. Drained on exit so the next
+   * runner starts with the user's queued message. Multiple queued lines are
+   * joined with blank lines so they read like one continuous note.
+   */
+  private inputQueue = new Map<string, string[]>();
 
   constructor(
     private readonly db: Db,
@@ -86,6 +92,11 @@ export class TaskManager {
   isRunning(id: string): boolean {
     const s = this.running.get(id);
     return !!s && s.runner.running;
+  }
+
+  /** Snapshot of queued steer messages — for the UI badge. */
+  queuedInput(id: string): string[] {
+    return this.inputQueue.get(id)?.slice() ?? [];
   }
 
   async create(params: CreateTaskParams): Promise<Task> {
@@ -144,11 +155,67 @@ export class TaskManager {
   async sendInput(taskId: string, text: string): Promise<void> {
     const task = getTask(this.db, taskId);
     if (!task) throw new Error("task not found");
+    // If the task is mid-turn we queue the message and surface it in the
+    // timeline as a "queued" user note. The exit handler drains the queue
+    // and starts a fresh `--continue` invocation with the joined text.
     if (this.isRunning(taskId)) {
-      throw new Error("task is busy; wait for it to finish before sending input");
+      this.queueInput(taskId, text);
+      return;
     }
     appendMessage(this.db, taskId, "user", text);
     await this.spawnRunner(task, text, true);
+  }
+
+  /**
+   * Steer modes:
+   *   queue     — append to the queue, fires on the next turn.
+   *   interrupt — stop the current runner now, then fire as the next turn.
+   *               The current turn's partial work is preserved in messages.
+   */
+  async steer(
+    taskId: string,
+    text: string,
+    mode: "queue" | "interrupt" = "queue",
+  ): Promise<void> {
+    const task = getTask(this.db, taskId);
+    if (!task) throw new Error("task not found");
+    if (!this.isRunning(taskId)) {
+      // Idle path — same as a normal sendInput so callers don't have to
+      // branch on running state themselves.
+      appendMessage(this.db, taskId, "user", text);
+      await this.spawnRunner(task, text, true);
+      return;
+    }
+    this.queueInput(taskId, text);
+    if (mode === "interrupt") {
+      // Stop and let the exit handler drain.
+      await this.stop(taskId).catch(() => {});
+    }
+  }
+
+  private queueInput(taskId: string, text: string): void {
+    const cur = this.inputQueue.get(taskId) ?? [];
+    cur.push(text);
+    this.inputQueue.set(taskId, cur);
+    // Surface the queued note in the timeline so the user can see it
+    // landed even before the agent picks it up.
+    appendMessage(this.db, taskId, "user", `[queued] ${text}`);
+    this.bus.publish({
+      taskId,
+      event: {
+        kind: "raw",
+        stream: "stdout",
+        text: `[queued] ${text}`,
+      },
+      ts: Date.now(),
+    });
+  }
+
+  private drainQueue(taskId: string): string | null {
+    const q = this.inputQueue.get(taskId);
+    if (!q || q.length === 0) return null;
+    this.inputQueue.delete(taskId);
+    return q.join("\n\n");
   }
 
   async stop(taskId: string): Promise<void> {
@@ -300,12 +367,35 @@ export class TaskManager {
     const task = getTask(this.db, taskId);
     if (!task) return;
     const committed = await this.maybeAutoCommit(taskId, task);
-    if (!committed) return;
-    if (task.autoPush || task.autoPr) {
-      await this.maybePush(taskId, task);
+    if (committed) {
+      if (task.autoPush || task.autoPr) {
+        await this.maybePush(taskId, task);
+      }
+      if (task.autoPr) {
+        await this.maybeOpenPr(taskId, task);
+      }
     }
-    if (task.autoPr) {
-      await this.maybeOpenPr(taskId, task);
+    // Drain any messages the user queued mid-turn. Re-fetch the task so we
+    // pick up any thinking-level change made while the previous turn ran.
+    const queued = this.drainQueue(taskId);
+    if (queued) {
+      const fresh = getTask(this.db, taskId);
+      if (fresh) {
+        appendMessage(this.db, taskId, "user", queued);
+        try {
+          await this.spawnRunner(fresh, queued, true);
+        } catch (err) {
+          this.bus.publish({
+            taskId,
+            event: {
+              kind: "raw",
+              stream: "stderr",
+              text: `[steer drain failed] ${(err as Error).message}`,
+            },
+            ts: Date.now(),
+          });
+        }
+      }
     }
   }
 

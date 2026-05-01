@@ -450,17 +450,8 @@ export function TaskDetail({ task }: { task: Task }) {
             </span>
           </>
         )}
-        {task.thinkingLevel && task.thinkingLevel !== "high" && (
-          <>
-            <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
-            <span
-              title={`reasoning effort: ${task.thinkingLevel}`}
-              className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] bg-violet-500/10 text-violet-700 dark:text-violet-300 border border-violet-500/20 shrink-0"
-            >
-              think:{task.thinkingLevel}
-            </span>
-          </>
-        )}
+        <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
+        <ThinkingLevelChip task={task} />
       </div>
 
       {/* Body */}
@@ -498,6 +489,74 @@ export function TaskDetail({ task }: { task: Task }) {
         )}
       </div>
     </div>
+  );
+}
+
+const THINKING_LEVELS = [
+  { value: "low", label: "low", hint: "fastest, minimal reasoning" },
+  { value: "medium", label: "medium", hint: "balanced" },
+  { value: "high", label: "high", hint: "default" },
+  { value: "max", label: "max", hint: "extended thinking budget" },
+  { value: "xhigh", label: "xhigh", hint: "deepest tier" },
+] as const;
+
+type ThinkingLevelValue = (typeof THINKING_LEVELS)[number]["value"];
+
+/**
+ * Inline thinking-level dropdown on the task header. Mutating it does NOT
+ * interrupt the in-flight turn — the new level applies to the next runner
+ * spawn (next user message or steered queue drain).
+ */
+function ThinkingLevelChip({ task }: { task: Task }) {
+  const client = useClient();
+  const qc = useQueryClient();
+  const { toast } = useApp();
+  const current = (task.thinkingLevel ?? "high") as ThinkingLevelValue;
+  const set = async (level: ThinkingLevelValue) => {
+    if (level === current) return;
+    try {
+      const res = await client.setTaskThinkingLevel(task.id, level);
+      if (res.task) {
+        qc.setQueryData(qk.task(task.id), { task: res.task });
+      }
+      toast(`thinking → ${level} (applies next turn)`);
+    } catch (e) {
+      toast((e as Error).message, true);
+    }
+  };
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          title="Change reasoning effort for the next turn"
+          className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] bg-violet-500/10 text-violet-700 dark:text-violet-300 border border-violet-500/20 hover:bg-violet-500/20 transition-colors shrink-0"
+        >
+          think:{current}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-44">
+        <DropdownMenuLabel className="text-[10px] uppercase tracking-[0.12em]">
+          Thinking · next turn
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {THINKING_LEVELS.map((m) => (
+          <DropdownMenuItem
+            key={m.value}
+            onClick={() => void set(m.value)}
+            className={cn(
+              "flex items-baseline justify-between gap-2",
+              m.value === current && "text-ember-700 dark:text-ember-300",
+            )}
+          >
+            <span className="font-mono">{m.label}</span>
+            <span className="text-[10px] text-ink-400 dark:text-ink-500">
+              {m.hint}
+            </span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

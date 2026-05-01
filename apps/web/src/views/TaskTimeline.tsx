@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AlertTriangle, Loader2, Send, User2, Wrench } from "lucide-react";
+import {
+  AlertTriangle,
+  ListPlus,
+  Loader2,
+  Send,
+  User2,
+  Wrench,
+  Zap,
+} from "lucide-react";
 import type { Message } from "@agentd/contracts";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -9,6 +17,8 @@ import { Kbd } from "@/components/ui/kbd";
 import { useApp, useClient } from "@/AppContext";
 import { cn, formatTokens, formatTs } from "@/lib/utils";
 import { useSendInput } from "@/queries";
+
+type SteerMode = "queue" | "interrupt";
 
 const ROLE_GLYPH: Record<Message["role"], React.ReactNode> = {
   user: <User2 className="h-3 w-3" />,
@@ -83,10 +93,29 @@ export function TaskTimeline({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length, streamEntries.map(([, t]) => t.length).join("|")]);
 
+  const [steerMode, setSteerMode] = useState<SteerMode>("queue");
+
   const submit = async () => {
     const msg = text.trim();
     if (!msg) return;
     setText("");
+    if (disabled) {
+      // Mid-turn: route through /steer so the daemon can queue or interrupt
+      // explicitly, and we get a "queued" badge in the timeline. The daemon
+      // also returns the queue depth so the UI can surface it.
+      appendLocal("user", `[${steerMode}] ${msg}`);
+      try {
+        await client.steerTask(taskId, msg, steerMode);
+        toast(
+          steerMode === "interrupt"
+            ? "Interrupted — agent will pick up your note next"
+            : "Queued — fires after this turn",
+        );
+      } catch (e) {
+        onError((e as Error).message);
+      }
+      return;
+    }
     appendLocal("user", msg);
     try {
       await send.mutateAsync(msg);
@@ -220,20 +249,56 @@ export function TaskTimeline({
               onKeyDown={(e) => {
                 if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
                   e.preventDefault();
-                  if (!disabled) void submit();
+                  void submit();
                 }
               }}
               placeholder={
                 disabled
-                  ? "agent is thinking — finish typing, send when it's done"
+                  ? steerMode === "interrupt"
+                    ? "Stop the current turn and steer with this note…"
+                    : "Queue a note for the next turn…"
                   : "Send input to the agent…"
               }
               rows={3}
               data-shortcut-target="chat-input"
-              className="resize-none pr-28 text-sm"
+              className={cn(
+                "resize-none pr-28 text-sm transition",
+                disabled &&
+                  (steerMode === "interrupt"
+                    ? "ring-1 ring-amber-500/40"
+                    : "ring-1 ring-violet-500/30"),
+              )}
               aria-label="Message"
             />
             <div className="absolute right-2 bottom-2 flex items-center gap-2">
+              {disabled && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSteerMode((m) =>
+                      m === "queue" ? "interrupt" : "queue",
+                    )
+                  }
+                  title={
+                    steerMode === "queue"
+                      ? "Queue: fires after the current turn finishes"
+                      : "Interrupt: stop the agent now and steer with this note"
+                  }
+                  className={cn(
+                    "h-7 inline-flex items-center gap-1.5 rounded-md border px-2 font-mono text-[10px] uppercase tracking-[0.08em] transition",
+                    steerMode === "queue"
+                      ? "border-violet-500/40 bg-violet-500/10 text-violet-700 dark:text-violet-300"
+                      : "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+                  )}
+                >
+                  {steerMode === "queue" ? (
+                    <ListPlus className="h-3 w-3" />
+                  ) : (
+                    <Zap className="h-3 w-3" />
+                  )}
+                  {steerMode}
+                </button>
+              )}
               <span className="hidden sm:flex items-center gap-1 text-2xs text-ink-400 dark:text-ink-500">
                 <Kbd>⌘</Kbd>
                 <Kbd>↵</Kbd>
@@ -241,14 +306,22 @@ export function TaskTimeline({
               <Button
                 type="submit"
                 size="sm"
-                disabled={send.isPending || disabled || !text.trim()}
+                disabled={send.isPending || !text.trim()}
               >
                 {send.isPending ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : disabled && steerMode === "interrupt" ? (
+                  <Zap className="h-3.5 w-3.5" />
+                ) : disabled ? (
+                  <ListPlus className="h-3.5 w-3.5" />
                 ) : (
                   <Send className="h-3.5 w-3.5" />
                 )}
-                Send
+                {disabled
+                  ? steerMode === "interrupt"
+                    ? "Steer"
+                    : "Queue"
+                  : "Send"}
               </Button>
             </div>
           </div>

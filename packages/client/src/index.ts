@@ -20,6 +20,7 @@ import type {
   Template,
   TerminalSession,
   TerminalWindow,
+  ThinkingLevel,
   Message,
   UpdateProjectRequest,
   UpdateSkillRequest,
@@ -159,6 +160,37 @@ export class AgentdClient {
     });
   }
 
+  async setTaskThinkingLevel(
+    id: string,
+    thinkingLevel: ThinkingLevel,
+  ): Promise<{ task: Task | null }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/thinking`, {
+      method: "PATCH",
+      body: JSON.stringify({ thinkingLevel }),
+    });
+  }
+
+  /**
+   * Queue a message while the agent is mid-turn, or interrupt-and-fire it
+   * immediately. Idle tasks behave like `sendTaskInput`.
+   */
+  async steerTask(
+    id: string,
+    text: string,
+    mode: "queue" | "interrupt" = "queue",
+  ): Promise<{ ok: true; mode: string; queued: number }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/steer`, {
+      method: "POST",
+      body: JSON.stringify({ text, mode }),
+    });
+  }
+
+  async getTaskSteerState(
+    id: string,
+  ): Promise<{ running: boolean; queue: string[] }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/steer`);
+  }
+
   async checkPrState(
     id: string,
     autoClose = false,
@@ -269,9 +301,11 @@ export class AgentdClient {
       if (done) break;
       const chunk = decoder.decode(value, { stream: true });
       buf += chunk;
-      // The sentinel "\n " separates the streamed message body from the
-      // trailing JSON metadata. Don't echo the sentinel or anything past it.
-      const sentinel = buf.indexOf("\n ");
+      // U+001E separates the streamed message body from the trailing JSON
+      // metadata. The control byte never appears in Claude's normal text
+      // output, so the boundary is unambiguous and we never leak the JSON
+      // envelope into the streamed body.
+      const sentinel = buf.indexOf("\x1e");
       if (sentinel >= 0) {
         const visible = chunk.slice(
           0,
@@ -290,13 +324,13 @@ export class AgentdClient {
       onChunk?.(chunk);
     }
     // Parse trailing metadata.
-    const sentinelAt = buf.indexOf("\n ");
+    const sentinelAt = buf.indexOf("\x1e");
     if (sentinelAt < 0) {
       // No sentinel arrived (e.g. claude died silently). Treat what we
       // got as the message.
       return { message: buf.trim(), source: "claude" };
     }
-    const tail = buf.slice(sentinelAt + 2).trim();
+    const tail = buf.slice(sentinelAt + 1).trim();
     try {
       const meta = JSON.parse(tail) as {
         source: string;

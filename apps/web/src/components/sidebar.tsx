@@ -4,7 +4,6 @@ import {
   Activity,
   BookText,
   CalendarClock,
-  ChevronDown,
   ChevronRight,
   FileTerminal,
   FolderGit2,
@@ -566,18 +565,24 @@ function ProjectGroupRow({
   const name = project?.name ?? "Untracked";
   const total = group.total;
   const liveTasks = active.length;
-  const visible = open ? [...active, ...recent] : [];
+  // Always populate so the collapse animation has content to shrink.
+  // The wrapper grid track + opacity drives visibility.
+  const visible = [...active, ...recent];
 
   // One integrated row: clicking the chevron area toggles, clicking
   // the rest navigates to the project (or just toggles for untracked).
   // The chevron is part of the same surface so it doesn't read as a
   // separate UI control.
-  const Chev = open ? ChevronDown : ChevronRight;
   void id;
 
   const Inner = (
     <>
-      <Chev className="h-3 w-3 shrink-0 text-ink-400 dark:text-ink-500 transition-transform" />
+      <ChevronRight
+        className={cn(
+          "h-3 w-3 shrink-0 text-ink-400 dark:text-ink-500 transition-transform duration-200",
+          open && "rotate-90",
+        )}
+      />
       <span
         className="size-2 rounded-sm shrink-0"
         style={{ background: color }}
@@ -635,7 +640,12 @@ function ProjectGroupRow({
               onToggle();
             }}
           >
-            <Chev className="h-3 w-3 shrink-0 text-ink-400 dark:text-ink-500 transition-transform" />
+            <ChevronRight
+              className={cn(
+                "h-3 w-3 shrink-0 text-ink-400 dark:text-ink-500 transition-transform duration-200",
+                open && "rotate-90",
+              )}
+            />
           </span>
           <span
             className="size-2 rounded-sm shrink-0"
@@ -664,13 +674,28 @@ function ProjectGroupRow({
         </button>
       )}
 
-      {open && visible.length > 0 && (
-        <ul className="ml-3 mt-0.5 mb-1 space-y-0.5 border-l border-ink-900/[0.06] pl-2 dark:border-ink-50/[0.06]">
-          {visible.map((t) => (
-            <SidebarTaskRow key={t.id} task={t} />
-          ))}
-        </ul>
-      )}
+      {/* Smooth expand/collapse via grid-template-rows: animating from
+          0fr → 1fr lets the row's natural content height drive the
+          transition without measuring it in JS. The inner min-h-0
+          + overflow-hidden lets the children clip cleanly while the
+          row's track collapses. */}
+      <div
+        className={cn(
+          "grid transition-[grid-template-rows,opacity] duration-200 ease-out",
+          open && visible.length > 0
+            ? "grid-rows-[1fr] opacity-100"
+            : "grid-rows-[0fr] opacity-0",
+        )}
+        aria-hidden={!open}
+      >
+        <div className="min-h-0 overflow-hidden">
+          <ul className="ml-3 mt-0.5 mb-1 space-y-0.5 border-l border-ink-900/[0.06] pl-2 dark:border-ink-50/[0.06]">
+            {visible.map((t) => (
+              <SidebarTaskRow key={t.id} task={t} />
+            ))}
+          </ul>
+        </div>
+      </div>
     </div>
   );
 }

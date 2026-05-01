@@ -208,11 +208,10 @@ function CommitDialog({
               <span className="text-[10px] text-ink-400 dark:text-ink-500 inline-flex items-center gap-1">
                 {generating ? (
                   <>
-                    <Sparkles className="h-2.5 w-2.5 text-ember-500 animate-pulse" />
+                    <Loader2 className="h-2.5 w-2.5 text-ember-500 animate-spin" />
                     <span className="text-ember-700 dark:text-ember-300">
                       claude is writing
                     </span>
-                    <span className="inline-block w-1 h-3 bg-ember-500/70 animate-blink align-text-bottom" />
                   </>
                 ) : source === "claude" ? (
                   "claude generated · edit freely"
@@ -232,14 +231,46 @@ function CommitDialog({
                 regenerate
               </button>
             </div>
-            <Textarea
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              rows={shape.includeBody ? 6 : 2}
-              spellCheck={false}
-              className="font-mono text-[12px]"
-              placeholder={generating ? "" : "feat: …"}
-            />
+            <div className="relative">
+              <Textarea
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                rows={shape.includeBody ? 6 : 2}
+                spellCheck={false}
+                className={cn(
+                  "font-mono text-[12px] transition",
+                  generating && "ring-1 ring-ember-500/40",
+                )}
+                placeholder={generating ? "" : "feat: …"}
+              />
+              {generating && (
+                <>
+                  {/* Top progress bar — animated stripes give "something is
+                      happening" energy even before any token has arrived. */}
+                  <div className="pointer-events-none absolute inset-x-0 top-0 h-0.5 overflow-hidden rounded-t">
+                    <div className="h-full w-full bg-gradient-to-r from-transparent via-ember-500 to-transparent bg-[length:200%_100%] animate-shimmer" />
+                  </div>
+                  {/* Skeleton lines while the textarea is empty, replaced
+                      seamlessly by tokens as they arrive. */}
+                  {message.length === 0 && (
+                    <div className="pointer-events-none absolute inset-0 flex flex-col gap-1.5 px-3 py-2">
+                      <div className="h-2.5 w-2/3 animate-pulse rounded bg-ember-500/15" />
+                      {shape.includeBody && (
+                        <>
+                          <div className="h-2.5 w-1/2 animate-pulse rounded bg-ember-500/10" />
+                          <div className="h-2.5 w-3/4 animate-pulse rounded bg-ember-500/10" />
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {/* Caret drifting behind the last character once tokens
+                      start flowing — keeps the "typing" feel honest. */}
+                  {message.length > 0 && (
+                    <span className="pointer-events-none absolute bottom-2 right-3 inline-block h-3 w-1 bg-ember-500 animate-blink" />
+                  )}
+                </>
+              )}
+            </div>
             <div className="mt-1 flex items-baseline justify-between font-mono text-[10px] text-ink-400 dark:text-ink-500">
               <span>
                 {message.split("\n")[0]?.length ?? 0} chars on subject line
