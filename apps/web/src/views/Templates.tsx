@@ -38,6 +38,8 @@ import {
   useTemplates,
 } from "@/queries";
 import { useApp } from "@/AppContext";
+import { Skeleton } from "@/components/ui/skeleton";
+import { RepoPicker } from "@/components/repo-picker";
 import {
   cn,
   formatCost,
@@ -125,9 +127,20 @@ export function Templates() {
 
       <div className="flex-1 min-h-0 overflow-y-auto">
         {tplQ.isLoading ? (
-          <div className="flex items-center justify-center py-16 text-[12px] text-ink-500 dark:text-ink-400">
-            Loading…
-          </div>
+          <ul className="divide-y divide-ink-900/[0.06] dark:divide-ink-50/[0.06]">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <li key={i} className="px-5 py-3 flex items-start gap-4">
+                <Skeleton className="h-3 w-3 rounded-sm mt-1" />
+                <div className="flex-1">
+                  <Skeleton className="h-3 w-40" />
+                  <Skeleton className="h-2.5 w-72 mt-2" />
+                  <Skeleton className="h-2.5 w-56 mt-1.5" />
+                </div>
+                <Skeleton className="h-3 w-12 mt-1 hidden md:block" />
+                <Skeleton className="h-7 w-14" />
+              </li>
+            ))}
+          </ul>
         ) : items.length === 0 ? (
           <EmptyState onCreate={() => setCreateOpen(true)} />
         ) : filtered.length === 0 ? (
@@ -176,10 +189,10 @@ function TemplateRow({
   onDelete: () => void;
 }) {
   return (
-    <li className="group h-auto min-h-12 px-5 py-3 flex items-start gap-4 hover:bg-cream-100/40 transition-colors dark:hover:bg-ink-50/[0.02]">
+    <li className="group h-auto min-h-12 px-5 py-3 flex items-start gap-4 hover:bg-paper-100 transition-colors dark:hover:bg-ink-700">
       {/* Glyph column */}
       <div className="w-3 shrink-0 mt-0.5">
-        <span className="font-mono text-[12px] text-ink-300 dark:text-ink-600 group-hover:text-vermilion-500 transition-colors">
+        <span className="font-mono text-[12px] text-ink-300 dark:text-ink-600 group-hover:text-ember-500 transition-colors">
           ▤
         </span>
       </div>
@@ -199,7 +212,7 @@ function TemplateRow({
             </span>
           )}
           {t.autoPr && (
-            <span className="inline-flex items-center h-4 px-1 rounded text-[9px] font-medium uppercase tracking-[0.08em] bg-vermilion-500/10 text-vermilion-700 dark:text-vermilion-300">
+            <span className="inline-flex items-center h-4 px-1 rounded text-[9px] font-medium uppercase tracking-[0.08em] bg-ember-500/10 text-ember-700 dark:text-ember-300">
               pr
             </span>
           )}
@@ -377,14 +390,12 @@ function CreateTemplateSheet({
             </Field>
           </div>
           <Field>
-            <Label htmlFor="tpl-repo">Repo path</Label>
-            <Input
+            <Label htmlFor="tpl-repo">Repository</Label>
+            <RepoPicker
               id="tpl-repo"
               value={repoPath}
-              onChange={(e) => setRepoPath(e.target.value)}
+              onChange={setRepoPath}
               placeholder="/path/to/repo"
-              spellCheck={false}
-              className="font-mono"
             />
           </Field>
           <Field>
@@ -450,20 +461,20 @@ function Toggle({
       className={cn(
         "flex flex-1 items-center justify-between gap-3 rounded-md border px-3 h-8 transition-colors",
         checked
-          ? "border-vermilion-500/30 bg-vermilion-500/[0.06] text-ink-900 dark:text-ink-50"
-          : "border-ink-900/10 bg-ink-900/[0.02] text-ink-500 dark:border-ink-50/10 dark:bg-ink-50/[0.02] dark:text-ink-400",
+          ? "border-ember-500/30 bg-ember-500/[0.06] text-ink-900 dark:text-ink-50"
+          : "border-ink-900/10 bg-ink-900/[0.02] text-ink-500 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400",
       )}
     >
       <span className="text-[12px] font-medium">{label}</span>
       <span
         className={cn(
           "inline-flex h-4 w-7 rounded-full transition-colors relative shrink-0",
-          checked ? "bg-vermilion-500" : "bg-ink-900/15 dark:bg-ink-50/15",
+          checked ? "bg-ember-500" : "bg-ink-900/15 dark:bg-ink-50/15",
         )}
       >
         <span
           className={cn(
-            "absolute top-0.5 left-0.5 h-3 w-3 rounded-full bg-cream-50 transition-transform",
+            "absolute top-0.5 left-0.5 h-3 w-3 rounded-full bg-paper-50 transition-transform",
             checked && "translate-x-3",
           )}
         />
@@ -511,7 +522,7 @@ function RunTemplateSheet({
 
         <div className="flex-1 overflow-y-auto px-6 pb-2 pt-4 space-y-4">
           {placeholders.length > 0 && (
-            <div className="rounded-lg border border-ink-900/10 bg-ink-900/[0.02] p-3 dark:border-ink-50/10 dark:bg-ink-50/[0.02]">
+            <div className="rounded-lg border border-ink-900/10 bg-ink-900/[0.02] p-3 dark:border-ink-50/10 dark:bg-ink-800">
               <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500 mb-1.5">
                 Placeholders
               </div>
@@ -548,7 +559,7 @@ function RunTemplateSheet({
           {template && (
             <Field>
               <Label>Prompt preview</Label>
-              <pre className="rounded-lg border border-ink-900/10 bg-ink-900/[0.02] p-3 font-mono text-[11px] whitespace-pre-wrap break-words leading-relaxed text-ink-700 dark:text-ink-300 dark:border-ink-50/10 dark:bg-ink-50/[0.02]">
+              <pre className="rounded-lg border border-ink-900/10 bg-ink-900/[0.02] p-3 font-mono text-[11px] whitespace-pre-wrap break-words leading-relaxed text-ink-700 dark:text-ink-300 dark:border-ink-50/10 dark:bg-ink-800">
                 {template.promptTemplate}
               </pre>
             </Field>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Check, Clipboard, Loader2, Sparkles } from "lucide-react";
+import { Check, Clipboard, Loader2, Sparkles, Trash2 } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import {
   Count,
@@ -10,7 +11,9 @@ import {
 } from "@/components/ui/page-topbar";
 import { SectionHeader } from "@/components/ui/section-header";
 import { useApp, useClient } from "@/AppContext";
-import { cn } from "@/lib/utils";
+import { cn, formatTs } from "@/lib/utils";
+
+const SESSIONS_KEY = ["admin", "sessions"] as const;
 
 interface Pairing {
   token: string;
@@ -21,10 +24,27 @@ interface Pairing {
 export function Devices() {
   const client = useClient();
   const { server, toast } = useApp();
+  const qc = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [pair, setPair] = useState<Pairing | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [copied, setCopied] = useState(false);
+
+  const sessionsQ = useQuery({
+    queryKey: SESSIONS_KEY,
+    queryFn: () => client.listDeviceSessions(),
+    staleTime: 10_000,
+  });
+  const sessions = sessionsQ.data?.sessions ?? [];
+
+  const revoke = useMutation({
+    mutationFn: (id: string) => client.revokeDeviceSession(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: SESSIONS_KEY });
+      toast("Session revoked");
+    },
+    onError: (e) => toast((e as Error).message, true),
+  });
 
   useEffect(() => {
     const t = window.setInterval(() => setNow(Date.now()), 1000);
@@ -68,7 +88,7 @@ export function Devices() {
         <span className="text-[13px] text-ink-900 dark:text-ink-50 font-medium">
           Devices
         </span>
-        <Count>1 paired</Count>
+        <Count>{sessions.length || 1} paired</Count>
         <span className="text-ink-300 dark:text-ink-600">·</span>
         <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
           this browser
@@ -145,10 +165,10 @@ export function Devices() {
                     "inline-flex items-center gap-1.5 rounded-md uppercase tracking-[0.06em]",
                     remainingSec < 60
                       ? "text-amber-700 dark:text-amber-300"
-                      : "text-vermilion-700 dark:text-vermilion-300",
+                      : "text-ember-700 dark:text-ember-300",
                   )}
                 >
-                  <span className="h-1.5 w-1.5 rounded-full bg-vermilion-500 animate-blink" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink" />
                   <span className="num text-[12px]">
                     {Math.floor(remainingSec / 60)}:
                     {String(remainingSec % 60).padStart(2, "0")}
@@ -166,7 +186,7 @@ export function Devices() {
                 CLI command
               </div>
               <div className="flex items-center gap-2">
-                <code className="flex-1 select-all rounded-md bg-ink-900 text-cream-100 px-3 py-2 font-mono text-[11px] leading-relaxed break-all">
+                <code className="flex-1 select-all rounded-md bg-ink-900 text-paper-100 px-3 py-2 font-mono text-[11px] leading-relaxed break-all">
                   agentd pair --server {server} --token {pair.token}
                 </code>
                 <Button
@@ -186,7 +206,7 @@ export function Devices() {
                 Browser
               </div>
               <div className="font-mono text-[11px] text-ink-700 dark:text-ink-200">
-                Open <span className="text-vermilion-700 dark:text-vermilion-300">{server}</span> on the new device, then paste the token.
+                Open <span className="text-ember-700 dark:text-ember-300">{server}</span> on the new device, then paste the token.
               </div>
             </div>
           </div>
@@ -212,13 +232,75 @@ export function Devices() {
 
         <SectionHeader
           label="Sessions"
-          hint="not yet exposed by the daemon"
+          hint={`${sessions.length} active`}
           sticky={false}
         />
-        <div className="px-5 py-4 max-w-2xl text-[11px] text-ink-500 dark:text-ink-400">
-          Listing or revoking other paired sessions isn't supported by the
-          daemon yet. As a workaround, restart the daemon to invalidate every
-          session at once.
+        <div className="px-5 py-4 max-w-3xl">
+          {sessionsQ.isLoading ? (
+            <div className="flex items-center gap-2 text-[12px] text-ink-500 dark:text-ink-400">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Loading…
+            </div>
+          ) : sessions.length === 0 ? (
+            <div className="text-[11px] text-ink-500 dark:text-ink-400">
+              No active sessions.
+            </div>
+          ) : (
+            <ul className="divide-y divide-ink-900/10 rounded-md border border-ink-900/10 bg-paper-50 dark:divide-ink-50/10 dark:border-ink-50/10 dark:bg-ink-800">
+              {sessions.map((s) => (
+                <li
+                  key={s.id}
+                  className="flex items-center gap-3 px-3 py-2.5"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate font-mono text-[12px] text-ink-900 dark:text-ink-50">
+                        {s.deviceLabel || "(unnamed device)"}
+                      </span>
+                      {s.current && (
+                        <span className="inline-flex items-center rounded-md bg-ember-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
+                          this device
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-2 font-mono text-[10px] text-ink-500 dark:text-ink-400">
+                      <span title={new Date(s.lastSeenAt).toLocaleString()}>
+                        last seen {formatTs(s.lastSeenAt)}
+                      </span>
+                      <span className="text-ink-300 dark:text-ink-600">·</span>
+                      <span title={new Date(s.createdAt).toLocaleString()}>
+                        paired {formatTs(s.createdAt)}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={s.current || revoke.isPending}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          `Revoke session "${s.deviceLabel}"? It'll have to re-pair to continue.`,
+                        )
+                      ) {
+                        revoke.mutate(s.id);
+                      }
+                    }}
+                    className="inline-flex h-7 items-center gap-1.5 rounded-md border border-ink-900/10 bg-paper-50 px-2 text-[11px] font-medium text-ink-600 transition-colors hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-ink-900/10 disabled:hover:bg-paper-50 disabled:hover:text-ink-600 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-300 dark:hover:border-red-400/40 dark:hover:bg-red-500/10 dark:hover:text-red-300"
+                    title={s.current ? "Log out instead to revoke this device" : "Revoke this session"}
+                  >
+                    <Trash2 className="h-3 w-3" />
+                    Revoke
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="mt-3 text-[11px] text-ink-500 dark:text-ink-400">
+            Revoke any device that should no longer access this daemon.
+            Revoking the current device requires logging out instead — the
+            "this device" row's button is disabled to prevent locking
+            yourself out.
+          </p>
         </div>
       </div>
     </div>
@@ -234,7 +316,7 @@ function ListStep({
 }) {
   return (
     <li className="flex gap-3">
-      <span className="num shrink-0 text-vermilion-600 dark:text-vermilion-400 w-5">
+      <span className="num shrink-0 text-ember-600 dark:text-ember-400 w-5">
         {n}.
       </span>
       <span>{children}</span>

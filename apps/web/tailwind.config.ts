@@ -12,38 +12,41 @@ const config: Config = {
     },
     extend: {
       colors: {
-        // ── brae editorial palette ───────────────────────────────────
-        cream: {
-          DEFAULT: "#F5F1E8",
+        // ── /agentd palette ──────────────────────────────────────────
+        // Paper: warm parchment, distinct from brae's cream.
+        paper: {
+          DEFAULT: "#F4EFE5",
           50: "#FBF8F1",
-          100: "#F5F1E8",
-          200: "#EFE9D9",
-          300: "#E8E1D3",
-          400: "#D4CBB5",
+          100: "#F4EFE5",
+          200: "#ECE5D5",
+          300: "#E1D9C4",
+          400: "#CCC2A8",
         },
+        // Ink: warm near-black with a touch of sepia depth.
         ink: {
-          50: "#FAFAF9",
-          100: "#F1EFEC",
-          200: "#E1DFDB",
-          300: "#C5C2BC",
-          400: "#8E8B83",
-          500: "#5C5953",
-          600: "#3F3D38",
-          700: "#26241F",
-          800: "#141310",
-          900: "#0A0A0A",
+          50: "#FAFAF7",
+          100: "#F0EEE8",
+          200: "#DEDBD3",
+          300: "#BFBBB1",
+          400: "#85807A",
+          500: "#5A5650",
+          600: "#3D3933",
+          700: "#231F1A",
+          800: "#15110D",
+          900: "#0A0805",
         },
-        vermilion: {
-          50: "#FFF1EB",
-          100: "#FFE0D3",
-          200: "#FFC1A6",
-          300: "#FF9A75",
-          400: "#FF7544",
-          500: "#FF5C28",
-          600: "#E84416",
-          700: "#C03511",
-          800: "#8E2509",
-          900: "#5A1604",
+        // Ember: matches the logo's #DC2626 red. The agentd accent.
+        ember: {
+          50: "#FEF2F2",
+          100: "#FEE2E2",
+          200: "#FECACA",
+          300: "#FCA5A5",
+          400: "#F87171",
+          500: "#DC2626",
+          600: "#B91C1C",
+          700: "#991B1B",
+          800: "#7F1D1D",
+          900: "#450A0A",
         },
 
         // ── shadcn semantic tokens (mapped per-mode in index.css) ────
@@ -101,8 +104,9 @@ const config: Config = {
         "2xs": ["0.6875rem", { lineHeight: "1rem" }],
       },
       boxShadow: {
-        edit: "0 1px 0 rgba(10, 10, 10, 0.06), 0 12px 30px -16px rgba(10, 10, 10, 0.2)",
-        deep: "0 30px 80px -30px rgba(10, 10, 10, 0.35)",
+        edit: "0 1px 0 rgba(10, 8, 5, 0.06), 0 12px 30px -16px rgba(10, 8, 5, 0.2)",
+        deep: "0 30px 80px -30px rgba(10, 8, 5, 0.35)",
+        glow: "0 0 0 3px rgba(220, 38, 38, 0.18)",
       },
       backgroundImage: {
         noise:
@@ -125,12 +129,22 @@ const config: Config = {
           "0%, 100%": { opacity: "1" },
           "50%": { opacity: "0.35" },
         },
+        pulse_ring: {
+          "0%": { transform: "scale(0.8)", opacity: "0.6" },
+          "100%": { transform: "scale(2.2)", opacity: "0" },
+        },
+        ticker_in: {
+          "0%": { opacity: "0", transform: "translateY(8px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
       },
       animation: {
         shimmer: "shimmer 2s linear infinite",
         "fade-in": "fade-in 0.25s ease-out both",
         rise: "rise 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both",
         blink: "blink 1.6s ease-in-out infinite",
+        "pulse-ring": "pulse_ring 1.6s cubic-bezier(0.2, 0.7, 0.2, 1) infinite",
+        "ticker-in": "ticker_in 0.4s ease-out both",
       },
     },
   },

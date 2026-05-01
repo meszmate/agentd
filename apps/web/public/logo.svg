@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 140" width="480" height="140" role="img" aria-label="/agentd">
+  <title>/agentd</title>
+  <text
+    x="50%"
+    y="50%"
+    text-anchor="middle"
+    dominant-baseline="central"
+    font-family="Inter, 'Helvetica Neue', 'Arial Black', Arial, sans-serif"
+    font-weight="700"
+    font-size="96"
+    letter-spacing="-4">
+    <tspan fill="#dc2626">/</tspan><tspan fill="#0a0a0a">agentd</tspan>
+  </text>
+</svg>

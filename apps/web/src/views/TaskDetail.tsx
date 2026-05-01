@@ -66,6 +66,14 @@ export function TaskDetail({ task }: { task: Task }) {
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  const [lastToolHint, setLastToolHint] = useState<string | null>(null);
+  /**
+   * In-flight streaming bubbles — one per content-block. Accumulates
+   * `message_delta` events into the bubble's text; `message_end` removes
+   * the bubble (the final committed text arrives via the regular
+   * `message` event right after).
+   */
+  const [streams, setStreams] = useState<Record<string, string>>({});
   const [workspaceOpen, setWorkspaceOpen] = useState<boolean>(() => {
     const v = localStorage.getItem(WORKSPACE_OPEN_KEY);
     return v == null ? true : v === "1";
@@ -110,7 +118,28 @@ export function TaskDetail({ task }: { task: Task }) {
       if (evTaskId !== task.id) return;
       if (event.kind === "message") {
         appendLocal(event.role, event.text);
+        setLastToolHint(null);
+      } else if (event.kind === "message_delta") {
+        setStreams((prev) => ({
+          ...prev,
+          [event.streamId]: (prev[event.streamId] ?? "") + event.delta,
+        }));
+      } else if (event.kind === "message_end") {
+        setStreams((prev) => {
+          if (!(event.streamId in prev)) return prev;
+          const next = { ...prev };
+          delete next[event.streamId];
+          return next;
+        });
       } else if (event.kind === "tool_call") {
+        const args =
+          typeof event.args === "object" && event.args
+            ? Object.entries(event.args)
+                .slice(0, 1)
+                .map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 40)}`)
+                .join(" ")
+            : "";
+        setLastToolHint(`→ ${event.tool}${args ? " " + args : ""}`);
         appendLocal(
           "tool",
           `[${event.tool}] ${JSON.stringify(event.args).slice(0, 400)}`,
@@ -129,6 +158,9 @@ export function TaskDetail({ task }: { task: Task }) {
         event.kind === "exit" ||
         event.kind === "usage"
       ) {
+        if (event.kind === "exit" || event.kind === "status") {
+          setLastToolHint(null);
+        }
         void qc.invalidateQueries({ queryKey: qk.tasks() });
         void qc.invalidateQueries({ queryKey: qk.task(task.id) });
       }
@@ -146,6 +178,13 @@ export function TaskDetail({ task }: { task: Task }) {
     task.status === "done" ||
     task.status === "failed" ||
     task.status === "stopped";
+  // The chat input should ONLY be locked while the agent is mid-turn —
+  // a finished task can be continued via `--continue` (the daemon spawns
+  // a fresh runner inside sendInput).
+  const isRunning =
+    task.status === "running" ||
+    task.status === "waiting_input" ||
+    task.status === "waiting_perm";
 
   const onStop = async () => {
     try {
@@ -168,7 +207,7 @@ export function TaskDetail({ task }: { task: Task }) {
 
   const statusTone =
     task.status === "running"
-      ? "bg-vermilion-500/10 text-vermilion-700 dark:text-vermilion-300"
+      ? "bg-ember-500/10 text-ember-700 dark:text-ember-300"
       : task.status === "done"
       ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
       : task.status === "failed"
@@ -204,6 +243,7 @@ export function TaskDetail({ task }: { task: Task }) {
         <Spacer />
 
         {/* stats */}
+        <ContextUsage totalTokens={totalTokens} />
         <span className="hidden md:flex items-center gap-3 font-mono text-[11px] tabular-nums text-ink-400 dark:text-ink-500">
           <span>{formatTokens(totalTokens)} tok</span>
           <span>{formatCost(task.totalCostUsd)}</span>
@@ -269,7 +309,7 @@ export function TaskDetail({ task }: { task: Task }) {
       </PageTopbar>
 
       {/* Sub-strip: branch, repo, base */}
-      <div className="flex h-9 items-center gap-3 px-5 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-cream-100/30 dark:bg-ink-50/[0.015] shrink-0 overflow-x-auto">
+      <div className="flex h-9 items-center gap-3 px-5 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900 shrink-0 overflow-x-auto">
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500 shrink-0">
           {task.agent}
         </span>
@@ -284,6 +324,37 @@ export function TaskDetail({ task }: { task: Task }) {
         <span className="font-mono text-[11px] text-ink-500 dark:text-ink-400 truncate">
           {task.repoPath}
         </span>
+        {(task.skills?.length ?? 0) > 0 && (
+          <>
+            <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
+            <div className="flex items-center gap-1 shrink-0">
+              {task.skills!.map((id) => (
+                <span
+                  key={id}
+                  title={id}
+                  className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] bg-ember-500/10 text-ember-700 dark:text-ember-300 border border-ember-500/20"
+                >
+                  ◆ {id.split(":")[1]}
+                </span>
+              ))}
+            </div>
+          </>
+        )}
+        {task.permissionMode && task.permissionMode !== "bypassPermissions" && (
+          <>
+            <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
+            <span
+              title={
+                task.permissionMode === "plan"
+                  ? "read-only — agent cannot modify files"
+                  : "auto-allow file edits, refuse other tools"
+              }
+              className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/20 shrink-0"
+            >
+              {task.permissionMode === "plan" ? "plan" : "accept-edits"}
+            </span>
+          </>
+        )}
       </div>
 
       {/* Body */}
@@ -296,10 +367,13 @@ export function TaskDetail({ task }: { task: Task }) {
                 messages={messages}
                 appendLocal={appendLocal}
                 onError={onError}
-                disabled={isTerminal}
+                disabled={isRunning}
+                lastToolHint={lastToolHint}
+                streams={streams}
+                totalTokens={totalTokens}
               />
             </Panel>
-            <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-vermilion-500/40 transition-colors dark:bg-ink-50/10" />
+            <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-ember-500/40 transition-colors dark:bg-ink-50/10" />
             <Panel id={`ws-${task.id}`} defaultSize={48} minSize={28}>
               <TaskWorkspace task={task} onError={onError} />
             </Panel>
@@ -310,7 +384,10 @@ export function TaskDetail({ task }: { task: Task }) {
             messages={messages}
             appendLocal={appendLocal}
             onError={onError}
-            disabled={isTerminal}
+            disabled={isRunning}
+                lastToolHint={lastToolHint}
+                streams={streams}
+                totalTokens={totalTokens}
           />
         )}
       </div>
@@ -331,7 +408,7 @@ function LiveBadge({ live, terminal }: { live: boolean; terminal: boolean }) {
       className={cn(
         "flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.08em]",
         live
-          ? "text-vermilion-700 dark:text-vermilion-300"
+          ? "text-ember-700 dark:text-ember-300"
           : "text-ink-400 dark:text-ink-500",
       )}
     >
@@ -339,11 +416,53 @@ function LiveBadge({ live, terminal }: { live: boolean; terminal: boolean }) {
         className={cn(
           "h-1.5 w-1.5 rounded-full",
           live
-            ? "bg-vermilion-500 animate-blink"
+            ? "bg-ember-500 animate-blink"
             : "bg-ink-300 dark:bg-ink-600",
         )}
       />
       {live ? "live" : "off"}
     </span>
+  );
+}
+
+function ContextUsage({ totalTokens }: { totalTokens: number }) {
+  const window = 200_000;
+  const pct = Math.min(100, Math.round((totalTokens / window) * 100));
+  const tone =
+    pct >= 80 ? "danger" : pct >= 60 ? "warn" : "ok";
+  const dot =
+    tone === "danger"
+      ? "bg-red-500 animate-blink"
+      : tone === "warn"
+      ? "bg-amber-500"
+      : "bg-emerald-500";
+  const text =
+    tone === "danger"
+      ? "text-red-700 dark:text-red-300"
+      : tone === "warn"
+      ? "text-amber-700 dark:text-amber-300"
+      : "text-ink-400 dark:text-ink-500";
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            className={cn(
+              "hidden md:inline-flex items-center gap-1.5 font-mono text-[10px] tabular-nums uppercase tracking-[0.06em] cursor-help",
+              text,
+            )}
+          >
+            <span className={cn("h-1.5 w-1.5 rounded-full", dot)} />
+            ctx {pct}%
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>
+          <span className="font-mono text-[10px]">
+            {totalTokens.toLocaleString()} / {window.toLocaleString()} ·
+            open the Context tab to compact
+          </span>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }

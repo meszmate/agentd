@@ -1,5 +1,10 @@
 import { eq, desc } from "drizzle-orm";
-import type { Task, TaskStatus, Message } from "@agentd/contracts";
+import type {
+  Message,
+  PermissionMode,
+  Task,
+  TaskStatus,
+} from "@agentd/contracts";
 import type { Db } from "./db.ts";
 import { tasks, messages } from "./db.ts";
 import { newId } from "./auth.ts";
@@ -14,11 +19,25 @@ export interface CreateTaskInput {
   baseBranch: string;
   templateId?: string | null;
   scheduleId?: string | null;
+  projectId?: string | null;
   autoPush?: boolean;
   autoPr?: boolean;
+  skills?: string[];
+  permissionMode?: PermissionMode;
 }
 
 function rowToTask(row: typeof tasks.$inferSelect): Task {
+  let parsedSkills: string[] = [];
+  if (row.skillsJson) {
+    try {
+      const arr = JSON.parse(row.skillsJson);
+      if (Array.isArray(arr)) {
+        parsedSkills = arr.filter((s): s is string => typeof s === "string");
+      }
+    } catch {
+      // ignore
+    }
+  }
   return {
     id: row.id,
     title: row.title,
@@ -32,6 +51,7 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     updatedAt: row.updatedAt,
     templateId: row.templateId ?? null,
     scheduleId: row.scheduleId ?? null,
+    projectId: row.projectId ?? null,
     autoPush: row.autoPush === 1,
     autoPr: row.autoPr === 1,
     prUrl: row.prUrl ?? null,
@@ -40,6 +60,9 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     totalCacheReadTokens: row.totalCacheReadTokens ?? 0,
     totalCacheWriteTokens: row.totalCacheWriteTokens ?? 0,
     totalCostUsd: row.totalCostUsd != null ? Number(row.totalCostUsd) : null,
+    skills: parsedSkills,
+    permissionMode:
+      (row.permissionMode as PermissionMode | undefined) ?? "bypassPermissions",
   };
 }
 
@@ -60,6 +83,7 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       updatedAt: now,
       templateId: input.templateId ?? null,
       scheduleId: input.scheduleId ?? null,
+      projectId: input.projectId ?? null,
       autoPush: input.autoPush ? 1 : 0,
       autoPr: input.autoPr ? 1 : 0,
       prUrl: null,
@@ -68,6 +92,8 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       totalCacheReadTokens: 0,
       totalCacheWriteTokens: 0,
       totalCostUsd: null,
+      skillsJson: JSON.stringify(input.skills ?? []),
+      permissionMode: input.permissionMode ?? "bypassPermissions",
     })
     .run();
   return getTask(db, id)!;

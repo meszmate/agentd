@@ -1,4 +1,4 @@
-import { Bot, GrammyError, HttpError } from "grammy";
+import { Bot, GrammyError, HttpError, InlineKeyboard } from "grammy";
 import { AgentdClient } from "@agentd/client";
 import type { Task, WsServerEvent } from "@agentd/contracts";
 
@@ -8,7 +8,6 @@ interface BotConfig {
   session: string;
   allowedChatIds: Set<number>;
   allowedUserIds: Set<number>;
-  defaultRepo: string | null;
 }
 
 function parseIdList(raw: string | undefined): Set<number> {
@@ -47,7 +46,6 @@ function loadConfig(): BotConfig {
     session,
     allowedChatIds,
     allowedUserIds,
-    defaultRepo: process.env.AGENTD_DEFAULT_REPO ?? null,
   };
 }
 
@@ -83,6 +81,20 @@ async function main() {
 
   // Per-chat current task focus, so user can `/in <text>` without an id.
   const focus = new Map<number, string>();
+
+  // Pending /new prompts waiting for a project tap. Cleared on tap or after 10m.
+  interface PendingNew {
+    prompt: string;
+    chatId: number;
+    expiresAt: number;
+  }
+  const pending = new Map<string, PendingNew>(); // key = short id
+  const newPendingId = (): string =>
+    Math.random().toString(36).slice(2, 10);
+  setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of pending) if (v.expiresAt < now) pending.delete(k);
+  }, 60_000);
 
   /**
    * Two-axis check: a request is allowed only if the chat is on the chat
@@ -127,7 +139,7 @@ async function main() {
         "agentd telegram bridge",
         "",
         "Tasks:",
-        "/new <repo?> <prompt> — spawn a task",
+        "/new <prompt> — spawn a task (you'll be asked which project)",
         "/ls — list tasks",
         "/show <id?> — show task (or focused)",
         "/in <text> — send input to focused task",
@@ -140,8 +152,6 @@ async function main() {
         "/tpl — list templates",
         "/run <template> [k=v ...] — fire a template",
         "/sched — list schedules",
-        "",
-        cfg.defaultRepo ? `default repo: ${cfg.defaultRepo}` : "(no default repo set)",
       ].join("\n"),
     );
   });
@@ -157,29 +167,99 @@ async function main() {
     }
   });
 
+  /**
+   * /new spawns a task. We never accept a path here — instead we always
+   * list saved projects as inline buttons and let the user tap one. The
+   * tap fires a callback handled below, which spawns the task at the
+   * chosen project's path.
+   */
   bot.command("new", async (ctx) => {
-    const text = (ctx.match || "").toString().trim();
-    if (!text) return ctx.reply("usage: /new [repo] <prompt>");
-    let repo = cfg.defaultRepo;
-    let prompt = text;
-    if (text.startsWith("/") || text.startsWith("~")) {
-      const parts = text.split(/\s+/);
-      repo = parts[0] ?? null;
-      prompt = parts.slice(1).join(" ");
+    const prompt = (ctx.match || "").toString().trim();
+    if (!prompt) return ctx.reply("usage: /new <prompt>");
+
+    let projects: Awaited<ReturnType<typeof client.listProjects>>["projects"];
+    try {
+      projects = (await client.listProjects()).projects;
+    } catch (e) {
+      return ctx.reply(`failed to list projects: ${(e as Error).message}`);
     }
-    if (!repo) return ctx.reply("no repo. set AGENTD_DEFAULT_REPO or pass an absolute path as first arg.");
-    if (!prompt) return ctx.reply("usage: /new [repo] <prompt>");
+    if (projects.length === 0) {
+      return ctx.reply(
+        "No projects yet — open the agentd web UI and add one (composer → 'Add project').",
+      );
+    }
+
+    const id = newPendingId();
+    pending.set(id, {
+      prompt,
+      chatId: ctx.chat!.id,
+      expiresAt: Date.now() + 10 * 60 * 1000,
+    });
+
+    const kb = new InlineKeyboard();
+    for (const p of projects.slice(0, 24)) {
+      const live = (p.activeCount ?? 0) > 0 ? ` · ${p.activeCount} live` : "";
+      kb.text(`${p.name}${live}`, `new:${id}:${p.id}`).row();
+    }
+    kb.text("Cancel", `new:${id}:cancel`);
+
+    await ctx.reply(
+      `Pick a project for: \`${escape(prompt.slice(0, 200))}\``,
+      { parse_mode: "MarkdownV2", reply_markup: kb },
+    );
+  });
+
+  // Callback router for the /new project picker.
+  bot.callbackQuery(/^new:([^:]+):(.+)$/, async (ctx) => {
+    const m = ctx.match;
+    const pendId = m[1] ?? "";
+    const projectId = m[2] ?? "";
+    const p = pending.get(pendId);
+    if (!p) {
+      await ctx.answerCallbackQuery({ text: "expired — re-run /new" });
+      try { await ctx.editMessageText("(expired)"); } catch {}
+      return;
+    }
+    if (projectId === "cancel") {
+      pending.delete(pendId);
+      await ctx.answerCallbackQuery({ text: "cancelled" });
+      try { await ctx.editMessageText("cancelled."); } catch {}
+      return;
+    }
+    let project: Awaited<ReturnType<typeof client.getProject>>["project"];
+    try {
+      project = (await client.getProject(projectId)).project;
+    } catch (e) {
+      await ctx.answerCallbackQuery({ text: "project gone" });
+      try {
+        await ctx.editMessageText(`project lookup failed: ${(e as Error).message}`);
+      } catch {}
+      return;
+    }
+    pending.delete(pendId);
+    await ctx.answerCallbackQuery({ text: `spawning in ${project.name}` });
     try {
       const { task } = await client.createTask({
         agent: "claude",
-        repoPath: repo,
+        repoPath: project.path,
         baseBranch: "main",
-        prompt,
+        prompt: p.prompt,
       });
-      focus.set(ctx.chat!.id, task.id);
-      await ctx.reply(`spawned ${task.id}\nbranch: ${task.branch}\nfocused.`);
+      focus.set(p.chatId, task.id);
+      try {
+        await ctx.editMessageText(
+          `spawned in *${escape(project.name)}*\nid: \`${escape(task.id.slice(-8))}\`\nbranch: \`${escape(task.branch)}\`\n_focused — your next plain message goes to this task._`,
+          { parse_mode: "MarkdownV2" },
+        );
+      } catch {
+        await bot.api.sendMessage(p.chatId, `spawned ${task.id} in ${project.name}`);
+      }
     } catch (e) {
-      await ctx.reply(`new failed: ${(e as Error).message}`);
+      try {
+        await ctx.editMessageText(`new failed: ${(e as Error).message}`);
+      } catch {
+        await bot.api.sendMessage(p.chatId, `new failed: ${(e as Error).message}`);
+      }
     }
   });
 

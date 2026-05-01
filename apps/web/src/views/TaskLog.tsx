@@ -1,6 +1,7 @@
 import { Loader2, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useLog, useRevertCommit } from "@/queries";
 import { formatTsAbsolute, shortSha } from "@/lib/utils";
 
@@ -25,8 +26,17 @@ export function TaskLog({
 
   if (logQ.isLoading) {
     return (
-      <div className="flex h-full items-center justify-center text-xs text-ink-500 dark:text-ink-400">
-        Loading log…
+      <div className="px-5 py-3 space-y-3">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <div key={i} className="flex items-start gap-3">
+            <Skeleton className="h-3 w-3 rounded-full mt-1" />
+            <Skeleton className="h-3 w-12 mt-0.5" />
+            <div className="flex-1 space-y-1.5">
+              <Skeleton className="h-3 w-3/4" />
+              <Skeleton className="h-2.5 w-1/2" />
+            </div>
+          </div>
+        ))}
       </div>
     );
   }
@@ -43,9 +53,9 @@ export function TaskLog({
       <ol className="relative pl-9 pr-3 py-3 before:absolute before:left-3 before:top-3 before:bottom-3 before:w-px before:bg-ink-900/10 dark:before:bg-ink-50/10">
         {logQ.data.log.map((c) => (
           <li key={c.sha} className="relative pb-4 last:pb-0">
-            <span className="absolute -left-9 top-1.5 flex h-3 w-3 items-center justify-center rounded-full bg-vermilion-500 ring-4 ring-cream-50 dark:ring-ink-900" />
+            <span className="absolute -left-9 top-1.5 flex h-3 w-3 items-center justify-center rounded-full bg-ember-500 ring-4 ring-paper-50 dark:ring-ink-900" />
             <div className="flex items-start gap-3">
-              <code className="font-mono text-2xs font-bold text-vermilion-700 dark:text-vermilion-300 mt-0.5 shrink-0">
+              <code className="font-mono text-2xs font-bold text-ember-700 dark:text-ember-300 mt-0.5 shrink-0">
                 {shortSha(c.sha)}
               </code>
               <div className="flex-1 min-w-0">

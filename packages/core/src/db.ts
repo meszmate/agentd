@@ -19,6 +19,7 @@ export const tasks = sqliteTable("tasks", {
   updatedAt: integer("updated_at").notNull(),
   templateId: text("template_id"),
   scheduleId: text("schedule_id"),
+  projectId: text("project_id"),
   autoPush: integer("auto_push").notNull().default(0),
   autoPr: integer("auto_pr").notNull().default(0),
   prUrl: text("pr_url"),
@@ -27,6 +28,18 @@ export const tasks = sqliteTable("tasks", {
   totalCacheReadTokens: integer("total_cache_read_tokens").notNull().default(0),
   totalCacheWriteTokens: integer("total_cache_write_tokens").notNull().default(0),
   totalCostUsd: text("total_cost_usd"),
+  skillsJson: text("skills_json").notNull().default("[]"),
+  permissionMode: text("permission_mode").notNull().default("bypassPermissions"),
+});
+
+export const projects = sqliteTable("projects", {
+  id: text("id").primaryKey(),
+  slug: text("slug").notNull().unique(),
+  name: text("name").notNull(),
+  path: text("path").notNull().unique(),
+  color: text("color"),
+  createdAt: integer("created_at").notNull(),
+  lastActiveAt: integer("last_active_at").notNull(),
 });
 
 export const templates = sqliteTable("templates", {
@@ -118,7 +131,20 @@ CREATE TABLE IF NOT EXISTS tasks (
   total_output_tokens INTEGER NOT NULL DEFAULT 0,
   total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
   total_cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-  total_cost_usd TEXT
+  total_cost_usd TEXT,
+  skills_json TEXT NOT NULL DEFAULT '[]',
+  project_id TEXT,
+  permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions'
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+  id TEXT PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  path TEXT NOT NULL UNIQUE,
+  color TEXT,
+  created_at INTEGER NOT NULL,
+  last_active_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS templates (
@@ -205,6 +231,9 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE tasks ADD COLUMN total_cache_read_tokens INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE tasks ADD COLUMN total_cache_write_tokens INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE tasks ADD COLUMN total_cost_usd TEXT",
+  "ALTER TABLE tasks ADD COLUMN skills_json TEXT NOT NULL DEFAULT '[]'",
+  "ALTER TABLE tasks ADD COLUMN project_id TEXT",
+  "ALTER TABLE tasks ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions'",
 ];
 
 function migrate(sqlite: Database): void {

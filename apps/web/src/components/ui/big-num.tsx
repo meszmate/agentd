@@ -46,7 +46,7 @@ export function StatCell({
           {label}
         </span>
         {accent && (
-          <span className="size-1.5 rounded-full bg-vermilion-500 animate-blink" />
+          <span className="size-1.5 rounded-full bg-ember-500 animate-blink" />
         )}
         {(href || onClick) && (
           <span className="ml-auto text-[10px] text-ink-300 dark:text-ink-600 group-hover:text-ink-500 dark:group-hover:text-ink-400 transition-colors">
@@ -66,7 +66,7 @@ export function StatCell({
   const baseClass = cn(
     "group px-5 py-4 transition-colors",
     !last && "border-r border-ink-900/10 dark:border-ink-50/10",
-    (href || onClick) && "hover:bg-cream-100/40 dark:hover:bg-ink-50/[0.02]",
+    (href || onClick) && "hover:bg-paper-100 dark:hover:bg-ink-700",
   );
 
   if (href) {

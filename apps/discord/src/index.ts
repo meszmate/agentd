@@ -1,7 +1,11 @@
 import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   Client,
   Events,
   GatewayIntentBits,
+  type ButtonInteraction,
   type Message,
   type TextBasedChannel,
 } from "discord.js";
@@ -14,7 +18,6 @@ interface BotConfig {
   session: string;
   allowedChannelIds: Set<string>;
   allowedUserIds: Set<string>;
-  defaultRepo: string | null;
 }
 
 function parseIdList(raw: string | undefined): Set<string> {
@@ -51,7 +54,6 @@ function loadConfig(): BotConfig {
     session,
     allowedChannelIds,
     allowedUserIds,
-    defaultRepo: process.env.AGENTD_DEFAULT_REPO ?? null,
   };
 }
 
@@ -100,6 +102,19 @@ async function main() {
   // channelId → focused taskId
   const focus = new Map<string, string>();
 
+  // Pending /new prompts waiting on a project button. key → prompt + chan + ts.
+  interface PendingNew {
+    prompt: string;
+    channelId: string;
+    expiresAt: number;
+  }
+  const pending = new Map<string, PendingNew>();
+  const newPendingId = (): string => Math.random().toString(36).slice(2, 10);
+  setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of pending) if (v.expiresAt < now) pending.delete(k);
+  }, 60_000);
+
   /**
    * Same two-axis rule as Telegram. If both lists are configured, BOTH must
    * match (channel allowed AND user allowed). If only one is configured, that
@@ -139,26 +154,62 @@ async function main() {
     if (!isAllowed(channelId, userId)) return;
 
     if (text.startsWith("!new ")) {
-      const rest = text.slice(5).trim();
-      let repo = cfg.defaultRepo;
-      let prompt = rest;
-      if (rest.startsWith("/") || rest.startsWith("~")) {
-        const parts = rest.split(/\s+/);
-        repo = parts[0] ?? null;
-        prompt = parts.slice(1).join(" ");
-      }
-      if (!repo || !prompt) return send(channel, "usage: !new [repo-path] <prompt>");
+      const prompt = text.slice(5).trim();
+      if (!prompt) return send(channel, "usage: !new <prompt>");
+      let projects: Awaited<ReturnType<typeof client.listProjects>>["projects"];
       try {
-        const { task } = await client.createTask({
-          agent: "claude",
-          repoPath: repo,
-          baseBranch: "main",
-          prompt,
-        });
-        focus.set(channelId, task.id);
-        await send(channel, `spawned **${task.id}** on \`${task.branch}\`. focused.`);
+        projects = (await client.listProjects()).projects;
       } catch (e) {
-        await send(channel, `new failed: ${(e as Error).message}`);
+        return send(channel, `failed to list projects: ${(e as Error).message}`);
+      }
+      if (projects.length === 0) {
+        return send(
+          channel,
+          "No projects yet — open the agentd web UI and add one.",
+        );
+      }
+      const id = newPendingId();
+      pending.set(id, {
+        prompt,
+        channelId,
+        expiresAt: Date.now() + 10 * 60 * 1000,
+      });
+      // Discord caps action rows at 5 buttons each, max 5 rows = 25 buttons.
+      const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+      let row = new ActionRowBuilder<ButtonBuilder>();
+      let count = 0;
+      for (const p of projects.slice(0, 24)) {
+        const live = (p.activeCount ?? 0) > 0 ? ` · ${p.activeCount}↑` : "";
+        const label = `${p.name}${live}`.slice(0, 80);
+        row.addComponents(
+          new ButtonBuilder()
+            .setCustomId(`new:${id}:${p.id}`)
+            .setLabel(label)
+            .setStyle(ButtonStyle.Secondary),
+        );
+        count += 1;
+        if (count % 5 === 0) {
+          rows.push(row);
+          row = new ActionRowBuilder<ButtonBuilder>();
+        }
+      }
+      if (row.components.length > 0) rows.push(row);
+      // Cancel row
+      rows.push(
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`new:${id}:cancel`)
+            .setLabel("Cancel")
+            .setStyle(ButtonStyle.Danger),
+        ),
+      );
+      if ("send" in channel) {
+        await (channel as TextBasedChannel & {
+          send: (m: { content: string; components: typeof rows }) => Promise<unknown>;
+        }).send({
+          content: `Pick a project for: \`${prompt.slice(0, 200)}\``,
+          components: rows,
+        });
       }
       return;
     }
@@ -241,7 +292,7 @@ async function main() {
     if (text === "!help") {
       await send(channel, [
         "**agentd discord bridge**",
-        "`!new [repo] <prompt>` — spawn a task",
+        "`!new <prompt>` — spawn a task (you'll be asked which project)",
         "`!ls` — list tasks",
         "`!use <id>` — focus a task",
         "`!show` — show focused task",
@@ -315,6 +366,65 @@ async function main() {
       await msg.react("✅").catch(() => {});
     } catch (e) {
       await send(channel, (e as Error).message);
+    }
+  });
+
+  // Project-picker button handler.
+  bot.on(Events.InteractionCreate, async (interaction) => {
+    if (!interaction.isButton()) return;
+    const btn = interaction as ButtonInteraction;
+    const m = /^new:([^:]+):(.+)$/.exec(btn.customId);
+    if (!m) return;
+    const pendId = m[1] ?? "";
+    const projectId = m[2] ?? "";
+    if (!isAllowed(btn.channelId ?? "", btn.user.id)) {
+      await btn.reply({ content: "not allowed", ephemeral: true }).catch(() => {});
+      return;
+    }
+    const p = pending.get(pendId);
+    if (!p) {
+      await btn.update({ content: "(expired)", components: [] }).catch(() => {});
+      return;
+    }
+    if (projectId === "cancel") {
+      pending.delete(pendId);
+      await btn.update({ content: "cancelled.", components: [] }).catch(() => {});
+      return;
+    }
+    let project: Awaited<ReturnType<typeof client.getProject>>["project"];
+    try {
+      project = (await client.getProject(projectId)).project;
+    } catch (e) {
+      await btn
+        .update({
+          content: `project lookup failed: ${(e as Error).message}`,
+          components: [],
+        })
+        .catch(() => {});
+      return;
+    }
+    pending.delete(pendId);
+    try {
+      const { task } = await client.createTask({
+        agent: "claude",
+        repoPath: project.path,
+        baseBranch: "main",
+        prompt: p.prompt,
+      });
+      focus.set(p.channelId, task.id);
+      await btn
+        .update({
+          content: `spawned in **${project.name}** → \`${task.id.slice(-8)}\` on \`${task.branch}\` _(focused)_`,
+          components: [],
+        })
+        .catch(() => {});
+    } catch (e) {
+      await btn
+        .update({
+          content: `new failed: ${(e as Error).message}`,
+          components: [],
+        })
+        .catch(() => {});
     }
   });
 

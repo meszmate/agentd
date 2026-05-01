@@ -12,6 +12,8 @@ import {
 import { SectionHeader } from "@/components/ui/section-header";
 import { FilterPills } from "@/components/ui/filter-pills";
 import { useTasks } from "@/queries";
+import { useRecentPulse } from "@/realtime";
+import { Skeleton, SkeletonRow } from "@/components/ui/skeleton";
 import {
   cn,
   formatCost,
@@ -50,7 +52,7 @@ export function Tasks() {
             Task <span className="font-mono">{shortId(taskId)}</span> not
             found.
           </span>
-          <Link to="/tasks" className="text-vermilion-600 hover:underline">
+          <Link to="/tasks" className="text-ember-600 hover:underline">
             Back to tasks
           </Link>
         </div>
@@ -135,7 +137,7 @@ function TasksList({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
         {counts.active > 0 && (
           <>
             <span className="text-ink-300 dark:text-ink-600">·</span>
-            <span className="font-mono text-[11px] tabular-nums text-vermilion-700 dark:text-vermilion-300">
+            <span className="font-mono text-[11px] tabular-nums text-ember-700 dark:text-ember-300">
               {counts.active} active
             </span>
           </>
@@ -144,7 +146,7 @@ function TasksList({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
       </PageTopbar>
 
       {/* Filter strip */}
-      <div className="flex items-center gap-3 border-b border-ink-900/10 dark:border-ink-50/10 px-5 py-2 shrink-0 bg-cream-100/30 dark:bg-ink-50/[0.015]">
+      <div className="flex items-center gap-3 border-b border-ink-900/10 dark:border-ink-50/10 px-5 py-2 shrink-0 bg-paper-50 dark:bg-ink-900">
         <FilterPills
           options={[
             { key: "all", label: "All", count: counts.all },
@@ -184,9 +186,7 @@ function TasksList({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
       {/* Lanes */}
       <div className="flex-1 min-h-0 overflow-y-auto">
         {loading && tasks.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-[12px] text-ink-500 dark:text-ink-400">
-            Loading tasks…
-          </div>
+          <SkeletonLanes />
         ) : tasks.length === 0 ? (
           <EmptyState />
         ) : filtered.length === 0 ? (
@@ -251,7 +251,7 @@ function Lane({
             className={cn(
               "font-mono text-[10px] tabular-nums",
               accent
-                ? "text-vermilion-700 dark:text-vermilion-300"
+                ? "text-ember-700 dark:text-ember-300"
                 : "text-ink-400 dark:text-ink-500",
             )}
           >
@@ -272,13 +272,23 @@ function Lane({
 function TaskRow({ task }: { task: Task }) {
   const totalTok =
     (task.totalInputTokens ?? 0) + (task.totalOutputTokens ?? 0);
+  const hot = useRecentPulse(task.id, 1500);
 
   return (
     <li>
       <Link
         to={`/tasks/${task.id}`}
-        className="group h-12 px-5 flex items-center gap-3 hover:bg-cream-100/40 transition-colors dark:hover:bg-ink-50/[0.02]"
+        className={cn(
+          "group h-12 px-5 flex items-center gap-3 hover:bg-paper-100 transition-colors dark:hover:bg-ink-700 relative",
+          hot && "bg-ember-500/[0.06] dark:bg-ember-500/[0.1]",
+        )}
       >
+        {hot && (
+          <span
+            aria-hidden
+            className="absolute inset-y-0 left-0 w-0.5 bg-ember-500 animate-blink"
+          />
+        )}
         <StatusDotSm status={task.status} />
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <span className="text-[13px] font-medium text-ink-900 dark:text-ink-50 truncate shrink-0 max-w-[42ch]">
@@ -292,7 +302,7 @@ function TaskRow({ task }: { task: Task }) {
             {task.branch}
           </span>
           {task.prUrl && (
-            <span className="shrink-0 inline-flex h-4 px-1 rounded text-[9px] font-medium uppercase tracking-[0.08em] bg-vermilion-500/10 text-vermilion-700 dark:text-vermilion-300">
+            <span className="shrink-0 inline-flex h-4 px-1 rounded text-[9px] font-medium uppercase tracking-[0.08em] bg-ember-500/10 text-ember-700 dark:text-ember-300">
               pr
             </span>
           )}
@@ -314,7 +324,7 @@ function TaskRow({ task }: { task: Task }) {
 function StatusDotSm({ status }: { status: TaskStatus }) {
   const tone =
     status === "running"
-      ? "bg-vermilion-500 animate-blink"
+      ? "bg-ember-500 animate-blink"
       : status === "done"
       ? "bg-emerald-500"
       : status === "failed"
@@ -342,6 +352,26 @@ function EmptyState() {
         or use the sidebar's New task button to spawn an agent in a fresh git
         worktree.
       </p>
+    </div>
+  );
+}
+
+function SkeletonLanes() {
+  return (
+    <div>
+      <div className="flex h-9 items-center gap-3 px-5 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-200 dark:bg-ink-800">
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500 font-medium">
+          Active
+        </span>
+        <span className="ml-auto">
+          <Skeleton className="h-3 w-6" />
+        </span>
+      </div>
+      <ul>
+        {Array.from({ length: 4 }).map((_, i) => (
+          <SkeletonRow key={i} />
+        ))}
+      </ul>
     </div>
   );
 }

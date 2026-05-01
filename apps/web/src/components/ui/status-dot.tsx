@@ -3,7 +3,7 @@ import type { TaskStatus } from "@agentd/contracts";
 
 const STATUS_COLOR: Record<TaskStatus, string> = {
   pending: "bg-ink-400 dark:bg-ink-500",
-  running: "bg-vermilion-500 animate-blink",
+  running: "bg-ember-500 animate-blink",
   waiting_input: "bg-amber-500 animate-blink",
   waiting_perm: "bg-amber-500 animate-blink",
   done: "bg-emerald-600 dark:bg-emerald-500",
@@ -53,7 +53,7 @@ export function StatusPill({
 }) {
   const tone =
     status === "running"
-      ? "border-vermilion-500/25 bg-vermilion-500/10 text-vermilion-700 dark:text-vermilion-300"
+      ? "border-ember-500/25 bg-ember-500/10 text-ember-700 dark:text-ember-300"
       : status === "done"
       ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
       : status === "failed"

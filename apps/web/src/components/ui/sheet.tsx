@@ -27,7 +27,7 @@ SheetOverlay.displayName = SheetPrimitive.Overlay.displayName;
 
 const sheetVariants = cva(
   [
-    "fixed z-50 gap-4 bg-cream-50 dark:bg-ink-800 shadow-deep",
+    "fixed z-50 gap-4 bg-paper-50 dark:bg-ink-800 shadow-deep",
     "border-ink-900/10 dark:border-ink-50/10",
     "transition ease-in-out",
     "data-[state=open]:animate-in data-[state=closed]:animate-out",
@@ -64,7 +64,7 @@ const SheetContent = React.forwardRef<
       {...props}
     >
       {children}
-      <SheetPrimitive.Close className="absolute right-4 top-4 rounded-md p-1 opacity-60 hover:bg-ink-900/[0.05] hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-vermilion-500/40 dark:hover:bg-ink-50/[0.05]">
+      <SheetPrimitive.Close className="absolute right-4 top-4 rounded-md p-1 opacity-60 hover:bg-ink-900/[0.05] hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ember-500/40 dark:hover:bg-ink-50/[0.05]">
         <X className="h-4 w-4" />
         <span className="sr-only">Close</span>
       </SheetPrimitive.Close>

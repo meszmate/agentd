@@ -1,4 +1,9 @@
-import type { AgentEvent, Task, AgentKind } from "@agentd/contracts";
+import type {
+  AgentEvent,
+  AgentKind,
+  PermissionMode,
+  Task,
+} from "@agentd/contracts";
 import {
   addTaskUsage,
   appendMessage,
@@ -12,6 +17,10 @@ import {
   listMessages,
   loadConfig,
   newId,
+  renderRepoContext,
+  renderSkillsCatalog,
+  ensureProjectForPath,
+  touchProject,
   pushBranch,
   removeWorktree,
   renderConfigTemplate,
@@ -43,6 +52,8 @@ export interface CreateTaskParams {
   autoPr?: boolean;
   templateId?: string | null;
   scheduleId?: string | null;
+  skills?: string[];
+  permissionMode?: PermissionMode;
 }
 
 export class TaskManager {
@@ -73,6 +84,9 @@ export class TaskManager {
     const title = params.title ?? params.prompt.split("\n")[0]!.slice(0, 80);
     const taskId = newId("task");
     const branch = `agentd/${slugify(title)}-${taskId.slice(-6)}`;
+    // Auto-create or look up the project for this repo path. Tasks belong
+    // to projects so the sidebar can group them and surface what's new.
+    const project = ensureProjectForPath(this.db, params.repoPath);
     const { worktreePath } = await createWorktree({
       repoPath: params.repoPath,
       worktreeRoot: this.paths.worktrees,
@@ -90,9 +104,13 @@ export class TaskManager {
       baseBranch,
       templateId: params.templateId ?? null,
       scheduleId: params.scheduleId ?? null,
+      projectId: project.id,
       autoPush: params.autoPush ?? false,
       autoPr: params.autoPr ?? false,
+      skills: params.skills ?? [],
+      permissionMode: params.permissionMode ?? "bypassPermissions",
     });
+    touchProject(this.db, project.id);
     appendMessage(this.db, task.id, "user", params.prompt);
     await this.spawnRunner(task, params.prompt, false);
     return task;
@@ -151,14 +169,57 @@ export class TaskManager {
       ts: Date.now(),
     });
     const cfg = loadConfig(this.paths.root);
+    // Two catalogs surface high-signal context to the agent without
+    // pasting bodies into the prompt:
+    //   1. Skills — agent reads SKILL.md when relevant.
+    //   2. Repo context — pins, conventions, service stacks. All in cwd
+    //      already, the catalog just tells the agent what's worth reading.
+    const catalog = renderSkillsCatalog(task.skills ?? [], {
+      agentdRoot: this.paths.root,
+      repoPath: task.repoPath,
+    });
+    if (catalog.entries.length > 0) {
+      this.bus.publish({
+        taskId: task.id,
+        event: {
+          kind: "raw",
+          stream: "stdout",
+          text: `[skills] catalog: ${catalog.entries.map((e) => e.id).join(", ")}`,
+        },
+        ts: Date.now(),
+      });
+    }
+    const repoCtx = renderRepoContext({ worktreePath: task.worktreePath });
+    if (repoCtx.sections.length > 0) {
+      const summary = repoCtx.sections
+        .map((s) => `${s.key}=${s.entries.length}`)
+        .join(" ");
+      this.bus.publish({
+        taskId: task.id,
+        event: {
+          kind: "raw",
+          stream: "stdout",
+          text: `[repo-ctx] ${summary}`,
+        },
+        ts: Date.now(),
+      });
+    }
+    const appendParts: string[] = [];
+    if (cfg.agentInstructions) appendParts.push(cfg.agentInstructions);
+    if (catalog.text) appendParts.push(catalog.text);
+    if (repoCtx.text) appendParts.push(repoCtx.text);
+    const appendSystemPrompt = appendParts.length
+      ? appendParts.join("\n\n---\n\n")
+      : undefined;
+    const additionalReadDirs = catalog.entries.map((e) => e.skillDir);
     try {
       await runner.start({
         prompt,
         cwd: task.worktreePath,
         resume,
-        ...(cfg.agentInstructions
-          ? { appendSystemPrompt: cfg.agentInstructions }
-          : {}),
+        ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
+        permissionMode: task.permissionMode ?? "bypassPermissions",
+        ...(additionalReadDirs.length ? { additionalReadDirs } : {}),
       });
     } catch (err) {
       const msg = (err as Error).message;

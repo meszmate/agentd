@@ -8,10 +8,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@agentd/agent-runner": "workspace:*",
     "@agentd/contracts": "workspace:*",
     "@agentd/core": "workspace:*",
-    "@agentd/agent-runner": "workspace:*",
+    "@lydell/node-pty": "^1.2.0-beta.12",
     "hono": "^4.6.13",
+    "node-pty": "^1.0.0",
     "qrcode-terminal": "^0.12.0",
     "zod": "^3.23.8"
   },

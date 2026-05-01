@@ -34,6 +34,14 @@ interface ClaudeStreamMessage {
   usage?: ClaudeUsage;
   total_cost_usd?: number;
   cost_usd?: number;
+  // Wrapped SSE streaming events when --include-partial-messages is on.
+  event?: {
+    type?: string;
+    index?: number;
+    delta?: { type?: string; text?: string; partial_json?: string };
+    content_block?: { type?: string; index?: number };
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 }
 
@@ -98,6 +106,14 @@ export class ClaudeRunner implements AgentRunner {
     if (opts.appendSystemPrompt && opts.appendSystemPrompt.trim().length > 0) {
       args.push("--append-system-prompt", opts.appendSystemPrompt);
     }
+    // Grant Claude access to extra dirs (active skill bundles) so it can
+    // Read their SKILL.md / scripts on demand. Each dir is a separate
+    // --add-dir occurrence; Claude dedupes against cwd internally.
+    if (opts.additionalReadDirs?.length) {
+      for (const d of opts.additionalReadDirs) {
+        args.push("--add-dir", d);
+      }
+    }
     if (this.opts.model) args.push("--model", this.opts.model);
     if (this.opts.extraArgs) args.push(...this.opts.extraArgs);
 
@@ -149,6 +165,17 @@ export class ClaudeRunner implements AgentRunner {
     })();
   }
 
+  /**
+   * Streaming text accumulators, keyed by content-block index. We re-emit
+   * deltas to the daemon's event bus so the web can render them live; the
+   * `kind:"message"` event still fires on block_stop and carries the final
+   * text (which goes into the messages table).
+   */
+  private streamBuf = new Map<number, string>();
+  private streamId(index: number): string {
+    return `cb-${index}`;
+  }
+
   private handleStdoutLine(line: string): void {
     let parsed: ClaudeStreamMessage | null = null;
     try {
@@ -160,6 +187,42 @@ export class ClaudeRunner implements AgentRunner {
     if (!parsed) return;
 
     const type = parsed.type;
+
+    // ── Partial-message events (--include-partial-messages) ──
+    if (type === "stream_event" && parsed.event) {
+      const ev = parsed.event;
+      if (ev.type === "content_block_start") {
+        const idx = Number(ev.index ?? 0);
+        if (ev.content_block?.type === "text") {
+          this.streamBuf.set(idx, "");
+        }
+      } else if (ev.type === "content_block_delta") {
+        const idx = Number(ev.index ?? 0);
+        if (ev.delta?.type === "text_delta" && typeof ev.delta.text === "string") {
+          const prev = this.streamBuf.get(idx) ?? "";
+          this.streamBuf.set(idx, prev + ev.delta.text);
+          this.emit({
+            kind: "message_delta",
+            streamId: this.streamId(idx),
+            delta: ev.delta.text,
+          });
+        }
+      } else if (ev.type === "content_block_stop") {
+        const idx = Number(ev.index ?? 0);
+        if (this.streamBuf.has(idx)) {
+          this.emit({ kind: "message_end", streamId: this.streamId(idx) });
+          this.streamBuf.delete(idx);
+        }
+      } else if (ev.type === "message_stop") {
+        // Backstop — flush any leftover streams that didn't get a stop.
+        for (const idx of this.streamBuf.keys()) {
+          this.emit({ kind: "message_end", streamId: this.streamId(idx) });
+        }
+        this.streamBuf.clear();
+      }
+      return;
+    }
+
     if (type === "assistant" && parsed.message?.content) {
       for (const block of parsed.message.content) {
         if (block.type === "text" && typeof block.text === "string") {

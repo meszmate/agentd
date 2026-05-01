@@ -9,12 +9,13 @@ import {
 import { TaskFiles } from "@/views/TaskFiles";
 import { TaskDiff } from "@/views/TaskDiff";
 import { TaskLog } from "@/views/TaskLog";
+import { TaskContext } from "@/views/TaskContext";
 
 const Terminal = lazy(() =>
   import("./Terminal").then((m) => ({ default: m.Terminal })),
 );
 
-type Tab = "files" | "diff" | "log" | "term";
+type Tab = "files" | "diff" | "log" | "term" | "context";
 
 export function TaskWorkspace({
   task,
@@ -26,13 +27,12 @@ export function TaskWorkspace({
   const [tab, setTab] = useState<Tab>("files");
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-cream-50 dark:bg-ink-900">
+    <div className="flex h-full min-h-0 flex-col bg-paper-50 dark:bg-ink-900">
       <Tabs
         value={tab}
         onValueChange={(v) => setTab(v as Tab)}
         className="flex h-full min-h-0 flex-col"
       >
-        {/* h-9 tab strip with stretched underline tabs */}
         <div className="flex h-9 items-stretch border-b border-ink-900/10 dark:border-ink-50/10 px-1 shrink-0 overflow-x-auto">
           <TabsList variant="stretch" className="h-9">
             <TabsTrigger value="files" variant="stretch">
@@ -48,6 +48,11 @@ export function TaskWorkspace({
             <TabsTrigger value="log" variant="stretch">
               <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
                 Log
+              </span>
+            </TabsTrigger>
+            <TabsTrigger value="context" variant="stretch">
+              <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
+                Context
               </span>
             </TabsTrigger>
             <TabsTrigger value="term" variant="stretch">
@@ -69,6 +74,9 @@ export function TaskWorkspace({
         </TabsContent>
         <TabsContent value="log" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskLog taskId={task.id} onError={onError} />
+        </TabsContent>
+        <TabsContent value="context" className="flex-1 min-h-0 mt-0 overflow-hidden">
+          <TaskContext task={task} />
         </TabsContent>
         <TabsContent value="term" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <Suspense fallback={<TermLoading />}>

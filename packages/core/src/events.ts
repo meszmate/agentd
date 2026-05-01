@@ -1,4 +1,4 @@
-import type { AgentEvent } from "@agentd/contracts";
+import type { AgentEvent, TerminalSession, TerminalWindow } from "@agentd/contracts";
 
 export type TaskEventEnvelope = {
   taskId: string;
@@ -6,11 +6,36 @@ export type TaskEventEnvelope = {
   ts: number;
 };
 
+/**
+ * Non-task system events that the daemon pushes to all subscribers. Today
+ * this is just terminal-session changes — when something mutates the tmux
+ * session list (create/kill/rename) or the windows of a specific session,
+ * we broadcast the new snapshot so connected web clients update their
+ * caches immediately, no polling needed.
+ */
+export type SystemEvent =
+  | {
+      kind: "terminal_sessions";
+      sessions: TerminalSession[];
+    }
+  | {
+      kind: "terminal_windows";
+      sessionName: string;
+      windows: TerminalWindow[];
+    };
+
+export type SystemEventEnvelope = {
+  event: SystemEvent;
+  ts: number;
+};
+
 type Listener = (envelope: TaskEventEnvelope) => void;
+type SystemListener = (envelope: SystemEventEnvelope) => void;
 
 export class EventBus {
   private listeners = new Set<Listener>();
   private byTask = new Map<string, Set<Listener>>();
+  private systemListeners = new Set<SystemListener>();
 
   publish(envelope: TaskEventEnvelope): void {
     for (const l of this.listeners) {
@@ -28,6 +53,17 @@ export class EventBus {
         } catch {
           // swallow
         }
+      }
+    }
+  }
+
+  publishSystem(event: SystemEvent): void {
+    const envelope: SystemEventEnvelope = { event, ts: Date.now() };
+    for (const l of this.systemListeners) {
+      try {
+        l(envelope);
+      } catch {
+        // swallow
       }
     }
   }
@@ -50,5 +86,10 @@ export class EventBus {
       s.delete(l);
       if (s.size === 0) this.byTask.delete(taskId);
     };
+  }
+
+  subscribeSystem(l: SystemListener): () => void {
+    this.systemListeners.add(l);
+    return () => this.systemListeners.delete(l);
   }
 }

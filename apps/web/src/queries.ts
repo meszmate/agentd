@@ -20,14 +20,39 @@ export const qk = {
   schedules: () => ["schedules"] as const,
   plugins: () => ["plugins"] as const,
   settings: () => ["settings"] as const,
+  skills: (repoPath?: string) => ["skills", repoPath ?? null] as const,
+  projects: () => ["projects"] as const,
+  project: (idOrSlug: string) => ["project", idOrSlug] as const,
 };
 
-export function useTasks(refetchInterval = 4000) {
+export function useProjects() {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.projects(),
+    queryFn: () => client.listProjects(),
+    // No polling — the realtime bus invalidates this on task_updated /
+    // status / exit events. Initial fetch + WS-driven refresh only.
+    staleTime: 60_000,
+  });
+}
+
+export function useProject(idOrSlug: string | null | undefined) {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.project(idOrSlug ?? "_none"),
+    queryFn: () => client.getProject(idOrSlug!),
+    enabled: !!idOrSlug,
+  });
+}
+
+export function useTasks() {
   const client = useClient();
   return useQuery({
     queryKey: qk.tasks(),
     queryFn: () => client.listTasks(),
-    refetchInterval,
+    // The realtime bus pushes task_updated and status/exit events, and
+    // updates this query's data directly. No need to poll.
+    staleTime: 60_000,
   });
 }
 
@@ -236,6 +261,87 @@ export function usePatchDiscord() {
     mutationFn: (patch: Parameters<AgentdClient["patchPlugin"]>[1]) =>
       client.patchPlugin("discord", patch as never),
     onSuccess: () => void qc.invalidateQueries({ queryKey: qk.plugins() }),
+  });
+}
+
+export function useRestartPlugin() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: "telegram" | "discord") => client.restartPlugin(name),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.plugins() }),
+  });
+}
+
+export function useTaskContext(id: string | null | undefined) {
+  const client = useClient();
+  return useQuery({
+    queryKey: ["taskContext", id ?? "_none"],
+    queryFn: () => client.getTaskContext(id!),
+    enabled: !!id,
+  });
+}
+
+export function useCompactTask(taskId: string) {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (focus: string) => client.compactTask(taskId, focus),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["taskContext", taskId] });
+      void qc.invalidateQueries({ queryKey: qk.task(taskId) });
+    },
+  });
+}
+
+/* ── Skills ─────────────────────────────────────────────────────── */
+
+export function useSkills(repoPath?: string) {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.skills(repoPath),
+    queryFn: () => client.listSkills(repoPath),
+    refetchInterval: 30_000,
+  });
+}
+
+export function useCreateSkill() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: Parameters<AgentdClient["createSkill"]>[0]) =>
+      client.createSkill(req),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["skills"] });
+    },
+  });
+}
+
+export function useUpdateSkill() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      scope: string;
+      slug: string;
+      patch: Parameters<AgentdClient["updateSkill"]>[2];
+      repoPath?: string;
+    }) => client.updateSkill(args.scope, args.slug, args.patch, args.repoPath),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["skills"] });
+    },
+  });
+}
+
+export function useDeleteSkill() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { scope: string; slug: string; repoPath?: string }) =>
+      client.deleteSkill(args.scope, args.slug, args.repoPath),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["skills"] });
+    },
   });
 }
 

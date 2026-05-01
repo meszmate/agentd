@@ -47,6 +47,13 @@ export const AgentdConfig = z.object({
    * Empty string means use the prompt verbatim with no extra framing.
    */
   prBodyTemplate: z.string().default(DEFAULT_PR_BODY_TEMPLATE),
+  /**
+   * Token budget for the system-prompt suffix (agentInstructions + skill
+   * bodies + repo doc). Skills get dropped (claude/codex first, then
+   * global, local last) when the total estimate exceeds this. Soft cap —
+   * the agent's actual context window is bigger.
+   */
+  maxContextTokens: z.number().int().positive().default(8000),
   plugins: z
     .object({
       telegram: TelegramPluginConfig.default({

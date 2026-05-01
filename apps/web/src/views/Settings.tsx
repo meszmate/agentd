@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Bell, BellOff, Loader2, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -42,6 +43,7 @@ export function Settings() {
   const [commitPrefix, setCommitPrefix] = useState("");
   const [prTitlePrefix, setPrTitlePrefix] = useState("");
   const [prBodyTemplate, setPrBodyTemplate] = useState("");
+  const [maxContextTokens, setMaxContextTokens] = useState<number>(8000);
   const [hydrated, setHydrated] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [active, setActive] = useState<string>("agent");
@@ -51,6 +53,7 @@ export function Settings() {
   const cpId = useId();
   const prtId = useId();
   const prbId = useId();
+  const ctxId = useId();
 
   useEffect(() => {
     if (!settingsQ.data || hydrated) return;
@@ -58,6 +61,7 @@ export function Settings() {
     setCommitPrefix(settingsQ.data.commitPrefix);
     setPrTitlePrefix(settingsQ.data.prTitlePrefix);
     setPrBodyTemplate(settingsQ.data.prBodyTemplate);
+    setMaxContextTokens(settingsQ.data.maxContextTokens ?? 8000);
     setHydrated(true);
   }, [settingsQ.data, hydrated]);
 
@@ -67,13 +71,15 @@ export function Settings() {
       agentInstructions !== settingsQ.data.agentInstructions ||
       commitPrefix !== settingsQ.data.commitPrefix ||
       prTitlePrefix !== settingsQ.data.prTitlePrefix ||
-      prBodyTemplate !== settingsQ.data.prBodyTemplate;
+      prBodyTemplate !== settingsQ.data.prBodyTemplate ||
+      maxContextTokens !== (settingsQ.data.maxContextTokens ?? 8000);
     setDirty(isDirty);
   }, [
     agentInstructions,
     commitPrefix,
     prTitlePrefix,
     prBodyTemplate,
+    maxContextTokens,
     hydrated,
     settingsQ.data,
   ]);
@@ -116,6 +122,7 @@ export function Settings() {
         commitPrefix,
         prTitlePrefix,
         prBodyTemplate,
+        maxContextTokens,
       });
       setSavedFlash(true);
       window.setTimeout(() => setSavedFlash(false), 2000);
@@ -126,11 +133,7 @@ export function Settings() {
   }
 
   if (!hydrated) {
-    return (
-      <div className="flex h-full items-center justify-center text-[12px] text-ink-500 dark:text-ink-400">
-        Loading settings…
-      </div>
-    );
+    return <SettingsSkeleton />;
   }
 
   return (
@@ -144,7 +147,7 @@ export function Settings() {
         <Count>server-side · applies to next agent run</Count>
         <Spacer />
         {dirty && (
-          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-vermilion-700 dark:text-vermilion-300">
+          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ember-700 dark:text-ember-300">
             unsaved
           </span>
         )}
@@ -157,7 +160,7 @@ export function Settings() {
 
       {/* Body: rail + content */}
       <div className="flex flex-1 min-h-0">
-        <aside className="hidden md:flex w-52 shrink-0 flex-col bg-cream-100/30 dark:bg-ink-50/[0.015] border-r border-ink-900/10 dark:border-ink-50/10">
+        <aside className="hidden md:flex w-52 shrink-0 flex-col bg-paper-50 dark:bg-ink-900 border-r border-ink-900/10 dark:border-ink-50/10">
           <div className="flex h-9 items-center justify-between px-4 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06]">
             <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500">
               Sections
@@ -166,7 +169,7 @@ export function Settings() {
               className={cn(
                 "font-mono text-[10px]",
                 dirty
-                  ? "text-vermilion-700 dark:text-vermilion-300"
+                  ? "text-ember-700 dark:text-ember-300"
                   : "text-ink-300 dark:text-ink-600",
               )}
             >
@@ -188,15 +191,15 @@ export function Settings() {
                 className={cn(
                   "h-8 pl-[14px] pr-4 flex items-center gap-2.5 text-[12px] transition-colors border-l-2",
                   active === s.id
-                    ? "bg-cream-50 text-ink-900 border-vermilion-500 font-medium dark:bg-ink-50/[0.05] dark:text-ink-50"
-                    : "text-ink-500 hover:bg-cream-50/60 hover:text-ink-900 border-transparent dark:text-ink-400 dark:hover:bg-ink-50/[0.03]",
+                    ? "bg-paper-50 text-ink-900 border-ember-500 font-medium dark:bg-ink-50/[0.05] dark:text-ink-50"
+                    : "text-ink-500 hover:bg-paper-50 hover:text-ink-900 border-transparent dark:text-ink-400 dark:hover:bg-ink-700",
                 )}
               >
                 <span
                   className={cn(
                     "font-mono text-[11px] w-3 shrink-0",
                     active === s.id
-                      ? "text-vermilion-500"
+                      ? "text-ember-500"
                       : "text-ink-400 dark:text-ink-500",
                   )}
                 >
@@ -232,6 +235,35 @@ export function Settings() {
                 className="font-mono text-xs"
                 placeholder="Suppress model self-references and attribution trailers in any output."
               />
+            </InfoRow>
+            <InfoRow
+              label="Context budget"
+              hint={
+                <>
+                  Token soft-cap for the system-prompt suffix (skills + this
+                  policy + repo CLAUDE.md). Lower-priority skills get
+                  auto-trimmed when the total exceeds this.
+                </>
+              }
+            >
+              <div className="flex items-center gap-2">
+                <Input
+                  id={ctxId}
+                  type="number"
+                  min={500}
+                  step={500}
+                  value={maxContextTokens}
+                  onChange={(e) =>
+                    setMaxContextTokens(
+                      Math.max(500, Number(e.target.value) || 0),
+                    )
+                  }
+                  className="font-mono w-32"
+                />
+                <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400">
+                  tokens · default 8000
+                </span>
+              </div>
             </InfoRow>
           </div>
 
@@ -311,7 +343,7 @@ export function Settings() {
       </div>
 
       {/* Sticky save bar */}
-      <div className="flex h-9 items-center gap-3 px-5 border-t border-ink-900/10 bg-cream-100/40 dark:border-ink-50/10 dark:bg-ink-50/[0.02] shrink-0">
+      <div className="flex h-9 items-center gap-3 px-5 border-t border-ink-900/10 bg-paper-100 dark:border-ink-50/10 dark:bg-ink-800 shrink-0">
         <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
           config.json
         </span>
@@ -370,6 +402,35 @@ function NotificationsRow() {
       value={enabled}
       onChange={(v) => void toggle(v)}
     />
+  );
+}
+
+function SettingsSkeleton() {
+  return (
+    <div className="flex h-full flex-col">
+      <PageTopbar>
+        <Kicker>account</Kicker>
+        <VRule />
+        <span className="text-[13px] text-ink-900 dark:text-ink-50 font-medium">
+          Settings
+        </span>
+      </PageTopbar>
+      <div className="flex flex-1 min-h-0">
+        <aside className="hidden md:flex w-52 shrink-0 flex-col bg-paper-50 dark:bg-ink-800 border-r border-ink-900/10 dark:border-ink-50/10 px-2 py-2 gap-1">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Skeleton key={i} className="h-7 w-full" />
+          ))}
+        </aside>
+        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-6 max-w-3xl space-y-5">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="space-y-2">
+              <Skeleton className="h-3 w-32" />
+              <Skeleton className="h-9 w-full" />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 

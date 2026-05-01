@@ -20,7 +20,7 @@ export function SectionHeader({
   return (
     <div
       className={cn(
-        "flex h-9 items-center gap-3 px-5 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-cream-100/60 dark:bg-ink-900/60 backdrop-blur-sm shrink-0 z-10",
+        "flex h-9 items-center gap-3 px-5 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-200 dark:bg-ink-800 shrink-0 z-10",
         sticky && "sticky top-0",
         className,
       )}

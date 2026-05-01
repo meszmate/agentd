@@ -46,9 +46,9 @@ export function Login({ initialServer, onPair, onError }: Props) {
   }
 
   return (
-    <div className="grid h-full w-full grid-cols-1 lg:grid-cols-5 bg-cream-100 dark:bg-ink-900">
+    <div className="grid h-full w-full grid-cols-1 lg:grid-cols-5 bg-paper-100 dark:bg-ink-900">
       {/* Editorial brand panel */}
-      <aside className="relative hidden lg:col-span-3 lg:flex flex-col justify-between overflow-hidden bg-cream-50 dark:bg-ink-800 border-r border-ink-900/10 dark:border-ink-50/10 p-12">
+      <aside className="relative hidden lg:col-span-3 lg:flex flex-col justify-between overflow-hidden bg-paper-50 dark:bg-ink-800 border-r border-ink-900/10 dark:border-ink-50/10 p-12">
         {/* Editorial radial wash */}
         <div
           aria-hidden
@@ -72,7 +72,7 @@ export function Login({ initialServer, onPair, onError }: Props) {
           <div className="label-section mb-3">A self-hosted orchestrator</div>
           <p className="display text-5xl xl:text-6xl text-ink-900 dark:text-ink-50">
             Spawn agents{" "}
-            <span className="italic text-vermilion-600 dark:text-vermilion-400">
+            <span className="italic text-ember-600 dark:text-ember-400">
               in worktrees,
             </span>{" "}
             chat from anywhere, auto-PR.

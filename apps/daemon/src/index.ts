@@ -8,6 +8,7 @@ import {
   issuePairingToken,
   openDb,
   resolvePaths,
+  backfillProjectsFromTasks,
 } from "@agentd/core";
 import { loadConfig } from "./config.ts";
 import { buildServer } from "./server.ts";
@@ -28,6 +29,10 @@ async function main() {
 
   const { db } = openDb(paths.db);
   const bus = new EventBus();
+  const backfilled = backfillProjectsFromTasks(db);
+  if (backfilled > 0) {
+    console.log(`[projects] backfilled ${backfilled} task(s) into projects`);
+  }
   const tasks = new TaskManager(db, bus, paths);
 
   const baseUrl = `http://${cfg.host === "0.0.0.0" ? "127.0.0.1" : cfg.host}:${cfg.port}`;

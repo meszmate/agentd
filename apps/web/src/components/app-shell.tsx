@@ -6,6 +6,7 @@ import { HelpOverlay } from "@/components/help-overlay";
 import { SpawnSheet } from "@/components/spawn-sheet";
 import { ErrorBoundary } from "@/ErrorBoundary";
 import { KeyboardShortcuts } from "@/components/keyboard-shortcuts";
+import { RouteProgress } from "@/components/route-progress";
 
 export function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -22,7 +23,8 @@ export function AppShell() {
             onSpawn={() => setSpawnOpen(true)}
           />
         </div>
-        <div className="flex min-w-0 flex-1 flex-col">
+        <div className="relative flex min-w-0 flex-1 flex-col">
+          <RouteProgress />
           <main className="flex-1 min-h-0 overflow-hidden">
             <ErrorBoundary>
               <Outlet />

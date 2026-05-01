@@ -1,21 +1,43 @@
-import type { ServerWebSocket } from "bun";
+import type { ServerWebSocket, Subprocess } from "bun";
 import type { Task } from "@agentd/contracts";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
- * Tracks shell subprocesses keyed by WS instance. Each WS connection owns one
- * shell rooted at the task's worktree. Without `node-pty` we get a non-tty
- * shell — this means full TUIs (vim, htop) won't render correctly, but
- * line-oriented commands (`ls`, `git`, `npm`, `cargo`) work fine, which is
- * 95% of the "I want to poke around in the worktree" use case.
+ * Browser ↔ daemon PTY bridge.
  *
- * If we ever need a real PTY, swap to `node-pty` and reuse the same WS
- * framing — the on-the-wire protocol is intentionally stable.
+ * Two modes share the same wire protocol:
+ *
+ *   - "task"  — spawn `$SHELL -i` rooted at the task's worktree. Used by the
+ *               per-task Terminal tab on a task detail page.
+ *   - "term"  — attach to a named tmux session (`tmux new-session -A -s NAME`).
+ *               The tmux server keeps the session alive across browser
+ *               disconnects, so reattaching from another tab / device is
+ *               instant. Used by the global Terminal page.
+ *
+ * The actual PTY allocation runs in a Node.js subprocess (pty-worker.cjs).
+ * node-pty's child setup currently misbehaves under Bun — the slave PTY
+ * returns EIO on ioctl(TCGETS), which makes tmux and other terminal-aware
+ * programs exit immediately. Hosting the PTY in Node fixes that without
+ * rewriting the rest of the daemon.
+ *
+ * Bridge: Bun.spawn the worker, forward WS input → worker stdin (NDJSON),
+ * forward worker stdout NDJSON → WS as the existing PtyServerMessage shape.
  */
 
+export type PtyMode = "task" | "term";
+
 export interface PtyAttachData {
-  taskId: string;
-  task: Task;
-  proc: Bun.Subprocess<"pipe", "pipe", "pipe"> | null;
+  mode: PtyMode;
+  // task mode
+  taskId?: string;
+  task?: Task;
+  // term mode
+  sessionName?: string;
+  proc: Subprocess<"pipe", "pipe", "pipe"> | null;
+  cwd?: string;
+  /** Newline-delimited JSON buffer for the worker's stdout. */
+  stdoutBuf?: string;
 }
 
 export type PtyClientMessage =
@@ -23,9 +45,32 @@ export type PtyClientMessage =
   | { type: "resize"; cols: number; rows: number };
 
 export type PtyServerMessage =
-  | { type: "ready"; cwd: string }
+  | { type: "ready"; cwd: string; mode: PtyMode; label: string }
   | { type: "output"; data: string }
   | { type: "exit"; code: number | null };
+
+interface WorkerReady {
+  type: "ready";
+  pid: number;
+  cwd: string;
+}
+interface WorkerOutput {
+  type: "output";
+  data: string;
+}
+interface WorkerExit {
+  type: "exit";
+  code: number | null;
+  signal: number | string | null;
+}
+interface WorkerError {
+  type: "error";
+  message: string;
+}
+type WorkerMessage = WorkerReady | WorkerOutput | WorkerExit | WorkerError;
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const WORKER_PATH = resolve(HERE, "pty-worker.cjs");
 
 function send(ws: ServerWebSocket<PtyAttachData>, msg: PtyServerMessage): void {
   try {
@@ -35,54 +80,177 @@ function send(ws: ServerWebSocket<PtyAttachData>, msg: PtyServerMessage): void {
   }
 }
 
-export function startPty(ws: ServerWebSocket<PtyAttachData>): void {
-  const cwd = ws.data.task.worktreePath;
-  const shell = process.env.SHELL || "/bin/bash";
-  const proc = Bun.spawn({
-    cmd: [shell, "-i"],
-    cwd,
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    env: {
-      ...(process.env as Record<string, string>),
-      // Hint to programs that this isn't a real terminal so they tone down
-      // ANSI noise that would garble the WS text frames.
-      TERM: "dumb",
-      PS1: "$ ",
-    },
-  });
-  ws.data.proc = proc;
-  send(ws, { type: "ready", cwd });
+function spawnWorkerArgs(data: PtyAttachData): {
+  args: string[];
+  cwd: string;
+  label: string;
+} | null {
+  if (data.mode === "task") {
+    if (!data.task) return null;
+    const cwd = data.task.worktreePath;
+    return {
+      args: ["task", cwd, cwd, "100", "30"],
+      cwd,
+      label: `task ${data.task.title}`,
+    };
+  }
+  if (data.mode === "term") {
+    const name = data.sessionName;
+    if (!name) return null;
+    const cwd = process.env.HOME || "/";
+    return {
+      args: ["term", name, cwd, "100", "30"],
+      cwd,
+      label: `tmux:${name}`,
+    };
+  }
+  return null;
+}
 
-  void pipe(proc.stdout, (chunk) => send(ws, { type: "output", data: chunk }));
-  void pipe(proc.stderr, (chunk) => send(ws, { type: "output", data: chunk }));
-  void (async () => {
-    const code = await proc.exited;
-    send(ws, { type: "exit", code: code ?? null });
+export function startPty(ws: ServerWebSocket<PtyAttachData>): void {
+  const data = ws.data;
+  const config = spawnWorkerArgs(data);
+  if (!config) {
+    send(ws, { type: "exit", code: -1 });
     try {
       ws.close();
     } catch {
       // already closed
     }
+    return;
+  }
+
+  const node = process.env.AGENTD_NODE_BIN || "node";
+  let proc: Subprocess<"pipe", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn({
+      cmd: [node, WORKER_PATH, ...config.args],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env },
+    });
+  } catch (e) {
+    console.error("[pty] failed to spawn worker:", (e as Error).message);
+    send(ws, { type: "exit", code: -1 });
+    try {
+      ws.close();
+    } catch {
+      // already closed
+    }
+    return;
+  }
+
+  data.proc = proc;
+  data.cwd = config.cwd;
+  data.stdoutBuf = "";
+
+  // Drain stderr to the daemon's own stderr — useful for diagnosing worker
+  // failures without surfacing them to the browser.
+  void (async () => {
+    try {
+      const reader = proc.stderr.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) process.stderr.write("[pty-worker] " + decoder.decode(value));
+      }
+    } catch {
+      // stream closed
+    }
   })();
+
+  // Stream stdout → parse NDJSON → forward.
+  void (async () => {
+    try {
+      const reader = proc.stdout.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value, { stream: true });
+        data.stdoutBuf = (data.stdoutBuf ?? "") + text;
+        let nl;
+        while ((nl = data.stdoutBuf.indexOf("\n")) >= 0) {
+          const line = data.stdoutBuf.slice(0, nl);
+          data.stdoutBuf = data.stdoutBuf.slice(nl + 1);
+          if (!line) continue;
+          let parsed: WorkerMessage;
+          try {
+            parsed = JSON.parse(line) as WorkerMessage;
+          } catch {
+            continue;
+          }
+          dispatch(ws, parsed, config.label);
+        }
+      }
+    } catch {
+      // reader cancelled
+    }
+  })();
+
+  // When the worker exits unexpectedly, make sure the WS sees an exit.
+  void proc.exited.then(() => {
+    try {
+      ws.close();
+    } catch {
+      // already closed
+    }
+  });
 }
 
-async function pipe(
-  stream: ReadableStream<Uint8Array>,
-  onChunk: (s: string) => void,
-): Promise<void> {
-  const decoder = new TextDecoder();
-  const reader = stream.getReader();
+function dispatch(
+  ws: ServerWebSocket<PtyAttachData>,
+  msg: WorkerMessage,
+  label: string,
+): void {
+  if (msg.type === "ready") {
+    send(ws, {
+      type: "ready",
+      cwd: msg.cwd,
+      mode: ws.data.mode,
+      label,
+    });
+  } else if (msg.type === "output") {
+    send(ws, { type: "output", data: msg.data });
+  } else if (msg.type === "exit") {
+    send(ws, { type: "exit", code: msg.code });
+    try {
+      ws.close();
+    } catch {
+      // already closed
+    }
+  } else if (msg.type === "error") {
+    console.error("[pty] worker error:", msg.message);
+    send(ws, { type: "exit", code: -1 });
+    try {
+      ws.close();
+    } catch {
+      // already closed
+    }
+  }
+}
+
+function writeWorker(
+  proc: Subprocess<"pipe", "pipe", "pipe">,
+  obj: unknown,
+): void {
   try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const text = decoder.decode(value, { stream: true });
-      if (text.length > 0) onChunk(text);
+    // Bun's WritableStream stdin accepts strings/Buffers via .write
+    const stdin = proc.stdin;
+    if (!stdin) return;
+    const text = JSON.stringify(obj) + "\n";
+    if (typeof (stdin as { write?: unknown }).write === "function") {
+      (stdin as { write: (s: string) => void }).write(text);
+    } else {
+      // Fallback for older Bun where stdin is a FileSink.
+      const writer = (stdin as unknown as { getWriter: () => WritableStreamDefaultWriter<Uint8Array> }).getWriter();
+      void writer.write(new TextEncoder().encode(text));
+      writer.releaseLock();
     }
   } catch {
-    // stream errored
+    // broken pipe — worker exited
   }
 }
 
@@ -96,24 +264,29 @@ export function handlePtyClientMessage(
   } catch {
     return;
   }
+  const proc = ws.data.proc;
+  if (!proc) return;
   if (parsed.type === "input") {
-    const proc = ws.data.proc;
-    if (!proc) return;
-    try {
-      proc.stdin?.write(parsed.data);
-    } catch {
-      // shell exited mid-write
-    }
+    writeWorker(proc, { type: "input", data: parsed.data });
+  } else if (parsed.type === "resize") {
+    const cols = Math.max(2, Math.min(500, parsed.cols | 0));
+    const rows = Math.max(2, Math.min(200, parsed.rows | 0));
+    writeWorker(proc, { type: "resize", cols, rows });
   }
-  // resize is a no-op without a real PTY; future node-pty integration
-  // will hook this up.
 }
 
 export function closePty(ws: ServerWebSocket<PtyAttachData>): void {
   const proc = ws.data.proc;
   if (!proc) return;
+  // For "term" mode this just detaches the browser side — the tmux server
+  // keeps the session running, so reconnecting picks back up.
   try {
-    proc.kill("SIGHUP");
+    writeWorker(proc, { type: "kill", signal: "SIGHUP" });
+  } catch {
+    // ignore
+  }
+  try {
+    proc.kill("SIGTERM");
   } catch {
     // already gone
   }

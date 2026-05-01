@@ -7,7 +7,7 @@ const buttonVariants = cva(
   [
     "inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium",
     "transition-all duration-150",
-    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion-500/40 focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ember-500/40 focus-visible:ring-offset-1 focus-visible:ring-offset-background",
     "disabled:pointer-events-none disabled:opacity-50",
     "[&_svg]:size-3.5 [&_svg]:shrink-0",
     "active:scale-[0.985]",
@@ -15,20 +15,21 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        // Brae's signature — ink-900 default, vermilion on hover
+        // Default: solid ink in light mode, ember in dark — always white text.
         default:
-          "bg-ink-900 text-cream-50 hover:bg-vermilion-500 dark:bg-vermilion-500 dark:text-cream-50 dark:hover:bg-vermilion-600",
+          "bg-ink-900 !text-white hover:bg-ember-600 dark:bg-ember-500 dark:hover:bg-ember-600",
+        // Always-ember variant.
         vermilion:
-          "bg-vermilion-500 text-cream-50 hover:bg-vermilion-600",
+          "bg-ember-500 !text-white hover:bg-ember-600",
         outline:
-          "border border-ink-900/15 bg-cream-50 text-ink-900 hover:bg-ink-900/[0.04] hover:border-ink-900/30 dark:border-ink-50/15 dark:bg-ink-800 dark:text-ink-50 dark:hover:bg-ink-50/[0.05] dark:hover:border-ink-50/25",
+          "border border-ink-900/20 bg-paper-50 text-ink-900 hover:bg-paper-200 hover:border-ink-900/40 dark:border-ink-50/20 dark:bg-ink-800 dark:text-ink-50 dark:hover:bg-ink-700 dark:hover:border-ink-50/30",
         secondary:
-          "bg-ink-900/[0.04] text-ink-900 hover:bg-ink-900/[0.08] dark:bg-ink-50/[0.05] dark:text-ink-50 dark:hover:bg-ink-50/[0.10]",
+          "bg-paper-200 text-ink-900 hover:bg-paper-300 dark:bg-ink-800 dark:text-ink-50 dark:hover:bg-ink-700",
         ghost:
-          "text-ink-700 hover:text-ink-900 hover:bg-ink-900/[0.05] dark:text-ink-300 dark:hover:text-ink-50 dark:hover:bg-ink-50/[0.05]",
-        link: "text-vermilion-600 dark:text-vermilion-400 underline-offset-4 hover:underline",
+          "text-ink-700 hover:text-ink-900 hover:bg-paper-200 dark:text-ink-300 dark:hover:text-ink-50 dark:hover:bg-ink-700",
+        link: "text-ember-600 dark:text-ember-400 underline-offset-4 hover:underline",
         destructive:
-          "bg-red-600 text-cream-50 hover:bg-red-700 dark:bg-red-500 dark:hover:bg-red-600",
+          "bg-red-600 !text-white hover:bg-red-700 dark:bg-red-500 dark:hover:bg-red-600",
       },
       size: {
         default: "h-9 px-4 text-sm rounded-lg",

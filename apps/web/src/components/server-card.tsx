@@ -77,14 +77,14 @@ export function ServerCard() {
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
-          className="mx-2 flex w-[calc(100%-1rem)] items-center gap-2.5 rounded-lg border border-ink-900/10 bg-cream-50 px-2 py-1.5 text-left transition-colors hover:bg-ink-900/[0.02] focus:outline-none focus-visible:ring-2 focus-visible:ring-vermilion-500/30 dark:border-ink-50/10 dark:bg-ink-800 dark:hover:bg-ink-50/[0.03]"
+          className="flex w-full max-w-full items-center gap-2.5 overflow-hidden rounded-lg border border-ink-900/15 bg-paper-100 px-2 py-1.5 text-left transition-colors hover:border-ink-900/30 hover:bg-paper-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-ember-500/30 dark:border-ink-50/15 dark:bg-ink-900 dark:hover:border-ink-50/30 dark:hover:bg-ink-700"
           aria-label="Server menu"
         >
-          <span className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-vermilion-500 font-mono text-2xs font-bold text-cream-50">
+          <span className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-ember-500 font-mono text-2xs font-bold text-white">
             {initials}
             <span
               className={cn(
-                "absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full ring-2 ring-cream-50 dark:ring-ink-800",
+                "absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full ring-2 ring-paper-100 dark:ring-ink-900",
                 healthy === "ok" && "bg-emerald-500",
                 healthy === "fail" && "bg-red-500",
                 healthy === "checking" && "bg-ink-300",
@@ -92,7 +92,7 @@ export function ServerCard() {
               aria-hidden
             />
           </span>
-          <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 flex-1 flex-col overflow-hidden">
             <span className="block truncate text-xs font-medium text-ink-900 dark:text-ink-50">
               {host}
             </span>

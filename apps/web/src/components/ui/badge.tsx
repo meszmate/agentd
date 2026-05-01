@@ -10,9 +10,9 @@ const badgeVariants = cva(
         default:
           "border-ink-900/10 bg-ink-900/[0.05] text-ink-700 dark:border-ink-50/10 dark:bg-ink-50/[0.05] dark:text-ink-200",
         vermilion:
-          "border-vermilion-500/20 bg-vermilion-500/10 text-vermilion-700 dark:border-vermilion-500/25 dark:bg-vermilion-500/15 dark:text-vermilion-300",
+          "border-ember-500/20 bg-ember-500/10 text-ember-700 dark:border-ember-500/25 dark:bg-ember-500/15 dark:text-ember-300",
         secondary:
-          "border-ink-900/10 bg-cream-50 text-ink-600 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-300",
+          "border-ink-900/10 bg-paper-50 text-ink-600 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-300",
         outline:
           "border-ink-900/15 text-ink-600 dark:border-ink-50/15 dark:text-ink-300",
         success:

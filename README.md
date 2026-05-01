@@ -9,6 +9,7 @@
     Spawn parallel agents, each in its own git worktree.<br>
     Chat from web, terminal, Telegram, or Discord.<br>
     Auto-commit, auto-push, auto-PR. Cron schedules. Templates.<br>
+    Run on your host so agents see your real toolchain.<br>
   </p>
 
   <p>
@@ -74,6 +75,11 @@ bun --filter @agentd/web build
 
 ## Run
 
+There are two ways to run the daemon. **Pick the right one for your goal —
+they don't behave the same.**
+
+### Host-direct (recommended for dev)
+
 ```bash
 # local-only (default 127.0.0.1:3773)
 bun apps/daemon/src/index.ts
@@ -85,7 +91,17 @@ bun apps/daemon/src/index.ts --host $(tailscale ip -4)
 bun apps/daemon/src/index.ts --host 0.0.0.0 --port 8080 --root /var/lib/agentd
 ```
 
-### Or with Docker
+The daemon runs as your user, on your filesystem, with your `$PATH`. That
+means **everything you do in the web tmux is a real shell on your machine**:
+`cargo`, `rustc`, `docker compose`, `pnpm`, `python`, your nvm/mise/asdf
+shims — all just work, because you already installed them. Worktrees live
+under `~/.agentd/worktrees/`. Agents inherit your `~/.claude/`,
+`~/.codex/`, `~/.gh/`, `~/.gitconfig` — no need to mount or copy anything.
+
+This is the right mode if you want agentd to do real development work for
+you on this machine.
+
+### Docker (clean-room deploy)
 
 ```bash
 cp .env.example .env       # fill in API keys + repos dir
@@ -97,13 +113,31 @@ State persists in the `agentd-data` volume; mount your repos at
 Full instructions, including dev compose with Vite hot reload, multi-arch
 build, and the auth options, are in [docs/docker.md](./docs/docker.md).
 
-The daemon prints a one-time pairing token + QR code on startup. Pair the CLI:
+The container ships only what agentd itself needs (bun, git, gh, tmux,
+node-pty, claude/codex CLIs). **It does not see your host's `cargo`,
+`docker`, `pnpm`, etc.** Web tmux sessions are shells inside the container.
+That's the right trade for an isolated deployment (a tailnet box you don't
+develop on, a shared host, CI), but it's not what you want if the goal is
+"the agent runs my projects on my machine". For that, use host-direct
+above.
+
+You can switch between modes any time: `docker compose down` and then
+`bun apps/daemon/src/index.ts`. The two have separate state directories
+(`/data` volume vs `~/.agentd/`) so they don't collide.
+
+### Pairing
+
+The daemon prints a one-time pairing token + QR code on startup. Pair the
+CLI:
 
 ```bash
 bun apps/cli/src/index.ts pair --server http://127.0.0.1:3773 --token <token>
 ```
 
 Open the same URL in a browser to pair the web UI (paste the token).
+Pairing tokens last 10 minutes; the resulting session token is stored on
+the device. Issue more pairings later from the web `Devices` page or
+`agentd plugin pair`.
 
 ## Spawning a task
 

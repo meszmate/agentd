@@ -16,6 +16,7 @@ import { ErrorBoundary } from "@/ErrorBoundary";
 import { AppShell } from "@/components/app-shell";
 import { Login } from "@/views/Login";
 import { useTaskCompletionNotifications } from "@/useNotifications";
+import { RealtimeProvider } from "@/realtime";
 import { qk } from "@/queries";
 
 const Home = lazy(() =>
@@ -41,6 +42,18 @@ const Devices = lazy(() =>
 );
 const Activity = lazy(() =>
   import("@/views/Activity").then((m) => ({ default: m.Activity })),
+);
+const Skills = lazy(() =>
+  import("@/views/Skills").then((m) => ({ default: m.Skills })),
+);
+const Projects = lazy(() =>
+  import("@/views/Projects").then((m) => ({ default: m.Projects })),
+);
+const ProjectDetail = lazy(() =>
+  import("@/views/ProjectDetail").then((m) => ({ default: m.ProjectDetail })),
+);
+const TerminalView = lazy(() =>
+  import("@/views/Terminal").then((m) => ({ default: m.TerminalView })),
 );
 
 function ViewSuspense({ children }: { children: React.ReactNode }) {
@@ -97,6 +110,39 @@ const router = createBrowserRouter([
         ),
       },
       {
+        path: "skills",
+        element: (
+          <ViewSuspense>
+            <Skills />
+          </ViewSuspense>
+        ),
+      },
+      {
+        path: "projects",
+        element: (
+          <ViewSuspense>
+            <Projects />
+          </ViewSuspense>
+        ),
+      },
+      {
+        path: "projects/:slug",
+        element: (
+          <ViewSuspense>
+            <ProjectDetail />
+          </ViewSuspense>
+        ),
+      },
+      {
+        path: "terminal",
+        element: (
+          <ViewSuspense>
+            <TerminalView />
+          </ViewSuspense>
+        ),
+        children: [{ path: ":sessionName" }],
+      },
+      {
         path: "activity",
         element: (
           <ViewSuspense>
@@ -151,11 +197,18 @@ function Root() {
     let cancelled = false;
     void (async () => {
       try {
-        await client.health();
-      } catch {
-        if (!cancelled) {
+        // listTasks is authenticated — health() is not, so it can't tell us
+        // whether our session token is still valid. A 401 here means the
+        // daemon was restarted / the token was revoked: force re-pair.
+        await client.listTasks();
+      } catch (e) {
+        if (cancelled) return;
+        const msg = (e as Error).message;
+        if (/401/.test(msg)) {
           logout();
           toast("Session invalid — please pair again", true);
+        } else {
+          toast(`Server unreachable: ${msg}`, true);
         }
       }
     })();
@@ -179,8 +232,10 @@ function Root() {
 
   return (
     <ErrorBoundary>
-      <RouterProvider router={router} />
-      <BackgroundEffects />
+      <RealtimeProvider>
+        <RouterProvider router={router} />
+        <BackgroundEffects />
+      </RealtimeProvider>
     </ErrorBoundary>
   );
 }
@@ -204,7 +259,7 @@ function ToasterMount() {
       toastOptions={{
         classNames: {
           toast:
-            "rounded-lg border border-ink-900/10 bg-cream-50 text-ink-900 shadow-deep font-sans dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-50",
+            "rounded-lg border border-ink-900/10 bg-paper-50 text-ink-900 shadow-deep font-sans dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-50",
           title: "text-sm",
           description: "text-xs text-ink-500 dark:text-ink-400",
         },

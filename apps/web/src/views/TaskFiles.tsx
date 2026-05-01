@@ -111,7 +111,7 @@ export function TaskFiles({
           </div>
         </div>
       </Panel>
-      <PanelResizeHandle className="w-px bg-ink-900/10 dark:bg-ink-50/10 hover:bg-vermilion-500/40 transition-colors" />
+      <PanelResizeHandle className="w-px bg-ink-900/10 dark:bg-ink-50/10 hover:bg-ember-500/40 transition-colors" />
       <Panel minSize={20}>
         <div className="flex h-full min-h-0 flex-col">
           {path ? (
@@ -208,7 +208,7 @@ function TreeRow({
       className={cn(
         "flex w-full items-center gap-1.5 rounded px-1.5 py-0.5 text-xs",
         selected === node.path
-          ? "bg-vermilion-500/10 text-vermilion-700 dark:text-vermilion-300"
+          ? "bg-ember-500/10 text-ember-700 dark:text-ember-300"
           : "text-ink-600 hover:bg-ink-900/[0.04] hover:text-ink-900 dark:text-ink-400 dark:hover:bg-ink-50/[0.04] dark:hover:text-ink-50",
       )}
       style={{ paddingLeft: 6 + depth * 12 }}

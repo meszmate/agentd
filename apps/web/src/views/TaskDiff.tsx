@@ -1,6 +1,7 @@
 import { Fragment, useMemo } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useDiff } from "@/queries";
 import { cn } from "@/lib/utils";
 
@@ -31,7 +32,23 @@ export function TaskDiff({ taskId }: { taskId: string }) {
   }, [diffQ.data?.diff]);
 
   if (diffQ.isLoading) {
-    return <Empty>Loading diff…</Empty>;
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="flex items-center gap-3 border-b border-ink-900/10 dark:border-ink-50/10 px-3 py-1.5 shrink-0">
+          <Skeleton className="h-4 w-20" />
+          <Skeleton className="h-2.5 w-40" />
+        </div>
+        <div className="p-3 space-y-1.5">
+          {Array.from({ length: 12 }).map((_, i) => (
+            <Skeleton
+              key={i}
+              className="h-3"
+              style={{ width: `${30 + (i * 7) % 60}%` }}
+            />
+          ))}
+        </div>
+      </div>
+    );
   }
   if (!diffQ.data) {
     return <Empty>No diff available.</Empty>;

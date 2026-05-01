@@ -3,82 +3,80 @@
 @tailwind utilities;
 
 /* ──────────────────────────────────────────────────────────────────────
-   /agentd — brae-inspired editorial palette.
-   Cream + ink + vermilion. Light is the canonical theme; dark is an
-   ink-base inversion with the same vermilion accent.
+   /agentd — paper + ember (logo red).
+   Light is canonical; dark inverts to ink-base with a slightly warmer
+   ember tone for legibility.
    ────────────────────────────────────────────────────────────────────── */
 
 @layer base {
   :root {
-    /* Light (canonical): cream paper, ink type, vermilion accent. */
-    --background: 41 31% 93%;        /* cream-100 #F5F1E8 */
-    --foreground: 0 0% 4%;           /* ink-900 #0A0A0A */
+    --background: 41 35% 93%;        /* paper-100 #F4EFE5 */
+    --foreground: 30 33% 4%;         /* ink-900 #0A0805 */
 
-    --card: 60 9% 98%;               /* ink-50 #FAFAF9 (cream paper for cards) */
-    --card-foreground: 0 0% 4%;
+    --card: 44 50% 97%;              /* paper-50 #FBF8F1 */
+    --card-foreground: 30 33% 4%;
 
-    --popover: 60 9% 98%;
-    --popover-foreground: 0 0% 4%;
+    --popover: 44 50% 97%;
+    --popover-foreground: 30 33% 4%;
 
-    --primary: 0 0% 4%;              /* ink-900 — brae's default button */
-    --primary-foreground: 60 9% 98%; /* cream-50 */
+    --primary: 30 33% 4%;            /* ink — the canonical button */
+    --primary-foreground: 44 50% 97%;
 
-    --secondary: 32 32% 89%;         /* cream-200 ish */
-    --secondary-foreground: 0 0% 4%;
+    --secondary: 41 35% 88%;         /* paper-200 */
+    --secondary-foreground: 30 33% 4%;
 
-    --muted: 32 32% 89%;
-    --muted-foreground: 36 6% 35%;   /* ink-600 */
+    --muted: 41 35% 88%;
+    --muted-foreground: 30 7% 35%;   /* ink-600 */
 
-    --accent: 13 100% 58%;           /* vermilion-500 #FF5C28 */
-    --accent-foreground: 60 9% 98%;
+    --accent: 0 72% 51%;             /* ember-500 #DC2626 */
+    --accent-foreground: 44 50% 97%;
 
-    --destructive: 0 72% 50%;
-    --destructive-foreground: 60 9% 98%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 44 50% 97%;
 
     --success: 142 60% 32%;
-    --warn: 13 100% 58%;
+    --warn: 25 85% 50%;
     --info: 217 91% 50%;
 
-    --border: 0 0% 4%;               /* ink-900 — applied with /10 alpha */
-    --input: 0 0% 4%;
-    --ring: 13 100% 58%;             /* vermilion */
+    --border: 30 33% 4%;
+    --input: 30 33% 4%;
+    --ring: 0 72% 51%;
 
     --radius: 0.625rem;
   }
 
   .dark {
-    /* Dark: ink paper, cream type, same vermilion accent. */
-    --background: 0 0% 4%;           /* ink-900 */
-    --foreground: 60 9% 98%;         /* ink-50 */
+    --background: 30 33% 4%;
+    --foreground: 44 50% 97%;
 
-    --card: 240 12% 8%;              /* ink-800 */
-    --card-foreground: 60 9% 98%;
+    --card: 24 16% 9%;               /* ink-800 ish */
+    --card-foreground: 44 50% 97%;
 
-    --popover: 240 12% 8%;
-    --popover-foreground: 60 9% 98%;
+    --popover: 24 16% 9%;
+    --popover-foreground: 44 50% 97%;
 
-    --primary: 13 100% 58%;          /* in dark mode, primary = vermilion */
-    --primary-foreground: 0 0% 4%;
+    --primary: 0 80% 56%;            /* in dark, primary = ember */
+    --primary-foreground: 30 33% 4%;
 
-    --secondary: 36 5% 11%;          /* ink-700 ish */
-    --secondary-foreground: 60 9% 98%;
+    --secondary: 28 12% 12%;
+    --secondary-foreground: 44 50% 97%;
 
-    --muted: 36 5% 11%;
+    --muted: 28 12% 12%;
     --muted-foreground: 36 7% 60%;
 
-    --accent: 13 100% 58%;
-    --accent-foreground: 0 0% 4%;
+    --accent: 0 80% 56%;
+    --accent-foreground: 30 33% 4%;
 
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 60 9% 98%;
+    --destructive: 0 72% 56%;
+    --destructive-foreground: 44 50% 97%;
 
     --success: 142 60% 50%;
-    --warn: 13 100% 58%;
+    --warn: 25 85% 60%;
     --info: 217 91% 65%;
 
-    --border: 60 9% 98%;             /* cream-50 — applied with /10 alpha */
-    --input: 60 9% 98%;
-    --ring: 13 100% 58%;
+    --border: 44 50% 97%;
+    --input: 44 50% 97%;
+    --ring: 0 80% 56%;
   }
 }
 
@@ -103,21 +101,22 @@
     @apply bg-background text-foreground;
     font-family: "Geist", ui-sans-serif, system-ui, sans-serif;
     font-feature-settings: "ss01";
+    /* Subtle warm wash + tiny grain — agentd identity */
     background-image:
-      radial-gradient(circle at 0% 0%, rgba(255, 92, 40, 0.05), transparent 40%),
-      radial-gradient(circle at 100% 0%, rgba(10, 10, 10, 0.04), transparent 50%);
+      radial-gradient(circle at 0% 0%, rgba(220, 38, 38, 0.045), transparent 38%),
+      radial-gradient(circle at 100% 0%, rgba(10, 8, 5, 0.04), transparent 50%);
     background-attachment: fixed;
   }
 
   .dark body {
     background-image:
-      radial-gradient(circle at 0% 0%, rgba(255, 92, 40, 0.07), transparent 40%),
+      radial-gradient(circle at 0% 0%, rgba(220, 38, 38, 0.07), transparent 40%),
       radial-gradient(circle at 100% 0%, rgba(255, 255, 255, 0.02), transparent 50%);
   }
 
   ::selection {
-    background: #ff5c28;
-    color: #fafaf9;
+    background: #DC2626;
+    color: #FBF8F1;
   }
 
   /* Editorial display class — Fraunces with stylistic alternates */
@@ -129,14 +128,12 @@
     line-height: 0.92;
   }
 
-  /* Editorial number — tabular & lining nums for hero stats */
   .num {
     font-family: "Fraunces", ui-serif, Georgia, serif;
     font-feature-settings: "tnum", "lnum";
     font-optical-sizing: auto;
   }
 
-  /* Sober scrollbars */
   ::-webkit-scrollbar {
     width: 10px;
     height: 10px;
@@ -158,7 +155,6 @@
 }
 
 @layer components {
-  /* Hairline rules — used as inline section dividers */
   .rule {
     @apply h-px w-full bg-ink-900/10 dark:bg-ink-50/10;
   }
@@ -169,36 +165,11 @@
     @apply w-px h-full bg-ink-900/10 dark:bg-ink-50/10;
   }
 
-  /* Section label — small-caps mono tracking, used everywhere */
   .label-section {
     @apply font-mono text-2xs font-medium uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400;
   }
 
-  /* Editorial chip */
-  .chip {
-    @apply inline-flex items-center gap-1.5 h-6 px-2 rounded-md
-           text-2xs font-medium tracking-[0.06em] uppercase
-           bg-ink-900/[0.05] text-ink-700 border border-ink-900/10
-           dark:bg-ink-50/[0.05] dark:text-ink-200 dark:border-ink-50/10;
-  }
-  .chip-vermilion {
-    @apply bg-vermilion-500/10 text-vermilion-700 border-vermilion-500/20
-           dark:bg-vermilion-500/15 dark:text-vermilion-300 dark:border-vermilion-500/25;
-  }
-  .chip-success {
-    @apply bg-emerald-500/10 text-emerald-700 border-emerald-500/20
-           dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/25;
-  }
-  .chip-info {
-    @apply bg-sky-500/10 text-sky-700 border-sky-500/20
-           dark:bg-sky-500/15 dark:text-sky-300 dark:border-sky-500/25;
-  }
-  .chip-mute {
-    @apply bg-ink-900/[0.04] text-ink-500 border-ink-900/10
-           dark:bg-ink-50/[0.04] dark:text-ink-400 dark:border-ink-50/10;
-  }
-
-  /* Diff coloring for the diff tab */
+  /* Diff coloring */
   .diff-add {
     color: #166534;
     background: rgba(34, 197, 94, 0.08);
@@ -222,10 +193,28 @@
   .diff-meta {
     color: hsl(var(--muted-foreground));
   }
+
+  /* Live pulse — used in sidebar live panel */
+  .live-dot {
+    position: relative;
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 9999px;
+    background: #DC2626;
+  }
+  .live-dot::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 9999px;
+    background: #DC2626;
+    opacity: 0.4;
+    animation: pulse_ring 1.6s cubic-bezier(0.2, 0.7, 0.2, 1) infinite;
+  }
 }
 
 @layer utilities {
-  /* Staggered entry animations — borrowed from brae */
   .rise-1 { animation-delay: 0.05s; }
   .rise-2 { animation-delay: 0.18s; }
   .rise-3 { animation-delay: 0.32s; }

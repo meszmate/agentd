@@ -42,6 +42,13 @@ Plugins:
   agentd plugin enable discord  --token <bot-token> [--allow-user a,b] [--allow-channel c,d] [--default-repo <path>]
   agentd plugin disable <telegram|discord>
 
+Skills (markdown skills the agent can invoke; sources: global / local / claude / codex):
+  agentd skills ls [--repo <path>]
+  agentd skills show <scope:slug> [--repo <path>]
+  agentd skills new <slug> [--scope global|local] [--repo <path>] [--display "PR review"] [--desc "..."]
+  agentd skills edit <scope:slug> [--repo <path>]                       # opens $EDITOR on the SKILL.md
+  agentd skills rm <scope:slug> [--repo <path>]
+
 Env:
   AGENTD_SERVER   default server URL (overrides saved config)
   AGENTD_TOKEN    default session token (overrides saved config)
@@ -545,6 +552,128 @@ async function cmdSettings(argv: string[]) {
   process.exit(2);
 }
 
+// ───────────── skills ─────────────
+async function cmdSkills(argv: string[]) {
+  const c = client();
+  const sub = argv[0];
+
+  function pickRepo(args: string[]): string | undefined {
+    const i = args.indexOf("--repo");
+    return i >= 0 ? args[i + 1] : undefined;
+  }
+  function pickFlag(args: string[], name: string): string | undefined {
+    const i = args.indexOf(name);
+    return i >= 0 ? args[i + 1] : undefined;
+  }
+
+  if (!sub || sub === "ls" || sub === "list") {
+    const repo = pickRepo(argv.slice(1));
+    const { skills } = await c.listSkills(repo);
+    if (skills.length === 0) {
+      console.log("(no skills)");
+      return;
+    }
+    for (const s of skills) {
+      const ro = s.writable ? "" : " [ro]";
+      const en = s.enabled ? "" : " [disabled]";
+      const desc = s.description ? `  ${s.description}` : "";
+      console.log(
+        `${s.scope.padEnd(7)} ${s.slug.padEnd(24)} ${s.displayName ?? s.name}${ro}${en}${desc}`,
+      );
+    }
+    return;
+  }
+
+  if (sub === "show") {
+    const id = argv[1];
+    if (!id || !id.includes(":")) {
+      console.error("usage: agentd skills show <scope:slug> [--repo <path>]");
+      process.exit(2);
+    }
+    const [scope, slug] = id.split(":") as [string, string];
+    const repo = pickRepo(argv.slice(2));
+    const { skill } = await c.getSkill(scope, slug, repo);
+    console.log(`# ${skill.displayName ?? skill.name}\n`);
+    if (skill.description) console.log(`${skill.description}\n`);
+    console.log(`scope: ${skill.scope}    path: ${skill.path}`);
+    console.log(`writable: ${skill.writable}    enabled: ${skill.enabled}\n`);
+    console.log("--- body ---\n");
+    console.log(skill.body || "(empty)");
+    return;
+  }
+
+  if (sub === "new" || sub === "create") {
+    const slug = argv[1];
+    if (!slug) {
+      console.error(
+        "usage: agentd skills new <slug> [--scope global|local] [--repo <path>] [--display ...] [--desc ...]",
+      );
+      process.exit(2);
+    }
+    const scopeArg = pickFlag(argv.slice(2), "--scope") ?? "global";
+    if (scopeArg !== "global" && scopeArg !== "local") {
+      console.error("--scope must be 'global' or 'local'");
+      process.exit(2);
+    }
+    const repo = pickRepo(argv.slice(2));
+    const display = pickFlag(argv.slice(2), "--display");
+    const desc = pickFlag(argv.slice(2), "--desc");
+    if (scopeArg === "local" && !repo) {
+      console.error("local skills need --repo");
+      process.exit(2);
+    }
+    const { skill } = await c.createSkill({
+      scope: scopeArg as "global" | "local",
+      name: slug,
+      ...(display ? { displayName: display } : {}),
+      ...(desc ? { description: desc } : {}),
+      body: "",
+      ...(scopeArg === "local" && repo ? { repoPath: repo } : {}),
+    });
+    console.log(`created ${skill.scope}:${skill.slug} → ${skill.path}`);
+    return;
+  }
+
+  if (sub === "edit") {
+    const id = argv[1];
+    if (!id || !id.includes(":")) {
+      console.error("usage: agentd skills edit <scope:slug> [--repo <path>]");
+      process.exit(2);
+    }
+    const [scope, slug] = id.split(":") as [string, string];
+    const repo = pickRepo(argv.slice(2));
+    const { skill } = await c.getSkill(scope, slug, repo);
+    if (!skill.writable) {
+      console.error(`skill is read-only: ${id}`);
+      process.exit(2);
+    }
+    const editor = process.env.EDITOR || "vi";
+    const { spawn } = await import("node:child_process");
+    await new Promise<void>((res, rej) => {
+      const p = spawn(editor, [skill.path], { stdio: "inherit" });
+      p.on("exit", (code) => (code === 0 ? res() : rej(new Error(`editor exited ${code}`))));
+    });
+    console.log(`saved ${skill.path}`);
+    return;
+  }
+
+  if (sub === "rm" || sub === "delete") {
+    const id = argv[1];
+    if (!id || !id.includes(":")) {
+      console.error("usage: agentd skills rm <scope:slug> [--repo <path>]");
+      process.exit(2);
+    }
+    const [scope, slug] = id.split(":") as [string, string];
+    const repo = pickRepo(argv.slice(2));
+    await c.deleteSkill(scope, slug, repo);
+    console.log(`removed ${id}`);
+    return;
+  }
+
+  console.error(`unknown skills subcommand: ${sub ?? "(none)"}`);
+  process.exit(2);
+}
+
 async function main() {
   const [, , cmd, ...rest] = process.argv;
   switch (cmd) {
@@ -578,6 +707,9 @@ async function main() {
       return cmdSchedule(rest);
     case "settings":
       return cmdSettings(rest);
+    case "skills":
+    case "skill":
+      return cmdSkills(rest);
     case undefined:
     case "help":
     case "-h":

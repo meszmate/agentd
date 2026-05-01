@@ -131,7 +131,7 @@ export function Schedules() {
         {upcoming > 0 && (
           <>
             <span className="text-ink-300 dark:text-ink-600">·</span>
-            <span className="font-mono text-[11px] tabular-nums text-vermilion-700 dark:text-vermilion-300">
+            <span className="font-mono text-[11px] tabular-nums text-ember-700 dark:text-ember-300">
               {upcoming} firing today
             </span>
           </>
@@ -233,8 +233,8 @@ function CalendarStrip({ schedules }: { schedules: Schedule[] }) {
           ))}
 
           {/* Now line */}
-          <div className="absolute left-0 top-0 bottom-0 w-px bg-vermilion-500" />
-          <div className="absolute left-0 top-0 -translate-x-1/2 -translate-y-full pb-1 font-mono text-[10px] uppercase tracking-[0.12em] text-vermilion-600 dark:text-vermilion-400">
+          <div className="absolute left-0 top-0 bottom-0 w-px bg-ember-500" />
+          <div className="absolute left-0 top-0 -translate-x-1/2 -translate-y-full pb-1 font-mono text-[10px] uppercase tracking-[0.12em] text-ember-600 dark:text-ember-400">
             now
           </div>
 
@@ -247,7 +247,7 @@ function CalendarStrip({ schedules }: { schedules: Schedule[] }) {
                     style={{
                       left: `${Math.min(99, Math.max(1, f.pos))}%`,
                     }}
-                    className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 h-2 w-2 rounded-full bg-vermilion-500 ring-4 ring-cream-100 hover:ring-vermilion-500/30 transition-colors dark:ring-ink-900"
+                    className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 h-2 w-2 rounded-full bg-ember-500 ring-4 ring-paper-100 hover:ring-ember-500/30 transition-colors dark:ring-ink-900"
                     aria-label={`${f.name} at ${formatTsAbsolute(f.ts)}`}
                   />
                 </TooltipTrigger>
@@ -298,8 +298,8 @@ function ScheduleRow({
   pending: boolean;
 }) {
   return (
-    <li className="group h-auto px-5 py-3 flex items-start gap-4 hover:bg-cream-100/40 transition-colors dark:hover:bg-ink-50/[0.02]">
-      <span className="font-mono text-[12px] text-ink-300 dark:text-ink-600 group-hover:text-vermilion-500 mt-0.5 transition-colors">
+    <li className="group h-auto px-5 py-3 flex items-start gap-4 hover:bg-paper-100 transition-colors dark:hover:bg-ink-700">
+      <span className="font-mono text-[12px] text-ink-300 dark:text-ink-600 group-hover:text-ember-500 mt-0.5 transition-colors">
         ◇
       </span>
 
@@ -338,7 +338,7 @@ function ScheduleRow({
                       r.status === "pending" ||
                       r.status === "waiting_input" ||
                       r.status === "waiting_perm") &&
-                      "bg-vermilion-500 animate-blink",
+                      "bg-ember-500 animate-blink",
                   )}
                 />
                 <Link
@@ -356,7 +356,7 @@ function ScheduleRow({
       {/* Right: next/last + actions */}
       <div className="hidden md:flex flex-col items-end gap-0.5 shrink-0 font-mono text-[11px] tabular-nums">
         {s.nextRunAt && s.enabled ? (
-          <span className="text-vermilion-700 dark:text-vermilion-300">
+          <span className="text-ember-700 dark:text-ember-300">
             next {formatTs(s.nextRunAt)}
           </span>
         ) : (
@@ -512,7 +512,7 @@ function CreateScheduleSheet({
               className="font-mono text-xs"
             />
           </div>
-          <label className="flex items-center justify-between gap-3 rounded-md border border-ink-900/10 bg-ink-900/[0.02] p-2.5 cursor-pointer dark:border-ink-50/10 dark:bg-ink-50/[0.02]">
+          <label className="flex items-center justify-between gap-3 rounded-md border border-ink-900/10 bg-ink-900/[0.02] p-2.5 cursor-pointer dark:border-ink-50/10 dark:bg-ink-800">
             <div>
               <div className="text-xs font-medium">Enabled</div>
               <div className="text-[10px] text-ink-500 dark:text-ink-400">

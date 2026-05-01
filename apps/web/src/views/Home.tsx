@@ -1,18 +1,42 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
-import type { AgentEvent, Task, WsServerEvent } from "@agentd/contracts";
+import { Link, useNavigate } from "react-router-dom";
 import {
-  Count,
+  ArrowUpRight,
+  ChevronDown,
+  CornerDownLeft,
+  Loader2,
+  Rocket,
+  Sparkles,
+} from "lucide-react";
+import type {
+  AgentEvent,
+  PermissionMode,
+  Project,
+  Task,
+  WsServerEvent,
+} from "@agentd/contracts";
+import {
   Kicker,
-  PageTitle,
   PageTopbar,
   Spacer,
   VRule,
 } from "@/components/ui/page-topbar";
-import { SectionHeader } from "@/components/ui/section-header";
-import { StatCell } from "@/components/ui/big-num";
-import { useClient } from "@/AppContext";
-import { useSchedules, useTasks, useTemplates } from "@/queries";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { ProjectPicker } from "@/components/project-picker";
+import { useApp, useClient } from "@/AppContext";
+import {
+  useCreateTask,
+  useProjects,
+  useSchedules,
+  useTasks,
+} from "@/queries";
 import {
   cn,
   formatCost,
@@ -21,7 +45,10 @@ import {
   shortId,
 } from "@/lib/utils";
 
-const PINS_KEY = "agentd.pinnedRepos";
+const PROJECT_KEY = "agentd.lastProjectId";
+const BASE_KEY = "agentd.lastBase";
+const AGENT_KEY = "agentd.lastAgent";
+const PERMS_KEY = "agentd.lastPermissionMode";
 
 interface ActivityEntry {
   id: string;
@@ -30,22 +57,6 @@ interface ActivityEntry {
   text: string;
   kind: AgentEvent["kind"];
   ts: number;
-}
-
-function loadPins(): string[] {
-  try {
-    const raw = localStorage.getItem(PINS_KEY);
-    if (!raw) return [];
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr)
-      ? arr.filter((s): s is string => typeof s === "string")
-      : [];
-  } catch {
-    return [];
-  }
-}
-function savePins(pins: string[]): void {
-  localStorage.setItem(PINS_KEY, JSON.stringify(pins));
 }
 
 function startOfToday(): number {
@@ -65,9 +76,10 @@ function greeting(): string {
 export function Home() {
   const tasksQ = useTasks();
   const schedulesQ = useSchedules();
-  const templatesQ = useTemplates();
+  const projectsQ = useProjects();
 
   const tasks = tasksQ.data?.tasks ?? [];
+  const projects = projectsQ.data?.projects ?? [];
   const todayMs = startOfToday();
 
   const stats = useMemo(() => {
@@ -82,7 +94,10 @@ export function Home() {
       (s, t) => s + (t.totalCostUsd ?? 0),
       0,
     );
-    const openPrs = tasks.filter((t) => !!t.prUrl);
+    const totalSpend = tasks.reduce(
+      (s, t) => s + (t.totalCostUsd ?? 0),
+      0,
+    );
     const totalTok = tasks.reduce(
       (s, t) =>
         s + (t.totalInputTokens ?? 0) + (t.totalOutputTokens ?? 0),
@@ -91,123 +106,527 @@ export function Home() {
     return {
       todayCount: todayTasks.length,
       activeCount: active.length,
+      activeTasks: active,
       todaysSpend,
-      openPrCount: openPrs.length,
+      totalSpend,
       totalTok,
     };
   }, [tasks, todayMs]);
 
-  const recentRepos = useMemo(() => {
-    const seen = new Map<string, { path: string; lastTs: number; count: number }>();
-    for (const t of tasks) {
-      const cur = seen.get(t.repoPath);
-      if (cur) {
-        cur.count += 1;
-        cur.lastTs = Math.max(cur.lastTs, t.createdAt);
-      } else {
-        seen.set(t.repoPath, {
-          path: t.repoPath,
-          lastTs: t.createdAt,
-          count: 1,
-        });
-      }
-    }
-    return [...seen.values()].sort((a, b) => b.lastTs - a.lastTs).slice(0, 8);
-  }, [tasks]);
+  const recentDone = useMemo(
+    () =>
+      tasks
+        .filter(
+          (t) =>
+            t.status === "done" ||
+            t.status === "failed" ||
+            t.status === "stopped",
+        )
+        .slice(0, 8),
+    [tasks],
+  );
 
-  const upcomingFires = useMemo(() => {
+  const upcoming = useMemo(() => {
     const items = schedulesQ.data?.schedules ?? [];
     const now = Date.now();
     const soon = now + 24 * 60 * 60 * 1000;
     return items
       .filter((s) => s.enabled && s.nextRunAt && s.nextRunAt <= soon)
       .sort((a, b) => a.nextRunAt! - b.nextRunAt!)
-      .slice(0, 6);
+      .slice(0, 4);
   }, [schedulesQ.data]);
+
+  const isFirstRun =
+    !tasksQ.isLoading && tasks.length === 0 && projects.length === 0;
 
   return (
     <div className="flex h-full flex-col">
-      {/* Topbar — greeting line with italic name */}
       <PageTopbar>
         <Kicker>workspace</Kicker>
         <VRule />
         <span className="text-[13px] text-ink-900 dark:text-ink-50">
-          {greeting()}.{" "}
+          {greeting()}
           {stats.activeCount > 0 ? (
-            <em className="italic font-medium">
-              {stats.activeCount}{" "}
-              {stats.activeCount === 1 ? "agent" : "agents"} working.
-            </em>
+            <>
+              {". "}
+              <span className="text-ember-700 dark:text-ember-300 font-medium">
+                {stats.activeCount}{" "}
+                {stats.activeCount === 1 ? "agent" : "agents"} working.
+              </span>
+            </>
           ) : (
             <span className="text-ink-500 dark:text-ink-400">
-              Nothing running.
+              {". What should we build?"}
             </span>
           )}
         </span>
         <Spacer />
-        <Link
-          to="/tasks"
-          className="inline-flex h-7 items-center gap-1 px-2.5 rounded-md border border-ink-900/10 hover:bg-ink-900/[0.03] text-[12px] text-ink-700 dark:text-ink-200 dark:border-ink-50/10 dark:hover:bg-ink-50/[0.03] transition-colors"
-        >
-          All tasks
-        </Link>
+        {!isFirstRun && (
+          <div className="hidden md:flex items-center gap-3 font-mono text-[10px] text-ink-500 dark:text-ink-400">
+            <span title="cost today">
+              today{" "}
+              <span className="text-ink-900 dark:text-ink-50 num">
+                {formatCost(stats.todaysSpend)}
+              </span>
+            </span>
+            <span className="text-ink-300 dark:text-ink-600">·</span>
+            <span title="all-time spend">
+              total{" "}
+              <span className="text-ink-900 dark:text-ink-50 num">
+                {formatCost(stats.totalSpend)}
+              </span>
+            </span>
+            <span className="text-ink-300 dark:text-ink-600">·</span>
+            <span title="all-time tokens">
+              <span className="text-ink-900 dark:text-ink-50 num">
+                {formatTokens(stats.totalTok)}
+              </span>{" "}
+              tok
+            </span>
+          </div>
+        )}
       </PageTopbar>
 
-      {/* Stat strip — borderless grid with vertical dividers */}
-      <div className="grid grid-cols-2 md:grid-cols-4 border-b border-ink-900/10 dark:border-ink-50/10 shrink-0">
-        <StatCell
-          label="Active"
-          value={stats.activeCount}
-          sublabel={
-            stats.activeCount > 0
-              ? "running now"
-              : "nothing running"
-          }
-          accent={stats.activeCount > 0}
-          href="/tasks"
-        />
-        <StatCell
-          label="Today"
-          value={stats.todayCount}
-          sublabel={`${tasks.length.toLocaleString()} all-time`}
-          href="/tasks"
-        />
-        <StatCell
-          label="Spend / day"
-          value={formatCost(stats.todaysSpend)}
-          sublabel={`${formatTokens(stats.totalTok)} tok all-time`}
-        />
-        <StatCell
-          label="Open PRs"
-          value={stats.openPrCount}
-          sublabel="awaiting review"
-          last
-        />
-      </div>
+      {/* Two-column body — composer + lanes on the left, secondary feeds on the right */}
+      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <section className="overflow-y-auto px-6 pt-6 pb-12 space-y-6 min-w-0 border-r border-ink-900/[0.06] dark:border-ink-50/[0.06]">
+          <Composer firstRun={isFirstRun} />
 
-      {/* Two-column body */}
-      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[1fr_320px]">
-        <section className="flex flex-col min-h-0 lg:border-r lg:border-ink-900/10 dark:lg:border-ink-50/10 overflow-hidden">
-          <ActivityFeed tasks={tasks} />
+          {stats.activeTasks.length > 0 && (
+            <Lane
+              kicker="live"
+              title={`${stats.activeTasks.length} running`}
+              accent
+            >
+              <ul className="rounded-md border border-ember-500/30 bg-ember-500/[0.04] dark:bg-ember-500/[0.06] divide-y divide-ember-500/15 overflow-hidden">
+                {stats.activeTasks.map((t) => (
+                  <RunningRow key={t.id} task={t} />
+                ))}
+              </ul>
+            </Lane>
+          )}
+
+          {recentDone.length > 0 && (
+            <Lane
+              kicker="recent"
+              title="completed"
+              trailing={
+                <Link
+                  to="/tasks"
+                  className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-500 hover:text-ember-700 dark:text-ink-400 dark:hover:text-ember-300"
+                >
+                  all →
+                </Link>
+              }
+            >
+              <ul className="rounded-md border border-ink-900/10 bg-paper-50 divide-y divide-ink-900/[0.06] overflow-hidden dark:border-ink-50/10 dark:bg-ink-800 dark:divide-ink-50/[0.06]">
+                {recentDone.map((t) => (
+                  <DoneRow key={t.id} task={t} />
+                ))}
+              </ul>
+            </Lane>
+          )}
+
+          {isFirstRun && <FirstRunHints />}
         </section>
 
-        <aside className="flex flex-col min-h-0 bg-cream-100/30 border-t lg:border-t-0 border-ink-900/10 dark:bg-ink-50/[0.015] dark:border-ink-50/10 overflow-hidden">
-          <UpcomingPanel items={upcomingFires} />
-          <ReposPanel recentRepos={recentRepos} />
-          <ShortcutsPanel
-            templatesCount={templatesQ.data?.templates.length ?? 0}
-            schedulesCount={schedulesQ.data?.schedules.length ?? 0}
-          />
+        {/* Right rail: live activity + projects + upcoming */}
+        <aside className="hidden lg:flex flex-col overflow-y-auto bg-paper-100/40 dark:bg-ink-900/30">
+          <RailSection title="Activity" right={<LiveDot />} sticky>
+            <ActivityTicker tasks={tasks} />
+          </RailSection>
+
+          <RailSection title="Projects" right={<span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">{projects.length}</span>}>
+            <ProjectsRail projects={projects} />
+          </RailSection>
+
+          {upcoming.length > 0 && (
+            <RailSection title="Next 24h" right={<span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">{upcoming.length}</span>}>
+              <ul className="space-y-1">
+                {upcoming.map((s) => (
+                  <li
+                    key={s.id}
+                    className="flex items-center gap-2 px-1 py-1 rounded hover:bg-paper-50 dark:hover:bg-ink-800/60"
+                  >
+                    <Sparkles className="h-3 w-3 text-ember-500 shrink-0" />
+                    <span className="flex-1 text-[12px] text-ink-900 dark:text-ink-50 truncate">
+                      {s.name}
+                    </span>
+                    <span className="font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300 shrink-0">
+                      {s.nextRunAt
+                        ? new Date(s.nextRunAt).toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })
+                        : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </RailSection>
+          )}
         </aside>
       </div>
     </div>
   );
 }
 
-function ActivityFeed({ tasks }: { tasks: Task[] }) {
+/* ── Composer — project + agent + perms + prompt ───────────────── */
+
+function Composer({ firstRun }: { firstRun: boolean }) {
+  const navigate = useNavigate();
+  const create = useCreateTask();
+  const { toast } = useApp();
+  const projectsQ = useProjects();
+  const projects = projectsQ.data?.projects ?? [];
+
+  const [projectId, setProjectId] = useState<string>(
+    () => localStorage.getItem(PROJECT_KEY) ?? "",
+  );
+  const [projectPath, setProjectPath] = useState<string>("");
+  const [base, setBase] = useState(
+    () => localStorage.getItem(BASE_KEY) ?? "main",
+  );
+  const [agent, setAgent] = useState<"claude" | "codex">(
+    () => (localStorage.getItem(AGENT_KEY) as "claude" | "codex") ?? "claude",
+  );
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(() => {
+    const v = localStorage.getItem(PERMS_KEY);
+    if (v === "acceptEdits" || v === "plan" || v === "bypassPermissions") return v;
+    return "bypassPermissions";
+  });
+  const [prompt, setPrompt] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // Sync the path label whenever the project list updates and our id matches.
+  useEffect(() => {
+    if (!projectId) return;
+    const found = projects.find((p) => p.id === projectId);
+    if (found) setProjectPath(found.path);
+  }, [projectId, projects]);
+
+  const submit = async () => {
+    const path = projectPath.trim();
+    const p = prompt.trim();
+    if (!path) {
+      toast("Pick a project first", true);
+      return;
+    }
+    if (!p) {
+      toast("Tell the agent what to do", true);
+      return;
+    }
+    try {
+      const res = await create.mutateAsync({
+        agent,
+        repoPath: path,
+        baseBranch: base.trim() || "main",
+        prompt: p,
+        permissionMode,
+      });
+      localStorage.setItem(PROJECT_KEY, projectId);
+      localStorage.setItem(BASE_KEY, base.trim() || "main");
+      localStorage.setItem(AGENT_KEY, agent);
+      localStorage.setItem(PERMS_KEY, permissionMode);
+      setPrompt("");
+      navigate(`/tasks/${res.task.id}`);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), true);
+    }
+  };
+
+  const onPromptKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !create.isPending) {
+      e.preventDefault();
+      void submit();
+    }
+  };
+
+  return (
+    <section
+      className={cn(
+        "rounded-lg border bg-paper-50 dark:bg-ink-800 overflow-hidden",
+        firstRun
+          ? "border-ember-500/40 shadow-[0_0_0_4px_rgba(255,92,40,0.05)]"
+          : "border-ink-900/10 dark:border-ink-50/10",
+      )}
+    >
+      <div className="flex items-center gap-2 px-4 py-2 border-b border-ink-900/[0.06] bg-paper-100/40 dark:border-ink-50/[0.06] dark:bg-ink-900/30">
+        <Rocket
+          className={cn(
+            "h-3.5 w-3.5 shrink-0",
+            firstRun
+              ? "text-ember-600 dark:text-ember-400"
+              : "text-ink-400 dark:text-ink-500",
+          )}
+        />
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+          {firstRun ? "spawn your first agent" : "spawn"}
+        </span>
+        <Spacer />
+        <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 hidden sm:inline">
+          ⌘↵ to send
+        </span>
+      </div>
+
+      <Textarea
+        value={prompt}
+        onChange={(e) => setPrompt(e.target.value)}
+        onKeyDown={onPromptKey}
+        placeholder={
+          firstRun
+            ? "Describe what the agent should do — e.g. 'add a /metrics endpoint that exposes request count and p95 latency'"
+            : "Tell the agent what to do…"
+        }
+        rows={firstRun ? 6 : 4}
+        className="border-0 rounded-none focus-visible:ring-0 resize-none bg-transparent text-[14px] leading-relaxed px-4 py-3 shadow-none"
+      />
+
+      {/* Bottom toolbar */}
+      <div className="flex flex-wrap items-center gap-2 border-t border-ink-900/[0.06] bg-paper-100/40 px-3 py-2 dark:border-ink-50/[0.06] dark:bg-ink-900/30">
+        <div className="min-w-0 flex-1 sm:flex-initial sm:w-72">
+          <ProjectPicker
+            value={projectId}
+            onChange={(p) => {
+              setProjectId(p.id);
+              setProjectPath(p.path);
+            }}
+            autoFocus={firstRun}
+          />
+        </div>
+
+        <ToolbarSelect
+          label={agent}
+          options={[
+            { value: "claude", label: "claude" },
+            { value: "codex", label: "codex" },
+          ]}
+          onSelect={(v) => setAgent(v as "claude" | "codex")}
+        />
+
+        <ToolbarSelect
+          label={
+            permissionMode === "bypassPermissions"
+              ? "bypass"
+              : permissionMode === "acceptEdits"
+              ? "accept-edits"
+              : "plan"
+          }
+          options={[
+            { value: "bypassPermissions", label: "bypass · auto-allow" },
+            { value: "acceptEdits", label: "accept-edits · edits only" },
+            { value: "plan", label: "plan · read-only" },
+          ]}
+          onSelect={(v) => setPermissionMode(v as PermissionMode)}
+        />
+
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 hover:text-ink-700 dark:text-ink-500 dark:hover:text-ink-200 inline-flex items-center gap-1 px-1"
+        >
+          {showAdvanced ? "less" : "branch?"}
+          <ChevronDown
+            className={cn(
+              "h-3 w-3 transition-transform",
+              showAdvanced && "rotate-180",
+            )}
+          />
+        </button>
+
+        <Spacer />
+
+        <Button
+          size="sm"
+          onClick={submit}
+          disabled={create.isPending || !projectPath || !prompt.trim()}
+        >
+          {create.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <CornerDownLeft className="h-3.5 w-3.5" />
+          )}
+          Spawn
+        </Button>
+      </div>
+
+      {showAdvanced && (
+        <div className="flex items-center gap-2 border-t border-ink-900/[0.06] bg-paper-100/40 px-3 py-2 dark:border-ink-50/[0.06] dark:bg-ink-900/30">
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400 shrink-0">
+            base
+          </span>
+          <input
+            value={base}
+            onChange={(e) => setBase(e.target.value)}
+            placeholder="main"
+            spellCheck={false}
+            className="font-mono text-[12px] bg-transparent border-0 outline-none focus:ring-0 text-ink-900 dark:text-ink-50 placeholder:text-ink-400 w-32"
+          />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ToolbarSelect({
+  label,
+  options,
+  onSelect,
+}: {
+  label: string;
+  options: { value: string; label: string }[];
+  onSelect: (v: string) => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 h-7 px-2 rounded border border-ink-900/10 bg-paper-50 font-mono text-[11px] text-ink-700 hover:border-ink-900/25 hover:bg-paper-100 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-200 dark:hover:bg-ink-700 transition-colors"
+        >
+          {label}
+          <ChevronDown className="h-3 w-3 opacity-60" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-[200px]">
+        {options.map((o) => (
+          <DropdownMenuItem key={o.value} onClick={() => onSelect(o.value)}>
+            <span className="font-mono text-[12px]">{o.label}</span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/* ── Layout helpers ─────────────────────────────────────────────── */
+
+function Lane({
+  kicker,
+  title,
+  trailing,
+  accent,
+  children,
+}: {
+  kicker: string;
+  title: string;
+  trailing?: React.ReactNode;
+  accent?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <section>
+      <div className="mb-2 flex items-baseline gap-2">
+        <span
+          className={cn(
+            "font-mono text-[10px] uppercase tracking-[0.14em]",
+            accent
+              ? "text-ember-700 dark:text-ember-300"
+              : "text-ink-400 dark:text-ink-500",
+          )}
+        >
+          {kicker}
+        </span>
+        <span className="text-[13px] font-medium text-ink-900 dark:text-ink-50">
+          {title}
+        </span>
+        <span className="ml-auto">{trailing}</span>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function RailSection({
+  title,
+  right,
+  sticky,
+  children,
+}: {
+  title: string;
+  right?: React.ReactNode;
+  sticky?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="border-b border-ink-900/[0.06] dark:border-ink-50/[0.06]">
+      <div
+        className={cn(
+          "flex items-baseline gap-2 px-4 pt-3 pb-2",
+          sticky && "sticky top-0 bg-paper-100/80 backdrop-blur dark:bg-ink-900/80 z-10",
+        )}
+      >
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400 font-medium">
+          {title}
+        </span>
+        <span className="ml-auto">{right}</span>
+      </div>
+      <div className="px-4 pb-3">{children}</div>
+    </div>
+  );
+}
+
+function LiveDot() {
+  return (
+    <span className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
+      <span className="h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink" />
+      live
+    </span>
+  );
+}
+
+/* ── Right-rail content ─────────────────────────────────────────── */
+
+function ProjectsRail({ projects }: { projects: Project[] }) {
+  if (projects.length === 0) {
+    return (
+      <div className="text-[11px] text-ink-400 dark:text-ink-500 italic">
+        No projects yet — add one from the composer.
+      </div>
+    );
+  }
+  return (
+    <ul className="space-y-1">
+      {projects.slice(0, 8).map((p) => (
+        <li key={p.id}>
+          <Link
+            to={`/projects/${p.slug}`}
+            className="group flex items-center gap-2 px-1 py-1 rounded hover:bg-paper-50 dark:hover:bg-ink-800/60 transition-colors"
+          >
+            <span
+              className="size-2 rounded-sm shrink-0"
+              style={{ background: p.color ?? "#FF5C28" }}
+            />
+            <span className="flex-1 min-w-0">
+              <span className="block text-[12px] font-medium text-ink-900 dark:text-ink-50 truncate">
+                {p.name}
+              </span>
+              <span className="block font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate">
+                {p.path}
+              </span>
+            </span>
+            {(p.activeCount ?? 0) > 0 && (
+              <span className="font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300 shrink-0">
+                {p.activeCount} live
+              </span>
+            )}
+            {(p.taskCount ?? 0) > 0 && (
+              <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 shrink-0 w-8 text-right">
+                {p.taskCount}
+              </span>
+            )}
+          </Link>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/* ── Activity ticker ────────────────────────────────────────────── */
+
+function ActivityTicker({ tasks }: { tasks: Task[] }) {
   const client = useClient();
   const [entries, setEntries] = useState<ActivityEntry[]>([]);
-  const [live, setLive] = useState(false);
   const titleByIdRef = useRef(new Map<string, string>());
 
   useEffect(() => {
@@ -228,15 +647,13 @@ function ActivityFeed({ tasks }: { tasks: Task[] }) {
         let text: string | null = null;
         if (ev.kind === "message") {
           text = (ev.text || "").replace(/\s+/g, " ").trim();
-          if (text.length > 160) text = text.slice(0, 157) + "…";
+          if (text.length > 100) text = text.slice(0, 97) + "…";
         } else if (ev.kind === "tool_call") {
           text = `→ ${ev.tool}`;
         } else if (ev.kind === "status") {
-          text = `status → ${ev.status}`;
+          text = `→ ${ev.status}`;
         } else if (ev.kind === "exit") {
-          text = `exited ${ev.code ?? "?"}`;
-        } else if (ev.kind === "tool_result") {
-          text = `← ${ev.tool} ${ev.ok ? "ok" : "err"}`;
+          text = `exit ${ev.code ?? "?"}`;
         }
         if (!text) return;
         setEntries((prev) => {
@@ -248,16 +665,13 @@ function ActivityFeed({ tasks }: { tasks: Task[] }) {
             kind: ev.kind,
             ts: msg.ts,
           };
-          return [next, ...prev].slice(0, 30);
+          return [next, ...prev].slice(0, 10);
         });
       });
-      ws.addEventListener("open", () => setLive(true));
       ws.addEventListener("close", () => {
-        setLive(false);
         if (closed) return;
         reconnectTimer = setTimeout(open, 2000);
       });
-      ws.addEventListener("error", () => setLive(false));
     };
     open();
     return () => {
@@ -271,289 +685,198 @@ function ActivityFeed({ tasks }: { tasks: Task[] }) {
     };
   }, [client]);
 
+  if (entries.length === 0) {
+    return (
+      <div className="text-[11px] text-ink-400 dark:text-ink-500 italic">
+        Waiting for events…
+      </div>
+    );
+  }
   return (
-    <>
-      <SectionHeader
-        label="Activity"
-        hint={
-          entries.length > 0
-            ? `${entries.length} events`
-            : live
-            ? "waiting…"
-            : "connecting…"
-        }
-        right={
-          <>
-            <span
+    <ul className="space-y-1">
+      {entries.map((e) => (
+        <li key={e.id}>
+          <Link
+            to={`/tasks/${e.taskId}`}
+            className="block px-1 py-1 rounded hover:bg-paper-50 dark:hover:bg-ink-800/60 transition-colors"
+          >
+            <div className="flex items-center gap-1.5">
+              <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 shrink-0 w-10">
+                {formatTs(e.ts)}
+              </span>
+              <span className="text-[11px] text-ink-700 dark:text-ink-200 truncate flex-1">
+                {e.taskTitle}
+              </span>
+            </div>
+            <div
               className={cn(
-                "flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.12em]",
-                live
-                  ? "text-vermilion-700 dark:text-vermilion-300"
-                  : "text-ink-400 dark:text-ink-500",
+                "ml-12 mt-0.5 text-[11px] truncate",
+                e.kind === "tool_call" || e.kind === "tool_result"
+                  ? "font-mono text-ink-500 dark:text-ink-400"
+                  : "text-ink-700 dark:text-ink-200",
               )}
             >
-              <span
-                className={cn(
-                  "h-1.5 w-1.5 rounded-full",
-                  live ? "bg-vermilion-500 animate-blink" : "bg-ink-300",
-                )}
-              />
-              {live ? "live" : "off"}
-            </span>
-            <Link
-              to="/activity"
-              className="text-[11px] text-ink-500 hover:text-ink-900 transition-colors dark:text-ink-400 dark:hover:text-ink-50"
-            >
-              Open →
-            </Link>
-          </>
-        }
-      />
-
-      <div className="flex-1 overflow-y-auto">
-        {entries.length === 0 ? (
-          <div className="flex h-full items-center justify-center">
-            <div className="text-center text-[12px] text-ink-500 dark:text-ink-400">
-              Spawn a task and events stream here.
+              {e.text}
             </div>
-          </div>
-        ) : (
-          <ul className="divide-y divide-ink-900/[0.06] dark:divide-ink-50/[0.06]">
-            {entries.map((e) => (
-              <li key={e.id}>
-                <Link
-                  to={`/tasks/${e.taskId}`}
-                  className="group flex items-baseline gap-3 h-11 px-5 hover:bg-cream-100/40 transition-colors dark:hover:bg-ink-50/[0.02]"
-                >
-                  <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 w-14 shrink-0">
-                    {formatTs(e.ts)}
-                  </span>
-                  <span className="text-[12px] font-medium text-ink-900 dark:text-ink-50 truncate max-w-[200px]">
-                    {e.taskTitle}
-                  </span>
-                  <span className="text-ink-300 dark:text-ink-600 shrink-0">
-                    ·
-                  </span>
-                  <span
-                    className={cn(
-                      "text-[12px] truncate flex-1",
-                      e.kind === "tool_call" || e.kind === "tool_result"
-                        ? "font-mono text-[11px] text-ink-500 dark:text-ink-400"
-                        : "text-ink-700 dark:text-ink-200",
-                    )}
-                  >
-                    {e.text}
-                  </span>
-                  <span className="font-mono text-[10px] text-ink-300 dark:text-ink-600 shrink-0">
-                    {shortId(e.taskId)}
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </>
+          </Link>
+        </li>
+      ))}
+    </ul>
   );
 }
 
-function UpcomingPanel({
-  items,
-}: {
-  items: { id: string; name: string; nextRunAt: number | null; cron: string }[];
-}) {
-  return (
-    <div className="border-b border-ink-900/10 dark:border-ink-50/10 flex flex-col">
-      <SectionHeader
-        label="Upcoming"
-        hint="next 24h"
-        right={
-          <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-            {items.length}
-          </span>
-        }
-        sticky={false}
-      />
-      {items.length === 0 ? (
-        <div className="px-5 py-5 text-[11px] text-ink-400 dark:text-ink-500">
-          Nothing scheduled.
-        </div>
-      ) : (
-        <ul className="divide-y divide-ink-900/[0.06] dark:divide-ink-50/[0.06]">
-          {items.map((s) => (
-            <li
-              key={s.id}
-              className="h-11 px-5 flex items-center gap-3 hover:bg-cream-50 dark:hover:bg-ink-50/[0.02] transition-colors"
-            >
-              <span className="text-[12px] font-medium text-ink-900 dark:text-ink-50 truncate flex-1">
-                {s.name}
-              </span>
-              <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 truncate max-w-[8ch]">
-                {s.cron}
-              </span>
-              <span className="font-mono text-[10px] tabular-nums text-vermilion-700 dark:text-vermilion-300 w-12 text-right">
-                {s.nextRunAt
-                  ? new Date(s.nextRunAt).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })
-                  : ""}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
+/* ── Running task row ────────────────────────────────────────────── */
 
-function ReposPanel({
-  recentRepos,
-}: {
-  recentRepos: { path: string; count: number; lastTs: number }[];
-}) {
-  const [pins, setPins] = useState<string[]>(() => loadPins());
-
-  const toggle = (path: string) => {
-    setPins((cur) => {
-      const next = cur.includes(path)
-        ? cur.filter((p) => p !== path)
-        : [path, ...cur].slice(0, 8);
-      savePins(next);
-      return next;
-    });
-  };
-
-  const list = useMemo(() => {
-    const seen = new Set<string>();
-    const ordered: { path: string; count: number; pinned: boolean }[] = [];
-    for (const p of pins) {
-      const r = recentRepos.find((x) => x.path === p);
-      ordered.push({ path: p, count: r?.count ?? 0, pinned: true });
-      seen.add(p);
-    }
-    for (const r of recentRepos) {
-      if (seen.has(r.path)) continue;
-      ordered.push({ path: r.path, count: r.count, pinned: false });
-    }
-    return ordered.slice(0, 6);
-  }, [pins, recentRepos]);
-
-  return (
-    <div className="border-b border-ink-900/10 dark:border-ink-50/10 flex flex-col">
-      <SectionHeader
-        label="Repos"
-        hint="pinned + recent"
-        right={
-          <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-            {list.length}
-          </span>
-        }
-        sticky={false}
-      />
-      {list.length === 0 ? (
-        <div className="px-5 py-5 text-[11px] text-ink-400 dark:text-ink-500">
-          Spawn a task — repos collect here.
-        </div>
-      ) : (
-        <ul className="divide-y divide-ink-900/[0.06] dark:divide-ink-50/[0.06]">
-          {list.map((r) => (
-            <li
-              key={r.path}
-              className="group h-9 px-5 flex items-center gap-2 hover:bg-cream-50 dark:hover:bg-ink-50/[0.02] transition-colors"
-            >
-              <button
-                type="button"
-                onClick={() => toggle(r.path)}
-                aria-label={r.pinned ? "Unpin repo" : "Pin repo"}
-                className={cn(
-                  "font-mono text-[11px] w-3 shrink-0 transition-colors",
-                  r.pinned
-                    ? "text-vermilion-500"
-                    : "text-ink-300 hover:text-vermilion-500 dark:text-ink-600",
-                )}
-              >
-                {r.pinned ? "★" : "☆"}
-              </button>
-              <span className="font-mono text-[11px] text-ink-700 dark:text-ink-200 truncate flex-1">
-                {r.path}
-              </span>
-              <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-                {r.count}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function ShortcutsPanel({
-  templatesCount,
-  schedulesCount,
-}: {
-  templatesCount: number;
-  schedulesCount: number;
-}) {
-  return (
-    <div className="flex flex-col">
-      <SectionHeader label="Jump" sticky={false} />
-      <ul>
-        <Shortcut
-          glyph="▤"
-          label="Templates"
-          count={templatesCount}
-          href="/templates"
-        />
-        <Shortcut
-          glyph="◇"
-          label="Schedules"
-          count={schedulesCount}
-          href="/schedules"
-        />
-        <Shortcut glyph="∷" label="Plugins" href="/plugins" />
-        <Shortcut glyph="▢" label="Devices" href="/devices" />
-      </ul>
-    </div>
-  );
-}
-
-function Shortcut({
-  glyph,
-  label,
-  href,
-  count,
-}: {
-  glyph: string;
-  label: string;
-  href: string;
-  count?: number;
-}) {
-  void Count; // suppress unused if count is undefined later
+function RunningRow({ task }: { task: Task }) {
+  const tokens = (task.totalInputTokens ?? 0) + (task.totalOutputTokens ?? 0);
+  const statusLabel =
+    task.status === "running"
+      ? "running"
+      : task.status === "waiting_input"
+      ? "needs input"
+      : task.status === "waiting_perm"
+      ? "needs approval"
+      : task.status;
+  const statusTone =
+    task.status === "waiting_input" || task.status === "waiting_perm"
+      ? "text-amber-700 dark:text-amber-300"
+      : "text-ember-700 dark:text-ember-300";
   return (
     <li>
       <Link
-        to={href}
-        className="group h-9 px-5 flex items-center gap-3 border-b border-ink-900/[0.06] last:border-b-0 hover:bg-cream-50 transition-colors dark:border-ink-50/[0.06] dark:hover:bg-ink-50/[0.02]"
+        to={`/tasks/${task.id}`}
+        className="flex items-center gap-3 px-4 py-2.5 hover:bg-paper-100/60 dark:hover:bg-ink-700/60 transition-colors"
       >
-        <span className="font-mono text-[11px] text-ink-400 group-hover:text-vermilion-500 w-3 transition-colors dark:text-ink-500">
-          {glyph}
-        </span>
-        <span className="text-[12px] text-ink-700 group-hover:text-ink-900 flex-1 transition-colors dark:text-ink-200 dark:group-hover:text-ink-50">
-          {label}
-        </span>
-        {count !== undefined && (
-          <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-            {count}
+        <span className="h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink shrink-0" />
+        <span className="flex-1 min-w-0">
+          <span className="block text-[13px] font-medium text-ink-900 dark:text-ink-50 truncate">
+            {task.title}
           </span>
-        )}
-        <span className="text-[10px] text-ink-300 group-hover:text-ink-500 transition-colors dark:text-ink-600">
-          →
+          <span className="block mt-0.5 font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate">
+            {task.agent} · {task.branch}
+          </span>
         </span>
+        <span
+          className={cn(
+            "font-mono text-[10px] uppercase tracking-[0.12em] shrink-0",
+            statusTone,
+          )}
+        >
+          {statusLabel}
+        </span>
+        <span className="font-mono text-[10px] tabular-nums text-ink-500 dark:text-ink-400 shrink-0 hidden sm:inline w-20 text-right">
+          {formatTokens(tokens)} tok
+        </span>
+        <ArrowUpRight className="h-3.5 w-3.5 text-ink-400 dark:text-ink-500 shrink-0" />
       </Link>
     </li>
   );
 }
 
-void PageTitle;
+/* ── Completed task row ──────────────────────────────────────────── */
+
+function DoneRow({ task }: { task: Task }) {
+  const ok = task.status === "done";
+  return (
+    <li>
+      <Link
+        to={`/tasks/${task.id}`}
+        className="flex items-center gap-3 px-4 py-2.5 hover:bg-paper-100/60 dark:hover:bg-ink-700/60 transition-colors"
+      >
+        <span
+          className={cn(
+            "font-mono text-[11px] shrink-0 w-3 text-center",
+            ok
+              ? "text-emerald-700 dark:text-emerald-300"
+              : task.status === "stopped"
+              ? "text-ink-500 dark:text-ink-400"
+              : "text-red-700 dark:text-red-300",
+          )}
+        >
+          {ok ? "✓" : task.status === "stopped" ? "■" : "✗"}
+        </span>
+        <span className="flex-1 min-w-0">
+          <span className="block text-[13px] text-ink-900 dark:text-ink-50 truncate">
+            {task.title}
+          </span>
+          <span className="block mt-0.5 font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate">
+            {task.agent} · {task.branch} · {formatTs(task.updatedAt)}
+            {task.prUrl && (
+              <>
+                {" · "}
+                <span className="text-ember-700 dark:text-ember-300">PR</span>
+              </>
+            )}
+          </span>
+        </span>
+        <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 shrink-0 hidden sm:inline">
+          {formatCost(task.totalCostUsd)}
+        </span>
+        <ArrowUpRight className="h-3.5 w-3.5 text-ink-400 dark:text-ink-500 shrink-0" />
+      </Link>
+    </li>
+  );
+}
+
+/* ── First-run hints ─────────────────────────────────────────────── */
+
+function FirstRunHints() {
+  return (
+    <Lane kicker="getting started" title="next steps">
+      <ul className="rounded-md border border-ink-900/10 bg-paper-50 dark:border-ink-50/10 dark:bg-ink-800 divide-y divide-ink-900/[0.06] dark:divide-ink-50/[0.06] overflow-hidden">
+        <HintRow
+          to="/templates"
+          glyph="▤"
+          title="Save a template"
+          body="Lock down a prompt with placeholders so cron can fire it later."
+        />
+        <HintRow
+          to="/schedules"
+          glyph="◇"
+          title="Schedule a recurring task"
+          body="Cron fires templates on its own — nightly tests, weekly audits, etc."
+        />
+        <HintRow
+          to="/plugins"
+          glyph="∷"
+          title="Connect a chat bridge"
+          body="Telegram or Discord — talk to your agents from your phone."
+        />
+      </ul>
+    </Lane>
+  );
+}
+
+function HintRow({
+  to,
+  glyph,
+  title,
+  body,
+}: {
+  to: string;
+  glyph: React.ReactNode;
+  title: string;
+  body: string;
+}) {
+  return (
+    <li>
+      <Link
+        to={to}
+        className="flex items-center gap-3 px-4 py-3 hover:bg-paper-100 dark:hover:bg-ink-700 transition-colors"
+      >
+        <span className="font-mono text-[14px] text-ember-500 w-6 shrink-0 grid place-items-center">
+          {glyph}
+        </span>
+        <span className="flex-1 min-w-0">
+          <span className="block text-[13px] font-medium text-ink-900 dark:text-ink-50">
+            {title}
+          </span>
+          <span className="block mt-0.5 text-[11px] text-ink-500 dark:text-ink-400">
+            {body}
+          </span>
+        </span>
+        <ArrowUpRight className="h-3.5 w-3.5 text-ink-400 dark:text-ink-500 shrink-0" />
+      </Link>
+    </li>
+  );
+}

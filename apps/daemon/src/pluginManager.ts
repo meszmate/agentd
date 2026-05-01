@@ -103,6 +103,42 @@ export class PluginManager {
     return out;
   }
 
+  /**
+   * Force-restart a single plugin. Kills the running process (if any),
+   * clears the restart-history backoff guard, then spawns a fresh one.
+   * No-op when the plugin isn't enabled in config.
+   */
+  async restart(name: PluginName): Promise<{ restarted: boolean; reason?: string }> {
+    const cfg = loadConfig(this.rootDir);
+    if (!cfg.plugins[name].enabled) {
+      return { restarted: false, reason: "plugin is disabled" };
+    }
+    const st = this.states.get(name)!;
+    // Cancel any pending auto-restart timer.
+    const pending = this.restartTimers.get(name);
+    if (pending) {
+      clearTimeout(pending);
+      this.restartTimers.delete(name);
+    }
+    // Reset the per-hour failure history so the operator's manual restart
+    // isn't blocked by the "too many restarts" guard.
+    this.restartHistory.set(name, []);
+    if (st.lastError) st.lastError = null;
+
+    if (st.proc && st.proc.exitCode == null) {
+      try {
+        st.proc.kill("SIGTERM");
+      } catch {
+        // already gone
+      }
+      await st.proc.exited;
+    }
+    const sessionToken = this.ensurePluginSession(cfg);
+    this.spawn(name, cfg, sessionToken);
+    st.restarts += 1;
+    return { restarted: true };
+  }
+
   /** Re-read config and (re)spawn plugins to match. Used when config changes. */
   async reload(): Promise<void> {
     const cfg = loadConfig(this.rootDir);

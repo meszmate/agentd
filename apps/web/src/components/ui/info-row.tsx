@@ -68,13 +68,13 @@ export function ToggleRow({
         className={cn(
           "relative w-9 h-5 rounded-full transition-colors shrink-0 ml-auto md:ml-0",
           value
-            ? "bg-vermilion-500"
+            ? "bg-ember-500"
             : "bg-ink-900/15 dark:bg-ink-50/15",
         )}
       >
         <span
           className={cn(
-            "absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-cream-50 shadow-sm transition-transform",
+            "absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-paper-50 shadow-sm transition-transform",
             value && "translate-x-4",
           )}
         />

@@ -35,7 +35,7 @@ export function FilterPills<V extends string>({
               "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md text-[12px] transition-colors",
               active
                 ? "bg-ink-900/[0.06] text-ink-900 font-medium dark:bg-ink-50/[0.06] dark:text-ink-50"
-                : "text-ink-500 hover:text-ink-900 hover:bg-ink-900/[0.03] dark:text-ink-400 dark:hover:text-ink-50 dark:hover:bg-ink-50/[0.03]",
+                : "text-ink-500 hover:text-ink-900 hover:bg-ink-900/[0.03] dark:text-ink-400 dark:hover:text-ink-50 dark:hover:bg-ink-700",
             )}
           >
             {opt.label}

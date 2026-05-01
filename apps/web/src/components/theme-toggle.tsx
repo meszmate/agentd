@@ -35,7 +35,7 @@ export function ThemeToggle() {
               <span
                 className={cn(
                   "ml-auto h-1.5 w-1.5 rounded-full",
-                  theme === t ? "bg-vermilion-500" : "bg-transparent",
+                  theme === t ? "bg-ember-500" : "bg-transparent",
                 )}
               />
             </DropdownMenuItem>

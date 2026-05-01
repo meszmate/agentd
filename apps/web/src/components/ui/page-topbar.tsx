@@ -19,7 +19,7 @@ export function PageTopbar({
   return (
     <div
       className={cn(
-        "flex h-12 items-center gap-3 px-5 border-b border-ink-900/10 dark:border-ink-50/10 shrink-0 bg-cream-100/40 backdrop-blur-sm dark:bg-ink-900/40",
+        "flex h-12 items-center gap-3 px-5 border-b border-ink-900/10 dark:border-ink-50/10 shrink-0 bg-paper-100 dark:bg-ink-900",
         className,
       )}
     >

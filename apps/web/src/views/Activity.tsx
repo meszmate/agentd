@@ -40,6 +40,8 @@ interface FlatEvent {
 
 const KIND_LABEL: Record<Kind, string> = {
   message: "msg",
+  message_delta: "δ",
+  message_end: "/δ",
   tool_call: "→ tool",
   tool_result: "← tool",
   permission_request: "perm",
@@ -51,10 +53,12 @@ const KIND_LABEL: Record<Kind, string> = {
 
 const KIND_TONE: Record<Kind, string> = {
   message: "text-ink-700 dark:text-ink-200",
+  message_delta: "text-ink-400 dark:text-ink-500",
+  message_end: "text-ink-400 dark:text-ink-500",
   tool_call: "text-sky-700 dark:text-sky-300",
   tool_result: "text-sky-700 dark:text-sky-300",
   permission_request: "text-amber-700 dark:text-amber-300",
-  status: "text-vermilion-700 dark:text-vermilion-300",
+  status: "text-ember-700 dark:text-ember-300",
   raw: "text-ink-500 dark:text-ink-400",
   exit: "text-ink-500 dark:text-ink-400",
   usage: "text-emerald-700 dark:text-emerald-300",
@@ -79,6 +83,10 @@ function renderEvent(ev: AgentEvent): { primary: string; secondary?: string } {
         secondary: ev.role,
       };
     }
+    case "message_delta":
+      return { primary: ev.delta.slice(0, 80), secondary: ev.streamId };
+    case "message_end":
+      return { primary: "stream done", secondary: ev.streamId };
     case "tool_call":
       return {
         primary: ev.tool,
@@ -199,6 +207,8 @@ export function Activity() {
   const counts = useMemo(() => {
     const c: Record<Kind, number> = {
       message: 0,
+      message_delta: 0,
+      message_end: 0,
       tool_call: 0,
       tool_result: 0,
       permission_request: 0,
@@ -228,7 +238,7 @@ export function Activity() {
               ? "text-ink-400 dark:text-ink-500"
               : paused
               ? "text-amber-700 dark:text-amber-300"
-              : "text-vermilion-700 dark:text-vermilion-300",
+              : "text-ember-700 dark:text-ember-300",
           )}
         >
           <span
@@ -238,7 +248,7 @@ export function Activity() {
                 ? "bg-ink-300 dark:bg-ink-600"
                 : paused
                 ? "bg-amber-500"
-                : "bg-vermilion-500 animate-blink",
+                : "bg-ember-500 animate-blink",
             )}
           />
           {!live ? "off" : paused ? "paused" : "live"}
@@ -264,7 +274,7 @@ export function Activity() {
       </PageTopbar>
 
       {/* Filter bar */}
-      <div className="flex flex-wrap items-center gap-2 px-5 py-2 border-b border-ink-900/10 dark:border-ink-50/10 bg-cream-100/30 dark:bg-ink-50/[0.015] shrink-0">
+      <div className="flex flex-wrap items-center gap-2 px-5 py-2 border-b border-ink-900/10 dark:border-ink-50/10 bg-paper-50 dark:bg-ink-900 shrink-0">
         {ALL_KINDS.map((k) => {
           const on = enabledKinds.has(k);
           return (
@@ -276,7 +286,7 @@ export function Activity() {
                 "inline-flex items-center gap-1.5 h-6 px-2 rounded-md font-mono text-[10px] uppercase tracking-[0.06em] transition-colors",
                 on
                   ? "bg-ink-900/[0.06] text-ink-900 dark:bg-ink-50/[0.06] dark:text-ink-50"
-                  : "text-ink-400 hover:bg-ink-900/[0.03] dark:text-ink-500 dark:hover:bg-ink-50/[0.03]",
+                  : "text-ink-400 hover:bg-ink-900/[0.03] dark:text-ink-500 dark:hover:bg-ink-700",
               )}
             >
               {KIND_LABEL[k]}
@@ -293,7 +303,7 @@ export function Activity() {
           <select
             value={taskFilter}
             onChange={(e) => setTaskFilter(e.target.value)}
-            className="h-6 rounded-md border border-ink-900/10 bg-cream-50 px-2 font-mono text-[11px] text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-50 focus:outline-none focus:border-ink-900/30"
+            className="h-6 rounded-md border border-ink-900/10 bg-paper-50 px-2 font-mono text-[11px] text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-50 focus:outline-none focus:border-ink-900/30"
           >
             <option value="all">all</option>
             {taskOptions.map(([id, title]) => (
@@ -320,7 +330,7 @@ export function Activity() {
             {filtered.map((e) => (
               <li
                 key={e.id}
-                className="grid grid-cols-[60px_180px_80px_1fr] items-baseline gap-3 px-5 py-2 hover:bg-cream-100/40 transition-colors dark:hover:bg-ink-50/[0.02]"
+                className="grid grid-cols-[60px_180px_80px_1fr] items-baseline gap-3 px-5 py-2 hover:bg-paper-100 transition-colors dark:hover:bg-ink-700"
               >
                 <TooltipProvider>
                   <Tooltip>
@@ -337,7 +347,7 @@ export function Activity() {
 
                 <Link
                   to={`/tasks/${e.taskId}`}
-                  className="truncate text-[12px] font-medium text-ink-900 hover:text-vermilion-600 dark:text-ink-50 dark:hover:text-vermilion-400"
+                  className="truncate text-[12px] font-medium text-ink-900 hover:text-ember-600 dark:text-ink-50 dark:hover:text-ember-400"
                   title={e.taskTitle}
                 >
                   {e.taskTitle}

@@ -16,6 +16,13 @@ ARG BUN_VERSION=1.3.13
 FROM oven/bun:${BUN_VERSION} AS build
 WORKDIR /build
 
+# node-pty has a native postinstall (node-gyp). Install build deps before
+# `bun install`, otherwise the workspace install will fail.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy lockfile + workspace manifests first so dep installs cache between
 # code-only changes.
 COPY package.json bun.lock tsconfig.base.json ./
@@ -41,14 +48,20 @@ FROM oven/bun:${BUN_VERSION} AS runtime
 
 # git is needed for worktrees, ca-certificates + curl for fetching gh/agent
 # CLIs, gnupg + apt-utils for the gh apt repo, jq is genuinely useful for
-# debugging /api responses from inside the container.
+# debugging /api responses from inside the container, tmux + ncurses-bin power
+# the in-browser terminal (xterm.js attaches to persistent tmux sessions).
+# nodejs runs the PTY worker — Bun + node-pty currently misbehave (slave
+# returns EIO on ioctl) so we host the PTY in a Node subprocess.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         git \
         gnupg \
         jq \
+        ncurses-bin \
+        nodejs \
         tini \
+        tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # gh CLI (needed for auto-PR; falls back to a plain push if you don't auth it)
