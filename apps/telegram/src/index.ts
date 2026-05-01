@@ -429,10 +429,54 @@ async function main() {
   //   4. Otherwise, ignore.
   bot.on("message:text", async (ctx) => {
     if (ctx.message.text.startsWith("/")) return;
-    let taskId: string | null = null;
+    const text = ctx.message.text.trim();
+    const chatId = ctx.chat!.id;
     const replyTo = ctx.message.reply_to_message;
+
+    // ── Suggestions get first crack ──────────────────────────────
+    // Either a reply-thread to a known suggestion bubble, OR (when
+    // the user just types in the chat) the most recent pending
+    // suggestion we sent here.
+    let suggestionId: string | null = null;
     if (replyTo) {
-      const k = replyKey(ctx.chat!.id, replyTo.message_id);
+      const k = replyKey(chatId, replyTo.message_id);
+      suggestionId = suggestionReplyMap.get(k) ?? null;
+    }
+    if (!suggestionId) {
+      suggestionId = lastSuggestionByChat.get(chatId) ?? null;
+    }
+    if (suggestionId) {
+      try {
+        const r = await client.replyToSuggestion(suggestionId, text);
+        if (r.kind === "spawned") {
+          await ctx.reply(
+            `✓ spawning [${r.task.id.slice(-8)}] (${r.agent}${r.model ? "/" + r.model : ""}${r.thinkingLevel !== "high" ? ", " + r.thinkingLevel : ""}): ${r.task.title.slice(0, 100)}`,
+          );
+          // Suggestion is resolved — drop the per-chat fallback.
+          if (lastSuggestionByChat.get(chatId) === suggestionId) {
+            lastSuggestionByChat.delete(chatId);
+          }
+        } else if (r.kind === "dismissed") {
+          await ctx.reply("ok, skipped.");
+          if (lastSuggestionByChat.get(chatId) === suggestionId) {
+            lastSuggestionByChat.delete(chatId);
+          }
+        } else if (r.kind === "clarify") {
+          await ctx.reply(`🤔 ${r.question}`);
+          // Suggestion stays pending — user can reply again.
+        } else {
+          await ctx.reply(`(suggestion ${r.reason})`);
+        }
+      } catch (e) {
+        await ctx.reply(`reply failed: ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    // ── Task replies fall through to steer ──────────────────────
+    let taskId: string | null = null;
+    if (replyTo) {
+      const k = replyKey(chatId, replyTo.message_id);
       taskId = replyMap.get(k) ?? null;
     }
     if (!taskId) taskId = focused(ctx);
@@ -453,20 +497,20 @@ async function main() {
     }
     if (!taskId) return;
 
-    let text = ctx.message.text.trim();
+    let resolvedText = text;
     // Numeric reply that maps to a known option list resolves to the
     // option's text. Lets the user tap "1" to approve a permission
     // request without typing the word.
-    const numeric = /^\d+$/.test(text) ? Number(text) : NaN;
+    const numeric = /^\d+$/.test(resolvedText) ? Number(resolvedText) : NaN;
     const opts = latestOptions.get(taskId);
     if (opts && Number.isFinite(numeric) && numeric >= 1 && numeric <= opts.length) {
-      text = opts[numeric - 1]!;
+      resolvedText = opts[numeric - 1]!;
       latestOptions.delete(taskId);
     }
     // "Done" acknowledgement — short affirmations after a `done: true`
     // progress note shouldn't requeue, just acknowledge.
     if (awaitingDone.has(taskId)) {
-      const ack = /^(y|yes|ok|okay|👍|cool|nice|done|good|sgtm)\b/i.test(text);
+      const ack = /^(y|yes|ok|okay|👍|cool|nice|done|good|sgtm)\b/i.test(resolvedText);
       if (ack) {
         awaitingDone.delete(taskId);
         await ctx.reply("ack — task is closed-out on agentd.");
@@ -475,7 +519,7 @@ async function main() {
     }
 
     try {
-      const r = await client.steerTask(taskId, text, "queue");
+      const r = await client.steerTask(taskId, resolvedText, "queue");
       await ctx.reply(
         `→ ${r.mode} for ${taskId.slice(-8)}${r.queued > 1 ? ` (depth ${r.queued})` : ""}`,
       );
@@ -496,6 +540,12 @@ async function main() {
   const replyMap = new Map<string, string>();
   const replyKey = (chatId: number, msgId: number): string =>
     `${chatId}:${msgId}`;
+
+  // Same idea for suggestions — separate map so a reply to a suggestion
+  // bubble routes through the conversational reply endpoint, not steer.
+  const suggestionReplyMap = new Map<string, string>(); // chat:msg → suggestionId
+  // Per-chat fallback when the user doesn't reply-thread: latest pending suggestion.
+  const lastSuggestionByChat = new Map<number, string>();
 
   // Latest set of options offered to the user, keyed per-task. Lets a
   // numeric reply in chat ("1", "2") resolve to the option text.
@@ -545,6 +595,55 @@ async function main() {
   // `status` changes, and `exit`. Every-message / every-tool noise stays
   // off so the chat is a digest, not a firehose.
   const ws = client.watch(null, async (event: WsServerEvent) => {
+    // Ideation suggestions — broadcast to every allowed chat. We
+    // record the outbound message id per chat so reply-threads route
+    // back through the conversational reply endpoint.
+    if (event.type === "suggestion_created") {
+      const sug = event.suggestion;
+      const numbered = sug.options
+        .map((o, i) => `${i + 1}. ${o}`)
+        .join("\n");
+      const body = [
+        `💡 *${escape(sug.title)}*`,
+        "",
+        escape(sug.prompt.split("\n")[0] ?? ""),
+        "",
+        numbered.length > 0 ? escape(numbered) : "",
+        "",
+        `_Reply with a number, "skip", or just say what you want — e.g. "do option 2 with opus"._`,
+      ]
+        .filter((s) => s.length > 0)
+        .join("\n");
+      const targets = new Set<number>([
+        ...cfg.allowedChatIds,
+        ...cfg.allowedUserIds,
+      ]);
+      for (const chatId of targets) {
+        try {
+          const sent = await bot.api.sendMessage(chatId, body, {
+            parse_mode: "MarkdownV2",
+          });
+          suggestionReplyMap.set(replyKey(chatId, sent.message_id), sug.id);
+          lastSuggestionByChat.set(chatId, sug.id);
+        } catch (e) {
+          console.error(
+            "suggestion notify failed:",
+            (e as Error).message,
+          );
+        }
+      }
+      return;
+    }
+    if (event.type === "suggestion_updated") {
+      // No outbound message — the bot already acked when the user
+      // replied. Just drop it from the per-chat fallback map if it
+      // was the last one tracked there.
+      const sug = event.suggestion;
+      for (const [chatId, id] of lastSuggestionByChat) {
+        if (id === sug.id) lastSuggestionByChat.delete(chatId);
+      }
+      return;
+    }
     if (event.type === "task_updated") {
       // Pull mirrorTo.chatId for the explicit-mirror path. We only do
       // this on task_updated so we always have the latest mirror config.

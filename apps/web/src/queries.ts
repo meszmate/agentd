@@ -434,6 +434,20 @@ export function usePatchSettings() {
 }
 
 /**
+ * Model registry — single source of truth for the model lists the UI
+ * shows in pickers. Backed by `cfg.models` server-side, overridable
+ * in `~/.agentd/config.json`.
+ */
+export function useModels() {
+  const client = useClient();
+  return useQuery({
+    queryKey: ["models"] as const,
+    queryFn: () => client.getModels(),
+    staleTime: 5 * 60_000,
+  });
+}
+
+/**
  * Cross-device "last used" defaults for the spawn flow. Backed by the
  * daemon's config.json under `prefs`. Replaces the old agentd.last*
  * localStorage keys.

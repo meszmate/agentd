@@ -42,6 +42,7 @@ import {
 import {
   useCreateTask,
   useDeleteProject,
+  useModels,
   usePatchPrefs,
   usePrefs,
   useProject,
@@ -416,6 +417,7 @@ function ProjectComposer({
 
   const prefsQ = usePrefs();
   const patchPrefs = usePatchPrefs();
+  const modelsQ = useModels();
 
   const [prompt, setPrompt] = useState("");
   const [agent, setAgent] = useState<"claude" | "codex">("claude");
@@ -550,20 +552,13 @@ function ProjectComposer({
         />
         <ToolbarPick
           label={`model:${model || "default"}`}
-          options={
-            agent === "claude"
-              ? [
-                  { value: "", label: "(default)" },
-                  { value: "claude-opus-4-7", label: "opus 4.7" },
-                  { value: "claude-sonnet-4-6", label: "sonnet 4.6" },
-                  { value: "claude-haiku-4-5", label: "haiku 4.5" },
-                ]
-              : [
-                  { value: "", label: "(default)" },
-                  { value: "gpt-5-codex", label: "gpt-5-codex" },
-                  { value: "gpt-5", label: "gpt-5" },
-                ]
-          }
+          options={[
+            { value: "", label: "(default)" },
+            ...((modelsQ.data?.models[agent] ?? []).map((m) => ({
+              value: m.id,
+              label: m.label || m.id,
+            }))),
+          ]}
           onSelect={setModel}
         />
         <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">

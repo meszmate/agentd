@@ -1,4 +1,9 @@
-import type { AgentEvent, TerminalSession, TerminalWindow } from "@agentd/contracts";
+import type {
+  AgentEvent,
+  Suggestion,
+  TerminalSession,
+  TerminalWindow,
+} from "@agentd/contracts";
 
 export type TaskEventEnvelope = {
   taskId: string;
@@ -22,6 +27,20 @@ export type SystemEvent =
       kind: "terminal_windows";
       sessionName: string;
       windows: TerminalWindow[];
+    }
+  | {
+      /**
+       * A new ideation suggestion just landed. Subscribers (web inbox,
+       * Telegram bot, etc.) format and present it. Replies route to
+       * `/suggestions/:id/reply`.
+       */
+      kind: "suggestion_created";
+      suggestion: Suggestion;
+    }
+  | {
+      /** A suggestion got resolved or dismissed. UIs use this to dim/hide it. */
+      kind: "suggestion_updated";
+      suggestion: Suggestion;
     };
 
 export type SystemEventEnvelope = {

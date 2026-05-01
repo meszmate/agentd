@@ -178,6 +178,17 @@ export function buildServer(opts: BuildServerOptions) {
 
   api.get("/tasks", (c) => c.json({ tasks: tasks.list() }));
 
+  /**
+   * Model registry — single source of truth for which agent CLIs accept
+   * which model ids. Override `models` in `~/.agentd/config.json` to
+   * add new releases without touching agentd code; everything that
+   * needs a model picker reads from here.
+   */
+  api.get("/models", (c) => {
+    const cfg = loadConfig(paths.root);
+    return c.json({ models: cfg.models });
+  });
+
   /* ── Councils ─────────────────────────────────────────────────────── */
 
   api.get("/councils", (c) => c.json({ councils: listCouncils(db) }));
@@ -1098,6 +1109,27 @@ export function buildServer(opts: BuildServerOptions) {
     return c.json({ suggestion: sug });
   });
 
+  /**
+   * Conversational reply — operator types whatever they want, the
+   * router (heuristic + AI) decides what to do. Used by the Telegram
+   * bot, the web inbox, and anywhere else that lets the operator
+   * answer a suggestion in free-form text.
+   */
+  api.post("/suggestions/:id/reply", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => null)) as {
+      text?: string;
+    } | null;
+    const text = (body?.text ?? "").trim();
+    if (!text) return c.json({ error: "text required" }, 400);
+    try {
+      const r = await tasks.replyToSuggestion(id, text);
+      return c.json(r);
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
   // ──────────────────────── templates ────────────────────────
   api.get("/templates", (c) => c.json({ templates: listTemplates(db) }));
 
@@ -1989,6 +2021,18 @@ export function buildServer(opts: BuildServerOptions) {
               type: "terminal_windows",
               sessionName: env.event.sessionName,
               windows: env.event.windows,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "suggestion_created") {
+            send({
+              type: "suggestion_created",
+              suggestion: env.event.suggestion,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "suggestion_updated") {
+            send({
+              type: "suggestion_updated",
+              suggestion: env.event.suggestion,
               ts: env.ts,
             });
           }

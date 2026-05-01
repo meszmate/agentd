@@ -33,6 +33,7 @@ import {
 import {
   useCreateTemplate,
   useDeleteTemplate,
+  useModels,
   useRunTemplate,
   useTasks,
   useTemplates,
@@ -301,6 +302,7 @@ function CreateTemplateSheet({
   onClose: () => void;
 }) {
   const create = useCreateTemplate();
+  const modelsQ = useModels();
   const { toast } = useApp();
   const [name, setName] = useState("");
   const [agent, setAgent] = useState<"claude" | "codex">("claude");
@@ -521,11 +523,12 @@ function CreateTemplateSheet({
                 id="tpl-model"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                placeholder={
-                  agent === "claude"
-                    ? "(default) e.g. claude-opus-4-7"
-                    : "(default) e.g. gpt-5-codex"
-                }
+                placeholder={(() => {
+                  const first = modelsQ.data?.models[agent]?.[0];
+                  return first
+                    ? `(default) e.g. ${first.id}`
+                    : "(default)";
+                })()}
                 className="font-mono text-xs"
               />
             </Field>

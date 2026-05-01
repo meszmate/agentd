@@ -24,6 +24,7 @@ import {
 import {
   useCreateCouncil,
   useCreateTask,
+  useModels,
   usePatchPrefs,
   usePrefs,
   useSkills,
@@ -76,6 +77,7 @@ export function SpawnSheet({
 }) {
   const create = useCreateTask();
   const createCouncil = useCreateCouncil();
+  const modelsQ = useModels();
   const [councilMode, setCouncilMode] = useState(false);
   const navigate = useNavigate();
   const { toast } = useApp();
@@ -177,46 +179,25 @@ export function SpawnSheet({
     try {
       const finalBase = (workspace.baseBranch || baseBranch).trim() || "main";
 
-      // Council mode short-circuits the regular task spawn — pop a fixed
-      // 3-member set (opus/sonnet/haiku for Claude, mirrored gpt-5/gpt-5-codex
-      // for Codex) and route to the Councils page.
+      // Council mode pulls members straight from the registry. Whatever
+      // models the user has configured for this agent become parallel
+      // candidates — adding a model to config.json grows the council
+      // automatically. Capped at 5 members (the council schema limit).
       if (councilMode) {
-        const members =
-          agent === "claude"
-            ? [
-                {
-                  agent: "claude" as const,
-                  model: "claude-opus-4-7",
-                  thinkingLevel,
-                  label: "opus",
-                },
-                {
-                  agent: "claude" as const,
-                  model: "claude-sonnet-4-6",
-                  thinkingLevel,
-                  label: "sonnet",
-                },
-                {
-                  agent: "claude" as const,
-                  model: "claude-haiku-4-5",
-                  thinkingLevel,
-                  label: "haiku",
-                },
-              ]
-            : [
-                {
-                  agent: "codex" as const,
-                  model: "gpt-5-codex",
-                  thinkingLevel,
-                  label: "gpt-5-codex",
-                },
-                {
-                  agent: "codex" as const,
-                  model: "gpt-5",
-                  thinkingLevel,
-                  label: "gpt-5",
-                },
-              ];
+        const registry = modelsQ.data?.models[agent] ?? [];
+        const members = registry.slice(0, 5).map((m) => ({
+          agent: agent as "claude" | "codex",
+          model: m.id,
+          thinkingLevel,
+          label: m.label || m.id,
+        }));
+        if (members.length < 2) {
+          toast(
+            `Council mode needs at least 2 ${agent} models in cfg.models. Add one in Settings or ~/.agentd/config.json.`,
+            true,
+          );
+          return;
+        }
         const res = await createCouncil.mutateAsync({
           repoPath: repoPath.trim(),
           baseBranch: finalBase,
@@ -339,7 +320,10 @@ export function SpawnSheet({
                 <p className="text-2xs text-muted-foreground">
                   Run the same prompt against{" "}
                   <span className="font-mono">
-                    {agent === "claude" ? "opus / sonnet / haiku" : "gpt-5-codex / gpt-5"}
+                    {(modelsQ.data?.models[agent] ?? [])
+                      .slice(0, 5)
+                      .map((m) => m.label || m.id)
+                      .join(" / ") || "(no models configured)"}
                   </span>{" "}
                   in parallel. The judge picks the best diff when they all
                   finish — overrideable from the council page.
@@ -539,11 +523,12 @@ export function SpawnSheet({
               <Input
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                placeholder={
-                  agent === "claude"
-                    ? "(default) e.g. claude-opus-4-7"
-                    : "(default) e.g. gpt-5-codex"
-                }
+                placeholder={(() => {
+                  const first = modelsQ.data?.models[agent]?.[0];
+                  return first
+                    ? `(default) e.g. ${first.id}`
+                    : "(default)";
+                })()}
                 spellCheck={false}
                 className="font-mono text-xs"
               />

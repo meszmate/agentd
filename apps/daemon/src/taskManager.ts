@@ -31,6 +31,7 @@ import {
   getProjectById,
   getSuggestion,
   getTemplate,
+  interpretSuggestionReply,
   resolveSuggestion as dbResolveSuggestion,
   runIdeation,
   runJudge,
@@ -38,6 +39,7 @@ import {
   setCouncilWinner,
   streamPrMessage,
   loadConfig,
+  resolveModelInRegistry,
   newId,
   renderRepoContext,
   renderSkillsCatalog,
@@ -654,17 +656,12 @@ export class TaskManager {
       prompt,
       options: result.options,
     });
-    // Surface on the bus under a synthetic taskId so the chat plugin
-    // can render it. Use the suggestion id so plugins disambiguate.
-    this.bus.publish({
-      taskId: `sug:${sug.id}`,
-      event: {
-        kind: "ask",
-        askId: sug.id,
-        prompt: `💡 ${tpl.name}: ${prompt.split("\n")[0]?.slice(0, 80) ?? ""}`,
-        options: result.options,
-      },
-      ts: Date.now(),
+    // Broadcast as a system event — first-class citizen, not a fake
+    // per-task `ask`. Web clients + chat plugins subscribe via /ws
+    // and render their own affordances.
+    this.bus.publishSystem({
+      kind: "suggestion_created",
+      suggestion: sug,
     });
     return sug;
   }
@@ -728,7 +725,137 @@ export class TaskManager {
   }
 
   dismissSuggestion(id: string): Suggestion | null {
-    return dbDismissSuggestion(this.db, id);
+    const updated = dbDismissSuggestion(this.db, id);
+    if (updated) {
+      this.bus.publishSystem({ kind: "suggestion_updated", suggestion: updated });
+    }
+    return updated;
+  }
+
+  /**
+   * Conversational reply path — routes a free-form chat reply through
+   * the heuristic + AI router, then either spawns a task, dismisses
+   * the suggestion, or returns a clarification question for the bot
+   * to ask back.
+   *
+   * Returns one of:
+   *   { kind: "spawned", suggestion, task, picked: "option N" | "custom" }
+   *   { kind: "dismissed", suggestion }
+   *   { kind: "clarify", question }
+   *   { kind: "noop", reason }   — already resolved, nothing to do
+   */
+  async replyToSuggestion(
+    id: string,
+    text: string,
+  ): Promise<
+    | {
+        kind: "spawned";
+        suggestion: Suggestion;
+        task: Task;
+        picked: string;
+        agent: AgentKind;
+        model: string;
+        thinkingLevel: ThinkingLevel;
+      }
+    | { kind: "dismissed"; suggestion: Suggestion }
+    | { kind: "clarify"; question: string }
+    | { kind: "noop"; reason: string }
+  > {
+    const sug = getSuggestion(this.db, id);
+    if (!sug) throw new Error("suggestion not found");
+    if (sug.status !== "pending") {
+      return { kind: "noop", reason: `already ${sug.status}` };
+    }
+    const cfg = loadConfig(this.paths.root);
+    const modelHints = (
+      ["claude", "codex"] as const
+    ).flatMap((agent) =>
+      (cfg.models[agent] ?? []).map((m) => ({
+        agent,
+        aliases: [m.id, ...m.aliases],
+      })),
+    );
+    const decision = await interpretSuggestionReply({
+      options: sug.options,
+      text,
+      helper: cfg.aiHelpers,
+      resolveModel: (raw, agent) =>
+        resolveModelInRegistry(raw, agent, cfg.models),
+      modelHints,
+    });
+
+    if (decision.action === "clarify") {
+      return { kind: "clarify", question: decision.question };
+    }
+    if (decision.action === "dismiss") {
+      const updated = dbDismissSuggestion(this.db, id)!;
+      this.bus.publishSystem({
+        kind: "suggestion_updated",
+        suggestion: updated,
+      });
+      return { kind: "dismissed", suggestion: updated };
+    }
+
+    // pick or custom — both spawn a task. The difference is just where
+    // the prompt comes from + how we record the resolution.
+    const repoPath = (() => {
+      if (sug.projectId) {
+        const project = getProjectById(this.db, sug.projectId);
+        if (project) return project.path;
+      }
+      if (sug.templateId) {
+        const tpl = getTemplate(this.db, sug.templateId);
+        if (tpl) return tpl.repoPath;
+      }
+      throw new Error("no repo path resolvable for suggestion");
+    })();
+
+    let chosenIndex: number | null = null;
+    let prompt: string;
+    let picked: string;
+    if (decision.action === "pick") {
+      chosenIndex = decision.index;
+      prompt = sug.options[decision.index]!;
+      picked = `option ${decision.index + 1}`;
+    } else {
+      // custom — text is the synthesized prompt.
+      prompt = decision.prompt;
+      picked = "custom";
+    }
+
+    const agent: AgentKind = decision.agent ?? "claude";
+    const thinkingLevel: ThinkingLevel =
+      decision.thinkingLevel ?? cfg.defaultThinking[agent];
+    const model = decision.model ?? "";
+
+    const task = await this.create({
+      agent,
+      repoPath,
+      prompt,
+      title: prompt.split("\n")[0]!.slice(0, 80),
+      thinkingLevel,
+      ...(model ? { model } : {}),
+    });
+    const updated = dbResolveSuggestion(
+      this.db,
+      sug.id,
+      chosenIndex,
+      prompt,
+      task.id,
+    )!;
+    this.bus.publishSystem({
+      kind: "suggestion_updated",
+      suggestion: updated,
+    });
+    return {
+      kind: "spawned",
+      suggestion: updated,
+      task,
+      picked,
+      agent,
+      model,
+      thinkingLevel,
+    };
   }
 
   /* ── Councils ───────────────────────────────────────────────────── */

@@ -1,6 +1,7 @@
 import type {
   Council,
   CreateCouncilRequest,
+  Suggestion,
   CreateProjectRequest,
   CreateScheduleRequest,
   CreateSkillRequest,
@@ -28,6 +29,23 @@ import type {
   UpdateSkillRequest,
   WsServerEvent,
 } from "@agentd/contracts";
+
+/**
+ * Model registry served at `/api/models`. The daemon's config.json
+ * is authoritative; this is a flat snapshot for the web/CLI to render
+ * pickers against. Adding a new model = edit config.json, restart.
+ */
+export interface AgentdModelEntry {
+  id: string;
+  label: string;
+  aliases: string[];
+  tier?: "fast" | "balanced" | "deep" | "deepest";
+}
+
+export interface AgentdModelRegistry {
+  claude: AgentdModelEntry[];
+  codex: AgentdModelEntry[];
+}
 
 /**
  * Server-stored "last picked" defaults for the spawn flow. Mirrors
@@ -145,6 +163,69 @@ export class AgentdClient {
 
   async health(): Promise<{ ok: boolean; version: string; time: number }> {
     return this.req("/health");
+  }
+
+  // ── model registry ──
+  async getModels(): Promise<{ models: AgentdModelRegistry }> {
+    return this.req("/api/models");
+  }
+
+  // ── suggestions ──
+  async listSuggestions(opts?: {
+    status?: "pending" | "resolved" | "dismissed";
+    limit?: number;
+  }): Promise<{ suggestions: Suggestion[] }> {
+    const qs: string[] = [];
+    if (opts?.status) qs.push(`status=${opts.status}`);
+    if (opts?.limit) qs.push(`limit=${opts.limit}`);
+    return this.req(`/api/suggestions${qs.length ? "?" + qs.join("&") : ""}`);
+  }
+  async getSuggestion(id: string): Promise<{ suggestion: Suggestion }> {
+    return this.req(`/api/suggestions/${encodeURIComponent(id)}`);
+  }
+  async resolveSuggestion(
+    id: string,
+    pick: { index?: number; text?: string },
+  ): Promise<{ suggestion: Suggestion; task: Task }> {
+    return this.req(`/api/suggestions/${encodeURIComponent(id)}/resolve`, {
+      method: "POST",
+      body: JSON.stringify(pick),
+    });
+  }
+  async dismissSuggestion(id: string): Promise<{ suggestion: Suggestion }> {
+    return this.req(`/api/suggestions/${encodeURIComponent(id)}/dismiss`, {
+      method: "POST",
+    });
+  }
+  /**
+   * Conversational reply — heuristic + AI router. The text is whatever
+   * the operator typed; server returns one of:
+   *   { kind: "spawned", suggestion, task, picked, agent, model, thinkingLevel }
+   *   { kind: "dismissed", suggestion }
+   *   { kind: "clarify", question }
+   *   { kind: "noop", reason }
+   */
+  async replyToSuggestion(
+    id: string,
+    text: string,
+  ): Promise<
+    | {
+        kind: "spawned";
+        suggestion: Suggestion;
+        task: Task;
+        picked: string;
+        agent: "claude" | "codex";
+        model: string;
+        thinkingLevel: ThinkingLevel;
+      }
+    | { kind: "dismissed"; suggestion: Suggestion }
+    | { kind: "clarify"; question: string }
+    | { kind: "noop"; reason: string }
+  > {
+    return this.req(`/api/suggestions/${encodeURIComponent(id)}/reply`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
   }
 
   // ── councils ──

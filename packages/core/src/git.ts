@@ -853,6 +853,259 @@ export async function runIdeation(
   }
 }
 
+/* ── Suggestion reply router ───────────────────────────────────────── */
+
+/**
+ * What the operator wants done with a pending suggestion. Mirrors the
+ * shape of the AI router's structured output but is also produced by
+ * the cheap heuristic gate (numeric / yes / skip).
+ *
+ *   pick     — operator picked option N. The agent uses that text.
+ *   custom   — operator wants a different prompt entirely (or "do N
+ *              but also X" — we synthesize the prompt).
+ *   clarify  — too ambiguous to act safely. Bot asks the question back;
+ *              suggestion stays pending.
+ *   dismiss  — operator skipped.
+ */
+export type SuggestionAction =
+  | {
+      action: "pick";
+      index: number;
+      agent?: "claude" | "codex";
+      model?: string;
+      thinkingLevel?: "low" | "medium" | "high" | "max" | "xhigh";
+    }
+  | {
+      action: "custom";
+      prompt: string;
+      agent?: "claude" | "codex";
+      model?: string;
+      thinkingLevel?: "low" | "medium" | "high" | "max" | "xhigh";
+    }
+  | { action: "clarify"; question: string }
+  | { action: "dismiss" };
+
+// Model alias resolution lives in config.ts (`resolveModelInRegistry`)
+// so the registry stays the single source of truth. The router below
+// imports it lazily to avoid a circular type dependency.
+
+function resolveThinkingAlias(
+  raw: string,
+):
+  | "low"
+  | "medium"
+  | "high"
+  | "max"
+  | "xhigh"
+  | undefined {
+  const k = raw.trim().toLowerCase();
+  if (["low", "fast", "quick"].includes(k)) return "low";
+  if (["medium", "normal", "balanced"].includes(k)) return "medium";
+  if (["high", "default"].includes(k)) return "high";
+  if (["max", "deep", "thorough", "deepest"].includes(k)) return "max";
+  if (["xhigh", "very high", "extra high"].includes(k)) return "xhigh";
+  return undefined;
+}
+
+const AFFIRMATIVE = /^(y|yes|ok|okay|go|do it|sure|sgtm|yep|yeah|please)\b\.?$/i;
+const NEGATIVE =
+  /^(skip|cancel|dismiss|no|nope|nah|not now|later|ignore|never mind|nvm)\b\.?$/i;
+
+/**
+ * Heuristic + AI route a free-form chat reply against a list of
+ * suggestion options. Cheap path handles 80% of common replies for
+ * free; the AI router covers ambiguous / mixed replies and extracts
+ * model/agent/effort overrides ("do option 2 with opus xhigh").
+ */
+export async function interpretSuggestionReply(args: {
+  options: string[];
+  text: string;
+  helper?: AiHelperOptions;
+  /**
+   * Resolver for nickname → full model id. Caller passes a closure
+   * that knows the user's registry (since we don't import config.ts
+   * here to avoid a cycle). Default: identity.
+   */
+  resolveModel?: (
+    raw: string,
+    agent: "claude" | "codex",
+  ) => string;
+  /**
+   * The full set of model nicknames + ids the user has in their
+   * registry, used to teach the AI router which strings to look for.
+   * Optional — when missing, the prompt falls back to a generic hint.
+   */
+  modelHints?: { agent: "claude" | "codex"; aliases: string[] }[];
+}): Promise<SuggestionAction> {
+  const text = args.text.trim();
+  if (!text) return { action: "clarify", question: "Empty reply — what would you like me to do?" };
+
+  // Cheap path 1: numeric pick.
+  const numeric = /^\d+$/.test(text) ? Number(text) : NaN;
+  if (Number.isFinite(numeric)) {
+    if (numeric >= 1 && numeric <= args.options.length) {
+      return { action: "pick", index: numeric - 1 };
+    }
+    return {
+      action: "clarify",
+      question: `That's outside the range. Pick 1-${args.options.length}, write your own direction, or say skip.`,
+    };
+  }
+
+  // Cheap path 2: clear dismissals.
+  if (NEGATIVE.test(text)) return { action: "dismiss" };
+
+  // Cheap path 3: bare affirmative against a single option.
+  if (AFFIRMATIVE.test(text) && args.options.length === 1) {
+    return { action: "pick", index: 0 };
+  }
+
+  // AI router. Output is a single line of JSON. Worth the latency
+  // because this is where the "talking to a real human" feel lives —
+  // "do 2 but also check WS reconnect coverage" → custom prompt.
+  const ask = [
+    `You are a router. The user saw these options:`,
+    args.options.map((o, i) => `${i + 1}. ${o}`).join("\n"),
+    "",
+    `The user replied: ${JSON.stringify(text)}`,
+    "",
+    `Output a single line of JSON, no preamble, no fences. Schema:`,
+    `{"action":"pick"|"custom"|"clarify"|"dismiss","index"?:number(1-${args.options.length}),"prompt"?:string,"question"?:string,"agent"?:"claude"|"codex","model"?:string,"effort"?:"low"|"medium"|"high"|"max"|"xhigh"}`,
+    ``,
+    `Rules:`,
+    `- pick when they clearly want one of the listed options. Index is 1-based.`,
+    `- custom when they want something different OR a hybrid like "do option 2 but also X" — synthesize the prompt that captures both.`,
+    `- clarify only when it's genuinely too ambiguous to act safely. Output a short question.`,
+    `- dismiss when they want to skip / not now.`,
+    `- If they mention a model, include the closest match in "model" (use the user's literal text — the server resolves aliases).${
+      args.modelHints?.length
+        ? ` Known models: ${args.modelHints
+            .flatMap((h) =>
+              h.aliases.map((a) => `${a} (${h.agent})`),
+            )
+            .join(", ")}.`
+        : ""
+    }`,
+    `- If they mention thinking effort (low/medium/high/max/xhigh) include it in "effort".`,
+    `- If they mention an agent ("with claude" / "with codex") include it in "agent".`,
+    `- Default agent is claude if not specified.`,
+    "",
+    `Examples:`,
+    `User: "1" → {"action":"pick","index":1}`,
+    `User: "do option 2 with opus" → {"action":"pick","index":2,"agent":"claude","model":"opus"}`,
+    `User: "actually focus on auth instead, codex high" → {"action":"custom","prompt":"focus on auth","agent":"codex","effort":"high"}`,
+    `User: "do 2 but also check WS reconnect coverage" → {"action":"custom","prompt":"<option 2 text> AND verify WS reconnect coverage"}`,
+    `User: "skip" → {"action":"dismiss"}`,
+    `User: "what about both?" → {"action":"clarify","question":"You want me to do both? I can only spawn one task at a time."}`,
+    "",
+    `JSON:`,
+  ].join("\n");
+
+  const argv = buildAiHelperArgv(args.helper ?? {});
+  argv.push("-p", ask);
+  let raw = "";
+  try {
+    const proc = Bun.spawn({
+      cmd: argv,
+      cwd: process.cwd(),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+    raw = await new Response(proc.stdout).text();
+    await proc.exited;
+  } catch {
+    // Helper unreachable — treat the literal text as a custom prompt.
+    return { action: "custom", prompt: text };
+  }
+
+  // Pull a JSON object out. Strip fences if Claude wrapped it.
+  const cleaned = raw
+    .trim()
+    .replace(/^```[a-z]*\n?|```$/g, "")
+    .trim();
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    parsed = JSON.parse(cleaned) as Record<string, unknown>;
+  } catch {
+    // Maybe extra text bracketed the JSON. Try a regex fallback.
+    const m = cleaned.match(/\{[\s\S]*\}/);
+    if (m) {
+      try {
+        parsed = JSON.parse(m[0]) as Record<string, unknown>;
+      } catch {
+        parsed = null;
+      }
+    }
+  }
+  if (!parsed) {
+    // Garbage — fall back to treating user text as a free-form prompt.
+    return { action: "custom", prompt: text };
+  }
+
+  const action = String(parsed.action ?? "");
+  const agent =
+    parsed.agent === "claude" || parsed.agent === "codex"
+      ? parsed.agent
+      : undefined;
+  const resolveModel =
+    args.resolveModel ?? ((raw: string) => raw.trim());
+  const modelAgent: "claude" | "codex" =
+    parsed.agent === "codex" ? "codex" : "claude";
+  const model =
+    typeof parsed.model === "string" && parsed.model.trim()
+      ? resolveModel(parsed.model, modelAgent)
+      : undefined;
+  const effort =
+    typeof parsed.effort === "string"
+      ? resolveThinkingAlias(parsed.effort)
+      : undefined;
+
+  if (action === "pick") {
+    const idx = Number(parsed.index);
+    if (
+      Number.isFinite(idx) &&
+      idx >= 1 &&
+      idx <= args.options.length
+    ) {
+      return {
+        action: "pick",
+        index: idx - 1,
+        ...(agent ? { agent } : {}),
+        ...(model ? { model } : {}),
+        ...(effort ? { thinkingLevel: effort } : {}),
+      };
+    }
+    // Pick with bad index — degrade to custom with the user's text.
+    return { action: "custom", prompt: text };
+  }
+  if (action === "custom") {
+    const promptText =
+      typeof parsed.prompt === "string" && parsed.prompt.trim()
+        ? parsed.prompt.trim()
+        : text;
+    return {
+      action: "custom",
+      prompt: promptText,
+      ...(agent ? { agent } : {}),
+      ...(model ? { model } : {}),
+      ...(effort ? { thinkingLevel: effort } : {}),
+    };
+  }
+  if (action === "clarify") {
+    const q =
+      typeof parsed.question === "string" && parsed.question.trim()
+        ? parsed.question.trim()
+        : "Could you say a bit more about what you want?";
+    return { action: "clarify", question: q };
+  }
+  if (action === "dismiss") {
+    return { action: "dismiss" };
+  }
+  // Unknown action — degrade safely.
+  return { action: "custom", prompt: text };
+}
+
 /* ── Council judge ─────────────────────────────────────────────────── */
 
 export interface JudgeCandidate {

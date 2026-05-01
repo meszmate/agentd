@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/tooltip";
 import {
   qk,
+  useModels,
   usePatchPrefs,
   usePrefs,
   useRemoveTask,
@@ -577,31 +578,21 @@ function ThinkingLevelChip({ task }: { task: Task }) {
   );
 }
 
-/**
- * Suggestion lists per agent kind. The user can also type any string they
- * want — these are just one-tap shortcuts. Empty string clears the override
- * so the task inherits the configured default.
- */
-const MODEL_SUGGESTIONS: Record<string, { value: string; label: string }[]> = {
-  claude: [
-    { value: "", label: "(default)" },
-    { value: "claude-opus-4-7", label: "opus 4.7" },
-    { value: "claude-sonnet-4-6", label: "sonnet 4.6" },
-    { value: "claude-haiku-4-5", label: "haiku 4.5" },
-  ],
-  codex: [
-    { value: "", label: "(default)" },
-    { value: "gpt-5-codex", label: "gpt-5-codex" },
-    { value: "gpt-5", label: "gpt-5" },
-  ],
-};
-
 function ModelChip({ task }: { task: Task }) {
   const client = useClient();
   const qc = useQueryClient();
   const { toast } = useApp();
+  const modelsQ = useModels();
   const current = task.model ?? "";
-  const suggestions = MODEL_SUGGESTIONS[task.agent] ?? [{ value: "", label: "(default)" }];
+  // Pulled from the server's `cfg.models` so adding a model only
+  // means editing config.json once. Always include "(default)" up
+  // front so clearing the override is one tap away.
+  const registryEntries =
+    modelsQ.data?.models[task.agent as "claude" | "codex"] ?? [];
+  const suggestions = [
+    { value: "", label: "(default)" },
+    ...registryEntries.map((m) => ({ value: m.id, label: m.label || m.id })),
+  ];
   const [draft, setDraft] = useState(current);
   useEffect(() => setDraft(current), [current]);
 

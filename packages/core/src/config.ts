@@ -50,6 +50,108 @@ export const DEFAULT_COMMIT_INSTRUCTIONS = "";
 export const DEFAULT_PR_INSTRUCTIONS = "";
 
 /**
+ * One model the user can pick in any agent picker. The registry lives
+ * in `cfg.models` and is fully overridable from `~/.agentd/config.json`
+ * — adding a new model is a config edit + daemon restart, no code.
+ *
+ *   id       — what gets passed to the CLI as `--model`. Must be exact.
+ *   label    — short display name shown in pickers.
+ *   aliases  — nicknames the AI router accepts ("opus", "opus 4.7").
+ *   tier     — optional UI grouping. The deepest tier is shown as the
+ *              "max thinking" pair; fast tiers are flagged in the UI.
+ */
+export const ModelEntry = z.object({
+  id: z.string().min(1),
+  label: z.string().default(""),
+  aliases: z.array(z.string()).default([]),
+  tier: z
+    .enum(["fast", "balanced", "deep", "deepest"])
+    .optional(),
+});
+export type ModelEntry = z.infer<typeof ModelEntry>;
+
+/**
+ * Per-agent model lists. Each entry is fully self-contained (id +
+ * label + aliases). The first entry that has `tier === "deepest"` is
+ * treated as the default for that agent when no `defaultModel` is set;
+ * otherwise the first entry wins.
+ */
+export const ModelRegistry = z.object({
+  claude: z.array(ModelEntry).default([]),
+  codex: z.array(ModelEntry).default([]),
+});
+export type ModelRegistry = z.infer<typeof ModelRegistry>;
+
+export const DEFAULT_MODEL_REGISTRY: ModelRegistry = {
+  claude: [
+    {
+      id: "claude-opus-4-7",
+      label: "opus 4.7",
+      aliases: ["opus", "claude-opus", "opus 4.7", "opus4.7", "opus-4.7"],
+      tier: "deep",
+    },
+    {
+      id: "claude-sonnet-4-6",
+      label: "sonnet 4.6",
+      aliases: ["sonnet", "claude-sonnet", "sonnet 4.6"],
+      tier: "balanced",
+    },
+    {
+      id: "claude-haiku-4-5",
+      label: "haiku 4.5",
+      aliases: ["haiku", "claude-haiku", "haiku 4.5"],
+      tier: "fast",
+    },
+  ],
+  codex: [
+    {
+      id: "gpt-5-codex",
+      label: "gpt-5-codex",
+      aliases: ["codex", "gpt5-codex", "gpt-5 codex"],
+      tier: "balanced",
+    },
+    {
+      id: "gpt-5",
+      label: "gpt-5",
+      aliases: ["gpt5", "gpt5.0"],
+      tier: "fast",
+    },
+  ],
+};
+
+/**
+ * Resolve a free-form model nickname (`"opus"`, `"gpt-5.5"`, the full
+ * id) against the registry. Falls back to the literal input when no
+ * registry match — that lets the user pass a model id the registry
+ * doesn't know about (a brand-new release, a private fine-tune, etc.).
+ */
+export function resolveModelInRegistry(
+  raw: string,
+  agent: "claude" | "codex",
+  registry: ModelRegistry,
+): string {
+  const k = raw.trim();
+  if (!k) return "";
+  const list = registry[agent] ?? [];
+  const lower = k.toLowerCase();
+  // Exact id match.
+  for (const m of list) if (m.id === k) return m.id;
+  // Alias / case-insensitive id match.
+  for (const m of list) {
+    if (m.id.toLowerCase() === lower) return m.id;
+    if (m.aliases.some((a) => a.toLowerCase() === lower)) return m.id;
+  }
+  // Substring match on aliases — last resort, helps "opus 4.7" land
+  // on "opus 4.7" entry even when whitespace is weird.
+  for (const m of list) {
+    if (m.aliases.some((a) => a.toLowerCase().replace(/\s+/g, "") === lower.replace(/\s+/g, ""))) {
+      return m.id;
+    }
+  }
+  return k;
+}
+
+/**
  * Settings for the small Claude invocations agentd makes outside the main
  * task agent: commit message generation, PR body generation, branch name
  * suggestion. Kept separate from the per-task agent config because these
@@ -161,6 +263,13 @@ export const AgentdConfig = z.object({
    * agent runs.
    */
   aiHelpers: AiHelperConfig.default(DEFAULT_AI_HELPER),
+  /**
+   * Per-agent model registry. Override in `~/.agentd/config.json` to
+   * add new releases (e.g. `gpt-5.5`) without touching agentd code.
+   * Every UI picker, the AI router's alias resolver, and the CLI's
+   * model flag all read from here.
+   */
+  models: ModelRegistry.default(DEFAULT_MODEL_REGISTRY),
   /**
    * Default thinking level applied when a task is spawned without one.
    *   claude — `xhigh` is Claude's own default; `max` is its deepest tier.

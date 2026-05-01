@@ -13,7 +13,8 @@ import {
 } from "@/components/ui/page-topbar";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoRow, ToggleRow } from "@/components/ui/info-row";
-import { usePatchSettings, useSettings } from "@/queries";
+import { useModels, usePatchSettings, useSettings } from "@/queries";
+import type { AgentdModelRegistry } from "@agentd/client";
 import { useApp } from "@/AppContext";
 import {
   getNotifPref,
@@ -55,6 +56,7 @@ export function Settings() {
   const { toast } = useApp();
   const settingsQ = useSettings();
   const patch = usePatchSettings();
+  const modelsQ = useModels();
 
   const [agentInstructions, setAgentInstructions] = useState("");
   const [commitInstructions, setCommitInstructions] = useState("");
@@ -340,10 +342,8 @@ export function Settings() {
                 <>
                   Forwarded as <code className="font-mono">--model</code> to
                   the <code className="font-mono">claude</code> CLI. Empty
-                  inherits Claude's own default. Common picks:{" "}
-                  <code className="font-mono">claude-opus-4-7</code>,{" "}
-                  <code className="font-mono">claude-sonnet-4-6</code>,{" "}
-                  <code className="font-mono">claude-haiku-4-5</code>.
+                  inherits Claude's own default. Registered:{" "}
+                  <RegistryHint agent="claude" />.
                 </>
               }
               top
@@ -351,7 +351,7 @@ export function Settings() {
               <Input
                 value={defaultClaudeModel}
                 onChange={(e) => setDefaultClaudeModel(e.target.value)}
-                placeholder="(inherit) e.g. claude-opus-4-7"
+                placeholder={registryPlaceholder("claude", modelsQ.data?.models)}
                 className="font-mono w-72"
               />
             </InfoRow>
@@ -360,16 +360,15 @@ export function Settings() {
               hint={
                 <>
                   Forwarded as <code className="font-mono">--model</code> to
-                  the <code className="font-mono">codex</code> CLI. Common
-                  picks: <code className="font-mono">gpt-5-codex</code>,{" "}
-                  <code className="font-mono">gpt-5</code>.
+                  the <code className="font-mono">codex</code> CLI. Registered:{" "}
+                  <RegistryHint agent="codex" />.
                 </>
               }
             >
               <Input
                 value={defaultCodexModel}
                 onChange={(e) => setDefaultCodexModel(e.target.value)}
-                placeholder="(inherit) e.g. gpt-5-codex"
+                placeholder={registryPlaceholder("codex", modelsQ.data?.models)}
                 className="font-mono w-72"
               />
             </InfoRow>
@@ -465,7 +464,14 @@ export function Settings() {
               <Input
                 value={helperModel}
                 onChange={(e) => setHelperModel(e.target.value)}
-                placeholder="(inherit) e.g. claude-haiku-4-5"
+                placeholder={(() => {
+                  // Bias toward the cheapest registered model since
+                  // helpers run often. Fall through if the registry
+                  // doesn't tag tiers.
+                  const list = modelsQ.data?.models.claude ?? [];
+                  const fast = list.find((m) => m.tier === "fast") ?? list[0];
+                  return fast ? `(inherit) e.g. ${fast.id}` : "(inherit)";
+                })()}
                 className="font-mono w-72"
               />
             </InfoRow>
@@ -604,6 +610,42 @@ function NotificationsRow() {
       onChange={(v) => void toggle(v)}
     />
   );
+}
+
+/**
+ * Render the registered models for an agent as an inline list. Reads
+ * the `cfg.models` registry at runtime — no hardcoded ids.
+ */
+function RegistryHint({ agent }: { agent: "claude" | "codex" }) {
+  const modelsQ = useModels();
+  const list = modelsQ.data?.models[agent] ?? [];
+  if (list.length === 0) {
+    return (
+      <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+        (none — set in ~/.agentd/config.json under{" "}
+        <code className="font-mono">models.{agent}</code>)
+      </span>
+    );
+  }
+  return (
+    <>
+      {list.map((m, i) => (
+        <span key={m.id}>
+          <code className="font-mono text-[10px]">{m.id}</code>
+          {i < list.length - 1 ? ", " : ""}
+        </span>
+      ))}
+    </>
+  );
+}
+
+/** Produce a sensible placeholder from the first registry entry. */
+function registryPlaceholder(
+  agent: "claude" | "codex",
+  registry: AgentdModelRegistry | undefined,
+): string {
+  const first = registry?.[agent]?.[0];
+  return first ? `(inherit) e.g. ${first.id}` : "(inherit)";
 }
 
 function ThinkingPicker({

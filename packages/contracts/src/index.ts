@@ -682,5 +682,15 @@ export const WsServerEvent = z.discriminatedUnion("type", [
     windows: z.array(TerminalWindow),
     ts: z.number(),
   }),
+  z.object({
+    type: z.literal("suggestion_created"),
+    suggestion: Suggestion,
+    ts: z.number(),
+  }),
+  z.object({
+    type: z.literal("suggestion_updated"),
+    suggestion: Suggestion,
+    ts: z.number(),
+  }),
 ]);
 export type WsServerEvent = z.infer<typeof WsServerEvent>;
