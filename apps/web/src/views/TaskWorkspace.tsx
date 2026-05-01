@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import type { Task } from "@agentd/contracts";
 import {
   Tabs,
@@ -10,21 +10,41 @@ import { TaskFiles } from "@/views/TaskFiles";
 import { TaskDiff } from "@/views/TaskDiff";
 import { TaskLog } from "@/views/TaskLog";
 import { TaskContext } from "@/views/TaskContext";
+import { TaskPlan, type TaskPlanItem } from "@/views/TaskPlan";
 
 const Terminal = lazy(() =>
   import("./Terminal").then((m) => ({ default: m.Terminal })),
 );
 
-type Tab = "files" | "diff" | "log" | "term" | "context";
+type Tab = "plan" | "files" | "diff" | "log" | "term" | "context";
 
 export function TaskWorkspace({
   task,
   onError,
+  plan,
+  planUpdatedAt,
 }: {
   task: Task;
   onError: (m: string) => void;
+  plan?: TaskPlanItem[];
+  planUpdatedAt?: number | null;
 }) {
   const [tab, setTab] = useState<Tab>("files");
+
+  // When the agent first emits a plan, jump to the Plan tab so the user
+  // sees what's about to happen. After that, leave the user's choice alone.
+  const [autoFlipped, setAutoFlipped] = useState(false);
+  useEffect(() => {
+    if (autoFlipped) return;
+    if ((plan?.length ?? 0) > 0) {
+      setTab("plan");
+      setAutoFlipped(true);
+    }
+  }, [plan, autoFlipped]);
+
+  const planCount = plan?.length ?? 0;
+  const planActive = (plan ?? []).filter((p) => p.status === "in_progress").length;
+  const planDone = (plan ?? []).filter((p) => p.status === "completed").length;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-paper-50 dark:bg-ink-900">
@@ -35,6 +55,19 @@ export function TaskWorkspace({
       >
         <div className="flex h-9 items-stretch border-b border-ink-900/10 dark:border-ink-50/10 px-1 shrink-0 overflow-x-auto">
           <TabsList variant="stretch" className="h-9">
+            {planCount > 0 && (
+              <TabsTrigger value="plan" variant="stretch">
+                <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
+                  Plan
+                </span>
+                <span className="ml-1.5 font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300">
+                  {planDone}/{planCount}
+                </span>
+                {planActive > 0 && (
+                  <span className="ml-1 h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink" />
+                )}
+              </TabsTrigger>
+            )}
             <TabsTrigger value="files" variant="stretch">
               <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
                 Files
@@ -66,6 +99,9 @@ export function TaskWorkspace({
           </span>
         </div>
 
+        <TabsContent value="plan" className="flex-1 min-h-0 mt-0 overflow-hidden">
+          <TaskPlan items={plan ?? []} updatedAt={planUpdatedAt ?? null} />
+        </TabsContent>
         <TabsContent value="files" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskFiles taskId={task.id} onError={onError} />
         </TabsContent>

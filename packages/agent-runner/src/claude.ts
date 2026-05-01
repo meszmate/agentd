@@ -266,9 +266,10 @@ export class ClaudeRunner implements AgentRunner {
       return;
     }
     if (type === "result") {
-      if (typeof parsed.result === "string") {
-        this.emit({ kind: "message", role: "system", text: parsed.result });
-      }
+      // Note: parsed.result is a duplicate of the assistant turn's text — Claude
+      // Code emits both `assistant` blocks (which we already surface as
+      // kind=message,role=agent) and a final `result` echo. Re-emitting it
+      // would render the reply twice in the timeline. Keep usage/cost only.
       const cost =
         typeof parsed.total_cost_usd === "number"
           ? parsed.total_cost_usd

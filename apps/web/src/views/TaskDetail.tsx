@@ -51,6 +51,8 @@ import {
 } from "@/lib/utils";
 import { TaskTimeline } from "@/views/TaskTimeline";
 import { TaskWorkspace } from "@/views/TaskWorkspace";
+import { ShipMenu } from "@/components/ship-menu";
+import type { TaskPlanItem } from "@/views/TaskPlan";
 
 const WORKSPACE_OPEN_KEY = "agentd.task.workspaceOpen";
 
@@ -74,6 +76,13 @@ export function TaskDetail({ task }: { task: Task }) {
    * `message` event right after).
    */
   const [streams, setStreams] = useState<Record<string, string>>({});
+  /**
+   * Latest TodoWrite / update_plan snapshot from the agent. Replaced
+   * wholesale on each tool call (those tools always send the full plan,
+   * not deltas).
+   */
+  const [plan, setPlan] = useState<TaskPlanItem[]>([]);
+  const [planUpdatedAt, setPlanUpdatedAt] = useState<number | null>(null);
   const [workspaceOpen, setWorkspaceOpen] = useState<boolean>(() => {
     const v = localStorage.getItem(WORKSPACE_OPEN_KEY);
     return v == null ? true : v === "1";
@@ -132,6 +141,17 @@ export function TaskDetail({ task }: { task: Task }) {
           return next;
         });
       } else if (event.kind === "tool_call") {
+        // Intercept the agent's plan tools — render them as a structured
+        // checklist instead of a wall of JSON. Both Claude (TodoWrite)
+        // and Codex (update_plan) send the full snapshot per call.
+        const planItems = parsePlan(event.tool, event.args);
+        if (planItems) {
+          setPlan(planItems);
+          setPlanUpdatedAt(Date.now());
+          setLastToolHint(`✓ plan · ${planItems.length} item${planItems.length === 1 ? "" : "s"}`);
+          // Don't litter the timeline with the raw JSON for plan tools.
+          return;
+        }
         const args =
           typeof event.args === "object" && event.args
             ? Object.entries(event.args)
@@ -266,6 +286,7 @@ export function TaskDetail({ task }: { task: Task }) {
             </a>
           </Button>
         )}
+        <ShipMenu task={task} />
         {!isTerminal && (
           <Button
             variant="outline"
@@ -375,7 +396,7 @@ export function TaskDetail({ task }: { task: Task }) {
             </Panel>
             <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-ember-500/40 transition-colors dark:bg-ink-50/10" />
             <Panel id={`ws-${task.id}`} defaultSize={48} minSize={28}>
-              <TaskWorkspace task={task} onError={onError} />
+              <TaskWorkspace task={task} onError={onError} plan={plan} planUpdatedAt={planUpdatedAt} />
             </Panel>
           </PanelGroup>
         ) : (
@@ -465,4 +486,56 @@ function ContextUsage({ totalTokens }: { totalTokens: number }) {
       </Tooltip>
     </TooltipProvider>
   );
+}
+
+/**
+ * Normalize a plan-tool call's args into a TaskPlanItem[]. Returns null
+ * for tools that aren't plan tools, so the caller can fall through to
+ * the generic tool_call rendering. Lenient about shape so Codex's
+ * update_plan and other agent dialects don't all need bespoke parsers.
+ */
+function parsePlan(tool: string, args: unknown): TaskPlanItem[] | null {
+  if (
+    tool !== "TodoWrite" &&
+    tool !== "todo_write" &&
+    tool !== "update_plan" &&
+    tool !== "UpdatePlan" &&
+    tool !== "Plan"
+  ) {
+    return null;
+  }
+  if (!args || typeof args !== "object") return null;
+  const a = args as Record<string, unknown>;
+  // Try common keys for the array of items.
+  const list =
+    (Array.isArray(a.todos) && (a.todos as unknown[])) ||
+    (Array.isArray(a.plan) && (a.plan as unknown[])) ||
+    (Array.isArray(a.items) && (a.items as unknown[])) ||
+    null;
+  if (!list) return null;
+  const out: TaskPlanItem[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    const content = String(r.content ?? r.step ?? r.task ?? r.title ?? "").trim();
+    if (!content) continue;
+    const rawStatus = String(r.status ?? r.state ?? "pending").toLowerCase();
+    const status: TaskPlanItem["status"] =
+      rawStatus === "completed" ||
+      rawStatus === "done" ||
+      rawStatus === "complete"
+        ? "completed"
+        : rawStatus === "in_progress" ||
+            rawStatus === "in-progress" ||
+            rawStatus === "active" ||
+            rawStatus === "running"
+          ? "in_progress"
+          : "pending";
+    const item: TaskPlanItem = { content, status };
+    if (typeof r.activeForm === "string" && r.activeForm) {
+      item.activeForm = r.activeForm;
+    }
+    out.push(item);
+  }
+  return out;
 }

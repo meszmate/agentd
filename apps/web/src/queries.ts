@@ -45,6 +45,17 @@ export function useProject(idOrSlug: string | null | undefined) {
   });
 }
 
+export function useDeleteProject() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (idOrSlug: string) => client.deleteProject(idOrSlug),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.projects() });
+    },
+  });
+}
+
 export function useTasks() {
   const client = useClient();
   return useQuery({
@@ -81,6 +92,19 @@ export function useFile(id: string | null | undefined, path: string | null) {
     queryKey: qk.file(id ?? "_none", path ?? "_none"),
     queryFn: () => client.getFile(id!, path!),
     enabled: !!id && !!path,
+  });
+}
+
+export function useGitStatus(
+  id: string | null | undefined,
+  refetchInterval = 4000,
+) {
+  const client = useClient();
+  return useQuery({
+    queryKey: ["task", id ?? "_none", "git-status"] as const,
+    queryFn: () => client.gitStatus(id!),
+    enabled: !!id,
+    refetchInterval,
   });
 }
 

@@ -115,6 +115,7 @@ export function Sidebar({
       </div>
 
       <nav className="flex flex-col gap-3 overflow-y-auto py-2">
+        <OpenTasksSection />
         <ProjectsSection />
         {SECTIONS.map((sec) => (
           <div key={sec.heading}>
@@ -451,6 +452,101 @@ function ProjectsSection() {
           <span className="flex-1">All projects</span>
           <ChevronRight className="h-3 w-3 text-ink-400 dark:text-ink-500" />
         </NavLink>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Live list of currently-running tasks. Surfaces what the operator
+ * actually wants to peek at on a busy day — agents that are working,
+ * waiting on input, or waiting on permission. Driven by the same
+ * useTasks() cache the rest of the app uses, so it ticks with the
+ * realtime bus without extra fetches.
+ */
+function OpenTasksSection() {
+  const tasksQ = useTasks();
+  const tasks = tasksQ.data?.tasks ?? [];
+  const projectsQ = useProjects();
+  const projects = projectsQ.data?.projects ?? [];
+
+  const open = tasks
+    .filter(
+      (t) =>
+        t.status === "running" ||
+        t.status === "waiting_input" ||
+        t.status === "waiting_perm",
+    )
+    .slice(0, 8);
+
+  if (open.length === 0) return null;
+
+  const projectColor = (id: string | null | undefined): string => {
+    if (!id) return "#FF5C28";
+    const p = projects.find((x) => x.id === id);
+    return p?.color ?? "#FF5C28";
+  };
+
+  return (
+    <div>
+      <div className="px-5 mb-1 flex items-center gap-2">
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ember-700 dark:text-ember-300 font-medium">
+          Open
+        </span>
+        <span className="ml-auto font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300">
+          {open.length}
+        </span>
+      </div>
+      <div className="flex flex-col px-2 gap-0.5">
+        {open.map((t) => {
+          const tone =
+            t.status === "running"
+              ? "text-ember-700 dark:text-ember-300"
+              : "text-amber-700 dark:text-amber-300";
+          const dot =
+            t.status === "running"
+              ? "bg-ember-500 animate-blink"
+              : "bg-amber-500 animate-blink";
+          return (
+            <NavLink
+              key={t.id}
+              to={`/tasks/${t.id}`}
+              end
+              className={({ isActive }) =>
+                cn(
+                  "group h-auto min-h-[28px] flex items-start gap-2 rounded-md px-2.5 py-1 text-[12px] transition-colors duration-100",
+                  isActive
+                    ? "bg-ink-900/[0.05] dark:bg-ink-50/[0.06]"
+                    : "hover:bg-ink-900/[0.03] dark:hover:bg-ink-700",
+                )
+              }
+            >
+              <span
+                className="size-2 rounded-sm shrink-0 mt-1"
+                style={{ background: projectColor(t.projectId) }}
+              />
+              <span className="flex-1 min-w-0">
+                <span className="block truncate text-ink-900 dark:text-ink-50">
+                  {t.title}
+                </span>
+                <span className="mt-0.5 flex items-center gap-1.5 font-mono text-[10px]">
+                  <span className={cn("h-1 w-1 rounded-full", dot)} />
+                  <span className={cn("uppercase tracking-[0.12em]", tone)}>
+                    {t.status === "running"
+                      ? "running"
+                      : t.status === "waiting_input"
+                        ? "needs you"
+                        : "needs ok"}
+                  </span>
+                  <span className="text-ink-400 dark:text-ink-500">·</span>
+                  <span className="text-ink-400 dark:text-ink-500">
+                    {t.agent}
+                  </span>
+                </span>
+              </span>
+            </NavLink>
+          );
+        })}
       </div>
     </div>
   );

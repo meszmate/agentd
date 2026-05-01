@@ -150,8 +150,75 @@ export class AgentdClient {
     await this.req(`/api/tasks/${id}`, { method: "DELETE" });
   }
 
-  async listFiles(id: string): Promise<{ files: string[] }> {
+  async listFiles(
+    id: string,
+  ): Promise<{ files: string[]; worktreePath: string }> {
     return this.req(`/api/tasks/${id}/files`);
+  }
+
+  async gitStatus(
+    id: string,
+  ): Promise<{
+    worktreePath: string;
+    base: string;
+    entries: {
+      path: string;
+      status:
+        | "added"
+        | "modified"
+        | "deleted"
+        | "renamed"
+        | "untracked"
+        | "ignored";
+      additions: number;
+      deletions: number;
+      changed: boolean;
+    }[];
+  }> {
+    return this.req(`/api/tasks/${id}/git-status`);
+  }
+
+  async commitTask(
+    id: string,
+    message?: string,
+  ): Promise<{ committed: boolean; sha?: string; message?: string }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/commit`, {
+      method: "POST",
+      body: JSON.stringify(message ? { message } : {}),
+    });
+  }
+
+  async generateCommitMessage(
+    id: string,
+    opts: {
+      includeBody?: boolean;
+      includeScope?: boolean;
+      wip?: boolean;
+      hint?: string;
+    } = {},
+  ): Promise<{ message: string; source: string; error?: string }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/commit-message`, {
+      method: "POST",
+      body: JSON.stringify(opts),
+    });
+  }
+
+  async pushTask(
+    id: string,
+  ): Promise<{ pushed: boolean; remote: string; branch: string; output: string }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/push`, {
+      method: "POST",
+    });
+  }
+
+  async openPrForTask(
+    id: string,
+    req: { title: string; body?: string; draft?: boolean },
+  ): Promise<{ url: string; output: string }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/pr`, {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
   }
 
   async getFile(id: string, path: string): Promise<{ path: string; size: number; content: string }> {

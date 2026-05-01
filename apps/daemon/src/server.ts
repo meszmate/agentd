@@ -40,6 +40,11 @@ import {
   diffAgainst,
   listLog,
   revertCommit,
+  autoCommit,
+  pushBranch,
+  createPr,
+  gitStatus,
+  setTaskPrUrl,
   resolveSession,
   loadConfig,
   saveConfig,
@@ -215,7 +220,196 @@ export function buildServer(opts: BuildServerOptions) {
     const task = tasks.get(id);
     if (!task) return c.json({ error: "not found" }, 404);
     const files = await listFiles(task.worktreePath);
-    return c.json({ files });
+    return c.json({ files, worktreePath: task.worktreePath });
+  });
+
+  // Git status with per-file +/- counts. Drives the workspace file tree's
+  // git-style overlay. Compared against the task's base branch so the
+  // tree shows the agent's work even after auto-commit.
+  api.get("/tasks/:id/git-status", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const base = c.req.query("base") ?? task.baseBranch;
+    try {
+      const entries = await gitStatus(task.worktreePath, base);
+      return c.json({ worktreePath: task.worktreePath, entries, base });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 500);
+    }
+  });
+
+  /**
+   * Generate a commit message from the current diff using Claude (one-shot,
+   * non-interactive). Returns a conventional-commit subject. Optional
+   * shape flags let the caller ask for a body / scope / wip prefix.
+   * Falls back to a deterministic title-derived message if Claude isn't
+   * on PATH or errors out.
+   */
+  api.post("/tasks/:id/commit-message", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      includeBody?: boolean;
+      includeScope?: boolean;
+      wip?: boolean;
+      hint?: string;
+    };
+    // Pull the staged + working diff so the model sees what's actually
+    // about to be committed. Cap to ~12k chars so the prompt stays small.
+    const stagedProc = Bun.spawn(["git", "diff", "--staged", "--no-color"], {
+      cwd: task.worktreePath,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const wtProc = Bun.spawn(["git", "diff", "--no-color"], {
+      cwd: task.worktreePath,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [staged, working] = await Promise.all([
+      new Response(stagedProc.stdout).text(),
+      new Response(wtProc.stdout).text(),
+    ]);
+    await Promise.all([stagedProc.exited, wtProc.exited]);
+    const combined = (staged + "\n" + working).slice(0, 12000);
+    if (combined.trim().length === 0) {
+      return c.json({
+        message: `chore: ${task.title.slice(0, 60)}`,
+        source: "fallback-no-changes",
+      });
+    }
+
+    const wantBody = !!body.includeBody;
+    const wantScope = !!body.includeScope;
+    const isWip = !!body.wip;
+    const hint = (body.hint ?? "").trim();
+
+    const rules = [
+      "Output ONLY the commit message, no preamble, no fences, no quotes.",
+      isWip
+        ? "Use prefix `wip` (e.g. `wip: small description`)."
+        : "Use a Conventional Commit type: feat, fix, refactor, docs, chore, style, test, perf, ci, build.",
+      wantScope
+        ? "Optionally include a short scope in parentheses if obvious from the diff: `feat(api): ...`."
+        : "Do NOT include a scope.",
+      "Subject line must be lowercase, in imperative mood, under 70 characters total.",
+      wantBody
+        ? "After the subject add a blank line, then 1–3 short bullet points explaining what changed (no test plan, no AI attribution)."
+        : "Subject line only — no body.",
+      hint ? `Operator hint: ${hint}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const prompt =
+      `Generate a single git commit message for this diff.\n\n${rules}\n\n--- DIFF ---\n${combined}\n--- END DIFF ---`;
+
+    const claudeBin = process.env.AGENTD_CLAUDE_BIN || "claude";
+    try {
+      const proc = Bun.spawn([
+        claudeBin,
+        "-p",
+        prompt,
+        "--permission-mode",
+        "bypassPermissions",
+        "--allow-dangerously-skip-permissions",
+      ], {
+        cwd: task.worktreePath,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: process.env as Record<string, string>,
+      });
+      const out = await new Response(proc.stdout).text();
+      await proc.exited;
+      const cleaned = out
+        .trim()
+        .replace(/^`+|`+$/g, "")
+        .replace(/^["']|["']$/g, "")
+        .trim();
+      if (!cleaned) {
+        return c.json({
+          message: `chore: ${task.title.slice(0, 60)}`,
+          source: "fallback-empty-output",
+        });
+      }
+      return c.json({ message: cleaned, source: "claude" });
+    } catch (e) {
+      return c.json({
+        message: `chore: ${task.title.slice(0, 60)}`,
+        source: "fallback-claude-error",
+        error: (e as Error).message,
+      });
+    }
+  });
+
+  // Manual commit — operator hits "Ship" in the UI when they want a
+  // discrete commit instead of waiting for the agent to finish.
+  api.post("/tasks/:id/commit", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      message?: string;
+    };
+    const cfg = loadConfig(paths.root);
+    const subject =
+      body.message?.trim() ||
+      `${cfg.commitPrefix}${task.title}`.slice(0, 72);
+    try {
+      const r = await autoCommit({
+        cwd: task.worktreePath,
+        title: subject,
+      });
+      return c.json(r);
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  // Push the task's branch to its origin remote.
+  api.post("/tasks/:id/push", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    try {
+      const r = await pushBranch(task.worktreePath);
+      return c.json(r);
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  // Open a PR for the current branch via gh. Title + body come from the
+  // operator (we don't auto-generate to keep the user's voice / style).
+  api.post("/tasks/:id/pr", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      title?: string;
+      body?: string;
+      draft?: boolean;
+    };
+    if (!body.title?.trim()) {
+      return c.json({ error: "title required" }, 400);
+    }
+    try {
+      const r = await createPr({
+        cwd: task.worktreePath,
+        title: body.title.trim(),
+        body: body.body ?? "",
+        baseBranch: task.baseBranch,
+        draft: !!body.draft,
+      });
+      if (r.url) {
+        setTaskPrUrl(db, task.id, r.url);
+      }
+      return c.json(r);
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
   });
 
   api.get("/tasks/:id/file", async (c) => {
