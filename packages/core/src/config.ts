@@ -72,6 +72,48 @@ export type AiHelperConfig = z.infer<typeof AiHelperConfig>;
 
 export const DEFAULT_AI_HELPER: AiHelperConfig = AiHelperConfig.parse({});
 
+/**
+ * Per-operator "last picked" values for the spawn flow. Stored in
+ * config.json (server-side) so opening agentd on a second device
+ * restores the same defaults without leaking through localStorage.
+ *
+ * These are pure UX preferences — they never change runtime behavior
+ * by themselves. Each form still applies them on submit, and per-task
+ * state lives on the Task row.
+ */
+export const UserPrefs = z.object({
+  lastAgent: z.enum(["claude", "codex"]).default("claude"),
+  lastBase: z.string().default("main"),
+  lastRepo: z.string().default(""),
+  lastProjectId: z.string().default(""),
+  lastAutoPush: z.boolean().default(true),
+  lastAutoPr: z.boolean().default(false),
+  lastPermissionMode: z
+    .enum(["bypassPermissions", "acceptEdits", "plan"])
+    .default("bypassPermissions"),
+  lastThinkingLevel: z
+    .enum(["low", "medium", "high", "max", "xhigh"])
+    .default("high"),
+  lastModelClaude: z.string().default(""),
+  lastModelCodex: z.string().default(""),
+  /** Workspace setup last picks, flattened from the old agentd.workspaceSetup blob. */
+  workspaceMode: z.enum(["worktree", "in_place"]).default("worktree"),
+  branchMode: z.enum(["new", "existing"]).default("new"),
+  pullLatest: z.boolean().default(false),
+  /**
+   * Project ids that are expanded in the sidebar tree (tasks visible
+   * underneath). Also persisted across devices so opening agentd
+   * elsewhere keeps the same shape.
+   */
+  sidebarExpandedProjects: z.array(z.string()).default([]),
+  /** Whether the task detail right-side workspace panel is open. */
+  taskWorkspaceOpen: z.boolean().default(true),
+  /** Pinned repo paths shown at the top of the repo picker. */
+  repoPickerPins: z.array(z.string()).default([]),
+});
+export type UserPrefs = z.infer<typeof UserPrefs>;
+export const DEFAULT_USER_PREFS: UserPrefs = UserPrefs.parse({});
+
 export const AgentdConfig = z.object({
   pluginSessionToken: z.string().nullable().default(null),
   /** Appended to the agent's system prompt for every task. */
@@ -99,6 +141,12 @@ export const AgentdConfig = z.object({
       codex: z.string().default(""),
     })
     .default({ claude: "", codex: "" }),
+  /**
+   * "Last used" form values for the spawn flow. Server-side so they
+   * sync across devices instead of getting trapped in browser
+   * localStorage.
+   */
+  prefs: UserPrefs.default(DEFAULT_USER_PREFS),
   /**
    * Token budget for the system-prompt suffix (agentInstructions + skill
    * bodies + repo doc). Skills get dropped (claude/codex first, then

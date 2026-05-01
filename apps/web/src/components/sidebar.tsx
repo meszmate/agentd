@@ -15,6 +15,7 @@ import {
   Settings as SettingsIcon,
   Smartphone,
   TerminalSquare,
+  Wrench,
 } from "lucide-react";
 import type { Project, Task } from "@agentd/contracts";
 import { cn, formatTs } from "@/lib/utils";
@@ -22,7 +23,13 @@ import { Wordmark } from "@/components/wordmark";
 import { ServerCard } from "@/components/server-card";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Kbd } from "@/components/ui/kbd";
-import { useProjects, useSchedules, useTasks } from "@/queries";
+import {
+  usePatchPrefs,
+  usePrefs,
+  useProjects,
+  useSchedules,
+  useTasks,
+} from "@/queries";
 import { usePluginsStatus } from "@/queries";
 import { useRealtime } from "@/realtime";
 import { useStore } from "@/store";
@@ -44,6 +51,7 @@ const SECTIONS: {
       { to: "/templates", label: "Templates", icon: FileTerminal, kbd: "g e" },
       { to: "/schedules", label: "Schedules", icon: CalendarClock, kbd: "g s" },
       { to: "/skills", label: "Skills", icon: BookText, kbd: "g k" },
+      { to: "/tools", label: "Tools", icon: Wrench, kbd: "g w" },
       { to: "/terminal", label: "Terminal", icon: TerminalSquare, kbd: "g r" },
     ],
   },
@@ -397,7 +405,6 @@ function colorForProject(id: string, override: string | null | undefined): strin
   return PROJECT_PALETTE[Math.abs(hash) % PROJECT_PALETTE.length]!;
 }
 
-const PROJECT_OPEN_KEY = "agentd.sidebar.openProjects";
 
 interface ProjectGroup {
   id: string;
@@ -415,24 +422,30 @@ function ProjectsTreeSection() {
   const projects = projectsQ.data?.projects ?? [];
   const unread = useStore((s) => s.unreadByProject);
 
-  // Persisted expand/collapse map. By default a project is expanded
-  // when it has any active task.
-  const [openMap, setOpenMap] = useState<Record<string, boolean>>(() => {
-    try {
-      const raw = localStorage.getItem(PROJECT_OPEN_KEY);
-      return raw ? JSON.parse(raw) : {};
-    } catch {
-      return {};
-    }
-  });
+  // Expanded project ids — server-stored so the same set syncs across
+  // devices. The local state is the source of truth for the current
+  // session and we patch back to the server in the toggle handler.
+  const prefsQ = usePrefs();
+  const patchPrefs = usePatchPrefs();
+  const [openMap, setOpenMap] = useState<Record<string, boolean>>({});
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => {
+    if (hydrated) return;
+    const ids = prefsQ.data?.prefs.sidebarExpandedProjects;
+    if (!ids) return;
+    const next: Record<string, boolean> = {};
+    for (const id of ids) next[id] = true;
+    setOpenMap(next);
+    setHydrated(true);
+  }, [prefsQ.data, hydrated]);
   const toggle = (key: string): void => {
     setOpenMap((cur) => {
       const next = { ...cur, [key]: !(cur[key] ?? false) };
-      try {
-        localStorage.setItem(PROJECT_OPEN_KEY, JSON.stringify(next));
-      } catch {
-        // ignore quota
-      }
+      void patchPrefs.mutateAsync({
+        sidebarExpandedProjects: Object.entries(next)
+          .filter(([, v]) => v)
+          .map(([k]) => k),
+      });
       return next;
     });
   };

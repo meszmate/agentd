@@ -33,12 +33,13 @@ import { ProjectPicker } from "@/components/project-picker";
 import {
   WorkspaceSetup,
   defaultWorkspaceSetup,
-  persistWorkspaceSetup,
   type WorkspaceSetupValue,
 } from "@/components/workspace-setup";
 import { useApp, useClient } from "@/AppContext";
 import {
   useCreateTask,
+  usePatchPrefs,
+  usePrefs,
   useProjects,
   useSchedules,
   useTasks,
@@ -51,10 +52,6 @@ import {
   shortId,
 } from "@/lib/utils";
 
-const PROJECT_KEY = "agentd.lastProjectId";
-const BASE_KEY = "agentd.lastBase";
-const AGENT_KEY = "agentd.lastAgent";
-const PERMS_KEY = "agentd.lastPermissionMode";
 
 interface ActivityEntry {
   id: string;
@@ -286,23 +283,37 @@ function Composer({ firstRun }: { firstRun: boolean }) {
   const projectsQ = useProjects();
   const projects = projectsQ.data?.projects ?? [];
 
-  const [projectId, setProjectId] = useState<string>(
-    () => localStorage.getItem(PROJECT_KEY) ?? "",
-  );
+  const prefsQ = usePrefs();
+  const patchPrefs = usePatchPrefs();
+  const [projectId, setProjectId] = useState<string>("");
   const [projectPath, setProjectPath] = useState<string>("");
   const [workspace, setWorkspace] = useState<WorkspaceSetupValue>(() =>
-    defaultWorkspaceSetup(localStorage.getItem(BASE_KEY) ?? "main"),
+    defaultWorkspaceSetup("main"),
   );
-  const [agent, setAgent] = useState<"claude" | "codex">(
-    () => (localStorage.getItem(AGENT_KEY) as "claude" | "codex") ?? "claude",
-  );
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>(() => {
-    const v = localStorage.getItem(PERMS_KEY);
-    if (v === "acceptEdits" || v === "plan" || v === "bypassPermissions") return v;
-    return "bypassPermissions";
-  });
+  const [agent, setAgent] = useState<"claude" | "codex">("claude");
+  const [permissionMode, setPermissionMode] =
+    useState<PermissionMode>("bypassPermissions");
   const [prompt, setPrompt] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+
+  // Hydrate the form from server-side prefs once.
+  useEffect(() => {
+    if (hydrated) return;
+    const p = prefsQ.data?.prefs;
+    if (!p) return;
+    setProjectId(p.lastProjectId);
+    setAgent(p.lastAgent);
+    setPermissionMode(p.lastPermissionMode);
+    setWorkspace({
+      workspaceMode: p.workspaceMode,
+      branchMode: p.branchMode,
+      branchName: "",
+      baseBranch: p.lastBase || "main",
+      pullLatest: p.pullLatest,
+    });
+    setHydrated(true);
+  }, [prefsQ.data, hydrated]);
 
   // Sync the path label whenever the project list updates and our id matches.
   useEffect(() => {
@@ -337,11 +348,15 @@ function Composer({ firstRun }: { firstRun: boolean }) {
           : {}),
         ...(workspace.pullLatest ? { pullLatest: true } : {}),
       });
-      persistWorkspaceSetup(workspace);
-      localStorage.setItem(PROJECT_KEY, projectId);
-      localStorage.setItem(BASE_KEY, finalBase);
-      localStorage.setItem(AGENT_KEY, agent);
-      localStorage.setItem(PERMS_KEY, permissionMode);
+      void patchPrefs.mutateAsync({
+        lastProjectId: projectId,
+        lastBase: finalBase,
+        lastAgent: agent,
+        lastPermissionMode: permissionMode,
+        workspaceMode: workspace.workspaceMode,
+        branchMode: workspace.branchMode,
+        pullLatest: workspace.pullLatest,
+      });
       setPrompt("");
       navigate(`/tasks/${res.task.id}`);
     } catch (err) {

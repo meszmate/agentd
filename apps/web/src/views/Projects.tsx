@@ -22,7 +22,7 @@ import {
   VRule,
 } from "@/components/ui/page-topbar";
 import { useApp, useClient } from "@/AppContext";
-import { useProjects, useTasks } from "@/queries";
+import { usePatchPrefs, useProjects, useTasks } from "@/queries";
 import { useStore } from "@/store";
 import { cn, formatCost, formatTokens, formatTs } from "@/lib/utils";
 
@@ -148,6 +148,7 @@ function ProjectCard({
 }) {
   const { toast } = useApp();
   const client = useClient();
+  const patchPrefs = usePatchPrefs();
 
   const stats = useMemo(() => {
     let active = 0;
@@ -309,7 +310,9 @@ function ProjectCard({
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            localStorage.setItem("agentd.lastProjectId", p.id);
+            // Seed the spawn sheet with this project, then fire the
+            // global ⌘N shortcut to open it.
+            void patchPrefs.mutateAsync({ lastProjectId: p.id });
             const ev = new KeyboardEvent("keydown", {
               key: "n",
               metaKey: true,

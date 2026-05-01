@@ -21,28 +21,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useCreateTask, useSkills } from "@/queries";
+import { useCreateTask, usePatchPrefs, usePrefs, useSkills } from "@/queries";
 import { useApp } from "@/AppContext";
 import { ProjectPicker } from "@/components/project-picker";
 import {
   WorkspaceSetup,
   defaultWorkspaceSetup,
-  persistWorkspaceSetup,
   type WorkspaceSetupValue,
 } from "@/components/workspace-setup";
 import { BookText } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-const REPO_KEY = "agentd.lastRepo";
-const PROJECT_KEY = "agentd.lastProjectId";
-const BASE_KEY = "agentd.lastBase";
-const AGENT_KEY = "agentd.lastAgent";
-const AUTOPUSH_KEY = "agentd.lastAutoPush";
-const AUTOPR_KEY = "agentd.lastAutoPr";
-const PERMS_KEY = "agentd.lastPermissionMode";
-const THINK_KEY = "agentd.lastThinkingLevel";
-const MODEL_CLAUDE_KEY = "agentd.lastModelClaude";
-const MODEL_CODEX_KEY = "agentd.lastModelCodex";
 
 type PermissionMode = "bypassPermissions" | "acceptEdits" | "plan";
 type ThinkingLevel = "low" | "medium" | "high" | "max" | "xhigh";
@@ -73,33 +61,6 @@ const PERMISSION_MODES: { value: PermissionMode; label: string; hint: string }[]
   },
 ];
 
-function loadBool(key: string, fallback: boolean): boolean {
-  const v = localStorage.getItem(key);
-  if (v === "1") return true;
-  if (v === "0") return false;
-  return fallback;
-}
-
-function loadPermissionMode(): PermissionMode {
-  const v = localStorage.getItem(PERMS_KEY);
-  if (v === "acceptEdits" || v === "plan" || v === "bypassPermissions") return v;
-  return "bypassPermissions";
-}
-
-function loadThinkingLevel(): ThinkingLevel {
-  const v = localStorage.getItem(THINK_KEY);
-  if (
-    v === "low" ||
-    v === "medium" ||
-    v === "high" ||
-    v === "max" ||
-    v === "xhigh"
-  ) {
-    return v;
-  }
-  return "high";
-}
-
 export function SpawnSheet({
   open,
   onClose,
@@ -110,43 +71,71 @@ export function SpawnSheet({
   const create = useCreateTask();
   const navigate = useNavigate();
   const { toast } = useApp();
+  const prefsQ = usePrefs();
+  const patchPrefs = usePatchPrefs();
 
-  const [projectId, setProjectId] = useState<string>(
-    () => localStorage.getItem(PROJECT_KEY) ?? "",
-  );
-  const [repoPath, setRepoPath] = useState(
-    () => localStorage.getItem(REPO_KEY) ?? "",
-  );
-  const [baseBranch, setBaseBranch] = useState(
-    () => localStorage.getItem(BASE_KEY) ?? "main",
-  );
-  const [agent, setAgent] = useState<"claude" | "codex">(
-    () =>
-      (localStorage.getItem(AGENT_KEY) as "claude" | "codex" | null) ?? "claude",
-  );
+  // Form state — initialized to safe defaults, then hydrated from the
+  // server-stored prefs once they arrive. Subsequent edits stay local
+  // until the user hits Spawn, at which point we patch prefs.
+  const [projectId, setProjectId] = useState<string>("");
+  const [repoPath, setRepoPath] = useState("");
+  const [baseBranch, setBaseBranch] = useState("main");
+  const [agent, setAgent] = useState<"claude" | "codex">("claude");
   const [prompt, setPrompt] = useState("");
   const [title, setTitle] = useState("");
-  const [autoPush, setAutoPush] = useState(() => loadBool(AUTOPUSH_KEY, false));
-  const [autoPr, setAutoPr] = useState(() => loadBool(AUTOPR_KEY, false));
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>(
-    () => loadPermissionMode(),
-  );
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(
-    () => loadThinkingLevel(),
-  );
-  // Per-agent model preference. Stored under separate keys so flipping
-  // between Claude and Codex restores the right last-picked model rather
-  // than carrying a Claude model into a Codex run (or vice versa).
+  // Default ON: the agent is told to commit + push when done. Auto-PR
+  // stays OFF — that's a deliberate manual step from the Ship menu.
+  const [autoPush, setAutoPush] = useState(true);
+  const [autoPr, setAutoPr] = useState(false);
+  const [permissionMode, setPermissionMode] =
+    useState<PermissionMode>("bypassPermissions");
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("high");
+  // Per-agent model preference, hydrated from prefs on mount and on
+  // agent switch (so flipping Claude → Codex restores the right pick).
   const [model, setModel] = useState<string>("");
-  useEffect(() => {
-    const k = agent === "claude" ? MODEL_CLAUDE_KEY : MODEL_CODEX_KEY;
-    setModel(localStorage.getItem(k) ?? "");
-  }, [agent]);
-  const [workspace, setWorkspace] = useState<WorkspaceSetupValue>(
-    () => defaultWorkspaceSetup(localStorage.getItem(BASE_KEY) ?? "main"),
+  const [workspace, setWorkspace] = useState<WorkspaceSetupValue>(() =>
+    defaultWorkspaceSetup("main"),
   );
   const [activeSkills, setActiveSkills] = useState<string[]>([]);
   const [autoFilledForPath, setAutoFilledForPath] = useState<string>("");
+  const [hydrated, setHydrated] = useState(false);
+
+  // One-shot hydration from server prefs. Subsequent edits stay local.
+  useEffect(() => {
+    if (hydrated) return;
+    const p = prefsQ.data?.prefs;
+    if (!p) return;
+    setProjectId(p.lastProjectId);
+    setRepoPath(p.lastRepo);
+    setBaseBranch(p.lastBase || "main");
+    setAgent(p.lastAgent);
+    setAutoPush(p.lastAutoPush);
+    setAutoPr(p.lastAutoPr);
+    setPermissionMode(p.lastPermissionMode);
+    setThinkingLevel(p.lastThinkingLevel);
+    setModel(
+      p.lastAgent === "claude" ? p.lastModelClaude : p.lastModelCodex,
+    );
+    setWorkspace({
+      workspaceMode: p.workspaceMode,
+      branchMode: p.branchMode,
+      branchName: "",
+      baseBranch: p.lastBase || "main",
+      pullLatest: p.pullLatest,
+    });
+    setHydrated(true);
+  }, [prefsQ.data, hydrated]);
+
+  // Whenever the agent flips after hydration, swap model to that
+  // agent's last-picked value from prefs.
+  useEffect(() => {
+    if (!hydrated || !prefsQ.data) return;
+    setModel(
+      agent === "claude"
+        ? prefsQ.data.prefs.lastModelClaude
+        : prefsQ.data.prefs.lastModelCodex,
+    );
+  }, [agent, hydrated, prefsQ.data]);
 
   const skillsQ = useSkills(repoPath || undefined);
   const availableSkills = skillsQ.data?.skills ?? [];
@@ -198,19 +187,25 @@ export function SpawnSheet({
         ...(workspace.pullLatest ? { pullLatest: true } : {}),
         ...(activeSkills.length ? { skills: activeSkills } : {}),
       });
-      persistWorkspaceSetup(workspace);
-      localStorage.setItem(REPO_KEY, repoPath.trim());
-      if (projectId) localStorage.setItem(PROJECT_KEY, projectId);
-      localStorage.setItem(BASE_KEY, finalBase);
-      localStorage.setItem(AGENT_KEY, agent);
-      localStorage.setItem(AUTOPUSH_KEY, autoPush ? "1" : "0");
-      localStorage.setItem(AUTOPR_KEY, autoPr ? "1" : "0");
-      localStorage.setItem(PERMS_KEY, permissionMode);
-      localStorage.setItem(THINK_KEY, thinkingLevel);
-      localStorage.setItem(
-        agent === "claude" ? MODEL_CLAUDE_KEY : MODEL_CODEX_KEY,
-        model.trim(),
-      );
+      // Persist the form's values to server-side prefs so other devices
+      // pick up the same defaults. Ignore failure — the spawn already
+      // succeeded and prefs are pure UX state.
+      void patchPrefs.mutateAsync({
+        lastRepo: repoPath.trim(),
+        lastProjectId: projectId,
+        lastBase: finalBase,
+        lastAgent: agent,
+        lastAutoPush: autoPush,
+        lastAutoPr: autoPr,
+        lastPermissionMode: permissionMode,
+        lastThinkingLevel: thinkingLevel,
+        ...(agent === "claude"
+          ? { lastModelClaude: model.trim() }
+          : { lastModelCodex: model.trim() }),
+        workspaceMode: workspace.workspaceMode,
+        branchMode: workspace.branchMode,
+        pullLatest: workspace.pullLatest,
+      });
       toast("Task spawned");
       onClose();
       navigate(`/tasks/${res.task.id}`);

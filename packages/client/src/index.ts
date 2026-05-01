@@ -27,6 +27,30 @@ import type {
   WsServerEvent,
 } from "@agentd/contracts";
 
+/**
+ * Server-stored "last picked" defaults for the spawn flow. Mirrors
+ * `UserPrefs` from `@agentd/core/config` — kept inline so the web client
+ * doesn't need to depend on the daemon package.
+ */
+export interface AgentdUserPrefs {
+  lastAgent: "claude" | "codex";
+  lastBase: string;
+  lastRepo: string;
+  lastProjectId: string;
+  lastAutoPush: boolean;
+  lastAutoPr: boolean;
+  lastPermissionMode: "bypassPermissions" | "acceptEdits" | "plan";
+  lastThinkingLevel: "low" | "medium" | "high" | "max" | "xhigh";
+  lastModelClaude: string;
+  lastModelCodex: string;
+  workspaceMode: "worktree" | "in_place";
+  branchMode: "new" | "existing";
+  pullLatest: boolean;
+  sidebarExpandedProjects: string[];
+  taskWorkspaceOpen: boolean;
+  repoPickerPins: string[];
+}
+
 export interface AgentdLogEntry {
   sha: string;
   ts: number;
@@ -482,6 +506,37 @@ export class AgentdClient {
       method: "POST",
       body: JSON.stringify(patch),
     });
+  }
+
+  // ── user prefs (spawn-flow defaults, server-stored, cross-device) ──
+  async getPrefs(): Promise<{ prefs: AgentdUserPrefs }> {
+    return this.req("/api/prefs");
+  }
+
+  async patchPrefs(
+    patch: Partial<AgentdUserPrefs>,
+  ): Promise<{ ok: boolean; prefs: AgentdUserPrefs }> {
+    return this.req("/api/prefs", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  }
+
+  async getToolStats(recent = 50): Promise<{
+    total: number;
+    counts: Record<string, number>;
+    recent: {
+      id: string;
+      taskId: string;
+      taskTitle: string | null;
+      taskAgent: string | null;
+      tool: string;
+      preview: string;
+      ts: number;
+    }[];
+    earliest: number | null;
+  }> {
+    return this.req(`/api/tools/stats?recent=${recent}`);
   }
 
   /** Per-task model override. Empty string clears it. */

@@ -18,7 +18,12 @@ import {
   Trash2,
   XCircle,
 } from "lucide-react";
-import type { PermissionMode, Task, TaskStatus } from "@agentd/contracts";
+import type {
+  PermissionMode,
+  Task,
+  TaskStatus,
+  ThinkingLevel,
+} from "@agentd/contracts";
 import {
   Kicker,
   PageTopbar,
@@ -37,6 +42,8 @@ import {
 import {
   useCreateTask,
   useDeleteProject,
+  usePatchPrefs,
+  usePrefs,
   useProject,
   useSkills,
   useTasks,
@@ -407,19 +414,43 @@ function ProjectComposer({
   const create = useCreateTask();
   const { toast } = useApp();
 
+  const prefsQ = usePrefs();
+  const patchPrefs = usePatchPrefs();
+
   const [prompt, setPrompt] = useState("");
-  const [agent, setAgent] = useState<"claude" | "codex">(
-    () => (localStorage.getItem("agentd.lastAgent") as "claude" | "codex") ?? "claude",
-  );
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>(() => {
-    const v = localStorage.getItem("agentd.lastPermissionMode");
-    if (v === "acceptEdits" || v === "plan" || v === "bypassPermissions") return v;
-    return "bypassPermissions";
-  });
-  const [base, setBase] = useState(
-    () => localStorage.getItem("agentd.lastBase") ?? "main",
-  );
+  const [agent, setAgent] = useState<"claude" | "codex">("claude");
+  const [permissionMode, setPermissionMode] =
+    useState<PermissionMode>("bypassPermissions");
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("high");
+  const [model, setModel] = useState<string>("");
+  const [base, setBase] = useState("main");
   const [busy, setBusy] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+
+  // One-shot hydration from server-side prefs.
+  useEffect(() => {
+    if (hydrated) return;
+    const p = prefsQ.data?.prefs;
+    if (!p) return;
+    setAgent(p.lastAgent);
+    setPermissionMode(p.lastPermissionMode);
+    setThinkingLevel(p.lastThinkingLevel);
+    setModel(
+      p.lastAgent === "claude" ? p.lastModelClaude : p.lastModelCodex,
+    );
+    setBase(p.lastBase || "main");
+    setHydrated(true);
+  }, [prefsQ.data, hydrated]);
+
+  // Swap model whenever the agent changes after hydration.
+  useEffect(() => {
+    if (!hydrated || !prefsQ.data) return;
+    setModel(
+      agent === "claude"
+        ? prefsQ.data.prefs.lastModelClaude
+        : prefsQ.data.prefs.lastModelCodex,
+    );
+  }, [agent, hydrated, prefsQ.data]);
 
   const submit = async () => {
     const p = prompt.trim();
@@ -435,11 +466,19 @@ function ProjectComposer({
         baseBranch: base.trim() || "main",
         prompt: p,
         permissionMode,
+        thinkingLevel,
+        ...(model.trim() ? { model: model.trim() } : {}),
       });
-      localStorage.setItem("agentd.lastProjectId", project.id);
-      localStorage.setItem("agentd.lastAgent", agent);
-      localStorage.setItem("agentd.lastPermissionMode", permissionMode);
-      localStorage.setItem("agentd.lastBase", base.trim() || "main");
+      void patchPrefs.mutateAsync({
+        lastProjectId: project.id,
+        lastAgent: agent,
+        lastPermissionMode: permissionMode,
+        lastThinkingLevel: thinkingLevel,
+        ...(agent === "claude"
+          ? { lastModelClaude: model.trim() }
+          : { lastModelCodex: model.trim() }),
+        lastBase: base.trim() || "main",
+      });
       setPrompt("");
       navigate(`/tasks/${res.task.id}`);
     } catch (err) {
@@ -497,6 +536,35 @@ function ProjectComposer({
             { value: "plan", label: "plan · read-only" },
           ]}
           onSelect={(v) => setPermissionMode(v as PermissionMode)}
+        />
+        <ToolbarPick
+          label={`think:${thinkingLevel}`}
+          options={[
+            { value: "low", label: "low · fastest" },
+            { value: "medium", label: "medium · balanced" },
+            { value: "high", label: "high · solid default" },
+            { value: "max", label: "max · deepest tier" },
+            { value: "xhigh", label: "xhigh · Claude default" },
+          ]}
+          onSelect={(v) => setThinkingLevel(v as ThinkingLevel)}
+        />
+        <ToolbarPick
+          label={`model:${model || "default"}`}
+          options={
+            agent === "claude"
+              ? [
+                  { value: "", label: "(default)" },
+                  { value: "claude-opus-4-7", label: "opus 4.7" },
+                  { value: "claude-sonnet-4-6", label: "sonnet 4.6" },
+                  { value: "claude-haiku-4-5", label: "haiku 4.5" },
+                ]
+              : [
+                  { value: "", label: "(default)" },
+                  { value: "gpt-5-codex", label: "gpt-5-codex" },
+                  { value: "gpt-5", label: "gpt-5" },
+                ]
+          }
+          onSelect={setModel}
         />
         <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
           base

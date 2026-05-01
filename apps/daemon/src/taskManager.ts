@@ -149,7 +149,10 @@ export class TaskManager {
       templateId: params.templateId ?? null,
       scheduleId: params.scheduleId ?? null,
       projectId: project.id,
-      autoPush: params.autoPush ?? false,
+      // Default ON: the agent commits + pushes when done; the post-hook
+      // is a safety net. Auto-PR stays OFF — that's a deliberate manual
+      // step from the Ship menu.
+      autoPush: params.autoPush ?? true,
       autoPr: params.autoPr ?? false,
       skills: params.skills ?? [],
       permissionMode: params.permissionMode ?? "bypassPermissions",
@@ -316,6 +319,29 @@ export class TaskManager {
     if (cfg.agentInstructions) appendParts.push(cfg.agentInstructions);
     if (catalog.text) appendParts.push(catalog.text);
     if (repoCtx.text) appendParts.push(repoCtx.text);
+    // Tell the agent to land its own work. We always ask it to commit
+    // because the agent has full context of what it changed and writes
+    // a much more accurate message than a separate Claude pass over the
+    // diff. The daemon-side post-hook still runs as a safety net (it
+    // becomes a no-op when there's nothing left to commit / push).
+    const finishParts: string[] = [
+      "When your work is complete, stage everything and commit it inside this worktree.",
+      "Use a single conventional-commit subject line (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `style:`, `test:`, `perf:`, `ci:`, `build:`) under 70 characters, lowercase, imperative mood, with no scope unless one is obvious.",
+      "Do NOT add `Co-Authored-By`, `Generated with`, or any AI attribution to commit messages.",
+    ];
+    if (cfg.commitInstructions?.trim()) {
+      finishParts.push(`Commit style notes:\n${cfg.commitInstructions.trim()}`);
+    }
+    if (task.autoPush) {
+      finishParts.push(
+        "After committing, push the branch to origin with `git push -u origin HEAD`. Don't open a pull request — that step is manual.",
+      );
+    } else {
+      finishParts.push(
+        "Do NOT push the branch and do NOT open a pull request — those are manual steps.",
+      );
+    }
+    appendParts.push(finishParts.join(" "));
     const appendSystemPrompt = appendParts.length
       ? appendParts.join("\n\n---\n\n")
       : undefined;

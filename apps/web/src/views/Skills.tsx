@@ -62,6 +62,8 @@ import {
   qk,
   useCreateSkill,
   useDeleteSkill,
+  usePatchPrefs,
+  usePrefs,
   useProjects,
   useSkills,
   useUpdateSkill,
@@ -98,11 +100,24 @@ export function Skills() {
   const projects = projectsQ.data?.projects ?? [];
 
   // Project context for "local" skills. Selecting a project unlocks local
-  // skills under <projectPath>/.agents/skills/.
-  const [projectId, setProjectId] = useState<string>(
-    () => localStorage.getItem("agentd.lastProjectId") ?? "",
-  );
+  // skills under <projectPath>/.agents/skills/. The last picked project
+  // syncs across devices via server-side prefs.
+  const prefsQ = usePrefs();
+  const patchPrefs = usePatchPrefs();
+  const [projectId, setProjectIdState] = useState<string>("");
   const [projectPath, setProjectPath] = useState<string>("");
+  const [projectHydrated, setProjectHydrated] = useState(false);
+  useEffect(() => {
+    if (projectHydrated) return;
+    const id = prefsQ.data?.prefs.lastProjectId;
+    if (id == null) return;
+    setProjectIdState(id);
+    setProjectHydrated(true);
+  }, [prefsQ.data, projectHydrated]);
+  const setProjectId = (id: string) => {
+    setProjectIdState(id);
+    void patchPrefs.mutateAsync({ lastProjectId: id });
+  };
   useEffect(() => {
     if (!projectId) return;
     const p = projects.find((x) => x.id === projectId);

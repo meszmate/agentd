@@ -52,6 +52,7 @@ import {
   streamPrMessage,
   getPrState,
   setTaskPrUrl,
+  aggregateToolStats,
   closeTask,
   reopenTask,
   setTaskThinkingLevel,
@@ -62,6 +63,7 @@ import {
   AiHelperConfig,
   TelegramPluginConfig,
   DiscordPluginConfig,
+  UserPrefs,
   createTemplate,
   deleteTemplate,
   getTemplate,
@@ -166,6 +168,22 @@ export function buildServer(opts: BuildServerOptions) {
   api.use("*", requireSession(db));
 
   api.get("/tasks", (c) => c.json({ tasks: tasks.list() }));
+
+  /**
+   * Tool usage stats. Reads `role='tool'` messages and aggregates by tool
+   * name (parsed from the `[call <toolName>] ...` prefix the task manager
+   * writes for every `tool_call` event the runner emits).
+   *   ?recent=<n>  newest entries to include in the activity feed (1-500)
+   */
+  api.get("/tools/stats", (c) => {
+    const recentParam = c.req.query("recent");
+    const recentLimit = recentParam ? Number(recentParam) : 50;
+    const stats = aggregateToolStats(db, {
+      recentLimit:
+        Number.isFinite(recentLimit) && recentLimit > 0 ? recentLimit : 50,
+    });
+    return c.json(stats);
+  });
 
   api.post("/tasks", async (c) => {
     const body = await c.req.json().catch(() => null);
@@ -1057,6 +1075,34 @@ export function buildServer(opts: BuildServerOptions) {
   api.get("/admin/plugins", (c) => {
     const cfg = loadConfig(paths.root);
     return c.json({ plugins: plugins.status(), config: cfg.plugins });
+  });
+
+  /**
+   * Spawn-flow user preferences. Replaces the old agentd.last*
+   * localStorage keys so prefs follow the user across devices.
+   */
+  api.get("/prefs", (c) => {
+    const cfg = loadConfig(paths.root);
+    return c.json({ prefs: cfg.prefs });
+  });
+
+  api.patch("/prefs", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return c.json({ error: "json body required" }, 400);
+    }
+    const cfg = loadConfig(paths.root);
+    const merged = { ...cfg.prefs, ...(body as Record<string, unknown>) };
+    const parsed = UserPrefs.safeParse(merged);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid prefs patch", issues: parsed.error.issues },
+        400,
+      );
+    }
+    const next = { ...cfg, prefs: parsed.data };
+    saveConfig(paths.root, next);
+    return c.json({ ok: true, prefs: parsed.data });
   });
 
   api.get("/admin/settings", (c) => {

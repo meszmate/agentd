@@ -17,10 +17,9 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useClient } from "@/AppContext";
-import { useTasks } from "@/queries";
+import { usePatchPrefs, usePrefs, useTasks } from "@/queries";
 import { cn } from "@/lib/utils";
 
-const PINS_KEY = "agentd.pinnedRepos";
 
 interface FsEntry {
   name: string;
@@ -36,21 +35,6 @@ interface FsListing {
   entries: FsEntry[];
 }
 
-function loadPins(): string[] {
-  try {
-    const raw = localStorage.getItem(PINS_KEY);
-    if (!raw) return [];
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr)
-      ? arr.filter((s): s is string => typeof s === "string")
-      : [];
-  } catch {
-    return [];
-  }
-}
-function savePins(pins: string[]): void {
-  localStorage.setItem(PINS_KEY, JSON.stringify(pins));
-}
 
 export function RepoPicker({
   value,
@@ -122,7 +106,17 @@ function PickerBody({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
-  const [pins, setPins] = useState<string[]>(() => loadPins());
+  const prefsQ = usePrefs();
+  const patchPrefs = usePatchPrefs();
+  const [pins, setPins] = useState<string[]>([]);
+  const [pinsHydrated, setPinsHydrated] = useState(false);
+  useEffect(() => {
+    if (pinsHydrated) return;
+    const p = prefsQ.data?.prefs.repoPickerPins;
+    if (!p) return;
+    setPins(p);
+    setPinsHydrated(true);
+  }, [prefsQ.data, pinsHydrated]);
 
   useEffect(() => {
     let cancelled = false;
@@ -171,7 +165,7 @@ function PickerBody({
       const next = cur.includes(p)
         ? cur.filter((x) => x !== p)
         : [p, ...cur].slice(0, 12);
-      savePins(next);
+      void patchPrefs.mutateAsync({ repoPickerPins: next });
       return next;
     });
   };

@@ -7,12 +7,18 @@ import { SpawnSheet } from "@/components/spawn-sheet";
 import { ErrorBoundary } from "@/ErrorBoundary";
 import { KeyboardShortcuts } from "@/components/keyboard-shortcuts";
 import { RouteProgress } from "@/components/route-progress";
+import { useLegacyPrefsMigration } from "@/lib/legacyPrefsMigrator";
 
 export function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const navigate = useNavigate();
+
+  // One-shot lift: pre-server-prefs installs had everything in
+  // localStorage. On first load with the new build we push those into
+  // the server config so the user keeps their picks.
+  useLegacyPrefsMigration();
 
   return (
     <>

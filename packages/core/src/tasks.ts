@@ -252,6 +252,83 @@ export function appendMessage(
   return m;
 }
 
+/**
+ * Aggregate tool-call activity across every task. Reads role='tool'
+ * messages and parses their `[call <toolName>] {args}` prefix (the format
+ * TaskManager writes when the runner emits a tool_call event).
+ *
+ * Returns counts per tool plus the latest `recentLimit` calls with task
+ * title and a short args preview. Cheap enough for a few thousand
+ * messages — well within agentd's expected scale.
+ */
+export interface ToolUsageEntry {
+  id: string;
+  taskId: string;
+  taskTitle: string | null;
+  taskAgent: string | null;
+  tool: string;
+  preview: string;
+  ts: number;
+}
+
+export interface ToolUsageStats {
+  /** Total number of tool_call messages on record. */
+  total: number;
+  /** Count by tool name, sorted desc in caller. */
+  counts: Record<string, number>;
+  /** Latest N tool calls (newest first) for the activity feed. */
+  recent: ToolUsageEntry[];
+  /** Earliest tool-call timestamp seen, useful for "tracked since". */
+  earliest: number | null;
+}
+
+const TOOL_CALL_RE = /^\[call ([^\]]+)\](.*)$/s;
+
+export function aggregateToolStats(
+  db: Db,
+  opts: { recentLimit?: number } = {},
+): ToolUsageStats {
+  const limit = Math.max(1, Math.min(500, opts.recentLimit ?? 50));
+  const rows = db
+    .select({
+      id: messages.id,
+      taskId: messages.taskId,
+      content: messages.content,
+      ts: messages.ts,
+      taskTitle: tasks.title,
+      taskAgent: tasks.agent,
+    })
+    .from(messages)
+    .leftJoin(tasks, eq(tasks.id, messages.taskId))
+    .where(eq(messages.role, "tool"))
+    .orderBy(desc(messages.ts))
+    .all();
+  const counts: Record<string, number> = {};
+  let total = 0;
+  let earliest: number | null = null;
+  const recent: ToolUsageEntry[] = [];
+  for (const r of rows) {
+    const m = TOOL_CALL_RE.exec(r.content ?? "");
+    if (!m) continue;
+    const tool = m[1]!.trim();
+    counts[tool] = (counts[tool] ?? 0) + 1;
+    total += 1;
+    if (earliest == null || (r.ts && r.ts < earliest)) earliest = r.ts;
+    if (recent.length < limit) {
+      recent.push({
+        id: r.id,
+        taskId: r.taskId,
+        taskTitle: r.taskTitle ?? null,
+        taskAgent: r.taskAgent ?? null,
+        tool,
+        preview: (m[2] ?? "").trim().slice(0, 200),
+        ts: r.ts,
+      });
+    }
+  }
+  return { total, counts, recent, earliest };
+}
+
 export function listMessages(db: Db, taskId: string, limit = 200): Message[] {
   return db
     .select()

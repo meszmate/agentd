@@ -379,6 +379,32 @@ export function usePatchSettings() {
   });
 }
 
+/**
+ * Cross-device "last used" defaults for the spawn flow. Backed by the
+ * daemon's config.json under `prefs`. Replaces the old agentd.last*
+ * localStorage keys.
+ */
+export function usePrefs() {
+  const client = useClient();
+  return useQuery({
+    queryKey: ["prefs"] as const,
+    queryFn: () => client.getPrefs(),
+    staleTime: 60_000,
+  });
+}
+
+export function usePatchPrefs() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: Parameters<AgentdClient["patchPrefs"]>[0]) =>
+      client.patchPrefs(patch),
+    onSuccess: (res) => {
+      qc.setQueryData(["prefs"], { prefs: res.prefs });
+    },
+  });
+}
+
 /* ── WS event stream hook (reused from old api.ts, lightly rewritten) ─ */
 
 export function useTaskStream(

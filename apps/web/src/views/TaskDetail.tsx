@@ -39,6 +39,8 @@ import {
 } from "@/components/ui/tooltip";
 import {
   qk,
+  usePatchPrefs,
+  usePrefs,
   useRemoveTask,
   useStopTask,
   useTask,
@@ -55,8 +57,6 @@ import { TaskTimeline } from "@/views/TaskTimeline";
 import { TaskWorkspace } from "@/views/TaskWorkspace";
 import { ShipMenu } from "@/components/ship-menu";
 import type { TaskPlanItem } from "@/views/TaskPlan";
-
-const WORKSPACE_OPEN_KEY = "agentd.task.workspaceOpen";
 
 export function TaskDetail({ task }: { task: Task }) {
   const navigate = useNavigate();
@@ -85,14 +85,21 @@ export function TaskDetail({ task }: { task: Task }) {
    */
   const [plan, setPlan] = useState<TaskPlanItem[]>([]);
   const [planUpdatedAt, setPlanUpdatedAt] = useState<number | null>(null);
-  const [workspaceOpen, setWorkspaceOpen] = useState<boolean>(() => {
-    const v = localStorage.getItem(WORKSPACE_OPEN_KEY);
-    return v == null ? true : v === "1";
-  });
-
+  const prefsQ = usePrefs();
+  const patchPrefs = usePatchPrefs();
+  const [workspaceOpen, setWorkspaceOpenState] = useState<boolean>(true);
+  const [workspaceHydrated, setWorkspaceHydrated] = useState(false);
   useEffect(() => {
-    localStorage.setItem(WORKSPACE_OPEN_KEY, workspaceOpen ? "1" : "0");
-  }, [workspaceOpen]);
+    if (workspaceHydrated) return;
+    const v = prefsQ.data?.prefs.taskWorkspaceOpen;
+    if (v == null) return;
+    setWorkspaceOpenState(v);
+    setWorkspaceHydrated(true);
+  }, [prefsQ.data, workspaceHydrated]);
+  const setWorkspaceOpen = (v: boolean): void => {
+    setWorkspaceOpenState(v);
+    void patchPrefs.mutateAsync({ taskWorkspaceOpen: v });
+  };
 
   useEffect(() => {
     if (loadedFor === task.id) return;
@@ -351,7 +358,7 @@ export function TaskDetail({ task }: { task: Task }) {
         <Button
           variant="ghost"
           size="icon-sm"
-          onClick={() => setWorkspaceOpen((v) => !v)}
+          onClick={() => setWorkspaceOpen(!workspaceOpen)}
           aria-label={workspaceOpen ? "Hide workspace" : "Show workspace"}
           title={workspaceOpen ? "Hide workspace" : "Show workspace"}
         >

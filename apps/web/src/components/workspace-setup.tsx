@@ -29,34 +29,17 @@ export interface WorkspaceSetupValue {
   pullLatest: boolean;
 }
 
-const STORAGE_KEY = "agentd.workspaceSetup";
-
-function loadDefaults(): Partial<WorkspaceSetupValue> {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return {};
-    return JSON.parse(raw) as Partial<WorkspaceSetupValue>;
-  } catch {
-    return {};
-  }
-}
-
-export function persistWorkspaceSetup(v: WorkspaceSetupValue): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(v));
-  } catch {
-    // localStorage disabled — fine
-  }
-}
-
+/**
+ * Defaults used when no server prefs are loaded yet. Real defaults come
+ * from `usePrefs()` and are applied by the parent form on hydration.
+ */
 export function defaultWorkspaceSetup(baseFallback = "main"): WorkspaceSetupValue {
-  const stored = loadDefaults();
   return {
-    workspaceMode: (stored.workspaceMode as WorkspaceMode) ?? "worktree",
-    branchMode: (stored.branchMode as BranchMode) ?? "new",
-    branchName: stored.branchName ?? "",
-    baseBranch: stored.baseBranch ?? baseFallback,
-    pullLatest: !!stored.pullLatest,
+    workspaceMode: "worktree",
+    branchMode: "new",
+    branchName: "",
+    baseBranch: baseFallback,
+    pullLatest: false,
   };
 }
 
@@ -109,9 +92,7 @@ export function WorkspaceSetup({
   void branchesQ;
 
   const update = (patch: Partial<WorkspaceSetupValue>): void => {
-    const next = { ...value, ...patch };
-    onChange(next);
-    persistWorkspaceSetup(next);
+    onChange({ ...value, ...patch });
   };
 
   const localBranches = realQ.data?.local ?? [];
