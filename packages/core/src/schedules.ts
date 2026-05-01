@@ -96,7 +96,7 @@ export function recordScheduleRun(
   db: Db,
   id: string,
   ranAt: number,
-  taskId: string,
+  taskId: string | null,
 ): void {
   const sched = getSchedule(db, id);
   if (!sched) return;

@@ -1,5 +1,6 @@
-import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { useVimList } from "@/lib/useVimList";
 import type { Task, TaskStatus } from "@agentd/contracts";
 import { Input } from "@/components/ui/input";
 import {
@@ -136,6 +137,29 @@ function TasksList({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
     return { active, recent, archive };
   }, [filtered]);
 
+  // Flatten lanes into the on-screen order so vim j/k can move across
+  // section boundaries naturally. The hook only needs the count + an
+  // activate handler; per-row focus checks happen via isFocused.
+  const flat = useMemo(
+    () => [...lanes.active, ...lanes.recent, ...lanes.archive],
+    [lanes],
+  );
+  const navigate = useNavigate();
+  const { isFocused, rowRef, setFocused } = useVimList(flat.length, (i) => {
+    const t = flat[i];
+    if (t) navigate(`/tasks/${t.id}`);
+  });
+  // Reset cursor to the first row whenever the filter result changes so
+  // the next j/k starts somewhere sensible.
+  useEffect(() => {
+    setFocused(0);
+  }, [filtered.length, setFocused]);
+  const laneOffsets = {
+    active: 0,
+    recent: lanes.active.length,
+    archive: lanes.active.length + lanes.recent.length,
+  } as const;
+
   return (
     <div className="flex h-full flex-col">
       {/* Topbar with title + counts */}
@@ -213,6 +237,9 @@ function TasksList({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
                 heading="Active"
                 count={lanes.active.length}
                 tasks={lanes.active}
+                offset={laneOffsets.active}
+                isFocused={isFocused}
+                rowRef={rowRef}
                 accent
               />
             )}
@@ -222,6 +249,9 @@ function TasksList({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
                 hint="last 24 hours"
                 count={lanes.recent.length}
                 tasks={lanes.recent}
+                offset={laneOffsets.recent}
+                isFocused={isFocused}
+                rowRef={rowRef}
               />
             )}
             {lanes.archive.length > 0 && (
@@ -229,6 +259,9 @@ function TasksList({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
                 heading="Archive"
                 count={lanes.archive.length}
                 tasks={lanes.archive}
+                offset={laneOffsets.archive}
+                isFocused={isFocused}
+                rowRef={rowRef}
                 muted
               />
             )}
@@ -246,6 +279,9 @@ function Lane({
   tasks,
   accent,
   muted,
+  offset,
+  isFocused,
+  rowRef,
 }: {
   heading: string;
   hint?: string;
@@ -253,6 +289,10 @@ function Lane({
   tasks: Task[];
   accent?: boolean;
   muted?: boolean;
+  /** Index of this lane's first task in the page-flat list. */
+  offset: number;
+  isFocused: (i: number) => boolean;
+  rowRef: (i: number) => (el: HTMLElement | null) => void;
 }) {
   return (
     <section className={muted ? "opacity-80" : undefined}>
@@ -274,26 +314,41 @@ function Lane({
         sticky={false}
       />
       <ul className="divide-y divide-ink-900/[0.06] dark:divide-ink-50/[0.06]">
-        {tasks.map((t) => (
-          <TaskRow key={t.id} task={t} />
+        {tasks.map((t, i) => (
+          <TaskRow
+            key={t.id}
+            task={t}
+            focused={isFocused(offset + i)}
+            rowRef={rowRef(offset + i)}
+          />
         ))}
       </ul>
     </section>
   );
 }
 
-function TaskRow({ task }: { task: Task }) {
+function TaskRow({
+  task,
+  focused,
+  rowRef,
+}: {
+  task: Task;
+  focused: boolean;
+  rowRef: (el: HTMLElement | null) => void;
+}) {
   const totalTok =
     (task.totalInputTokens ?? 0) + (task.totalOutputTokens ?? 0);
   const hot = useRecentPulse(task.id, 1500);
 
   return (
-    <li>
+    <li ref={rowRef}>
       <Link
         to={`/tasks/${task.id}`}
         className={cn(
           "group h-12 px-5 flex items-center gap-3 hover:bg-paper-100 transition-colors dark:hover:bg-ink-700 relative",
           hot && "bg-ember-500/[0.06] dark:bg-ember-500/[0.1]",
+          focused &&
+            "bg-ember-500/[0.08] dark:bg-ember-500/[0.12] before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:bg-ember-500",
         )}
       >
         {hot && (

@@ -56,6 +56,57 @@ export const ThinkingLevel = z.enum(["low", "medium", "high", "max", "xhigh"]);
 export type ThinkingLevel = z.infer<typeof ThinkingLevel>;
 
 /**
+ * One candidate agent in a council. Each member runs the same prompt in
+ * its own worktree; the judge picks a winner after all members exit.
+ */
+export const CouncilMember = z.object({
+  agent: z.enum(["claude", "codex"]),
+  model: z.string().optional(),
+  thinkingLevel: ThinkingLevel.optional(),
+  /** Short label for UI ("opus xhigh", "sonnet high", "gpt-5-codex"). */
+  label: z.string().optional(),
+});
+export type CouncilMember = z.infer<typeof CouncilMember>;
+
+export const CouncilStatus = z.enum([
+  "running",
+  "judging",
+  "done",
+  "failed",
+]);
+export type CouncilStatus = z.infer<typeof CouncilStatus>;
+
+export const Council = z.object({
+  id: z.string(),
+  projectId: z.string().nullable(),
+  repoPath: z.string(),
+  baseBranch: z.string(),
+  prompt: z.string(),
+  status: CouncilStatus,
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  /** Task ids that belong to this council, in spawn order. */
+  taskIds: z.array(z.string()),
+  /** Set once the judge picks (or the operator does manually). */
+  winnerTaskId: z.string().nullable(),
+  /** One-line rationale from the judge. Empty for manual picks. */
+  judgeExplanation: z.string().nullable(),
+});
+export type Council = z.infer<typeof Council>;
+
+export const CreateCouncilRequest = z.object({
+  projectId: z.string().optional(),
+  repoPath: z.string().min(1),
+  baseBranch: z.string().default("main"),
+  prompt: z.string().min(1),
+  /** 2–5 members. Each spawns its own task + worktree on a unique branch. */
+  members: z.array(CouncilMember).min(2).max(5),
+  /** Optional task title — defaults to the prompt's first line. */
+  title: z.string().optional(),
+});
+export type CreateCouncilRequest = z.infer<typeof CreateCouncilRequest>;
+
+/**
  * Where a running task mirrors its events. When set, every agent message,
  * tool call, permission request, progress note, and exit gets forwarded
  * to the named chat. Replies in that chat get fed back as steered input.
@@ -118,6 +169,12 @@ export const Task = z.object({
    */
   mirrorTo: MirrorTarget.nullable().optional(),
   /**
+   * Council membership — set when the task was spawned as one of N
+   * parallel candidates against the same prompt. The council page
+   * groups its members and runs the judge when all of them exit.
+   */
+  councilId: z.string().nullable().optional(),
+  /**
    * When set, the task is "closed" — typically because its PR merged or
    * the operator decided it's no longer relevant. Closed tasks default
    * to filtered out of list views. Closed tasks can be reopened.
@@ -128,15 +185,37 @@ export const Task = z.object({
 });
 export type Task = z.infer<typeof Task>;
 
+/**
+ *   task     — fires on schedule, spawns a real agent task.
+ *   ideation — fires on schedule, runs a small AI helper that suggests
+ *              N options for the operator to pick from. Picking spawns
+ *              a real task with the chosen option as its prompt. This
+ *              is the "AGI is thinking about your project while you're
+ *              away" loop — the agent proposes, you approve.
+ */
+export const TemplateKind = z.enum(["task", "ideation"]);
+export type TemplateKind = z.infer<typeof TemplateKind>;
+
 export const Template = z.object({
   id: z.string(),
   name: z.string(),
   agent: AgentKind,
+  kind: TemplateKind.default("task"),
+  /** Optional — when set, repoPath is resolved from the project at run time. */
+  projectId: z.string().nullable(),
   repoPath: z.string(),
   baseBranch: z.string(),
   promptTemplate: z.string(),
   autoPush: z.boolean(),
   autoPr: z.boolean(),
+  /** All these knobs propagate into the spawned task — overridable per-run. */
+  permissionMode: PermissionMode.default("bypassPermissions"),
+  thinkingLevel: ThinkingLevel.default("high"),
+  model: z.string().default(""),
+  workspaceMode: WorkspaceMode.default("worktree"),
+  branchMode: BranchMode.default("new"),
+  pullLatest: z.boolean().default(false),
+  skills: z.array(z.string()).default([]),
   createdAt: z.number(),
   updatedAt: z.number(),
 });
@@ -298,17 +377,79 @@ export type CreateTaskRequest = z.infer<typeof CreateTaskRequest>;
 export const CreateTemplateRequest = z.object({
   name: z.string().min(1),
   agent: AgentKind,
-  repoPath: z.string().min(1),
+  kind: TemplateKind.optional(),
+  /** Either projectId OR repoPath is required. projectId wins if both set. */
+  projectId: z.string().optional(),
+  repoPath: z.string().optional(),
   baseBranch: z.string().default("main"),
   promptTemplate: z.string().min(1),
   autoPush: z.boolean().default(false),
   autoPr: z.boolean().default(false),
+  permissionMode: PermissionMode.optional(),
+  thinkingLevel: ThinkingLevel.optional(),
+  model: z.string().optional(),
+  workspaceMode: WorkspaceMode.optional(),
+  branchMode: BranchMode.optional(),
+  pullLatest: z.boolean().optional(),
+  skills: z.array(z.string()).optional(),
 });
 export type CreateTemplateRequest = z.infer<typeof CreateTemplateRequest>;
+
+/**
+ * Output of an ideation template run. The AI helper proposed N options
+ * the operator can pick from. Picking spawns a real task with the
+ * chosen option as its prompt; dismissing closes it without action.
+ */
+export const SuggestionStatus = z.enum([
+  "pending",
+  "resolved",
+  "dismissed",
+]);
+export type SuggestionStatus = z.infer<typeof SuggestionStatus>;
+
+export const Suggestion = z.object({
+  id: z.string(),
+  templateId: z.string().nullable(),
+  projectId: z.string().nullable(),
+  /** Short title for UI listing, derived from the source template name. */
+  title: z.string(),
+  /** The ideation prompt that produced these options. */
+  prompt: z.string(),
+  /** Numbered options — pick by index (0..N-1) or write a free-form answer. */
+  options: z.array(z.string()),
+  status: SuggestionStatus,
+  createdAt: z.number(),
+  resolvedAt: z.number().nullable(),
+  /** Index of the chosen option, or -1 if a free-form answer was used. */
+  chosenIndex: z.number().nullable(),
+  /** The resolved choice text — either an option or a free-form answer. */
+  chosenText: z.string().nullable(),
+  /** Task spawned from the resolved choice (null when dismissed). */
+  spawnedTaskId: z.string().nullable(),
+});
+export type Suggestion = z.infer<typeof Suggestion>;
+
+export const ResolveSuggestionRequest = z.object({
+  /** Pick an option by index (0..N-1). Required unless `text` is set. */
+  index: z.number().int().min(0).optional(),
+  /** Free-form prompt that overrides the option list. */
+  text: z.string().optional(),
+});
+export type ResolveSuggestionRequest = z.infer<typeof ResolveSuggestionRequest>;
 
 export const RunTemplateRequest = z.object({
   args: z.record(z.string(), z.string()).default({}),
   titleOverride: z.string().optional(),
+  /** Per-run overrides — anything set here wins over the template's own values. */
+  permissionMode: PermissionMode.optional(),
+  thinkingLevel: ThinkingLevel.optional(),
+  model: z.string().optional(),
+  workspaceMode: WorkspaceMode.optional(),
+  branchMode: BranchMode.optional(),
+  branchName: z.string().optional(),
+  pullLatest: z.boolean().optional(),
+  autoPush: z.boolean().optional(),
+  autoPr: z.boolean().optional(),
 });
 export type RunTemplateRequest = z.infer<typeof RunTemplateRequest>;
 

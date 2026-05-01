@@ -21,7 +21,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useCreateTask, usePatchPrefs, usePrefs, useSkills } from "@/queries";
+import {
+  useCreateCouncil,
+  useCreateTask,
+  usePatchPrefs,
+  usePrefs,
+  useSkills,
+} from "@/queries";
 import { useApp } from "@/AppContext";
 import { ProjectPicker } from "@/components/project-picker";
 import {
@@ -69,6 +75,8 @@ export function SpawnSheet({
   onClose: () => void;
 }) {
   const create = useCreateTask();
+  const createCouncil = useCreateCouncil();
+  const [councilMode, setCouncilMode] = useState(false);
   const navigate = useNavigate();
   const { toast } = useApp();
   const prefsQ = usePrefs();
@@ -168,6 +176,60 @@ export function SpawnSheet({
     }
     try {
       const finalBase = (workspace.baseBranch || baseBranch).trim() || "main";
+
+      // Council mode short-circuits the regular task spawn — pop a fixed
+      // 3-member set (opus/sonnet/haiku for Claude, mirrored gpt-5/gpt-5-codex
+      // for Codex) and route to the Councils page.
+      if (councilMode) {
+        const members =
+          agent === "claude"
+            ? [
+                {
+                  agent: "claude" as const,
+                  model: "claude-opus-4-7",
+                  thinkingLevel,
+                  label: "opus",
+                },
+                {
+                  agent: "claude" as const,
+                  model: "claude-sonnet-4-6",
+                  thinkingLevel,
+                  label: "sonnet",
+                },
+                {
+                  agent: "claude" as const,
+                  model: "claude-haiku-4-5",
+                  thinkingLevel,
+                  label: "haiku",
+                },
+              ]
+            : [
+                {
+                  agent: "codex" as const,
+                  model: "gpt-5-codex",
+                  thinkingLevel,
+                  label: "gpt-5-codex",
+                },
+                {
+                  agent: "codex" as const,
+                  model: "gpt-5",
+                  thinkingLevel,
+                  label: "gpt-5",
+                },
+              ];
+        const res = await createCouncil.mutateAsync({
+          repoPath: repoPath.trim(),
+          baseBranch: finalBase,
+          prompt: prompt.trim(),
+          ...(title.trim() ? { title: title.trim() } : {}),
+          ...(projectId ? { projectId } : {}),
+          members,
+        });
+        toast(`Council spawned · ${members.length} members`);
+        onClose();
+        navigate(`/councils/${res.council.id}`);
+        return;
+      }
       const res = await create.mutateAsync({
         agent,
         repoPath: repoPath.trim(),
@@ -261,6 +323,33 @@ export function SpawnSheet({
                 </SelectContent>
               </Select>
             </Field>
+
+            <div
+              className={cn(
+                "flex items-center justify-between rounded-md border p-3 transition-colors",
+                councilMode
+                  ? "border-violet-500/30 bg-violet-500/[0.06]"
+                  : "border-ink-900/10 bg-paper-50 dark:border-ink-50/10 dark:bg-ink-800",
+              )}
+            >
+              <div>
+                <Label className="text-xs normal-case tracking-normal text-foreground">
+                  Council mode
+                </Label>
+                <p className="text-2xs text-muted-foreground">
+                  Run the same prompt against{" "}
+                  <span className="font-mono">
+                    {agent === "claude" ? "opus / sonnet / haiku" : "gpt-5-codex / gpt-5"}
+                  </span>{" "}
+                  in parallel. The judge picks the best diff when they all
+                  finish — overrideable from the council page.
+                </p>
+              </div>
+              <Switch
+                checked={councilMode}
+                onCheckedChange={setCouncilMode}
+              />
+            </div>
 
             <Field>
               <Label>Workspace</Label>

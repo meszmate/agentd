@@ -1,16 +1,44 @@
 import { eq, desc } from "drizzle-orm";
-import type { Template } from "@agentd/contracts";
+import type {
+  BranchMode,
+  PermissionMode,
+  Template,
+  TemplateKind,
+  ThinkingLevel,
+  WorkspaceMode,
+} from "@agentd/contracts";
 import { templates, type Db } from "./db.ts";
 import { newId } from "./auth.ts";
 
 export interface CreateTemplateInput {
   name: string;
   agent: Template["agent"];
+  kind?: TemplateKind;
+  projectId?: string | null;
   repoPath: string;
   baseBranch: string;
   promptTemplate: string;
   autoPush: boolean;
   autoPr: boolean;
+  permissionMode?: PermissionMode;
+  thinkingLevel?: ThinkingLevel;
+  model?: string;
+  workspaceMode?: WorkspaceMode;
+  branchMode?: BranchMode;
+  pullLatest?: boolean;
+  skills?: string[];
+}
+
+function parseSkills(raw: string): string[] {
+  try {
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) {
+      return arr.filter((s): s is string => typeof s === "string");
+    }
+  } catch {
+    // legacy / corrupt — drop it
+  }
+  return [];
 }
 
 function rowToTemplate(row: typeof templates.$inferSelect): Template {
@@ -18,11 +46,20 @@ function rowToTemplate(row: typeof templates.$inferSelect): Template {
     id: row.id,
     name: row.name,
     agent: row.agent as Template["agent"],
+    kind: (row.kind as TemplateKind) ?? "task",
+    projectId: row.projectId ?? null,
     repoPath: row.repoPath,
     baseBranch: row.baseBranch,
     promptTemplate: row.promptTemplate,
     autoPush: row.autoPush === 1,
     autoPr: row.autoPr === 1,
+    permissionMode: (row.permissionMode as PermissionMode) ?? "bypassPermissions",
+    thinkingLevel: (row.thinkingLevel as ThinkingLevel) ?? "high",
+    model: row.model ?? "",
+    workspaceMode: (row.workspaceMode as WorkspaceMode) ?? "worktree",
+    branchMode: (row.branchMode as BranchMode) ?? "new",
+    pullLatest: row.pullLatest === 1,
+    skills: parseSkills(row.skillsJson ?? "[]"),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -36,11 +73,20 @@ export function createTemplate(db: Db, input: CreateTemplateInput): Template {
       id,
       name: input.name,
       agent: input.agent,
+      kind: input.kind ?? "task",
+      projectId: input.projectId ?? null,
       repoPath: input.repoPath,
       baseBranch: input.baseBranch,
       promptTemplate: input.promptTemplate,
       autoPush: input.autoPush ? 1 : 0,
       autoPr: input.autoPr ? 1 : 0,
+      permissionMode: input.permissionMode ?? "bypassPermissions",
+      thinkingLevel: input.thinkingLevel ?? "high",
+      model: input.model ?? "",
+      workspaceMode: input.workspaceMode ?? "worktree",
+      branchMode: input.branchMode ?? "new",
+      pullLatest: input.pullLatest ? 1 : 0,
+      skillsJson: JSON.stringify(input.skills ?? []),
       createdAt: now,
       updatedAt: now,
     })

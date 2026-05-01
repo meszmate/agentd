@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckSquare,
   ExternalLink,
@@ -463,6 +463,12 @@ export function TaskDetail({ task }: { task: Task }) {
         <ModelChip task={task} />
         <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
         <MirrorChip task={task} />
+        {task.councilId && (
+          <>
+            <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
+            <CouncilChip task={task} />
+          </>
+        )}
       </div>
 
       {/* Body */}
@@ -773,6 +779,134 @@ function MirrorChip({ task }: { task: Task }) {
             </button>
           </form>
         ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * Council chip on the task header. The council itself is invisible UI
+ * — there's no /councils route. Each member's task page shows whether
+ * it won, lost, or is still in flight, and lets the operator override
+ * the judge by marking THIS task as the winner.
+ *
+ *   ✓ winner             — judge picked this task
+ *   …  judging           — all members settled, judge running
+ *   council 2/3 settled  — still waiting on siblings
+ *   council · lost       — judge picked someone else
+ */
+function CouncilChip({ task }: { task: Task }) {
+  const client = useClient();
+  const qc = useQueryClient();
+  const { toast } = useApp();
+  const { data } = useQuery({
+    queryKey: ["councils", task.councilId ?? ""] as const,
+    queryFn: () => client.getCouncil(task.councilId!),
+    enabled: !!task.councilId,
+    refetchInterval: 3_000,
+  });
+  const council = data?.council;
+  const isWinner =
+    !!council?.winnerTaskId && council.winnerTaskId === task.id;
+  const lost =
+    !!council?.winnerTaskId && council.winnerTaskId !== task.id;
+  const judging = council?.status === "judging";
+  const settled =
+    council?.taskIds.filter((id) => id === task.id || id !== task.id) ?? [];
+  void settled;
+
+  const pick = async () => {
+    if (!task.councilId) return;
+    try {
+      await client.pickCouncilWinner(task.councilId, task.id, "manual pick");
+      qc.setQueryData(qk.task(task.id), { task });
+      void qc.invalidateQueries({ queryKey: ["councils", task.councilId] });
+      toast("set as winner");
+    } catch (e) {
+      toast((e as Error).message, true);
+    }
+  };
+
+  let label = "council";
+  let tone = "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/20";
+  if (isWinner) {
+    label = "✓ winner";
+    tone = "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20";
+  } else if (lost) {
+    label = "lost";
+    tone = "bg-ink-900/[0.04] text-ink-500 dark:text-ink-400 border-ink-900/10 dark:border-ink-50/10";
+  } else if (judging) {
+    label = "judging…";
+    tone = "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/20";
+  } else if (council) {
+    label = `council · ${council.taskIds.length} members`;
+  }
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          title={
+            council?.judgeExplanation
+              ? `Verdict: ${council.judgeExplanation}`
+              : "Council member"
+          }
+          className={cn(
+            "inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] border shrink-0 transition-colors",
+            tone,
+          )}
+        >
+          {label}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-72">
+        <DropdownMenuLabel className="text-[10px] uppercase tracking-[0.12em]">
+          Council {task.councilId?.slice(-6)}
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {council?.judgeExplanation && (
+          <div className="px-2 py-1.5 text-[11px] text-ink-600 dark:text-ink-300 leading-relaxed">
+            <span className="font-mono uppercase tracking-[0.08em] text-ink-400 dark:text-ink-500">
+              verdict
+            </span>
+            <div className="mt-0.5">{council.judgeExplanation}</div>
+          </div>
+        )}
+        {council && (
+          <div className="px-2 py-1.5 text-[10px] text-ink-500 dark:text-ink-400">
+            siblings ({council.taskIds.length}):
+            <ul className="mt-1 space-y-0.5">
+              {council.taskIds.map((id) => (
+                <li key={id}>
+                  <Link
+                    to={`/tasks/${id}`}
+                    className={cn(
+                      "font-mono hover:underline",
+                      id === task.id && "text-ember-700 dark:text-ember-300",
+                      id === council.winnerTaskId &&
+                        "text-emerald-700 dark:text-emerald-300",
+                    )}
+                  >
+                    {id === task.id ? "→ " : "  "}
+                    {shortId(id)}
+                    {id === council.winnerTaskId ? " ✓" : ""}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {!isWinner && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => void pick()}>
+              <span className="font-mono text-[11px]">
+                Mark this as winner
+              </span>
+            </DropdownMenuItem>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

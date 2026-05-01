@@ -2,8 +2,12 @@ import type {
   AgentEvent,
   AgentKind,
   BranchMode,
+  Council,
+  CouncilMember,
   PermissionMode,
+  Suggestion,
   Task,
+  Template,
   ThinkingLevel,
   WorkspaceMode,
 } from "@agentd/contracts";
@@ -18,8 +22,20 @@ import {
   getTask,
   listTasks,
   listMessages,
+  createCouncil as dbCreateCouncil,
+  createSuggestion,
+  dismissSuggestion as dbDismissSuggestion,
   generateBranchName,
   generateCommitMessage,
+  getCouncil,
+  getProjectById,
+  getSuggestion,
+  getTemplate,
+  resolveSuggestion as dbResolveSuggestion,
+  runIdeation,
+  runJudge,
+  setCouncilStatus,
+  setCouncilWinner,
   streamPrMessage,
   loadConfig,
   newId,
@@ -592,6 +608,279 @@ export class TaskManager {
           });
         }
       }
+    }
+    // Council hook — if this task is part of a council, see whether all
+    // siblings have settled and run the judge if so.
+    if (task.councilId) {
+      void this.maybeRunJudge(task.councilId);
+    }
+  }
+
+  /* ── Ideation ───────────────────────────────────────────────────── */
+
+  /**
+   * Fire an ideation template — runs a one-off Claude helper that
+   * proposes N options, persists them as a `Suggestion`, and emits a
+   * bus event so chat mirrors + the web inbox light up. The schedule
+   * caller logs whichever id we return.
+   *
+   * Returns null if the AI helper produced nothing useful (we just
+   * skip a fire rather than create an empty suggestion).
+   */
+  async fireIdeation(
+    tpl: Template,
+    prompt: string,
+    _scheduleId: string | null,
+  ): Promise<Suggestion | null> {
+    const cfg = loadConfig(this.paths.root);
+    const repoPath = (() => {
+      if (tpl.projectId) {
+        const p = getProjectById(this.db, tpl.projectId);
+        if (p?.path) return p.path;
+      }
+      return tpl.repoPath;
+    })();
+    const result = await runIdeation(repoPath, prompt, {
+      helper: cfg.aiHelpers,
+      max: 5,
+    });
+    if (result.options.length === 0) {
+      return null;
+    }
+    const sug = createSuggestion(this.db, {
+      templateId: tpl.id,
+      projectId: tpl.projectId,
+      title: tpl.name,
+      prompt,
+      options: result.options,
+    });
+    // Surface on the bus under a synthetic taskId so the chat plugin
+    // can render it. Use the suggestion id so plugins disambiguate.
+    this.bus.publish({
+      taskId: `sug:${sug.id}`,
+      event: {
+        kind: "ask",
+        askId: sug.id,
+        prompt: `💡 ${tpl.name}: ${prompt.split("\n")[0]?.slice(0, 80) ?? ""}`,
+        options: result.options,
+      },
+      ts: Date.now(),
+    });
+    return sug;
+  }
+
+  /**
+   * Resolve a suggestion — either by index (operator picked one of the
+   * proposed options) or by free-form text (operator wrote their own
+   * direction). Spawns a real task using the chosen text as the prompt;
+   * the spawned task lives in the same project as the suggestion.
+   */
+  async resolveSuggestionToTask(
+    suggestionId: string,
+    pick: { index?: number; text?: string },
+  ): Promise<{ suggestion: Suggestion; task: Task } | null> {
+    const sug = getSuggestion(this.db, suggestionId);
+    if (!sug) throw new Error("suggestion not found");
+    if (sug.status !== "pending") {
+      throw new Error(`suggestion is ${sug.status}, not pending`);
+    }
+    let chosenText: string;
+    let chosenIndex: number | null = null;
+    if (typeof pick.index === "number") {
+      if (pick.index < 0 || pick.index >= sug.options.length) {
+        throw new Error("index out of range");
+      }
+      chosenIndex = pick.index;
+      chosenText = sug.options[pick.index]!;
+    } else if (pick.text && pick.text.trim()) {
+      chosenText = pick.text.trim();
+    } else {
+      throw new Error("provide index or text");
+    }
+    // Resolve the project to a real repo path. If the template had no
+    // project, fall back to the originating template's stored path.
+    const repoPath = (() => {
+      if (sug.projectId) {
+        const project = getProjectById(this.db, sug.projectId);
+        if (project) return project.path;
+      }
+      if (sug.templateId) {
+        const tpl = getTemplate(this.db, sug.templateId);
+        if (tpl) return tpl.repoPath;
+      }
+      throw new Error("no repo path resolvable for suggestion");
+    })();
+    const task = await this.create({
+      agent: "claude",
+      repoPath,
+      prompt: chosenText,
+      title: chosenText.split("\n")[0]!.slice(0, 80),
+      ...(sug.projectId ? {} : {}),
+    });
+    const updated = dbResolveSuggestion(
+      this.db,
+      sug.id,
+      chosenIndex,
+      chosenText,
+      task.id,
+    )!;
+    return { suggestion: updated, task };
+  }
+
+  dismissSuggestion(id: string): Suggestion | null {
+    return dbDismissSuggestion(this.db, id);
+  }
+
+  /* ── Councils ───────────────────────────────────────────────────── */
+
+  /**
+   * Spawn a council: N parallel tasks against the same prompt, each in
+   * its own worktree on a unique branch. The judge runs after all of
+   * them exit and picks a winner.
+   */
+  async createCouncil(params: {
+    repoPath: string;
+    baseBranch?: string;
+    prompt: string;
+    title?: string;
+    members: CouncilMember[];
+    projectId?: string | null;
+  }): Promise<Council> {
+    if (params.members.length < 2 || params.members.length > 5) {
+      throw new Error("council needs 2-5 members");
+    }
+    const baseBranch =
+      params.baseBranch ?? (await detectDefaultBranch(params.repoPath));
+    const title = params.title ?? params.prompt.split("\n")[0]!.slice(0, 80);
+    const project = params.projectId
+      ? null
+      : ensureProjectForPath(this.db, params.repoPath);
+    const projectId = params.projectId ?? project?.id ?? null;
+
+    const cfg = loadConfig(this.paths.root);
+    const ai = await generateBranchName(params.prompt, {
+      helper: cfg.aiHelpers,
+    });
+    const baseSlug = ai.slug || "council";
+
+    const council = dbCreateCouncil(this.db, {
+      projectId,
+      repoPath: params.repoPath,
+      baseBranch,
+      prompt: params.prompt,
+    });
+
+    // Spawn each member sequentially so worktree creation doesn't race.
+    // Runner starts kick off in parallel inside `spawnRunner` though.
+    const memberLabels: string[] = [];
+    for (const m of params.members) {
+      const label =
+        m.label ||
+        [m.agent, m.model, m.thinkingLevel].filter(Boolean).join(" ") ||
+        m.agent;
+      const safeLabel = label
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 24);
+      memberLabels.push(label);
+      const taskId = newId("task");
+      const branch = `feature/${baseSlug}-${safeLabel}-${taskId.slice(-4)}`;
+      const { worktreePath } = await createWorktree({
+        repoPath: params.repoPath,
+        worktreeRoot: this.paths.worktrees,
+        taskId,
+        baseBranch,
+        branchName: branch,
+        workspaceMode: "worktree",
+        branchMode: "new",
+        pullLatest: false,
+      });
+      const memberTask: Task = createTask(this.db, {
+        id: taskId,
+        title: `[${label}] ${title}`.slice(0, 120),
+        agent: m.agent,
+        repoPath: params.repoPath,
+        worktreePath,
+        branch,
+        baseBranch,
+        projectId,
+        // Council members never auto-PR — we only PR the winner via the
+        // operator's manual Ship action.
+        autoPush: false,
+        autoPr: false,
+        permissionMode: "bypassPermissions",
+        thinkingLevel:
+          m.thinkingLevel ?? cfg.defaultThinking[m.agent],
+        model: m.model ?? "",
+        councilId: council.id,
+      });
+      void touchProject(this.db, projectId ?? "");
+      appendMessage(this.db, memberTask.id, "user", params.prompt);
+      // Fire and forget — each runner starts independently. Errors get
+      // logged on the bus by spawnRunner itself.
+      void this.spawnRunner(memberTask, params.prompt, false).catch(() => {});
+    }
+    void memberLabels;
+
+    return getCouncil(this.db, council.id)!;
+  }
+
+  /**
+   * Called whenever a council member exits. If every member has settled,
+   * runs the judge and records a winner. Idempotent: only one judge run
+   * per council, gated on status.
+   */
+  private async maybeRunJudge(councilId: string): Promise<void> {
+    const council = getCouncil(this.db, councilId);
+    if (!council) return;
+    if (council.status !== "running") return; // already judged or judging
+    // All members settled means none of them are currently running.
+    const members = council.taskIds
+      .map((id) => getTask(this.db, id))
+      .filter((t): t is Task => t != null);
+    if (members.length === 0) return;
+    const stillRunning = members.some((t) => this.isRunning(t.id));
+    if (stillRunning) return;
+    setCouncilStatus(this.db, councilId, "judging");
+    this.bus.publish({
+      taskId: members[0]!.id,
+      event: {
+        kind: "raw",
+        stream: "stdout",
+        text: `[council ${councilId.slice(-6)}] all members settled — running judge`,
+      },
+      ts: Date.now(),
+    });
+    const cfg = loadConfig(this.paths.root);
+    const verdict = await runJudge(
+      council.prompt,
+      members.map((t) => ({
+        id: t.id,
+        label: t.title.replace(/^\[([^\]]+)\].*/, "$1") || t.agent,
+        cwd: t.worktreePath,
+        baseRef: t.baseBranch,
+      })),
+      { helper: cfg.aiHelpers },
+    );
+    if (verdict.winnerId) {
+      setCouncilWinner(
+        this.db,
+        councilId,
+        verdict.winnerId,
+        verdict.explanation,
+      );
+      this.bus.publish({
+        taskId: verdict.winnerId,
+        event: {
+          kind: "raw",
+          stream: "stdout",
+          text: `[council ${councilId.slice(-6)}] winner: ${verdict.explanation}`,
+        },
+        ts: Date.now(),
+      });
+    } else {
+      setCouncilStatus(this.db, councilId, "failed");
     }
   }
 

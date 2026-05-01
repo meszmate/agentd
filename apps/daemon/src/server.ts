@@ -20,6 +20,8 @@ import {
   SendTerminalKeysRequest,
   ThinkingLevel,
   MirrorTarget,
+  CreateCouncilRequest,
+  ResolveSuggestionRequest,
   type WsServerEvent,
 } from "@agentd/contracts";
 import { join, normalize, relative, resolve } from "node:path";
@@ -55,7 +57,12 @@ import {
   setTaskPrUrl,
   aggregateToolStats,
   closeTask,
+  getCouncil,
+  getSuggestion,
+  listCouncils,
+  listSuggestions,
   reopenTask,
+  setCouncilWinner,
   setTaskThinkingLevel,
   setTaskModel,
   setTaskMirrorTo,
@@ -93,8 +100,8 @@ import {
   renderSkillsBudgeted,
   renderSkillsCatalog,
   renderRepoContext,
-  listProjects,
   getProjectById,
+  listProjects,
   getProjectBySlug,
   createProject,
   updateProject,
@@ -170,6 +177,63 @@ export function buildServer(opts: BuildServerOptions) {
   api.use("*", requireSession(db));
 
   api.get("/tasks", (c) => c.json({ tasks: tasks.list() }));
+
+  /* ── Councils ─────────────────────────────────────────────────────── */
+
+  api.get("/councils", (c) => c.json({ councils: listCouncils(db) }));
+
+  api.get("/councils/:id", (c) => {
+    const id = c.req.param("id");
+    const council = getCouncil(db, id);
+    if (!council) return c.json({ error: "not found" }, 404);
+    return c.json({ council });
+  });
+
+  api.post("/councils", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = CreateCouncilRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid request", issues: parsed.error.issues },
+        400,
+      );
+    }
+    try {
+      const council = await tasks.createCouncil({
+        repoPath: parsed.data.repoPath,
+        baseBranch: parsed.data.baseBranch,
+        prompt: parsed.data.prompt,
+        members: parsed.data.members,
+        ...(parsed.data.title ? { title: parsed.data.title } : {}),
+        ...(parsed.data.projectId ? { projectId: parsed.data.projectId } : {}),
+      });
+      return c.json({ council });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  /** Manual override — operator picks a winner instead of (or after) the judge. */
+  api.post("/councils/:id/pick", async (c) => {
+    const id = c.req.param("id");
+    const council = getCouncil(db, id);
+    if (!council) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => null)) as {
+      taskId?: string;
+      explanation?: string;
+    } | null;
+    const winnerTaskId = (body?.taskId ?? "").trim();
+    if (!council.taskIds.includes(winnerTaskId)) {
+      return c.json({ error: "taskId is not a member of this council" }, 400);
+    }
+    setCouncilWinner(
+      db,
+      id,
+      winnerTaskId,
+      (body?.explanation ?? "manual pick").slice(0, 240),
+    );
+    return c.json({ council: getCouncil(db, id) });
+  });
 
   /**
    * Tool usage stats. Reads `role='tool'` messages and aggregates by tool
@@ -988,6 +1052,52 @@ export function buildServer(opts: BuildServerOptions) {
     }
   });
 
+  // ──────────────────────── suggestions ────────────────────────
+
+  api.get("/suggestions", (c) => {
+    const status = c.req.query("status");
+    const valid = status === "pending" || status === "resolved" || status === "dismissed";
+    const limitStr = c.req.query("limit");
+    const limit = limitStr ? Math.max(1, Math.min(200, Number(limitStr))) : 50;
+    const list = listSuggestions(db, {
+      ...(valid ? { status } : {}),
+      limit,
+    });
+    return c.json({ suggestions: list });
+  });
+
+  api.get("/suggestions/:id", (c) => {
+    const sug = getSuggestion(db, c.req.param("id"));
+    if (!sug) return c.json({ error: "not found" }, 404);
+    return c.json({ suggestion: sug });
+  });
+
+  api.post("/suggestions/:id/resolve", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => null);
+    const parsed = ResolveSuggestionRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid request", issues: parsed.error.issues },
+        400,
+      );
+    }
+    try {
+      const r = await tasks.resolveSuggestionToTask(id, parsed.data);
+      if (!r) return c.json({ error: "could not resolve" }, 400);
+      return c.json(r);
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  api.post("/suggestions/:id/dismiss", (c) => {
+    const id = c.req.param("id");
+    const sug = tasks.dismissSuggestion(id);
+    if (!sug) return c.json({ error: "not found" }, 404);
+    return c.json({ suggestion: sug });
+  });
+
   // ──────────────────────── templates ────────────────────────
   api.get("/templates", (c) => c.json({ templates: listTemplates(db) }));
 
@@ -999,7 +1109,51 @@ export function buildServer(opts: BuildServerOptions) {
     if (getTemplateByName(db, parsed.data.name)) {
       return c.json({ error: "template name already exists" }, 409);
     }
-    const tpl = createTemplate(db, parsed.data);
+    // Resolve repoPath from project if a projectId was given. We still
+    // store the resolved path so older callers (and exports) keep
+    // working; the projectId reference makes future relocations cheap.
+    let repoPath = parsed.data.repoPath ?? "";
+    let projectId: string | null = parsed.data.projectId ?? null;
+    if (projectId) {
+      const project = getProjectById(db, projectId);
+      if (!project) {
+        return c.json({ error: `unknown project: ${projectId}` }, 400);
+      }
+      repoPath = project.path;
+      projectId = project.id;
+    }
+    if (!repoPath.trim()) {
+      return c.json(
+        { error: "either projectId or repoPath is required" },
+        400,
+      );
+    }
+    const tpl = createTemplate(db, {
+      name: parsed.data.name,
+      agent: parsed.data.agent,
+      ...(parsed.data.kind ? { kind: parsed.data.kind } : {}),
+      projectId,
+      repoPath,
+      baseBranch: parsed.data.baseBranch,
+      promptTemplate: parsed.data.promptTemplate,
+      autoPush: parsed.data.autoPush,
+      autoPr: parsed.data.autoPr,
+      ...(parsed.data.permissionMode
+        ? { permissionMode: parsed.data.permissionMode }
+        : {}),
+      ...(parsed.data.thinkingLevel
+        ? { thinkingLevel: parsed.data.thinkingLevel }
+        : {}),
+      ...(parsed.data.model != null ? { model: parsed.data.model } : {}),
+      ...(parsed.data.workspaceMode
+        ? { workspaceMode: parsed.data.workspaceMode }
+        : {}),
+      ...(parsed.data.branchMode ? { branchMode: parsed.data.branchMode } : {}),
+      ...(parsed.data.pullLatest != null
+        ? { pullLatest: parsed.data.pullLatest }
+        : {}),
+      ...(parsed.data.skills?.length ? { skills: parsed.data.skills } : {}),
+    });
     return c.json({ template: tpl });
   });
 
@@ -1024,16 +1178,33 @@ export function buildServer(opts: BuildServerOptions) {
     if (!parsed.success)
       return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
     const prompt = renderTemplate(tpl.promptTemplate, parsed.data.args);
+    // If the template references a project, resolve fresh — its path may
+    // have moved since the template was created.
+    let repoPath = tpl.repoPath;
+    if (tpl.projectId) {
+      const project = getProjectById(db, tpl.projectId);
+      if (project) repoPath = project.path;
+    }
     try {
       const task = await tasks.create({
         agent: tpl.agent,
-        repoPath: tpl.repoPath,
+        repoPath,
         baseBranch: tpl.baseBranch,
         prompt,
         title: parsed.data.titleOverride ?? tpl.name,
-        autoPush: tpl.autoPush,
-        autoPr: tpl.autoPr,
+        autoPush: parsed.data.autoPush ?? tpl.autoPush,
+        autoPr: parsed.data.autoPr ?? tpl.autoPr,
         templateId: tpl.id,
+        permissionMode: parsed.data.permissionMode ?? tpl.permissionMode,
+        thinkingLevel: parsed.data.thinkingLevel ?? tpl.thinkingLevel,
+        model: parsed.data.model ?? tpl.model,
+        workspaceMode: parsed.data.workspaceMode ?? tpl.workspaceMode,
+        branchMode: parsed.data.branchMode ?? tpl.branchMode,
+        ...(parsed.data.branchName?.trim()
+          ? { branchName: parsed.data.branchName.trim() }
+          : {}),
+        pullLatest: parsed.data.pullLatest ?? tpl.pullLatest,
+        ...(tpl.skills.length ? { skills: tpl.skills } : {}),
       });
       return c.json({ task });
     } catch (e) {

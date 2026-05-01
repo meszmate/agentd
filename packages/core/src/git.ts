@@ -776,6 +776,205 @@ function slugifyTitle(s: string): string {
     .join(" ");
 }
 
+/* ── Ideation runner ───────────────────────────────────────────────── */
+
+export interface IdeationResult {
+  options: string[];
+  source: "claude" | "fallback-empty" | "fallback-error";
+  error?: string;
+}
+
+/**
+ * Run a small Claude helper with the user's ideation prompt and parse
+ * the output into a list of option strings. The prompt is augmented
+ * with formatting rules — the agent must output one option per line,
+ * 1-line each, no preamble. We then split + clean.
+ *
+ * `cwd` is the project's repo path so the agent can `Read` real files.
+ * `extraInstructions` is the operator's optional `agentInstructions`.
+ */
+export async function runIdeation(
+  cwd: string,
+  prompt: string,
+  opts: { helper?: AiHelperOptions; max?: number } = {},
+): Promise<IdeationResult> {
+  const max = Math.max(2, Math.min(9, opts.max ?? 5));
+  const ask = [
+    `You are brainstorming actionable ideas for the operator's project.`,
+    `Look at the repo (read files if needed) and return ${max} short, actionable options.`,
+    `Output rules:`,
+    `- One option per line.`,
+    `- Each line is a complete imperative directive the operator could hand back to a coding agent (e.g. "Add unit tests for the streaming pipeline in apps/web/src/views/TaskTimeline.tsx").`,
+    `- No numbering, bullets, or markdown — just the lines.`,
+    `- No preamble, no closing summary, no commentary.`,
+    "",
+    `Operator's brief:`,
+    prompt.slice(0, 2000),
+  ].join("\n");
+  const argv = buildAiHelperArgv(opts.helper ?? {});
+  // Ideation needs to read the repo, so pass --add-dir for the cwd.
+  argv.push("--add-dir", cwd);
+  argv.push("-p", ask);
+  try {
+    const proc = Bun.spawn({
+      cmd: argv,
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    const cleaned = out
+      .trim()
+      .replace(/^```[a-z]*\n?|```$/g, "")
+      .trim();
+    const lines = cleaned
+      .split("\n")
+      .map((l) =>
+        l
+          .trim()
+          // Strip leading numbering ("1.", "1)", "- ", "* ").
+          .replace(/^(\d+[\.\)]|\-|\*)\s+/, "")
+          .trim(),
+      )
+      .filter((l) => l.length > 0)
+      .slice(0, max);
+    if (lines.length === 0) {
+      return { options: [], source: "fallback-empty" };
+    }
+    return { options: lines, source: "claude" };
+  } catch (e) {
+    return {
+      options: [],
+      source: "fallback-error",
+      error: (e as Error).message,
+    };
+  }
+}
+
+/* ── Council judge ─────────────────────────────────────────────────── */
+
+export interface JudgeCandidate {
+  /** Stable id (the task id) so the caller can map the verdict back. */
+  id: string;
+  /** Short human label ("opus xhigh", "gpt-5-codex"). */
+  label: string;
+  /** The candidate's worktree path — the judge reads its diff. */
+  cwd: string;
+  /** Base branch to diff against. */
+  baseRef: string;
+}
+
+export interface JudgeVerdict {
+  winnerId: string;
+  explanation: string;
+  source: "claude" | "fallback";
+  error?: string;
+}
+
+/**
+ * Read each candidate's diff vs its base, ask the helper to pick the
+ * best, and return the winner's id + a one-line explanation.
+ *
+ * Falls back to "first candidate that produced any diff" when the
+ * helper isn't reachable, so the council always settles eventually.
+ */
+export async function runJudge(
+  prompt: string,
+  candidates: JudgeCandidate[],
+  opts: { helper?: AiHelperOptions } = {},
+): Promise<JudgeVerdict> {
+  if (candidates.length === 0) {
+    return {
+      winnerId: "",
+      explanation: "no candidates",
+      source: "fallback",
+    };
+  }
+  // Gather diffs.
+  const diffs: { id: string; label: string; diff: string }[] = [];
+  for (const c of candidates) {
+    const { diff } = await readCombinedDiff(c.cwd, c.baseRef);
+    diffs.push({ id: c.id, label: c.label, diff: diff.slice(0, 12000) });
+  }
+  const nonEmpty = diffs.filter((d) => d.diff.trim().length > 0);
+  if (nonEmpty.length === 0) {
+    return {
+      winnerId: candidates[0]!.id,
+      explanation: "no candidate produced changes; defaulting to the first",
+      source: "fallback",
+    };
+  }
+  if (nonEmpty.length === 1) {
+    return {
+      winnerId: nonEmpty[0]!.id,
+      explanation: `only candidate "${nonEmpty[0]!.label}" produced changes`,
+      source: "fallback",
+    };
+  }
+  // Build a short letter-keyed prompt: A / B / C / ... so the model
+  // picks one letter, easy to parse out.
+  const letters = "ABCDE";
+  const sections = nonEmpty
+    .map(
+      (d, i) =>
+        `### Candidate ${letters[i]} (${d.label})\n--- diff start ---\n${d.diff}\n--- diff end ---`,
+    )
+    .join("\n\n");
+  const ask = [
+    `You are judging ${nonEmpty.length} parallel attempts at the same task.`,
+    `Original prompt:\n${prompt.slice(0, 1500)}`,
+    `Pick the candidate whose diff is most likely correct, complete, and idiomatic.`,
+    `Output a SINGLE LINE: the candidate's letter, a colon, then a one-sentence reason. No preamble. Example: "B: cleaner separation, no dead code."`,
+    "",
+    sections,
+  ].join("\n\n");
+  const argv = buildAiHelperArgv(opts.helper ?? {});
+  argv.push("-p", ask);
+  try {
+    const proc = Bun.spawn({
+      cmd: argv,
+      cwd: process.cwd(),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    const cleaned = out.trim().replace(/^```[a-z]*\n?|```$/g, "").trim();
+    const m = cleaned.match(/^([A-E])\s*[:.\-]\s*(.+)$/im);
+    if (m) {
+      const letter = m[1]!.toUpperCase();
+      const idx = letters.indexOf(letter);
+      const target = idx >= 0 && idx < nonEmpty.length ? nonEmpty[idx] : null;
+      if (target) {
+        return {
+          winnerId: target.id,
+          explanation: m[2]!.trim().slice(0, 240),
+          source: "claude",
+        };
+      }
+    }
+    // Couldn't parse — pick the longest non-empty diff as a heuristic.
+    const longest = nonEmpty
+      .slice()
+      .sort((a, b) => b.diff.length - a.diff.length)[0]!;
+    return {
+      winnerId: longest.id,
+      explanation: "judge output unparseable; chose largest diff",
+      source: "fallback",
+    };
+  } catch (e) {
+    return {
+      winnerId: nonEmpty[0]!.id,
+      explanation: "judge unreachable; defaulted to first non-empty",
+      source: "fallback",
+      error: (e as Error).message,
+    };
+  }
+}
+
 /* ── Branch-name generator ─────────────────────────────────────────── */
 
 export interface BranchNameResult {

@@ -1,4 +1,6 @@
 import type {
+  Council,
+  CreateCouncilRequest,
   CreateProjectRequest,
   CreateScheduleRequest,
   CreateSkillRequest,
@@ -143,6 +145,35 @@ export class AgentdClient {
 
   async health(): Promise<{ ok: boolean; version: string; time: number }> {
     return this.req("/health");
+  }
+
+  // ── councils ──
+  async listCouncils(): Promise<{ councils: Council[] }> {
+    return this.req("/api/councils");
+  }
+  async getCouncil(id: string): Promise<{ council: Council }> {
+    return this.req(`/api/councils/${encodeURIComponent(id)}`);
+  }
+  async createCouncil(
+    req: CreateCouncilRequest,
+  ): Promise<{ council: Council }> {
+    return this.req("/api/councils", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+  async pickCouncilWinner(
+    id: string,
+    taskId: string,
+    explanation?: string,
+  ): Promise<{ council: Council }> {
+    return this.req(`/api/councils/${encodeURIComponent(id)}/pick`, {
+      method: "POST",
+      body: JSON.stringify({
+        taskId,
+        ...(explanation ? { explanation } : {}),
+      }),
+    });
   }
 
   async listTasks(): Promise<{ tasks: Task[] }> {

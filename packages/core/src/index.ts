@@ -13,3 +13,5 @@ export * from "./skills.ts";
 export * from "./projects.ts";
 export * from "./tmux.ts";
 export * from "./repoContext.ts";
+export * from "./councils.ts";
+export * from "./suggestions.ts";

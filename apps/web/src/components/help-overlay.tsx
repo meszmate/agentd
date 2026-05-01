@@ -24,10 +24,23 @@ const GROUPS: { heading: string; items: { keys: string[]; label: string }[] }[] 
       { keys: ["g", "t"], label: "Tasks" },
       { keys: ["g", "e"], label: "Templates" },
       { keys: ["g", "s"], label: "Schedules" },
+      { keys: ["g", "k"], label: "Skills" },
+      { keys: ["g", "w"], label: "Tools" },
+      { keys: ["g", "r"], label: "Terminal" },
       { keys: ["g", "a"], label: "Activity" },
       { keys: ["g", "p"], label: "Plugins" },
       { keys: ["g", "d"], label: "Devices" },
       { keys: ["g", ","], label: "Settings" },
+    ],
+  },
+  {
+    heading: "Vim list movements",
+    items: [
+      { keys: ["j"], label: "Next row in current list" },
+      { keys: ["k"], label: "Previous row" },
+      { keys: ["g", "g"], label: "First row" },
+      { keys: ["G"], label: "Last row" },
+      { keys: ["↵"], label: "Activate focused row" },
     ],
   },
   {

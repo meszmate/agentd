@@ -39,7 +39,7 @@ import {
 } from "@/queries";
 import { useApp } from "@/AppContext";
 import { Skeleton } from "@/components/ui/skeleton";
-import { RepoPicker } from "@/components/repo-picker";
+import { ProjectPicker } from "@/components/project-picker";
 import {
   cn,
   formatCost,
@@ -304,30 +304,44 @@ function CreateTemplateSheet({
   const { toast } = useApp();
   const [name, setName] = useState("");
   const [agent, setAgent] = useState<"claude" | "codex">("claude");
-  const [repoPath, setRepoPath] = useState("");
+  const [projectId, setProjectId] = useState("");
   const [baseBranch, setBaseBranch] = useState("main");
   const [autoPush, setAutoPush] = useState(false);
   const [autoPr, setAutoPr] = useState(false);
   const [promptTemplate, setPromptTemplate] = useState("");
+  const [permissionMode, setPermissionMode] = useState<
+    "bypassPermissions" | "acceptEdits" | "plan"
+  >("bypassPermissions");
+  const [thinkingLevel, setThinkingLevel] = useState<
+    "low" | "medium" | "high" | "max" | "xhigh"
+  >("high");
+  const [model, setModel] = useState("");
+  const [kind, setKind] = useState<"task" | "ideation">("task");
 
   const submit = async () => {
-    if (!name.trim() || !repoPath.trim() || !promptTemplate.trim()) {
-      toast("Name, repo path, and prompt are required", true);
+    if (!name.trim() || !projectId || !promptTemplate.trim()) {
+      toast("Name, project, and prompt are required", true);
       return;
     }
     try {
       await create.mutateAsync({
         name: name.trim(),
         agent,
-        repoPath: repoPath.trim(),
+        kind,
+        projectId,
         baseBranch: baseBranch.trim() || "main",
         promptTemplate,
-        autoPush: autoPush || autoPr,
-        autoPr,
+        // Ideation templates never spawn an agent task themselves —
+        // they propose options. Auto flags don't apply to them.
+        autoPush: kind === "ideation" ? false : autoPush || autoPr,
+        autoPr: kind === "ideation" ? false : autoPr,
+        permissionMode,
+        thinkingLevel,
+        ...(model.trim() ? { model: model.trim() } : {}),
       });
       toast(`Created ${name}`);
       setName("");
-      setRepoPath("");
+      setProjectId("");
       setPromptTemplate("");
       setAutoPush(false);
       setAutoPr(false);
@@ -346,84 +360,204 @@ function CreateTemplateSheet({
         <SheetHeader>
           <SheetTitle>New template</SheetTitle>
           <SheetDescription>
-            <span className="font-mono">{"{name}"}</span> tokens substitute
-            from <span className="font-mono">--arg</span> at run time.
+            Reusable prompt + spawn config. Schedule it later to run on a
+            cron, or fire ad-hoc with{" "}
+            <span className="font-mono">/run</span>.
           </SheetDescription>
         </SheetHeader>
 
-        <div className="flex-1 overflow-y-auto px-6 pb-2 pt-4 space-y-4">
-          <Field>
-            <Label htmlFor="tpl-name">Name</Label>
-            <Input
-              id="tpl-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. review-pr"
-              autoFocus
-            />
-          </Field>
-          <div className="grid grid-cols-2 gap-3">
+        <div className="flex-1 overflow-y-auto px-6 pb-3 pt-4 space-y-5">
+          {/* Kind toggle — biggest decision, drive it first. */}
+          <div>
+            <Label className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+              Kind
+            </Label>
+            <div className="mt-1.5 grid grid-cols-2 gap-2">
+              <KindCard
+                active={kind === "task"}
+                onClick={() => setKind("task")}
+                title="Task"
+                hint="Fires → spawns an agent task in a fresh worktree. The agent does the work."
+              />
+              <KindCard
+                active={kind === "ideation"}
+                onClick={() => setKind("ideation")}
+                title="Ideation"
+                hint="Fires → AI proposes options. You pick one (or write your own) → that becomes a task."
+              />
+            </div>
+          </div>
+
+          {/* ── Basics ────────────────────────────────────────── */}
+          <section className="space-y-3">
+            <h3 className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+              Basics
+            </h3>
             <Field>
-              <Label htmlFor="tpl-agent">Agent</Label>
-              <Select
-                value={agent}
-                onValueChange={(v) => setAgent(v as "claude" | "codex")}
-              >
-                <SelectTrigger id="tpl-agent">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="claude">claude</SelectItem>
-                  <SelectItem value="codex">codex</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
-            <Field>
-              <Label htmlFor="tpl-base">Base branch</Label>
+              <Label htmlFor="tpl-name">Name</Label>
               <Input
-                id="tpl-base"
-                value={baseBranch}
-                onChange={(e) => setBaseBranch(e.target.value)}
-                className="font-mono"
-                spellCheck={false}
+                id="tpl-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder={
+                  kind === "ideation"
+                    ? "e.g. daily-ideas"
+                    : "e.g. review-pr"
+                }
+                autoFocus
               />
             </Field>
-          </div>
-          <Field>
-            <Label htmlFor="tpl-repo">Repository</Label>
-            <RepoPicker
-              id="tpl-repo"
-              value={repoPath}
-              onChange={setRepoPath}
-              placeholder="/path/to/repo"
-            />
-          </Field>
-          <Field>
-            <Label htmlFor="tpl-prompt">Prompt</Label>
-            <Textarea
-              id="tpl-prompt"
-              rows={6}
-              value={promptTemplate}
-              onChange={(e) => setPromptTemplate(e.target.value)}
-              placeholder={"Review PR #{pr_number}. Suggest fixes."}
-              className="font-mono text-xs"
-            />
-          </Field>
-          <div className="flex gap-2">
-            <Toggle
-              label="Auto-push"
-              checked={autoPush}
-              onChange={setAutoPush}
-            />
-            <Toggle
-              label="Auto-PR"
-              checked={autoPr}
-              onChange={(v) => {
-                setAutoPr(v);
-                if (v) setAutoPush(true);
-              }}
-            />
-          </div>
+            <Field>
+              <Label htmlFor="tpl-repo">Project</Label>
+              <ProjectPicker
+                value={projectId}
+                onChange={(p) => setProjectId(p.id)}
+              />
+            </Field>
+            <Field>
+              <Label htmlFor="tpl-prompt">
+                {kind === "ideation" ? "Ideation brief" : "Prompt"}
+              </Label>
+              <Textarea
+                id="tpl-prompt"
+                rows={6}
+                value={promptTemplate}
+                onChange={(e) => setPromptTemplate(e.target.value)}
+                placeholder={
+                  kind === "ideation"
+                    ? "What should the AI propose? e.g. 'Suggest small improvements: missing tests, naming, dead code, doc gaps.'"
+                    : "Review PR #{pr_number}. Suggest fixes."
+                }
+                className="font-mono text-xs"
+              />
+              <p className="mt-1 text-[10px] text-ink-500 dark:text-ink-400">
+                {kind === "ideation"
+                  ? "The AI reads the project and returns up to 5 actionable lines. You pick one to spawn a task."
+                  : (
+                    <>
+                      <span className="font-mono">{"{placeholders}"}</span>{" "}
+                      substitute from runtime args.
+                    </>
+                  )}
+              </p>
+            </Field>
+          </section>
+
+          {/* ── Behavior ──────────────────────────────────────── */}
+          <section className="space-y-3">
+            <h3 className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+              Behavior
+            </h3>
+            <div className="grid grid-cols-2 gap-3">
+              <Field>
+                <Label htmlFor="tpl-agent">Agent</Label>
+                <Select
+                  value={agent}
+                  onValueChange={(v) => setAgent(v as "claude" | "codex")}
+                >
+                  <SelectTrigger id="tpl-agent">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="claude">claude</SelectItem>
+                    <SelectItem value="codex">codex</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field>
+                <Label htmlFor="tpl-base">Base branch</Label>
+                <Input
+                  id="tpl-base"
+                  value={baseBranch}
+                  onChange={(e) => setBaseBranch(e.target.value)}
+                  className="font-mono"
+                  spellCheck={false}
+                />
+              </Field>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field>
+                <Label htmlFor="tpl-perm">Permissions</Label>
+                <Select
+                  value={permissionMode}
+                  onValueChange={(v) =>
+                    setPermissionMode(v as typeof permissionMode)
+                  }
+                >
+                  <SelectTrigger id="tpl-perm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="bypassPermissions">bypass</SelectItem>
+                    <SelectItem value="acceptEdits">accept-edits</SelectItem>
+                    <SelectItem value="plan">plan (read-only)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field>
+                <Label htmlFor="tpl-think">Thinking</Label>
+                <Select
+                  value={thinkingLevel}
+                  onValueChange={(v) =>
+                    setThinkingLevel(v as typeof thinkingLevel)
+                  }
+                >
+                  <SelectTrigger id="tpl-think">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="low">low</SelectItem>
+                    <SelectItem value="medium">medium</SelectItem>
+                    <SelectItem value="high">high</SelectItem>
+                    <SelectItem value="max">max</SelectItem>
+                    <SelectItem value="xhigh">xhigh</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+            </div>
+            <Field>
+              <Label htmlFor="tpl-model">Model (optional)</Label>
+              <Input
+                id="tpl-model"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder={
+                  agent === "claude"
+                    ? "(default) e.g. claude-opus-4-7"
+                    : "(default) e.g. gpt-5-codex"
+                }
+                className="font-mono text-xs"
+              />
+            </Field>
+          </section>
+
+          {/* Auto flags only matter for task-kind templates. */}
+          {kind === "task" && (
+            <section className="space-y-3">
+              <h3 className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+                After the agent finishes
+              </h3>
+              <p className="text-[11px] text-ink-500 dark:text-ink-400 leading-relaxed">
+                Auto-commit always runs. Push is opt-in; pull request stays
+                manual.
+              </p>
+              <div className="flex gap-2">
+                <Toggle
+                  label="Auto-push"
+                  checked={autoPush}
+                  onChange={setAutoPush}
+                />
+                <Toggle
+                  label="Auto-PR"
+                  checked={autoPr}
+                  onChange={(v) => {
+                    setAutoPr(v);
+                    if (v) setAutoPush(true);
+                  }}
+                />
+              </div>
+            </section>
+          )}
         </div>
 
         <SheetFooter>
@@ -441,6 +575,45 @@ function CreateTemplateSheet({
         </SheetFooter>
       </SheetContent>
     </Sheet>
+  );
+}
+
+function KindCard({
+  active,
+  onClick,
+  title,
+  hint,
+}: {
+  active: boolean;
+  onClick: () => void;
+  title: string;
+  hint: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "rounded-md border p-3 text-left transition-colors",
+        active
+          ? "border-ember-500/40 bg-ember-500/[0.06]"
+          : "border-ink-900/10 bg-paper-50 hover:border-ink-900/25 dark:border-ink-50/10 dark:bg-ink-800 dark:hover:border-ink-50/25",
+      )}
+    >
+      <div
+        className={cn(
+          "text-[12px] font-medium",
+          active
+            ? "text-ember-700 dark:text-ember-300"
+            : "text-ink-900 dark:text-ink-50",
+        )}
+      >
+        {title}
+      </div>
+      <div className="mt-1 text-[11px] leading-relaxed text-ink-500 dark:text-ink-400">
+        {hint}
+      </div>
+    </button>
   );
 }
 

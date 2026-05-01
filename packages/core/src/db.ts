@@ -34,8 +34,37 @@ export const tasks = sqliteTable("tasks", {
   thinkingLevel: text("thinking_level").notNull().default("high"),
   model: text("model").notNull().default(""),
   mirrorTo: text("mirror_to"),
+  councilId: text("council_id"),
   closedAt: integer("closed_at"),
   closedReason: text("closed_reason"),
+});
+
+export const suggestions = sqliteTable("suggestions", {
+  id: text("id").primaryKey(),
+  templateId: text("template_id"),
+  projectId: text("project_id"),
+  title: text("title").notNull(),
+  prompt: text("prompt").notNull(),
+  optionsJson: text("options_json").notNull().default("[]"),
+  status: text("status").notNull().default("pending"),
+  createdAt: integer("created_at").notNull(),
+  resolvedAt: integer("resolved_at"),
+  chosenIndex: integer("chosen_index"),
+  chosenText: text("chosen_text"),
+  spawnedTaskId: text("spawned_task_id"),
+});
+
+export const councils = sqliteTable("councils", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id"),
+  repoPath: text("repo_path").notNull(),
+  baseBranch: text("base_branch").notNull(),
+  prompt: text("prompt").notNull(),
+  status: text("status").notNull().default("running"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  winnerTaskId: text("winner_task_id"),
+  judgeExplanation: text("judge_explanation"),
 });
 
 export const projects = sqliteTable("projects", {
@@ -52,11 +81,31 @@ export const templates = sqliteTable("templates", {
   id: text("id").primaryKey(),
   name: text("name").notNull().unique(),
   agent: text("agent").notNull(),
+  /**
+   *   task     — schedule fires → spawn an agent task.
+   *   ideation — schedule fires → run an AI helper, parse N options,
+   *              ask the operator (chat + web inbox) to pick one.
+   */
+  kind: text("kind").notNull().default("task"),
+  /**
+   * Either a saved project's id (preferred — repoPath stays in sync if
+   * the project is renamed/relocated) or empty + a literal repoPath.
+   * Templates resolve repoPath at run time: project lookup wins.
+   */
+  projectId: text("project_id"),
   repoPath: text("repo_path").notNull(),
   baseBranch: text("base_branch").notNull(),
   promptTemplate: text("prompt_template").notNull(),
   autoPush: integer("auto_push").notNull().default(0),
   autoPr: integer("auto_pr").notNull().default(0),
+  /** Per-task knobs the template carries forward; same vocab as Task. */
+  permissionMode: text("permission_mode").notNull().default("bypassPermissions"),
+  thinkingLevel: text("thinking_level").notNull().default("high"),
+  model: text("model").notNull().default(""),
+  workspaceMode: text("workspace_mode").notNull().default("worktree"),
+  branchMode: text("branch_mode").notNull().default("new"),
+  pullLatest: integer("pull_latest").notNull().default(0),
+  skillsJson: text("skills_json").notNull().default("[]"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
@@ -145,6 +194,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   thinking_level TEXT NOT NULL DEFAULT 'high',
   model TEXT NOT NULL DEFAULT '',
   mirror_to TEXT,
+  council_id TEXT,
   closed_at INTEGER,
   closed_reason TEXT
 );
@@ -159,15 +209,52 @@ CREATE TABLE IF NOT EXISTS projects (
   last_active_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS councils (
+  id TEXT PRIMARY KEY,
+  project_id TEXT,
+  repo_path TEXT NOT NULL,
+  base_branch TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  winner_task_id TEXT,
+  judge_explanation TEXT
+);
+
+CREATE TABLE IF NOT EXISTS suggestions (
+  id TEXT PRIMARY KEY,
+  template_id TEXT,
+  project_id TEXT,
+  title TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  options_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER,
+  chosen_index INTEGER,
+  chosen_text TEXT,
+  spawned_task_id TEXT
+);
+
 CREATE TABLE IF NOT EXISTS templates (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   agent TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'task',
+  project_id TEXT,
   repo_path TEXT NOT NULL,
   base_branch TEXT NOT NULL,
   prompt_template TEXT NOT NULL,
   auto_push INTEGER NOT NULL DEFAULT 0,
   auto_pr INTEGER NOT NULL DEFAULT 0,
+  permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions',
+  thinking_level TEXT NOT NULL DEFAULT 'high',
+  model TEXT NOT NULL DEFAULT '',
+  workspace_mode TEXT NOT NULL DEFAULT 'worktree',
+  branch_mode TEXT NOT NULL DEFAULT 'new',
+  pull_latest INTEGER NOT NULL DEFAULT 0,
+  skills_json TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -250,8 +337,18 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE tasks ADD COLUMN thinking_level TEXT NOT NULL DEFAULT 'high'",
   "ALTER TABLE tasks ADD COLUMN model TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE tasks ADD COLUMN mirror_to TEXT",
+  "ALTER TABLE tasks ADD COLUMN council_id TEXT",
   "ALTER TABLE tasks ADD COLUMN closed_at INTEGER",
   "ALTER TABLE tasks ADD COLUMN closed_reason TEXT",
+  "ALTER TABLE templates ADD COLUMN project_id TEXT",
+  "ALTER TABLE templates ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions'",
+  "ALTER TABLE templates ADD COLUMN thinking_level TEXT NOT NULL DEFAULT 'high'",
+  "ALTER TABLE templates ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE templates ADD COLUMN workspace_mode TEXT NOT NULL DEFAULT 'worktree'",
+  "ALTER TABLE templates ADD COLUMN branch_mode TEXT NOT NULL DEFAULT 'new'",
+  "ALTER TABLE templates ADD COLUMN pull_latest INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE templates ADD COLUMN skills_json TEXT NOT NULL DEFAULT '[]'",
+  "ALTER TABLE templates ADD COLUMN kind TEXT NOT NULL DEFAULT 'task'",
 ];
 
 function migrate(sqlite: Database): void {

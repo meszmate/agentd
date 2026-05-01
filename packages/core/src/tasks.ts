@@ -31,6 +31,7 @@ export interface CreateTaskInput {
   thinkingLevel?: ThinkingLevel;
   model?: string;
   mirrorTo?: MirrorTarget | null;
+  councilId?: string | null;
 }
 
 function parseMirrorTo(raw: string | null): MirrorTarget | null {
@@ -93,6 +94,7 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
       (row.thinkingLevel as ThinkingLevel | undefined) ?? "high",
     model: row.model ?? "",
     mirrorTo: parseMirrorTo(row.mirrorTo),
+    councilId: row.councilId ?? null,
     closedAt: row.closedAt ?? null,
     closedReason: row.closedReason ?? null,
   };
@@ -156,6 +158,7 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       thinkingLevel: input.thinkingLevel ?? "high",
       model: input.model ?? "",
       mirrorTo: input.mirrorTo ? JSON.stringify(input.mirrorTo) : null,
+      councilId: input.councilId ?? null,
     })
     .run();
   return getTask(db, id)!;

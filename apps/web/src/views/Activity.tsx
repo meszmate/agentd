@@ -18,6 +18,8 @@ import {
 } from "@/components/ui/page-topbar";
 import { useClient } from "@/AppContext";
 import { useTasks } from "@/queries";
+import { useNavigate } from "react-router-dom";
+import { useVimList } from "@/lib/useVimList";
 import {
   cn,
   formatTs,
@@ -214,6 +216,12 @@ export function Activity() {
     [events, enabledKinds, taskFilter],
   );
 
+  const navigate = useNavigate();
+  const { isFocused, rowRef } = useVimList(filtered.length, (i) => {
+    const e = filtered[i];
+    if (e) navigate(`/tasks/${e.taskId}`);
+  });
+
   const toggleKind = useCallback((k: Kind) => {
     setEnabledKinds((prev) => {
       const next = new Set(prev);
@@ -358,10 +366,15 @@ export function Activity() {
           </div>
         ) : (
           <ul className="divide-y divide-ink-900/[0.06] dark:divide-ink-50/[0.06]">
-            {filtered.map((e) => (
+            {filtered.map((e, i) => (
               <li
                 key={e.id}
-                className="grid grid-cols-[60px_180px_80px_1fr] items-baseline gap-3 px-5 py-2 hover:bg-paper-100 transition-colors dark:hover:bg-ink-700"
+                ref={rowRef(i)}
+                className={cn(
+                  "grid grid-cols-[60px_180px_80px_1fr] items-baseline gap-3 px-5 py-2 hover:bg-paper-100 transition-colors dark:hover:bg-ink-700",
+                  isFocused(i) &&
+                    "bg-ember-500/[0.08] dark:bg-ember-500/[0.12] relative before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:bg-ember-500",
+                )}
               >
                 <TooltipProvider>
                   <Tooltip>

@@ -71,19 +71,31 @@ export class Scheduler {
       }
       try {
         const prompt = renderTemplate(tpl.promptTemplate, sch.templateArgs);
-        const task = await this.tasks.create({
-          agent: tpl.agent,
-          repoPath: tpl.repoPath,
-          baseBranch: tpl.baseBranch,
-          prompt,
-          title: `${sch.name}: ${tpl.name}`,
-          autoPush: tpl.autoPush,
-          autoPr: tpl.autoPr,
-          templateId: tpl.id,
-          scheduleId: sch.id,
-        });
-        recordScheduleRun(this.db, sch.id, nowMinute, task.id);
-        console.log(`[scheduler] fired ${sch.name} → ${task.id}`);
+        if (tpl.kind === "ideation") {
+          // Ideation templates don't spawn a task. They run a small AI
+          // helper that proposes options for the operator to pick from.
+          // Picking happens in the chat / web inbox and creates the
+          // real task at that point.
+          const sug = await this.tasks.fireIdeation(tpl, prompt, sch.id);
+          recordScheduleRun(this.db, sch.id, nowMinute, sug?.id ?? null);
+          console.log(
+            `[scheduler] fired ${sch.name} → suggestion ${sug?.id ?? "(skipped)"}`,
+          );
+        } else {
+          const task = await this.tasks.create({
+            agent: tpl.agent,
+            repoPath: tpl.repoPath,
+            baseBranch: tpl.baseBranch,
+            prompt,
+            title: `${sch.name}: ${tpl.name}`,
+            autoPush: tpl.autoPush,
+            autoPr: tpl.autoPr,
+            templateId: tpl.id,
+            scheduleId: sch.id,
+          });
+          recordScheduleRun(this.db, sch.id, nowMinute, task.id);
+          console.log(`[scheduler] fired ${sch.name} → ${task.id}`);
+        }
       } catch (e) {
         console.error(`[scheduler] schedule ${sch.name} failed to fire: ${(e as Error).message}`);
       }

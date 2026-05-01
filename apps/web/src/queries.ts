@@ -175,6 +175,60 @@ export function useCreateTask() {
   });
 }
 
+/* ── Councils ─────────────────────────────────────────────────────── */
+
+export function useCouncils() {
+  const client = useClient();
+  return useQuery({
+    queryKey: ["councils"] as const,
+    queryFn: () => client.listCouncils(),
+    refetchInterval: 5_000,
+  });
+}
+
+export function useCouncil(id: string | null | undefined) {
+  const client = useClient();
+  return useQuery({
+    queryKey: ["councils", id ?? ""] as const,
+    queryFn: () => client.getCouncil(id!),
+    enabled: !!id,
+    refetchInterval: 3_000,
+  });
+}
+
+export function useCreateCouncil() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: Parameters<AgentdClient["createCouncil"]>[0]) =>
+      client.createCouncil(req),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["councils"] });
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+    },
+  });
+}
+
+export function usePickCouncilWinner() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      taskId,
+      explanation,
+    }: {
+      id: string;
+      taskId: string;
+      explanation?: string;
+    }) => client.pickCouncilWinner(id, taskId, explanation),
+    onSuccess: (_r, vars) => {
+      void qc.invalidateQueries({ queryKey: ["councils", vars.id] });
+      void qc.invalidateQueries({ queryKey: ["councils"] });
+    },
+  });
+}
+
 export function useSendInput(taskId: string) {
   const client = useClient();
   return useMutation({
