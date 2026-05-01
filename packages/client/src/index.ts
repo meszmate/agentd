@@ -550,6 +550,20 @@ export class AgentdClient {
     });
   }
 
+  /**
+   * Set / clear the chat mirror target for a task. Passing null
+   * unmirrors. Triggers immediately — no runner restart.
+   */
+  async setTaskMirror(
+    id: string,
+    mirrorTo: { platform: "telegram" | "discord"; chatId: string } | null,
+  ): Promise<{ task: Task | null }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/mirror`, {
+      method: "PATCH",
+      body: JSON.stringify({ mirrorTo }),
+    });
+  }
+
   /** Suggest a kebab-case branch slug from the task prompt. */
   async suggestBranchName(
     prompt: string,

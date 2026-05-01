@@ -91,6 +91,8 @@ function describe(ev: AgentEvent): string | null {
       return `${(ev.inputTokens ?? 0) + (ev.outputTokens ?? 0)} tok`;
     case "raw":
       return ev.text.slice(0, 140);
+    case "progress":
+      return `${ev.done ? "✓ done · " : "↻ "}${ev.text.slice(0, 140)}`;
     // Streaming partials are too noisy for the activity ticker — drop them.
     case "message_delta":
     case "message_end":

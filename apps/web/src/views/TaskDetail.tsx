@@ -461,6 +461,8 @@ export function TaskDetail({ task }: { task: Task }) {
         <ThinkingLevelChip task={task} />
         <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
         <ModelChip task={task} />
+        <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
+        <MirrorChip task={task} />
       </div>
 
       {/* Body */}
@@ -665,6 +667,112 @@ function ModelChip({ task }: { task: Task }) {
             set
           </button>
         </form>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * Toggle whether this task mirrors its curated events (progress notes,
+ * permission asks, terminal status changes) into a chat. Today the only
+ * supported targets come from enabled plugins (Telegram + Discord).
+ *
+ * The chatId itself comes from the plugin: in Telegram, every operator
+ * runs `/whoami` once to discover their id, then drops it here. We
+ * keep the input lightweight — the real flow is "open chat, /mirror
+ * <task-id>" which is already handled by the bot side.
+ */
+function MirrorChip({ task }: { task: Task }) {
+  const client = useClient();
+  const qc = useQueryClient();
+  const { toast } = useApp();
+  const cur = task.mirrorTo;
+  const label = cur
+    ? `mirror:${cur.platform === "telegram" ? "tg" : "ds"} ${cur.chatId.slice(-6)}`
+    : "mirror:off";
+  const [draftId, setDraftId] = useState("");
+
+  const apply = async (
+    next: { platform: "telegram" | "discord"; chatId: string } | null,
+  ) => {
+    try {
+      const res = await client.setTaskMirror(task.id, next);
+      if (res.task) qc.setQueryData(qk.task(task.id), { task: res.task });
+      toast(
+        next
+          ? `mirroring → ${next.platform}:${next.chatId.slice(-6)}`
+          : "mirror off",
+      );
+    } catch (e) {
+      toast((e as Error).message, true);
+    }
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          title="Mirror task events to a chat — replies steer the agent"
+          className={cn(
+            "inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] border shrink-0 transition-colors max-w-[180px]",
+            cur
+              ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20 hover:bg-emerald-500/20"
+              : "bg-ink-900/[0.04] text-ink-500 dark:text-ink-400 border-ink-900/10 dark:border-ink-50/10 hover:bg-ink-900/[0.07]",
+          )}
+        >
+          <span className="truncate">{label}</span>
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-72">
+        <DropdownMenuLabel className="text-[10px] uppercase tracking-[0.12em]">
+          Mirror to chat
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {cur && (
+          <DropdownMenuItem
+            onClick={() => void apply(null)}
+            className="text-red-700 dark:text-red-300"
+          >
+            Stop mirroring
+          </DropdownMenuItem>
+        )}
+        <div className="px-2 py-1.5">
+          <p className="font-mono text-[10px] text-ink-500 dark:text-ink-400">
+            Set the chat id directly. Easier path: in your bot chat run{" "}
+            <code className="font-mono">/use {task.id.slice(-8)}</code> then{" "}
+            <code className="font-mono">/mirror</code> — it self-registers.
+          </p>
+        </div>
+        {(["telegram", "discord"] as const).map((platform) => (
+          <form
+            key={platform}
+            className="flex items-center gap-1 px-1 py-1"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const v = draftId.trim();
+              if (!v) return;
+              void apply({ platform, chatId: v });
+              setDraftId("");
+            }}
+          >
+            <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 dark:text-ink-400 w-16 shrink-0">
+              {platform}
+            </span>
+            <input
+              value={draftId}
+              onChange={(e) => setDraftId(e.target.value)}
+              placeholder="chat / channel id"
+              className="flex-1 h-7 px-2 rounded border border-ink-900/15 bg-paper-50 font-mono text-[11px] outline-none focus:border-ember-500/40 dark:border-ink-50/15 dark:bg-ink-800"
+            />
+            <button
+              type="submit"
+              className="h-7 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+            >
+              set
+            </button>
+          </form>
+        ))}
       </DropdownMenuContent>
     </DropdownMenu>
   );

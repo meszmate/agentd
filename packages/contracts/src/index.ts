@@ -55,6 +55,20 @@ export type BranchMode = z.infer<typeof BranchMode>;
 export const ThinkingLevel = z.enum(["low", "medium", "high", "max", "xhigh"]);
 export type ThinkingLevel = z.infer<typeof ThinkingLevel>;
 
+/**
+ * Where a running task mirrors its events. When set, every agent message,
+ * tool call, permission request, progress note, and exit gets forwarded
+ * to the named chat. Replies in that chat get fed back as steered input.
+ *
+ * `chatId` is platform-specific (a Telegram chat id, a Discord channel id),
+ * stored as a string so we don't lose precision on Telegram's int64 ids.
+ */
+export const MirrorTarget = z.object({
+  platform: z.enum(["telegram", "discord"]),
+  chatId: z.string().min(1),
+});
+export type MirrorTarget = z.infer<typeof MirrorTarget>;
+
 export const TaskStatus = z.enum([
   "pending",
   "running",
@@ -98,6 +112,11 @@ export const Task = z.object({
    * Set per task in the spawn UI or changed mid-task from the header chip.
    */
   model: z.string().optional(),
+  /**
+   * When set, the task mirrors events to a chat (Telegram or Discord) and
+   * accepts replies as steered input. Toggle from the task header chip.
+   */
+  mirrorTo: MirrorTarget.nullable().optional(),
   /**
    * When set, the task is "closed" — typically because its PR merged or
    * the operator decided it's no longer relevant. Closed tasks default
@@ -205,6 +224,18 @@ export const AgentEvent = z.discriminatedUnion("kind", [
     cacheReadTokens: z.number().optional(),
     cacheWriteTokens: z.number().optional(),
     costUsd: z.number().optional(),
+  }),
+  z.object({
+    /**
+     * Structured progress note the agent posts via `agentd progress` after
+     * each meaningful step. The text is what the agent did; `done: true`
+     * signals the work is complete and the runner is about to wrap up.
+     * Mirrored chats render these as the primary status update — they're
+     * meant to be the digest stream when you're not at the computer.
+     */
+    kind: z.literal("progress"),
+    text: z.string(),
+    done: z.boolean().optional(),
   }),
 ]);
 export type AgentEvent = z.infer<typeof AgentEvent>;

@@ -80,6 +80,18 @@ export class TaskManager {
     private readonly db: Db,
     private readonly bus: EventBus,
     private readonly paths: AgentdPaths,
+    /**
+     * Daemon URL the agent's `agentd progress` Bash calls hit. Exposed
+     * to the runner subprocess as AGENTD_DAEMON_URL.
+     */
+    private readonly daemonUrl: string,
+    /**
+     * A pre-issued session token the agent can use to authenticate its
+     * progress / steer / status calls back into the daemon. Reuses the
+     * plugin session token so chat plugins and agent subprocesses share
+     * the same identity from the daemon's perspective.
+     */
+    private readonly agentSessionToken: string,
   ) {}
 
   list(): Task[] {
@@ -98,6 +110,24 @@ export class TaskManager {
   /** Snapshot of queued steer messages — for the UI badge. */
   queuedInput(id: string): string[] {
     return this.inputQueue.get(id)?.slice() ?? [];
+  }
+
+  /**
+   * Persist a structured progress note from the running agent and fan it
+   * out to the bus. The mirror plugin and web timeline both subscribe.
+   */
+  recordProgress(taskId: string, text: string, done: boolean): void {
+    appendMessage(
+      this.db,
+      taskId,
+      "system",
+      done ? `[progress · done] ${text}` : `[progress] ${text}`,
+    );
+    this.bus.publish({
+      taskId,
+      event: { kind: "progress", text, done },
+      ts: Date.now(),
+    });
   }
 
   async create(params: CreateTaskParams): Promise<Task> {
@@ -325,7 +355,9 @@ export class TaskManager {
     // diff. The daemon-side post-hook still runs as a safety net (it
     // becomes a no-op when there's nothing left to commit / push).
     const finishParts: string[] = [
-      "When your work is complete, stage everything and commit it inside this worktree.",
+      "After every meaningful step (a file edit, a successful build, a tool call that produced a useful result, or whenever you're about to wait on the user), report what you did by running this exact Bash command: `agentd-progress \"<one-line summary of what you just did>\"`.",
+      "When you believe the entire task is finished, run `agentd-progress \"<final summary>\" --done` and then stop. The operator may be on their phone watching the chat mirror — that progress stream is how they see your work in real time.",
+      "When your work is complete, stage everything and commit it inside this worktree BEFORE the final `--done` progress call.",
       "Use a single conventional-commit subject line (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `style:`, `test:`, `perf:`, `ci:`, `build:`) under 70 characters, lowercase, imperative mood, with no scope unless one is obvious.",
       "Do NOT add `Co-Authored-By`, `Generated with`, or any AI attribution to commit messages.",
     ];
@@ -362,6 +394,14 @@ export class TaskManager {
         thinkingLevel: task.thinkingLevel ?? "high",
         ...(model ? { model } : {}),
         ...(additionalReadDirs.length ? { additionalReadDirs } : {}),
+        env: {
+          AGENTD_TASK_ID: task.id,
+          AGENTD_DAEMON_URL: this.daemonUrl,
+          AGENTD_TOKEN: this.agentSessionToken,
+          // Prepend the daemon's bin dir so the agent always finds
+          // `agentd-progress` on its PATH regardless of host install.
+          PATH: `${this.paths.bin}:${process.env.PATH ?? ""}`,
+        },
       });
     } catch (err) {
       const msg = (err as Error).message;

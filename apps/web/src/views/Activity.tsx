@@ -49,6 +49,7 @@ const KIND_LABEL: Record<Kind, string> = {
   raw: "raw",
   exit: "exit",
   usage: "usage",
+  progress: "step",
 };
 
 const KIND_TONE: Record<Kind, string> = {
@@ -62,10 +63,12 @@ const KIND_TONE: Record<Kind, string> = {
   raw: "text-ink-500 dark:text-ink-400",
   exit: "text-ink-500 dark:text-ink-400",
   usage: "text-emerald-700 dark:text-emerald-300",
+  progress: "text-violet-700 dark:text-violet-300",
 };
 
 const ALL_KINDS: Kind[] = [
   "message",
+  "progress",
   "tool_call",
   "tool_result",
   "permission_request",
@@ -110,6 +113,10 @@ function renderEvent(ev: AgentEvent): { primary: string; secondary?: string } {
     }
     case "raw":
       return { primary: ev.text.slice(0, 200) };
+    case "progress":
+      return {
+        primary: ev.done ? `✓ done · ${ev.text}` : `↻ ${ev.text}`,
+      };
   }
 }
 
@@ -216,6 +223,7 @@ export function Activity() {
       raw: 0,
       exit: 0,
       usage: 0,
+      progress: 0,
     };
     for (const e of events) c[e.kind] += 1;
     return c;

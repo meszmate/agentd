@@ -19,6 +19,7 @@ import {
   RenameTerminalWindowRequest,
   SendTerminalKeysRequest,
   ThinkingLevel,
+  MirrorTarget,
   type WsServerEvent,
 } from "@agentd/contracts";
 import { join, normalize, relative, resolve } from "node:path";
@@ -57,6 +58,7 @@ import {
   reopenTask,
   setTaskThinkingLevel,
   setTaskModel,
+  setTaskMirrorTo,
   resolveSession,
   loadConfig,
   saveConfig,
@@ -654,6 +656,59 @@ export function buildServer(opts: BuildServerOptions) {
     }
     const updated = setTaskThinkingLevel(db, id, parsed.data);
     return c.json({ task: updated });
+  });
+
+  /**
+   * Set or clear the chat mirror target. Pass `{ mirrorTo: null }` to
+   * unmirror. The change takes effect on the next event the bus
+   * publishes — no runner restart needed.
+   */
+  api.patch("/tasks/:id/mirror", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => null)) as {
+      mirrorTo?: MirrorTarget | null;
+    } | null;
+    if (!body || !("mirrorTo" in body)) {
+      return c.json({ error: "mirrorTo field required" }, 400);
+    }
+    let target: MirrorTarget | null;
+    if (body.mirrorTo == null) {
+      target = null;
+    } else {
+      const parsed = MirrorTarget.safeParse(body.mirrorTo);
+      if (!parsed.success) {
+        return c.json(
+          { error: "invalid mirrorTo", issues: parsed.error.issues },
+          400,
+        );
+      }
+      target = parsed.data;
+    }
+    const updated = setTaskMirrorTo(db, id, target);
+    return c.json({ task: updated });
+  });
+
+  /**
+   * Progress note from the running agent. The agent calls this after every
+   * meaningful step via `agentd progress "<text>" [--done]`. Writes a
+   * message + publishes a `progress` AgentEvent the bus fans out to the
+   * web timeline and any mirrored chat.
+   */
+  api.post("/tasks/:id/progress", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => null)) as {
+      text?: string;
+      done?: boolean;
+    } | null;
+    const text = (body?.text ?? "").trim();
+    if (!text) return c.json({ error: "text required" }, 400);
+    const done = !!body?.done;
+    tasks.recordProgress(id, text, done);
+    return c.json({ ok: true });
   });
 
   /**

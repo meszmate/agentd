@@ -1,6 +1,7 @@
 import { eq, desc } from "drizzle-orm";
 import type {
   Message,
+  MirrorTarget,
   PermissionMode,
   Task,
   TaskStatus,
@@ -29,6 +30,24 @@ export interface CreateTaskInput {
   workspaceMode?: WorkspaceMode;
   thinkingLevel?: ThinkingLevel;
   model?: string;
+  mirrorTo?: MirrorTarget | null;
+}
+
+function parseMirrorTo(raw: string | null): MirrorTarget | null {
+  if (!raw) return null;
+  try {
+    const obj = JSON.parse(raw) as Partial<MirrorTarget>;
+    if (
+      (obj.platform === "telegram" || obj.platform === "discord") &&
+      typeof obj.chatId === "string" &&
+      obj.chatId.length > 0
+    ) {
+      return { platform: obj.platform, chatId: obj.chatId };
+    }
+  } catch {
+    // legacy / corrupt — drop it
+  }
+  return null;
 }
 
 function rowToTask(row: typeof tasks.$inferSelect): Task {
@@ -73,6 +92,7 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     thinkingLevel:
       (row.thinkingLevel as ThinkingLevel | undefined) ?? "high",
     model: row.model ?? "",
+    mirrorTo: parseMirrorTo(row.mirrorTo),
     closedAt: row.closedAt ?? null,
     closedReason: row.closedReason ?? null,
   };
@@ -135,6 +155,7 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       workspaceMode: input.workspaceMode ?? "worktree",
       thinkingLevel: input.thinkingLevel ?? "high",
       model: input.model ?? "",
+      mirrorTo: input.mirrorTo ? JSON.stringify(input.mirrorTo) : null,
     })
     .run();
   return getTask(db, id)!;
@@ -174,6 +195,26 @@ export function setTaskThinkingLevel(
 export function setTaskModel(db: Db, id: string, model: string): Task | null {
   db.update(tasks)
     .set({ model, updatedAt: Date.now() })
+    .where(eq(tasks.id, id))
+    .run();
+  return getTask(db, id);
+}
+
+/**
+ * Set or clear the chat mirror target for a task. The plugin (Telegram /
+ * Discord) starts forwarding bus events to that chat on the next event;
+ * the change is applied immediately, no runner spawn required.
+ */
+export function setTaskMirrorTo(
+  db: Db,
+  id: string,
+  mirrorTo: MirrorTarget | null,
+): Task | null {
+  db.update(tasks)
+    .set({
+      mirrorTo: mirrorTo ? JSON.stringify(mirrorTo) : null,
+      updatedAt: Date.now(),
+    })
     .where(eq(tasks.id, id))
     .run();
   return getTask(db, id);

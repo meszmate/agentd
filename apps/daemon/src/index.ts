@@ -4,10 +4,14 @@ import { existsSync, readFileSync } from "node:fs";
 import qrcode from "qrcode-terminal";
 import {
   EventBus,
+  createSystemSession,
   ensurePaths,
   issuePairingToken,
+  loadConfig as loadAgentdConfig,
   openDb,
   resolvePaths,
+  saveConfig,
+  sessionExists,
   backfillProjectsFromTasks,
 } from "@agentd/core";
 import { loadConfig } from "./config.ts";
@@ -33,9 +37,21 @@ async function main() {
   if (backfilled > 0) {
     console.log(`[projects] backfilled ${backfilled} task(s) into projects`);
   }
-  const tasks = new TaskManager(db, bus, paths);
-
   const baseUrl = `http://${cfg.host === "0.0.0.0" ? "127.0.0.1" : cfg.host}:${cfg.port}`;
+  // Session for in-process subprocesses (agent runners + chat plugins).
+  // Reused across restarts via the user config's pluginSessionToken.
+  const agentdCfg = loadAgentdConfig(paths.root);
+  let agentSessionToken = agentdCfg.pluginSessionToken ?? "";
+  if (!agentSessionToken || !sessionExists(db, agentSessionToken)) {
+    const { sessionToken } = createSystemSession(db, "agentd:plugins");
+    agentSessionToken = sessionToken;
+    saveConfig(paths.root, {
+      ...agentdCfg,
+      pluginSessionToken: sessionToken,
+    });
+  }
+  const tasks = new TaskManager(db, bus, paths, baseUrl, agentSessionToken);
+
   const plugins = new PluginManager(paths.root, baseUrl, db);
 
   const { app, wsHandler, upgradeRequest } = buildServer({

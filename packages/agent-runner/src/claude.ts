@@ -131,7 +131,11 @@ export class ClaudeRunner implements AgentRunner {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, ...this.opts.env } as Record<string, string>,
+      env: {
+        ...process.env,
+        ...this.opts.env,
+        ...(opts.env ?? {}),
+      } as Record<string, string>,
     });
     this.proc = proc;
     this.emit({ kind: "status", status: "running" });

@@ -31,6 +31,12 @@ export interface RunnerStartOptions {
    * the catalog entries it cares about mid-conversation.
    */
   additionalReadDirs?: string[];
+  /**
+   * Per-run env additions, merged into the runner's own env at spawn.
+   * Used by the daemon to expose AGENTD_TASK_ID / AGENTD_DAEMON_URL /
+   * AGENTD_TOKEN so the agent's `agentd progress` Bash calls work.
+   */
+  env?: Record<string, string>;
 }
 
 export type RunnerEventListener = (event: AgentEvent) => void;

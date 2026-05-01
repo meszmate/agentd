@@ -36,6 +36,9 @@ Settings (daemon-side, edit the system prompt + AI helper guidance):
   agentd settings show
   agentd settings set <agentInstructions|commitInstructions|prInstructions> <value>
 
+Progress (called by the agent automatically; useful from a host shell too):
+  agentd progress "<summary>" [--done] [--task <id>]
+
 Plugins:
   agentd plugin status
   agentd plugin enable telegram --token <bot-token> [--allow-user 1,2] [--allow-chat 3,4] [--default-repo <path>]
@@ -524,6 +527,78 @@ async function cmdSchedule(argv: string[]) {
 const SETTINGS_KEYS = ["agentInstructions", "commitInstructions", "prInstructions"] as const;
 type SettingKey = (typeof SETTINGS_KEYS)[number];
 
+/**
+ * Progress reporter the running agent calls after every meaningful step.
+ * The daemon injects AGENTD_TASK_ID, AGENTD_DAEMON_URL, AGENTD_TOKEN at
+ * spawn time so this works without a paired CLI session.
+ *
+ *   agentd progress "<one-line summary>" [--done]
+ *
+ * Outside the spawn env (no env vars set) we fall back to the saved CLI
+ * config and require an explicit `--task <id>` so the host shell can
+ * also use it for ad-hoc status posts.
+ */
+async function cmdProgress(argv: string[]) {
+  let text = "";
+  let done = false;
+  let explicitTaskId: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--done") done = true;
+    else if (a === "--task" && argv[i + 1]) {
+      explicitTaskId = argv[++i];
+    } else {
+      text = text ? `${text} ${a}` : a;
+    }
+  }
+  if (!text.trim()) {
+    console.error('progress: usage: agentd progress "<summary>" [--done] [--task <id>]');
+    process.exit(2);
+  }
+
+  const envTaskId = process.env.AGENTD_TASK_ID;
+  const envUrl = process.env.AGENTD_DAEMON_URL;
+  const envToken = process.env.AGENTD_TOKEN;
+
+  let server: string;
+  let token: string;
+  let taskId: string | undefined;
+  if (envTaskId && envUrl && envToken) {
+    server = envUrl;
+    token = envToken;
+    taskId = explicitTaskId ?? envTaskId;
+  } else {
+    const cfg = loadCliConfig();
+    if (!cfg.sessionToken) {
+      console.error("progress: no session — pair the CLI first or run inside a spawn");
+      process.exit(2);
+    }
+    server = cfg.server;
+    token = cfg.sessionToken;
+    taskId = explicitTaskId;
+    if (!taskId) {
+      console.error(
+        "progress: no task id (set AGENTD_TASK_ID or pass --task <id>)",
+      );
+      process.exit(2);
+    }
+  }
+
+  const url = `${server.replace(/\/$/, "")}/api/tasks/${encodeURIComponent(taskId)}/progress`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ text: text.trim(), done }),
+  });
+  if (!r.ok) {
+    console.error(`progress: ${r.status} ${await r.text().catch(() => "")}`);
+    process.exit(1);
+  }
+}
+
 async function cmdSettings(argv: string[]) {
   const sub = argv[0];
   const c = client();
@@ -710,6 +785,8 @@ async function main() {
     case "skills":
     case "skill":
       return cmdSkills(rest);
+    case "progress":
+      return cmdProgress(rest);
     case undefined:
     case "help":
     case "-h":
