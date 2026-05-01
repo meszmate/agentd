@@ -34,6 +34,29 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
 
 export const DEFAULT_PR_BODY_TEMPLATE = "Original prompt:\n\n{prompt}\n";
 
+/**
+ * Settings for the small Claude invocations agentd makes outside the main
+ * task agent: commit message generation, PR body generation, branch name
+ * suggestion. Kept separate from the per-task agent config because these
+ * helper calls are short and cheap, so a lighter / faster model is usually
+ * the right default.
+ */
+export const AiHelperConfig = z.object({
+  /** CLI binary to invoke; defaults to whatever's first on $PATH. */
+  binary: z.string().default("claude"),
+  /** Optional `--model` override. Empty string means inherit Claude's default. */
+  model: z.string().default(""),
+  /**
+   * Reasoning effort for helper calls. Defaults to `medium` because the
+   * tasks (commit subjects, branch names) are short. Bump to `high` for
+   * meatier PR bodies if you want the bullets to read better.
+   */
+  effort: z.enum(["low", "medium", "high", "max", "xhigh"]).default("medium"),
+});
+export type AiHelperConfig = z.infer<typeof AiHelperConfig>;
+
+export const DEFAULT_AI_HELPER: AiHelperConfig = AiHelperConfig.parse({});
+
 export const AgentdConfig = z.object({
   pluginSessionToken: z.string().nullable().default(null),
   /** Appended to the agent's system prompt for every task. */
@@ -54,6 +77,27 @@ export const AgentdConfig = z.object({
    * the agent's actual context window is bigger.
    */
   maxContextTokens: z.number().int().positive().default(8000),
+  /**
+   * Model + effort used for AI helpers (commit messages, PR bodies, branch
+   * names). Separate from the per-task agent configuration so users can pick
+   * a fast cheap model for short helper calls without affecting their main
+   * agent runs.
+   */
+  aiHelpers: AiHelperConfig.default(DEFAULT_AI_HELPER),
+  /**
+   * Default thinking level applied when a task is spawned without one.
+   *   claude — `xhigh` is Claude's own default; `max` is its deepest tier.
+   *   codex  — `high` is the practical default; `xhigh` is its deepest tier.
+   *   commit/pr/branch — short helper calls; `medium` keeps them fast.
+   * The user can override per-task in the spawn UI; this just controls the
+   * initial value of those selectors.
+   */
+  defaultThinking: z
+    .object({
+      claude: z.enum(["low", "medium", "high", "max", "xhigh"]).default("xhigh"),
+      codex: z.enum(["low", "medium", "high", "max", "xhigh"]).default("high"),
+    })
+    .default({ claude: "xhigh", codex: "high" }),
   plugins: z
     .object({
       telegram: TelegramPluginConfig.default({

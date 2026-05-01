@@ -454,6 +454,12 @@ export class AgentdClient {
     prTitlePrefix: string;
     prBodyTemplate: string;
     maxContextTokens: number;
+    aiHelpers: {
+      binary: string;
+      model: string;
+      effort: ThinkingLevel;
+    };
+    defaultThinking: { claude: ThinkingLevel; codex: ThinkingLevel };
   }> {
     return this.req("/api/admin/settings");
   }
@@ -465,12 +471,120 @@ export class AgentdClient {
       prTitlePrefix: string;
       prBodyTemplate: string;
       maxContextTokens: number;
+      aiHelpers: { binary: string; model: string; effort: ThinkingLevel };
+      defaultThinking: Partial<{
+        claude: ThinkingLevel;
+        codex: ThinkingLevel;
+      }>;
     }>,
   ): Promise<{ ok: boolean; settings: Record<string, unknown> }> {
     return this.req("/api/admin/settings", {
       method: "POST",
       body: JSON.stringify(patch),
     });
+  }
+
+  /** Suggest a kebab-case branch slug from the task prompt. */
+  async suggestBranchName(
+    prompt: string,
+  ): Promise<{ slug: string; source: string; error?: string }> {
+    return this.req("/api/branch-name", {
+      method: "POST",
+      body: JSON.stringify({ prompt }),
+    });
+  }
+
+  /**
+   * Streamed PR title + body generator. Same wire format as
+   * `streamCommitMessage`: chunks → U+001E sentinel → JSON metadata.
+   */
+  async streamPrMessage(
+    id: string,
+    opts: { hint?: string; includeBullets?: boolean } = {},
+    onChunk?: (chunk: string) => void,
+    abort?: AbortSignal,
+  ): Promise<{
+    title: string;
+    body: string;
+    source: string;
+    error?: string;
+  }> {
+    const url =
+      this.server +
+      `/api/tasks/${encodeURIComponent(id)}/pr-message/stream`;
+    const r = await fetch(url, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(opts),
+      ...(abort ? { signal: abort } : {}),
+    });
+    if (!r.ok || !r.body) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`stream pr-message ${r.status}: ${text}`);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      buf += chunk;
+      const sentinel = buf.indexOf("\x1e");
+      if (sentinel >= 0) {
+        const visible = chunk.slice(
+          0,
+          chunk.length - (buf.length - sentinel),
+        );
+        if (visible.length > 0) onChunk?.(visible);
+        while (true) {
+          const next = await reader.read();
+          if (next.done) break;
+          buf += decoder.decode(next.value, { stream: true });
+        }
+        break;
+      }
+      onChunk?.(chunk);
+    }
+    const sentinelAt = buf.indexOf("\x1e");
+    if (sentinelAt < 0) {
+      // No sentinel; treat the whole buffer as title+body split on first
+      // blank line.
+      const cleaned = buf.trim();
+      const idx = cleaned.indexOf("\n\n");
+      return idx < 0
+        ? { title: cleaned, body: "", source: "claude" }
+        : {
+            title: cleaned.slice(0, idx).trim(),
+            body: cleaned.slice(idx + 2).trim(),
+            source: "claude",
+          };
+    }
+    const tail = buf.slice(sentinelAt + 1).trim();
+    try {
+      const meta = JSON.parse(tail) as {
+        source: string;
+        title?: string;
+        body?: string;
+        error?: string;
+      };
+      return {
+        title: meta.title ?? "",
+        body: meta.body ?? "",
+        source: meta.source,
+        ...(meta.error ? { error: meta.error } : {}),
+      };
+    } catch {
+      const cleaned = buf.slice(0, sentinelAt).trim();
+      const idx = cleaned.indexOf("\n\n");
+      return idx < 0
+        ? { title: cleaned, body: "", source: "claude" }
+        : {
+            title: cleaned.slice(0, idx).trim(),
+            body: cleaned.slice(idx + 2).trim(),
+            source: "claude",
+          };
+    }
   }
 
   // ── pairing tokens ──

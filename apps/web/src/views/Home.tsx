@@ -484,6 +484,7 @@ function Composer({ firstRun }: { firstRun: boolean }) {
             value={workspace}
             onChange={setWorkspace}
             projectIdOrSlug={projectId || null}
+            prompt={prompt}
           />
         </div>
       )}

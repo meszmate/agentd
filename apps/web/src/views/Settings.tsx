@@ -30,8 +30,24 @@ interface RailItem {
 
 const SECTIONS: RailItem[] = [
   { id: "agent", glyph: "§", label: "Agent policy" },
+  { id: "thinking", glyph: "✦", label: "Thinking defaults" },
+  { id: "ai-helpers", glyph: "✶", label: "AI helpers" },
   { id: "commits", glyph: "◆", label: "Commits & PRs" },
   { id: "browser", glyph: "▢", label: "Browser" },
+];
+
+type ThinkingLevel = "low" | "medium" | "high" | "max" | "xhigh";
+
+const THINKING_LEVELS: {
+  value: ThinkingLevel;
+  label: string;
+  hint: string;
+}[] = [
+  { value: "low", label: "low", hint: "fastest, minimal reasoning" },
+  { value: "medium", label: "medium", hint: "balanced" },
+  { value: "high", label: "high", hint: "solid for multi-step engineering" },
+  { value: "max", label: "max", hint: "Claude's deepest tier" },
+  { value: "xhigh", label: "xhigh", hint: "Claude default · Codex's deepest tier" },
 ];
 
 export function Settings() {
@@ -44,6 +60,11 @@ export function Settings() {
   const [prTitlePrefix, setPrTitlePrefix] = useState("");
   const [prBodyTemplate, setPrBodyTemplate] = useState("");
   const [maxContextTokens, setMaxContextTokens] = useState<number>(8000);
+  const [helperBinary, setHelperBinary] = useState("claude");
+  const [helperModel, setHelperModel] = useState("");
+  const [helperEffort, setHelperEffort] = useState<ThinkingLevel>("medium");
+  const [defaultClaude, setDefaultClaude] = useState<ThinkingLevel>("xhigh");
+  const [defaultCodex, setDefaultCodex] = useState<ThinkingLevel>("high");
   const [hydrated, setHydrated] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [active, setActive] = useState<string>("agent");
@@ -62,17 +83,34 @@ export function Settings() {
     setPrTitlePrefix(settingsQ.data.prTitlePrefix);
     setPrBodyTemplate(settingsQ.data.prBodyTemplate);
     setMaxContextTokens(settingsQ.data.maxContextTokens ?? 8000);
+    setHelperBinary(settingsQ.data.aiHelpers?.binary ?? "claude");
+    setHelperModel(settingsQ.data.aiHelpers?.model ?? "");
+    setHelperEffort(
+      (settingsQ.data.aiHelpers?.effort as ThinkingLevel) ?? "medium",
+    );
+    setDefaultClaude(
+      (settingsQ.data.defaultThinking?.claude as ThinkingLevel) ?? "xhigh",
+    );
+    setDefaultCodex(
+      (settingsQ.data.defaultThinking?.codex as ThinkingLevel) ?? "high",
+    );
     setHydrated(true);
   }, [settingsQ.data, hydrated]);
 
   useEffect(() => {
     if (!hydrated || !settingsQ.data) return;
+    const d = settingsQ.data;
     const isDirty =
-      agentInstructions !== settingsQ.data.agentInstructions ||
-      commitPrefix !== settingsQ.data.commitPrefix ||
-      prTitlePrefix !== settingsQ.data.prTitlePrefix ||
-      prBodyTemplate !== settingsQ.data.prBodyTemplate ||
-      maxContextTokens !== (settingsQ.data.maxContextTokens ?? 8000);
+      agentInstructions !== d.agentInstructions ||
+      commitPrefix !== d.commitPrefix ||
+      prTitlePrefix !== d.prTitlePrefix ||
+      prBodyTemplate !== d.prBodyTemplate ||
+      maxContextTokens !== (d.maxContextTokens ?? 8000) ||
+      helperBinary !== (d.aiHelpers?.binary ?? "claude") ||
+      helperModel !== (d.aiHelpers?.model ?? "") ||
+      helperEffort !== (d.aiHelpers?.effort ?? "medium") ||
+      defaultClaude !== (d.defaultThinking?.claude ?? "xhigh") ||
+      defaultCodex !== (d.defaultThinking?.codex ?? "high");
     setDirty(isDirty);
   }, [
     agentInstructions,
@@ -80,6 +118,11 @@ export function Settings() {
     prTitlePrefix,
     prBodyTemplate,
     maxContextTokens,
+    helperBinary,
+    helperModel,
+    helperEffort,
+    defaultClaude,
+    defaultCodex,
     hydrated,
     settingsQ.data,
   ]);
@@ -123,6 +166,15 @@ export function Settings() {
         prTitlePrefix,
         prBodyTemplate,
         maxContextTokens,
+        aiHelpers: {
+          binary: helperBinary.trim(),
+          model: helperModel.trim(),
+          effort: helperEffort,
+        },
+        defaultThinking: {
+          claude: defaultClaude,
+          codex: defaultCodex,
+        },
       });
       setSavedFlash(true);
       window.setTimeout(() => setSavedFlash(false), 2000);
@@ -267,6 +319,103 @@ export function Settings() {
             </InfoRow>
           </div>
 
+          {/* Thinking defaults */}
+          <div id="section-thinking">
+            <SectionHeader
+              label="Thinking defaults"
+              hint="reasoning effort applied when a task is spawned without one"
+              sticky
+            />
+            <InfoRow
+              label="Claude default"
+              hint={
+                <>
+                  Claude's own default is{" "}
+                  <code className="font-mono text-[10px] text-ink-700 dark:text-ink-200">
+                    xhigh
+                  </code>
+                  . The deepest tier is{" "}
+                  <code className="font-mono text-[10px] text-ink-700 dark:text-ink-200">
+                    max
+                  </code>
+                  .
+                </>
+              }
+              top
+            >
+              <ThinkingPicker value={defaultClaude} onChange={setDefaultClaude} />
+            </InfoRow>
+            <InfoRow
+              label="Codex default"
+              hint={
+                <>
+                  Codex's practical default is{" "}
+                  <code className="font-mono text-[10px] text-ink-700 dark:text-ink-200">
+                    high
+                  </code>
+                  . The deepest Codex tier is{" "}
+                  <code className="font-mono text-[10px] text-ink-700 dark:text-ink-200">
+                    xhigh
+                  </code>
+                  .
+                </>
+              }
+            >
+              <ThinkingPicker value={defaultCodex} onChange={setDefaultCodex} />
+            </InfoRow>
+          </div>
+
+          {/* AI helpers */}
+          <div id="section-ai-helpers">
+            <SectionHeader
+              label="AI helpers"
+              hint="model + effort for commit messages, PR bodies, branch names"
+              sticky
+            />
+            <InfoRow
+              label="Binary"
+              hint={
+                <>
+                  CLI to invoke for helper calls. Defaults to{" "}
+                  <code className="font-mono text-[10px] text-ink-700 dark:text-ink-200">
+                    claude
+                  </code>{" "}
+                  on $PATH.
+                </>
+              }
+              top
+            >
+              <Input
+                value={helperBinary}
+                onChange={(e) => setHelperBinary(e.target.value)}
+                placeholder="claude"
+                className="font-mono w-56"
+              />
+            </InfoRow>
+            <InfoRow
+              label="Model"
+              hint={
+                <>
+                  Optional <code className="font-mono">--model</code> override.
+                  Leave blank to inherit Claude's default.
+                </>
+              }
+            >
+              <Input
+                value={helperModel}
+                onChange={(e) => setHelperModel(e.target.value)}
+                placeholder="(inherit) e.g. claude-haiku-4-5"
+                className="font-mono w-72"
+              />
+            </InfoRow>
+            <InfoRow
+              label="Effort"
+              hint="higher → better wording, slower & more expensive"
+            >
+              <ThinkingPicker value={helperEffort} onChange={setHelperEffort} />
+            </InfoRow>
+          </div>
+
           {/* Commits & PRs */}
           <div id="section-commits">
             <SectionHeader
@@ -402,6 +551,38 @@ function NotificationsRow() {
       value={enabled}
       onChange={(v) => void toggle(v)}
     />
+  );
+}
+
+function ThinkingPicker({
+  value,
+  onChange,
+}: {
+  value: ThinkingLevel;
+  onChange: (next: ThinkingLevel) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {THINKING_LEVELS.map((m) => {
+        const on = value === m.value;
+        return (
+          <button
+            key={m.value}
+            type="button"
+            onClick={() => onChange(m.value)}
+            title={m.hint}
+            className={cn(
+              "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border text-[11px] transition-colors",
+              on
+                ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+                : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
+            )}
+          >
+            <span className="font-mono">{m.label}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

@@ -413,13 +413,67 @@ function PrDialog({
   const [body, setBody] = useState("");
   const [draft, setDraft] = useState(false);
   const [pending, setPending] = useState<"push" | "pr" | null>(null);
+  const [hint, setHint] = useState("");
+  const [includeBullets, setIncludeBullets] = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const [source, setSource] = useState<string | null>(null);
+
+  const regenerate = async () => {
+    setGenerating(true);
+    setSubject("");
+    setBody("");
+    setSource(null);
+    let buffer = "";
+    try {
+      const r = await client.streamPrMessage(
+        task.id,
+        {
+          ...(hint.trim() ? { hint: hint.trim() } : {}),
+          includeBullets,
+        },
+        (chunk) => {
+          buffer += chunk;
+          // Split on first blank line: subject above, body below.
+          const idx = buffer.indexOf("\n\n");
+          if (idx < 0) {
+            setSubject(stripPrefix(buffer.trim()));
+          } else {
+            setSubject(stripPrefix(buffer.slice(0, idx).trim()));
+            setBody(buffer.slice(idx + 2));
+          }
+        },
+      );
+      setSubject(stripPrefix(r.title));
+      setBody(r.body);
+      setSource(r.source);
+      // If the model embedded a known prefix in the title, sync the chip.
+      const m = r.title.match(/^([a-z]+):/);
+      if (m && (COMMIT_PREFIXES as readonly string[]).includes(m[1]!)) {
+        setPrefix(m[1] as Prefix);
+      }
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setSource(null);
+      setHint("");
+      setIncludeBullets(true);
+      setSubject("");
+      setBody("");
+      return;
+    }
     setPrefix("feat");
+    setDraft(false);
+    // Seed deterministic content immediately, then kick off AI generation.
     setSubject(deriveSubject(task.title));
     setBody(deriveBody(task));
-    setDraft(false);
+    void regenerate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, task]);
 
   const title = `${prefix}: ${subject.trim()}`;
@@ -505,20 +559,94 @@ function PrDialog({
               <Label className="font-mono text-[10px] uppercase tracking-[0.12em]">
                 What changed
               </Label>
-              <span className="text-[10px] text-ink-400 dark:text-ink-500">
-                · bullet list, no Test plan, no boilerplate
+              <span className="text-[10px] text-ink-400 dark:text-ink-500 inline-flex items-center gap-1">
+                {generating ? (
+                  <>
+                    <Loader2 className="h-2.5 w-2.5 text-ember-500 animate-spin" />
+                    <span className="text-ember-700 dark:text-ember-300">
+                      claude is writing
+                    </span>
+                  </>
+                ) : source === "claude" ? (
+                  "claude generated · edit freely"
+                ) : source ? (
+                  `fallback (${source.replace("fallback-", "")})`
+                ) : (
+                  "· bullets, no Test plan, no boilerplate"
+                )}
               </span>
+              <button
+                type="button"
+                onClick={regenerate}
+                disabled={generating}
+                className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.12em] text-ember-700 hover:underline disabled:opacity-50 dark:text-ember-300"
+              >
+                <Sparkles className="h-3 w-3" />
+                regenerate
+              </button>
             </div>
-            <Textarea
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              rows={8}
-              spellCheck={false}
-              className="font-mono text-[12px]"
-            />
+            <div className="relative">
+              <Textarea
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                rows={8}
+                spellCheck={false}
+                className={cn(
+                  "font-mono text-[12px] transition",
+                  generating && "ring-1 ring-ember-500/40",
+                )}
+              />
+              {generating && (
+                <>
+                  <div className="pointer-events-none absolute inset-x-0 top-0 h-0.5 overflow-hidden rounded-t">
+                    <div className="h-full w-full bg-gradient-to-r from-transparent via-ember-500 to-transparent bg-[length:200%_100%] animate-shimmer" />
+                  </div>
+                  {body.length === 0 && (
+                    <div className="pointer-events-none absolute inset-0 flex flex-col gap-1.5 px-3 py-2">
+                      <div className="h-2.5 w-2/3 animate-pulse rounded bg-ember-500/15" />
+                      <div className="h-2.5 w-1/2 animate-pulse rounded bg-ember-500/10" />
+                      <div className="h-2.5 w-3/4 animate-pulse rounded bg-ember-500/10" />
+                    </div>
+                  )}
+                  {body.length > 0 && (
+                    <span className="pointer-events-none absolute bottom-2 right-3 inline-block h-3 w-1 bg-ember-500 animate-blink" />
+                  )}
+                </>
+              )}
+            </div>
           </div>
 
-          <div className="flex items-center gap-3 text-[12px]">
+          <div>
+            <Label className="font-mono text-[10px] uppercase tracking-[0.12em]">
+              Hint (optional)
+            </Label>
+            <Input
+              value={hint}
+              onChange={(e) => setHint(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void regenerate();
+                }
+              }}
+              placeholder="e.g. focus on the streaming refactor"
+              className="font-mono text-[12px]"
+            />
+            <p className="mt-1 font-mono text-[10px] text-ink-400 dark:text-ink-500">
+              Press enter to regenerate.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 text-[12px]">
+            <label className="flex items-center gap-2 text-ink-700 dark:text-ink-200">
+              <input
+                type="checkbox"
+                checked={includeBullets}
+                onChange={(e) => setIncludeBullets(e.target.checked)}
+                className="accent-ember-500"
+              />
+              include bullets
+            </label>
             <label className="flex items-center gap-2 text-ink-700 dark:text-ink-200">
               <input
                 type="checkbox"
@@ -571,6 +699,13 @@ function deriveSubject(title: string): string {
   // when naming the task, then trim down.
   const stripped = title.replace(/^([a-z]+)(\([^)]+\))?:\s*/i, "");
   return stripped.length > 60 ? stripped.slice(0, 57) + "…" : stripped;
+}
+
+function stripPrefix(s: string): string {
+  // Drop the conventional-commit prefix from streamed model output so the
+  // subject input shows just the description (the prefix dropdown handles
+  // the rest of the title).
+  return s.replace(/^([a-z]+)(\([^)]+\))?:\s*/i, "").trim();
 }
 
 function deriveBody(task: Task): string {

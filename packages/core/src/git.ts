@@ -22,6 +22,40 @@ async function run(
   return { stdout, stderr, exitCode };
 }
 
+/**
+ * Settings that drive the small Claude helper invocations agentd uses for
+ * commit messages, PR bodies, and branch-name suggestions. Mirrors the
+ * `aiHelpers` config block but stays decoupled so callers can override
+ * per-call (e.g. higher effort for PR bodies than commit subjects).
+ */
+export interface AiHelperOptions {
+  binary?: string;
+  model?: string;
+  effort?: "low" | "medium" | "high" | "max" | "xhigh";
+}
+
+/**
+ * Build the `claude -p ...` argv from helper settings. Caller appends the
+ * actual prompt as the final positional. Honors AGENTD_CLAUDE_BIN as a
+ * legacy override for the binary so existing installs keep working.
+ */
+function buildAiHelperArgv(opts: AiHelperOptions): string[] {
+  const binary =
+    opts.binary?.trim() || process.env.AGENTD_CLAUDE_BIN || "claude";
+  const argv: string[] = [
+    binary,
+    "--permission-mode",
+    "bypassPermissions",
+    "--allow-dangerously-skip-permissions",
+    "--effort",
+    opts.effort ?? "medium",
+  ];
+  if (opts.model && opts.model.trim()) {
+    argv.push("--model", opts.model.trim());
+  }
+  return argv;
+}
+
 export async function hasChanges(cwd: string): Promise<boolean> {
   const r = await run(["git", "status", "--porcelain"], cwd);
   if (r.exitCode !== 0) return false;
@@ -469,7 +503,11 @@ function cleanCommitOutput(raw: string): string {
  */
 export async function generateCommitMessage(
   cwd: string,
-  opts: { fallbackHint?: string; baseRef?: string } & CommitMessageShape = {},
+  opts: {
+    fallbackHint?: string;
+    baseRef?: string;
+    helper?: AiHelperOptions;
+  } & CommitMessageShape = {},
 ): Promise<CommitMessageResult> {
   const { diff, source: diffSource } = await readCombinedDiff(cwd, opts.baseRef);
   if (!diff.trim()) {
@@ -483,17 +521,11 @@ export async function generateCommitMessage(
     };
   }
   const prompt = buildCommitPrompt(diff, opts);
-  const claudeBin = process.env.AGENTD_CLAUDE_BIN || "claude";
+  const argv = buildAiHelperArgv(opts.helper ?? {});
+  argv.push("-p", prompt);
   try {
     const proc = Bun.spawn(
-      [
-        claudeBin,
-        "-p",
-        prompt,
-        "--permission-mode",
-        "bypassPermissions",
-        "--allow-dangerously-skip-permissions",
-      ],
+      argv,
       {
         cwd,
         stdout: "pipe",
@@ -533,7 +565,11 @@ export async function generateCommitMessage(
  */
 export async function* streamCommitMessage(
   cwd: string,
-  opts: { fallbackHint?: string; baseRef?: string } & CommitMessageShape = {},
+  opts: {
+    fallbackHint?: string;
+    baseRef?: string;
+    helper?: AiHelperOptions;
+  } & CommitMessageShape = {},
 ): AsyncGenerator<string, CommitMessageResult, void> {
   const { diff } = await readCombinedDiff(cwd, opts.baseRef);
   if (!diff.trim()) {
@@ -547,18 +583,12 @@ export async function* streamCommitMessage(
     return { message: fallback, source: "fallback-no-changes" };
   }
   const prompt = buildCommitPrompt(diff, opts);
-  const claudeBin = process.env.AGENTD_CLAUDE_BIN || "claude";
+  const argv = buildAiHelperArgv(opts.helper ?? {});
+  argv.push("-p", prompt);
   let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
-      cmd: [
-        claudeBin,
-        "-p",
-        prompt,
-        "--permission-mode",
-        "bypassPermissions",
-        "--allow-dangerously-skip-permissions",
-      ],
+      cmd: argv,
       cwd,
       stdin: "pipe",
       stdout: "pipe",
@@ -599,6 +629,214 @@ export async function* streamCommitMessage(
     };
   }
   return { message: cleaned, source: "claude" };
+}
+
+/* ── PR title + body generator ─────────────────────────────────────── */
+
+export interface PrMessageShape {
+  /** Operator hint that nudges the model toward what's important. */
+  hint?: string;
+  /** Whether to include "What changed" bullets. Default true. */
+  includeBullets?: boolean;
+  /** Optional context: the original task prompt, for framing the PR. */
+  taskPrompt?: string;
+  /** Optional context: the task title, for fallback subject. */
+  taskTitle?: string;
+}
+
+export interface PrMessageResult {
+  /** Subject line, ready to drop into `gh pr create --title`. */
+  title: string;
+  /** Markdown body, ready for `gh pr create --body`. */
+  body: string;
+  source: "claude" | "fallback-no-changes" | "fallback-empty-output" | "fallback-claude-error";
+  error?: string;
+}
+
+function buildPrPrompt(diff: string, shape: PrMessageShape): string {
+  const rules = [
+    "Output ONLY two parts separated by a blank line: a single subject line, then a Markdown body.",
+    "Subject: lowercase, conventional-commit style (`feat: ...`, `fix: ...`), under 70 characters, imperative mood.",
+    shape.includeBullets === false
+      ? "Body: one short paragraph (no list)."
+      : "Body: 2-5 short bullet points starting with `- `, focused on what changed and why. No 'Test plan', no AI attribution, no boilerplate.",
+    "No closing summary, no headings, no code fences, no quotes around the subject.",
+    shape.taskPrompt?.trim()
+      ? `Original task prompt (for context only — describe the diff, not the prompt):\n${shape.taskPrompt.trim()}`
+      : "",
+    shape.hint?.trim() ? `Operator hint: ${shape.hint.trim()}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return `Generate a pull request subject + body for this diff.\n\n${rules}\n\n--- DIFF ---\n${diff}\n--- END DIFF ---`;
+}
+
+function splitPrOutput(raw: string): { title: string; body: string } {
+  const cleaned = cleanCommitOutput(raw);
+  const idx = cleaned.indexOf("\n");
+  if (idx < 0) return { title: cleaned, body: "" };
+  return {
+    title: cleaned.slice(0, idx).trim(),
+    body: cleaned.slice(idx + 1).trim(),
+  };
+}
+
+const PR_FALLBACK_BODY = (taskPrompt?: string): string => {
+  if (taskPrompt?.trim()) {
+    return `## What changed\n\n${taskPrompt.trim()}\n`;
+  }
+  return "## What changed\n\n- (auto-fallback — could not reach the AI helper)\n";
+};
+
+/** Stream a PR subject + body. Yields chunks for the wire, returns the parsed result. */
+export async function* streamPrMessage(
+  cwd: string,
+  opts: {
+    baseRef?: string;
+    helper?: AiHelperOptions;
+  } & PrMessageShape = {},
+): AsyncGenerator<string, PrMessageResult, void> {
+  const { diff } = await readCombinedDiff(cwd, opts.baseRef);
+  if (!diff.trim()) {
+    const fallback = `${opts.taskTitle ? `feat: ${slugifyTitle(opts.taskTitle)}` : "chore: update"}\n\n${PR_FALLBACK_BODY(opts.taskPrompt)}`;
+    yield fallback;
+    const split = splitPrOutput(fallback);
+    return { ...split, source: "fallback-no-changes" };
+  }
+  const prompt = buildPrPrompt(diff, opts);
+  const argv = buildAiHelperArgv(opts.helper ?? {});
+  argv.push("-p", prompt);
+  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn({
+      cmd: argv,
+      cwd,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+  } catch (e) {
+    const fallback = `${opts.taskTitle ? `feat: ${slugifyTitle(opts.taskTitle)}` : "chore: update"}\n\n${PR_FALLBACK_BODY(opts.taskPrompt)}`;
+    yield fallback;
+    const split = splitPrOutput(fallback);
+    return { ...split, source: "fallback-claude-error", error: (e as Error).message };
+  }
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let raw = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      raw += chunk;
+      yield chunk;
+    }
+  } catch {
+    // stream cancelled
+  }
+  await proc.exited;
+  const split = splitPrOutput(raw);
+  if (!split.title) {
+    return {
+      title: opts.taskTitle ? `feat: ${slugifyTitle(opts.taskTitle)}` : "chore: update",
+      body: PR_FALLBACK_BODY(opts.taskPrompt),
+      source: "fallback-empty-output",
+    };
+  }
+  return { ...split, source: "claude" };
+}
+
+function slugifyTitle(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .slice(0, 6)
+    .join(" ");
+}
+
+/* ── Branch-name generator ─────────────────────────────────────────── */
+
+export interface BranchNameResult {
+  /** Generated kebab-case slug, no prefix (e.g. "worktree-option"). */
+  slug: string;
+  source: "claude" | "fallback";
+  error?: string;
+}
+
+const STOPWORDS = new Set([
+  "a","an","and","are","as","at","be","but","by","can","could","do","does","done",
+  "fix","for","from","get","got","has","have","i","if","in","is","it","its","just",
+  "like","make","many","me","my","no","not","of","on","one","or","our","out","over",
+  "please","s","so","some","that","the","their","then","there","these","they","this",
+  "to","up","want","was","we","were","what","when","where","which","who","why","will",
+  "with","you","your","really","actually","things","stuff","like",
+]);
+
+/** Cheap deterministic fallback: pick the first 3-5 meaningful words. */
+function deterministicSlug(prompt: string): string {
+  const words = prompt
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !STOPWORDS.has(w));
+  const picked = words.slice(0, 5).join("-");
+  return picked || "task";
+}
+
+/**
+ * Ask Claude for a tight feature-branch slug. Returns just the slug — no
+ * `feature/` prefix, no leading/trailing punctuation. Falls back to a
+ * deterministic slug when Claude is unavailable or empty.
+ */
+export async function generateBranchName(
+  prompt: string,
+  opts: { helper?: AiHelperOptions } = {},
+): Promise<BranchNameResult> {
+  const trimmed = prompt.trim();
+  if (!trimmed) return { slug: "task", source: "fallback" };
+  const ask =
+    `Suggest a short kebab-case feature branch name for this task. ` +
+    `Output ONLY the slug (lowercase letters, digits, hyphens). 2-5 words, ` +
+    `under 35 characters total. No prefix like "feature/". No quotes, no extra text.\n\n` +
+    `Task: ${trimmed.slice(0, 800)}`;
+  const argv = buildAiHelperArgv(opts.helper ?? {});
+  argv.push("-p", ask);
+  try {
+    const proc = Bun.spawn({
+      cmd: argv,
+      cwd: process.cwd(),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    const cleaned = out
+      .trim()
+      .replace(/^```[a-z]*\n?|```$/g, "")
+      .replace(/^["'`]|["'`]$/g, "")
+      .trim()
+      .toLowerCase()
+      .replace(/^feature\//, "")
+      .replace(/^[a-z]+\//, "")
+      .replace(/[^a-z0-9-]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40);
+    if (!cleaned) return { slug: deterministicSlug(trimmed), source: "fallback" };
+    return { slug: cleaned, source: "claude" };
+  } catch (e) {
+    return {
+      slug: deterministicSlug(trimmed),
+      source: "fallback",
+      error: (e as Error).message,
+    };
+  }
 }
 
 /**

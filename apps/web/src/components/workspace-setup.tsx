@@ -7,6 +7,7 @@ import {
   GitBranch,
   Loader2,
   RefreshCw,
+  Sparkles,
 } from "lucide-react";
 import type { BranchMode, WorkspaceMode } from "@agentd/contracts";
 import { Input } from "@/components/ui/input";
@@ -73,11 +74,18 @@ export function WorkspaceSetup({
   projectIdOrSlug,
   /** Compact = used inside the inline composer; default = full size. */
   compact = false,
+  /**
+   * Live prompt text. When provided, the new-branch input gets a
+   * `✨ generate` button that asks the AI helper for a kebab-case slug.
+   * The button is disabled when the prompt is empty.
+   */
+  prompt,
 }: {
   value: WorkspaceSetupValue;
   onChange: (next: WorkspaceSetupValue) => void;
   projectIdOrSlug?: string | null;
   compact?: boolean;
+  prompt?: string;
 }) {
   const branchesQ = useQuery({
     queryKey: ["project", projectIdOrSlug ?? "_none", "branches"] as const,
@@ -191,6 +199,7 @@ export function WorkspaceSetup({
           <NewBranchInput
             value={value.branchName}
             onChange={(b) => update({ branchName: b })}
+            prompt={prompt}
           />
         )}
       </div>
@@ -287,10 +296,14 @@ const BRANCH_PREFIXES = [
 function NewBranchInput({
   value,
   onChange,
+  prompt,
 }: {
   value: string;
   onChange: (v: string) => void;
+  prompt?: string;
 }) {
+  const client = useClient();
+  const [generating, setGenerating] = useState(false);
   const detected = useMemo(() => {
     const slash = value.indexOf("/");
     if (slash <= 0) return null;
@@ -298,6 +311,22 @@ function NewBranchInput({
     if ((BRANCH_PREFIXES as readonly string[]).includes(prefix)) return prefix;
     return null;
   }, [value]);
+
+  const generate = async () => {
+    const p = (prompt ?? "").trim();
+    if (!p) return;
+    setGenerating(true);
+    try {
+      const r = await client.suggestBranchName(p);
+      // Preserve whatever prefix the user already chose (or default to feature/).
+      const prefix = detected ?? "feature";
+      onChange(`${prefix}/${r.slug}`);
+    } catch {
+      // best-effort — leave field as-is
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   return (
     <div className="flex flex-wrap items-center gap-1.5 flex-1 min-w-0">
@@ -333,9 +362,33 @@ function NewBranchInput({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder="auto · e.g. feature/streaming-chat"
-        className="font-mono text-[11px] h-7 px-2 min-w-[180px]"
+        className="font-mono text-[11px] h-7 px-2 min-w-[180px] flex-1"
         spellCheck={false}
       />
+      <button
+        type="button"
+        onClick={() => void generate()}
+        disabled={generating || !(prompt ?? "").trim()}
+        title={
+          (prompt ?? "").trim()
+            ? "Generate a kebab-case branch name from the prompt"
+            : "Type a prompt first to enable AI suggestions"
+        }
+        className={cn(
+          "inline-flex items-center gap-1 h-7 px-2 rounded-md border font-mono text-[10px] uppercase tracking-[0.08em] transition-colors",
+          generating
+            ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+            : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
+          !(prompt ?? "").trim() && "opacity-40 cursor-not-allowed",
+        )}
+      >
+        {generating ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : (
+          <Sparkles className="h-3 w-3" />
+        )}
+        generate
+      </button>
     </div>
   );
 }

@@ -261,6 +261,7 @@ export function SpawnSheet({
                   setBaseBranch(next.baseBranch);
                 }}
                 projectIdOrSlug={projectId || null}
+                prompt={prompt}
               />
             </Field>
 

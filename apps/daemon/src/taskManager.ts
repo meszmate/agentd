@@ -18,6 +18,7 @@ import {
   getTask,
   listTasks,
   listMessages,
+  generateBranchName,
   generateCommitMessage,
   loadConfig,
   newId,
@@ -29,7 +30,6 @@ import {
   removeWorktree,
   renderConfigTemplate,
   setTaskPrUrl,
-  slugify,
   updateTaskStatus,
   createWorktree,
   type AgentdPaths,
@@ -106,15 +106,24 @@ export class TaskManager {
     const taskId = newId("task");
     const workspaceMode = params.workspaceMode ?? "worktree";
     const branchMode = params.branchMode ?? "new";
-    // Auto-name the branch when caller didn't provide one and we're creating.
-    // Auto-named branches default to `feature/<slug>-xxxxxx` — closer to
-    // gitflow / what most teams actually use. The user can override either
-    // by typing the full name or tapping a prefix chip in the UI.
-    const branch =
-      branchMode === "existing"
-        ? (params.branchName?.trim() || baseBranch)
-        : (params.branchName?.trim() ||
-            `feature/${slugify(title)}-${taskId.slice(-6)}`);
+    // Auto-name the branch when the caller didn't provide one. We try the
+    // AI helper first because the prompt usually has a clear intent ("fix
+    // X", "add Y") that maps to a much tighter slug than the title.
+    // Falls back to a deterministic slug if Claude isn't available — and
+    // we never include the task id, so names look like `feature/auth-rate-limit`
+    // instead of the old `feature/<long-title>-7a5a4a`.
+    let branch: string;
+    if (branchMode === "existing") {
+      branch = params.branchName?.trim() || baseBranch;
+    } else if (params.branchName?.trim()) {
+      branch = params.branchName.trim();
+    } else {
+      const cfg = loadConfig(this.paths.root);
+      const ai = await generateBranchName(params.prompt, {
+        helper: cfg.aiHelpers,
+      });
+      branch = `feature/${ai.slug}`;
+    }
     // Auto-create or look up the project for this repo path. Tasks belong
     // to projects so the sidebar can group them and surface what's new.
     const project = ensureProjectForPath(this.db, params.repoPath);
@@ -144,7 +153,12 @@ export class TaskManager {
       skills: params.skills ?? [],
       permissionMode: params.permissionMode ?? "bypassPermissions",
       workspaceMode,
-      thinkingLevel: params.thinkingLevel ?? "high",
+      thinkingLevel:
+        params.thinkingLevel ??
+        (() => {
+          const cfg = loadConfig(this.paths.root);
+          return cfg.defaultThinking[params.agent];
+        })(),
     });
     touchProject(this.db, project.id);
     appendMessage(this.db, task.id, "user", params.prompt);
@@ -408,6 +422,7 @@ export class TaskManager {
     const ai = await generateCommitMessage(task.worktreePath, {
       fallbackHint: task.title,
       baseRef: task.baseBranch,
+      helper: cfg.aiHelpers,
     });
     const fallbackTitle =
       `${cfg.commitPrefix}${task.title}`.slice(0, 72);

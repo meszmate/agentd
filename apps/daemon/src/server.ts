@@ -46,8 +46,10 @@ import {
   createPr,
   gitStatus,
   listBranches,
+  generateBranchName,
   generateCommitMessage,
   streamCommitMessage,
+  streamPrMessage,
   getPrState,
   setTaskPrUrl,
   closeTask,
@@ -56,6 +58,7 @@ import {
   resolveSession,
   loadConfig,
   saveConfig,
+  AiHelperConfig,
   TelegramPluginConfig,
   DiscordPluginConfig,
   createTemplate,
@@ -316,6 +319,7 @@ export function buildServer(opts: BuildServerOptions) {
       wip?: boolean;
       hint?: string;
     };
+    const cfg = loadConfig(paths.root);
     const r = await generateCommitMessage(task.worktreePath, {
       includeBody: !!body.includeBody,
       includeScope: !!body.includeScope,
@@ -323,6 +327,7 @@ export function buildServer(opts: BuildServerOptions) {
       ...(body.hint ? { hint: body.hint } : {}),
       fallbackHint: task.title,
       baseRef: task.baseBranch,
+      helper: cfg.aiHelpers,
     });
     return c.json(r);
   });
@@ -337,6 +342,7 @@ export function buildServer(opts: BuildServerOptions) {
       wip?: boolean;
       hint?: string;
     };
+    const cfg = loadConfig(paths.root);
     const opts = {
       includeBody: !!body.includeBody,
       includeScope: !!body.includeScope,
@@ -344,6 +350,7 @@ export function buildServer(opts: BuildServerOptions) {
       ...(body.hint ? { hint: body.hint } : {}),
       fallbackHint: task.title,
       baseRef: task.baseBranch,
+      helper: cfg.aiHelpers,
     };
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -392,6 +399,99 @@ export function buildServer(opts: BuildServerOptions) {
     });
   });
 
+  /**
+   * Streamed PR title + body generator. Response stream is the model's raw
+   * output, terminated by the U+001E sentinel + JSON metadata
+   *   { source, title, body, error? }
+   * so the client can settle on a parsed result without losing tokens.
+   */
+  api.post("/tasks/:id/pr-message/stream", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      hint?: string;
+      includeBullets?: boolean;
+    };
+    const cfg = loadConfig(paths.root);
+    const messages = listMessages(db, task.id, 1);
+    const taskPrompt = messages[0]?.role === "user" ? messages[0].content : "";
+    const opts = {
+      ...(body.hint ? { hint: body.hint } : {}),
+      includeBullets: body.includeBullets !== false,
+      baseRef: task.baseBranch,
+      taskPrompt,
+      taskTitle: task.title,
+      helper: cfg.aiHelpers,
+    };
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const enc = new TextEncoder();
+        try {
+          const it = streamPrMessage(task.worktreePath, opts);
+          type Final = {
+            title: string;
+            body: string;
+            source: string;
+            error?: string;
+          };
+          let result: Final | null = null;
+          while (true) {
+            const next = await it.next();
+            if (next.done) {
+              result = next.value as Final;
+              break;
+            }
+            controller.enqueue(enc.encode(next.value));
+          }
+          controller.enqueue(enc.encode("\x1e"));
+          controller.enqueue(
+            enc.encode(
+              JSON.stringify({
+                source: result?.source ?? "fallback-empty-output",
+                title: result?.title ?? "",
+                body: result?.body ?? "",
+              }),
+            ),
+          );
+        } catch (e) {
+          controller.enqueue(
+            enc.encode(
+              `\x1e${JSON.stringify({
+                source: "fallback-claude-error",
+                error: (e as Error).message,
+              })}`,
+            ),
+          );
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
+  /**
+   * Suggest a branch slug for a not-yet-created task. Used by the spawn
+   * UI to fill in a clean `feature/<slug>` when the user hasn't typed
+   * a branch name themselves.
+   */
+  api.post("/branch-name", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      prompt?: string;
+    } | null;
+    const prompt = (body?.prompt ?? "").trim();
+    if (!prompt) return c.json({ error: "prompt required" }, 400);
+    const cfg = loadConfig(paths.root);
+    const r = await generateBranchName(prompt, { helper: cfg.aiHelpers });
+    return c.json(r);
+  });
+
   // Manual commit. If `message` is missing we generate one from the diff
   // (same path the auto-commit-on-exit uses), so callers never end up
   // committing the task title verbatim by accident.
@@ -404,9 +504,11 @@ export function buildServer(opts: BuildServerOptions) {
     };
     let subject = body.message?.trim();
     if (!subject) {
+      const cfg = loadConfig(paths.root);
       const ai = await generateCommitMessage(task.worktreePath, {
         fallbackHint: task.title,
         baseRef: task.baseBranch,
+        helper: cfg.aiHelpers,
       });
       subject = ai.message;
     }
@@ -933,6 +1035,8 @@ export function buildServer(opts: BuildServerOptions) {
       prTitlePrefix: cfg.prTitlePrefix,
       prBodyTemplate: cfg.prBodyTemplate,
       maxContextTokens: cfg.maxContextTokens,
+      aiHelpers: cfg.aiHelpers,
+      defaultThinking: cfg.defaultThinking,
     });
   });
 
@@ -971,6 +1075,37 @@ export function buildServer(opts: BuildServerOptions) {
         changed = true;
       }
     }
+    if ("aiHelpers" in body) {
+      const parsed = AiHelperConfig.safeParse(body.aiHelpers);
+      if (!parsed.success) {
+        return c.json(
+          { error: "invalid aiHelpers", issues: parsed.error.issues },
+          400,
+        );
+      }
+      next.aiHelpers = parsed.data;
+      changed = true;
+    }
+    if ("defaultThinking" in body) {
+      const dt = body.defaultThinking as
+        | { claude?: string; codex?: string }
+        | undefined;
+      if (!dt || typeof dt !== "object") {
+        return c.json({ error: "defaultThinking must be an object" }, 400);
+      }
+      const allowed = ["low", "medium", "high", "max", "xhigh"] as const;
+      const cur = { ...cfg.defaultThinking };
+      for (const k of ["claude", "codex"] as const) {
+        const v = dt[k];
+        if (v == null) continue;
+        if (!allowed.includes(v as (typeof allowed)[number])) {
+          return c.json({ error: `defaultThinking.${k} must be one of ${allowed.join("|")}` }, 400);
+        }
+        cur[k] = v as (typeof allowed)[number];
+      }
+      next.defaultThinking = cur;
+      changed = true;
+    }
     if (!changed) return c.json({ error: "no valid keys in patch" }, 400);
     saveConfig(paths.root, next);
     return c.json({
@@ -981,6 +1116,8 @@ export function buildServer(opts: BuildServerOptions) {
         prTitlePrefix: next.prTitlePrefix,
         prBodyTemplate: next.prBodyTemplate,
         maxContextTokens: next.maxContextTokens,
+        aiHelpers: next.aiHelpers,
+        defaultThinking: next.defaultThinking,
       },
     });
   });
