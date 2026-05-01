@@ -31,6 +31,8 @@ export const tasks = sqliteTable("tasks", {
   skillsJson: text("skills_json").notNull().default("[]"),
   permissionMode: text("permission_mode").notNull().default("bypassPermissions"),
   workspaceMode: text("workspace_mode").notNull().default("worktree"),
+  closedAt: integer("closed_at"),
+  closedReason: text("closed_reason"),
 });
 
 export const projects = sqliteTable("projects", {
@@ -136,7 +138,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   skills_json TEXT NOT NULL DEFAULT '[]',
   project_id TEXT,
   permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions',
-  workspace_mode TEXT NOT NULL DEFAULT 'worktree'
+  workspace_mode TEXT NOT NULL DEFAULT 'worktree',
+  closed_at INTEGER,
+  closed_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -237,6 +241,8 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE tasks ADD COLUMN project_id TEXT",
   "ALTER TABLE tasks ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions'",
   "ALTER TABLE tasks ADD COLUMN workspace_mode TEXT NOT NULL DEFAULT 'worktree'",
+  "ALTER TABLE tasks ADD COLUMN closed_at INTEGER",
+  "ALTER TABLE tasks ADD COLUMN closed_reason TEXT",
 ];
 
 function migrate(sqlite: Database): void {

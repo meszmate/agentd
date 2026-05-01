@@ -84,12 +84,20 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint }: Props)
       );
     };
 
+    // Track readiness so we can distinguish "couldn't connect at all"
+    // (worth a toast) from "the WS hiccupped after a successful open"
+    // (silent — the server-driven exit message in the terminal already
+    // tells the user the session ended).
+    let everOpened = false;
     if (ws) {
       ws.onopen = () => {
+        everOpened = true;
         term.focus();
         sendResize();
       };
-      ws.onerror = () => onError?.("terminal: connection error");
+      ws.onerror = () => {
+        if (!everOpened) onError?.("terminal: connection error");
+      };
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(String(ev.data)) as PtyServerMessage;

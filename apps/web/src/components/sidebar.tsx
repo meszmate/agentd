@@ -470,15 +470,22 @@ function OpenTasksSection() {
   const projectsQ = useProjects();
   const projects = projectsQ.data?.projects ?? [];
 
-  const open = tasks
-    .filter(
-      (t) =>
-        t.status === "running" ||
-        t.status === "waiting_input" ||
-        t.status === "waiting_perm",
-    )
-    .slice(0, 8);
-
+  // "Current" = anything actively in flight, then the most recent done /
+  // failed / stopped tasks so the operator can quickly resume one. Up to 8
+  // total. We don't render the section if the user has no tasks at all
+  // (that's the proper first-run state).
+  const active = tasks.filter(
+    (t) =>
+      t.status === "running" ||
+      t.status === "waiting_input" ||
+      t.status === "waiting_perm" ||
+      t.status === "pending",
+  );
+  const recent = tasks
+    .filter((t) => !active.includes(t))
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, Math.max(0, 8 - active.length));
+  const open = [...active, ...recent].slice(0, 8);
   if (open.length === 0) return null;
 
   const projectColor = (id: string | null | undefined): string => {
@@ -491,22 +498,45 @@ function OpenTasksSection() {
     <div>
       <div className="px-5 mb-1 flex items-center gap-2">
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ember-700 dark:text-ember-300 font-medium">
-          Open
+          Tasks
         </span>
-        <span className="ml-auto font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300">
+        {active.length > 0 && (
+          <span className="font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300">
+            {active.length} live
+          </span>
+        )}
+        <span className="ml-auto font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
           {open.length}
         </span>
       </div>
       <div className="flex flex-col px-2 gap-0.5">
         {open.map((t) => {
+          const isActive =
+            t.status === "running" ||
+            t.status === "waiting_input" ||
+            t.status === "waiting_perm" ||
+            t.status === "pending";
           const tone =
             t.status === "running"
               ? "text-ember-700 dark:text-ember-300"
-              : "text-amber-700 dark:text-amber-300";
+              : t.status === "waiting_input" || t.status === "waiting_perm"
+                ? "text-amber-700 dark:text-amber-300"
+                : t.status === "done"
+                  ? "text-emerald-700 dark:text-emerald-300"
+                  : t.status === "failed"
+                    ? "text-red-700 dark:text-red-300"
+                    : "text-ink-400 dark:text-ink-500";
           const dot =
             t.status === "running"
               ? "bg-ember-500 animate-blink"
-              : "bg-amber-500 animate-blink";
+              : t.status === "waiting_input" || t.status === "waiting_perm"
+                ? "bg-amber-500 animate-blink"
+                : t.status === "done"
+                  ? "bg-emerald-500"
+                  : t.status === "failed"
+                    ? "bg-red-500"
+                    : "bg-ink-300 dark:bg-ink-600";
+          void isActive;
           return (
             <NavLink
               key={t.id}
@@ -536,7 +566,11 @@ function OpenTasksSection() {
                       ? "running"
                       : t.status === "waiting_input"
                         ? "needs you"
-                        : "needs ok"}
+                        : t.status === "waiting_perm"
+                          ? "needs ok"
+                          : t.status === "pending"
+                            ? "queued"
+                            : t.status}
                   </span>
                   <span className="text-ink-400 dark:text-ink-500">·</span>
                   <span className="text-ink-400 dark:text-ink-500">

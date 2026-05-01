@@ -23,7 +23,7 @@ import {
 } from "@/lib/utils";
 import { TaskDetail } from "@/views/TaskDetail";
 
-type StatusFilter = "all" | "active" | "done" | "failed";
+type StatusFilter = "all" | "active" | "done" | "failed" | "closed";
 
 const ACTIVE_STATUSES: TaskStatus[] = [
   "running",
@@ -77,16 +77,28 @@ function TasksList({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
     let active = 0;
     let done = 0;
     let failed = 0;
+    let closed = 0;
     for (const t of tasks) {
-      if (ACTIVE_STATUSES.includes(t.status)) active++;
-      else if (t.status === "done") done++;
-      else if (t.status === "failed" || t.status === "stopped") failed++;
+      if (t.closedAt) closed++;
+      if (ACTIVE_STATUSES.includes(t.status) && !t.closedAt) active++;
+      else if (t.status === "done" && !t.closedAt) done++;
+      else if ((t.status === "failed" || t.status === "stopped") && !t.closedAt) failed++;
     }
-    return { all: tasks.length, active, done, failed };
+    return {
+      all: tasks.filter((t) => !t.closedAt).length,
+      active,
+      done,
+      failed,
+      closed,
+    };
   }, [tasks]);
 
   const filtered = useMemo(() => {
     return tasks.filter((t) => {
+      // Closed tasks are hidden from every filter except "closed". This
+      // matches "closed = archived, out of the way" semantics.
+      if (statusFilter !== "closed" && t.closedAt) return false;
+      if (statusFilter === "closed" && !t.closedAt) return false;
       if (statusFilter === "active" && !ACTIVE_STATUSES.includes(t.status))
         return false;
       if (statusFilter === "done" && t.status !== "done") return false;
@@ -153,6 +165,7 @@ function TasksList({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
             { key: "active", label: "Active", count: counts.active },
             { key: "done", label: "Done", count: counts.done },
             { key: "failed", label: "Failed", count: counts.failed },
+            { key: "closed", label: "Closed", count: counts.closed },
           ]}
           value={statusFilter}
           onChange={setStatusFilter}

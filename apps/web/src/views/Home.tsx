@@ -434,6 +434,20 @@ function Composer({ firstRun }: { firstRun: boolean }) {
           onSelect={(v) => setPermissionMode(v as PermissionMode)}
         />
 
+        <ToolbarSelect
+          label={workspace.workspaceMode === "in_place" ? "in-place" : "worktree"}
+          options={[
+            { value: "worktree", label: "worktree · isolated copy" },
+            { value: "in_place", label: "in-place · your real branch" },
+          ]}
+          onSelect={(v) =>
+            setWorkspace({
+              ...workspace,
+              workspaceMode: v as "worktree" | "in_place",
+            })
+          }
+        />
+
         <button
           type="button"
           onClick={() => setShowAdvanced((v) => !v)}

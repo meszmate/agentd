@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  CheckSquare,
   ExternalLink,
   MoreHorizontal,
   PanelRight,
   PanelRightClose,
+  RotateCcw,
   Square,
   Trash2,
 } from "lucide-react";
@@ -42,7 +44,7 @@ import {
   useTask,
   useTaskStream,
 } from "@/queries";
-import { useApp } from "@/AppContext";
+import { useApp, useClient } from "@/AppContext";
 import {
   cn,
   formatCost,
@@ -225,6 +227,46 @@ export function TaskDetail({ task }: { task: Task }) {
     }
   };
 
+  const client = useClient();
+  const onClose = async (reason: string) => {
+    try {
+      await client.closeTask(task.id, reason);
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+      void qc.invalidateQueries({ queryKey: qk.task(task.id) });
+      toast(`Task closed (${reason})`);
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
+  const onReopen = async () => {
+    try {
+      await client.reopenTask(task.id);
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+      void qc.invalidateQueries({ queryKey: qk.task(task.id) });
+      toast("Task reopened");
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
+  const onCheckMerged = async () => {
+    try {
+      const r = await client.checkPrState(task.id, true);
+      if (!r.prUrl) {
+        toast("No PR linked to this task", true);
+        return;
+      }
+      if (r.merged) {
+        toast(`PR is merged · task ${r.autoClosed ? "auto-closed" : "still open"}`);
+        void qc.invalidateQueries({ queryKey: qk.task(task.id) });
+        void qc.invalidateQueries({ queryKey: qk.tasks() });
+      } else {
+        toast(`PR state: ${r.state ?? "unknown"} (not merged)`);
+      }
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
+
   const statusTone =
     task.status === "running"
       ? "bg-ember-500/10 text-ember-700 dark:text-ember-300"
@@ -258,6 +300,15 @@ export function TaskDetail({ task }: { task: Task }) {
         >
           {task.status}
         </span>
+        {task.closedAt && (
+          <span
+            className="shrink-0 inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] font-medium uppercase tracking-[0.08em] bg-ink-900/[0.05] text-ink-500 dark:bg-ink-50/[0.05] dark:text-ink-400"
+            title={`closed ${new Date(task.closedAt).toLocaleString()}${task.closedReason ? ` (${task.closedReason})` : ""}`}
+          >
+            <CheckSquare className="h-3 w-3" />
+            closed{task.closedReason ? ` · ${task.closedReason}` : ""}
+          </span>
+        )}
         <LiveBadge live={live} terminal={isTerminal} />
 
         <Spacer />
@@ -316,8 +367,31 @@ export function TaskDetail({ task }: { task: Task }) {
               <MoreHorizontal className="h-3.5 w-3.5" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-[12rem]">
+          <DropdownMenuContent align="end" className="min-w-[14rem]">
             <DropdownMenuLabel>Task</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            {task.closedAt ? (
+              <DropdownMenuItem onClick={onReopen}>
+                <RotateCcw /> Reopen
+              </DropdownMenuItem>
+            ) : (
+              <>
+                <DropdownMenuItem onClick={() => onClose("merged")}>
+                  <CheckSquare /> Close · merged
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => onClose("abandoned")}>
+                  <CheckSquare /> Close · abandoned
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => onClose("manual")}>
+                  <CheckSquare /> Close · manual
+                </DropdownMenuItem>
+                {task.prUrl && (
+                  <DropdownMenuItem onClick={onCheckMerged}>
+                    <ExternalLink /> Check PR merged → auto-close
+                  </DropdownMenuItem>
+                )}
+              </>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem
               onClick={onRemove}

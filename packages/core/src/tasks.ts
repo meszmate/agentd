@@ -67,7 +67,35 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
       (row.permissionMode as PermissionMode | undefined) ?? "bypassPermissions",
     workspaceMode:
       (row.workspaceMode as WorkspaceMode | undefined) ?? "worktree",
+    closedAt: row.closedAt ?? null,
+    closedReason: row.closedReason ?? null,
   };
+}
+
+/** Mark a task as closed with an optional reason ("merged" / "abandoned" / etc.). */
+export function closeTask(
+  db: Db,
+  id: string,
+  reason?: string,
+): Task | null {
+  db.update(tasks)
+    .set({
+      closedAt: Date.now(),
+      closedReason: reason ?? null,
+      updatedAt: Date.now(),
+    })
+    .where(eq(tasks.id, id))
+    .run();
+  return getTask(db, id);
+}
+
+/** Undo close — back into the active list. */
+export function reopenTask(db: Db, id: string): Task | null {
+  db.update(tasks)
+    .set({ closedAt: null, closedReason: null, updatedAt: Date.now() })
+    .where(eq(tasks.id, id))
+    .run();
+  return getTask(db, id);
 }
 
 export function createTask(db: Db, input: CreateTaskInput): Task {

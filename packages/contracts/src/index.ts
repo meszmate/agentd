@@ -78,6 +78,14 @@ export const Task = z.object({
   skills: z.array(z.string()).optional(),
   permissionMode: PermissionMode.optional(),
   workspaceMode: WorkspaceMode.optional(),
+  /**
+   * When set, the task is "closed" — typically because its PR merged or
+   * the operator decided it's no longer relevant. Closed tasks default
+   * to filtered out of list views. Closed tasks can be reopened.
+   */
+  closedAt: z.number().nullable().optional(),
+  /** Why the task was closed: "merged" | "abandoned" | "manual" | etc. */
+  closedReason: z.string().nullable().optional(),
 });
 export type Task = z.infer<typeof Task>;
 

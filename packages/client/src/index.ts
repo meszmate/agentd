@@ -146,6 +146,34 @@ export class AgentdClient {
     await this.req(`/api/tasks/${id}/stop`, { method: "POST" });
   }
 
+  async closeTask(id: string, reason?: string): Promise<{ task: Task | null }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/close`, {
+      method: "POST",
+      body: JSON.stringify(reason ? { reason } : {}),
+    });
+  }
+
+  async reopenTask(id: string): Promise<{ task: Task | null }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/reopen`, {
+      method: "POST",
+    });
+  }
+
+  async checkPrState(
+    id: string,
+    autoClose = false,
+  ): Promise<{
+    prUrl: string | null;
+    merged?: boolean;
+    state?: string | null;
+    mergedAt?: string | null;
+    autoClosed?: boolean;
+    task?: Task | null;
+  }> {
+    const qs = autoClose ? "?autoClose=1" : "";
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/pr-state${qs}`);
+  }
+
   async removeTask(id: string): Promise<void> {
     await this.req(`/api/tasks/${id}`, { method: "DELETE" });
   }
@@ -201,6 +229,88 @@ export class AgentdClient {
       method: "POST",
       body: JSON.stringify(opts),
     });
+  }
+
+  /**
+   * Streamed commit-message generation. Calls `onChunk(text)` as Claude
+   * prints each chunk; resolves with the cleaned final message + source.
+   * The response stream ends with a sentinel " " + JSON metadata that the
+   * caller's last chunk will not include.
+   */
+  async streamCommitMessage(
+    id: string,
+    opts: {
+      includeBody?: boolean;
+      includeScope?: boolean;
+      wip?: boolean;
+      hint?: string;
+    } = {},
+    onChunk?: (chunk: string) => void,
+    abort?: AbortSignal,
+  ): Promise<{ message: string; source: string; error?: string }> {
+    const url =
+      this.server +
+      `/api/tasks/${encodeURIComponent(id)}/commit-message/stream`;
+    const r = await fetch(url, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(opts),
+      ...(abort ? { signal: abort } : {}),
+    });
+    if (!r.ok || !r.body) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`stream commit-message ${r.status}: ${text}`);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      buf += chunk;
+      // The sentinel "\n " separates the streamed message body from the
+      // trailing JSON metadata. Don't echo the sentinel or anything past it.
+      const sentinel = buf.indexOf("\n ");
+      if (sentinel >= 0) {
+        const visible = chunk.slice(
+          0,
+          chunk.length - (buf.length - sentinel),
+        );
+        if (visible.length > 0) onChunk?.(visible);
+        // Drain remaining bytes into buf for parsing below, but stop
+        // forwarding to onChunk.
+        while (true) {
+          const next = await reader.read();
+          if (next.done) break;
+          buf += decoder.decode(next.value, { stream: true });
+        }
+        break;
+      }
+      onChunk?.(chunk);
+    }
+    // Parse trailing metadata.
+    const sentinelAt = buf.indexOf("\n ");
+    if (sentinelAt < 0) {
+      // No sentinel arrived (e.g. claude died silently). Treat what we
+      // got as the message.
+      return { message: buf.trim(), source: "claude" };
+    }
+    const tail = buf.slice(sentinelAt + 2).trim();
+    try {
+      const meta = JSON.parse(tail) as {
+        source: string;
+        message?: string;
+        error?: string;
+      };
+      return {
+        message: meta.message ?? buf.slice(0, sentinelAt).trim(),
+        source: meta.source,
+        ...(meta.error ? { error: meta.error } : {}),
+      };
+    } catch {
+      return { message: buf.slice(0, sentinelAt).trim(), source: "claude" };
+    }
   }
 
   async pushTask(

@@ -137,11 +137,22 @@ function CommitDialog({
 
   const regenerate = async () => {
     setGenerating(true);
+    setMessage("");
+    setSource(null);
     try {
-      const r = await client.generateCommitMessage(task.id, {
-        ...shape,
-        hint: hint.trim() || undefined,
-      });
+      const r = await client.streamCommitMessage(
+        task.id,
+        {
+          ...shape,
+          hint: hint.trim() || undefined,
+        },
+        (chunk) => {
+          // Append each token as it arrives — the textarea fills like the
+          // model is typing.
+          setMessage((cur) => cur + chunk);
+        },
+      );
+      // Stream ended; replace with the cleaned final message.
       setMessage(r.message);
       setSource(r.source);
     } catch (e) {
@@ -194,14 +205,22 @@ function CommitDialog({
               <Label className="font-mono text-[10px] uppercase tracking-[0.12em]">
                 Message
               </Label>
-              <span className="text-[10px] text-ink-400 dark:text-ink-500">
-                {generating
-                  ? "asking claude…"
-                  : source === "claude"
-                    ? "claude generated · edit freely"
-                    : source
-                      ? `fallback (${source.replace("fallback-", "")})`
-                      : ""}
+              <span className="text-[10px] text-ink-400 dark:text-ink-500 inline-flex items-center gap-1">
+                {generating ? (
+                  <>
+                    <Sparkles className="h-2.5 w-2.5 text-ember-500 animate-pulse" />
+                    <span className="text-ember-700 dark:text-ember-300">
+                      claude is writing
+                    </span>
+                    <span className="inline-block w-1 h-3 bg-ember-500/70 animate-blink align-text-bottom" />
+                  </>
+                ) : source === "claude" ? (
+                  "claude generated · edit freely"
+                ) : source ? (
+                  `fallback (${source.replace("fallback-", "")})`
+                ) : (
+                  ""
+                )}
               </span>
               <button
                 type="button"

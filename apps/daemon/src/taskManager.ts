@@ -17,6 +17,7 @@ import {
   getTask,
   listTasks,
   listMessages,
+  generateCommitMessage,
   loadConfig,
   newId,
   renderRepoContext,
@@ -307,12 +308,27 @@ export class TaskManager {
   private async maybeAutoCommit(taskId: string, task: Task): Promise<boolean> {
     const lastUserMsg = findLastUserMessage(this.db, taskId);
     const cfg = loadConfig(this.paths.root);
-    const title = `${cfg.commitPrefix}${task.title}`.slice(0, 72);
+    // Generate the commit subject from the actual diff. Falls back to the
+    // task title if claude isn't available or the diff is empty (which
+    // should be rare — we only run this when the agent left changes behind).
+    const ai = await generateCommitMessage(task.worktreePath, {
+      fallbackHint: task.title,
+    });
+    const fallbackTitle =
+      `${cfg.commitPrefix}${task.title}`.slice(0, 72);
+    const subject =
+      ai.source === "claude"
+        ? ai.message.split("\n")[0]!.slice(0, 72)
+        : fallbackTitle;
+    const body =
+      ai.source === "claude" && ai.message.includes("\n")
+        ? ai.message.split("\n").slice(1).join("\n").trim() || undefined
+        : (lastUserMsg ?? undefined);
     try {
       const result = await autoCommit({
         cwd: task.worktreePath,
-        title,
-        body: lastUserMsg ?? undefined,
+        title: subject,
+        body,
       });
       if (result.committed) {
         appendMessage(

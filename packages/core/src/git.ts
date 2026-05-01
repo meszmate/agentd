@@ -345,6 +345,228 @@ export async function pushBranch(
   };
 }
 
+// ── AI commit message generation ─────────────────────────────────
+//
+// Runs `claude -p` against the worktree's current diff and returns a
+// conventional-commit subject (and optional body). Used by both the
+// manual Ship → Commit dialog and the auto-commit-on-exit hook so the
+// committed message reflects the actual change, not the task title.
+
+export interface CommitMessageShape {
+  includeBody?: boolean;
+  includeScope?: boolean;
+  wip?: boolean;
+  /** Free-form operator hint — e.g. "focus on the streaming part". */
+  hint?: string;
+}
+
+export interface CommitMessageResult {
+  message: string;
+  source: "claude" | "fallback-no-changes" | "fallback-empty-output" | "fallback-claude-error";
+  error?: string;
+}
+
+const COMMIT_DIFF_LIMIT = 12000;
+const COMMIT_FALLBACK = (hint: string) =>
+  `chore: ${(hint || "update").slice(0, 60).replace(/\s+/g, " ").trim()}`;
+
+async function readCombinedDiff(cwd: string): Promise<string> {
+  const [staged, working] = await Promise.all([
+    run(["git", "diff", "--staged", "--no-color"], cwd),
+    run(["git", "diff", "--no-color"], cwd),
+  ]);
+  return (staged.stdout + "\n" + working.stdout).slice(0, COMMIT_DIFF_LIMIT);
+}
+
+function buildCommitPrompt(diff: string, shape: CommitMessageShape): string {
+  const rules = [
+    "Output ONLY the commit message. No preamble, no fences, no quotes.",
+    shape.wip
+      ? "Use prefix `wip` (e.g. `wip: small description`)."
+      : "Use a Conventional Commit type: feat, fix, refactor, docs, chore, style, test, perf, ci, build.",
+    shape.includeScope
+      ? "Optionally include a short scope in parentheses if obvious from the diff: `feat(api): ...`."
+      : "Do NOT include a scope.",
+    "Subject line must be lowercase, in imperative mood, under 70 characters total.",
+    shape.includeBody
+      ? "After the subject add a blank line, then 1-3 short bullet points explaining what changed. No test plan, no AI attribution."
+      : "Subject line only — no body.",
+    shape.hint?.trim() ? `Operator hint: ${shape.hint.trim()}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return `Generate a single git commit message for this diff.\n\n${rules}\n\n--- DIFF ---\n${diff}\n--- END DIFF ---`;
+}
+
+function cleanCommitOutput(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^```[a-z]*\n?|```$/g, "")
+    .replace(/^["']|["']$/g, "")
+    .trim();
+}
+
+/**
+ * Synchronous-ish generator: spawn claude, wait, return the cleaned
+ * message. Falls back gracefully when claude is missing or empty.
+ */
+export async function generateCommitMessage(
+  cwd: string,
+  opts: { fallbackHint?: string } & CommitMessageShape = {},
+): Promise<CommitMessageResult> {
+  const diff = await readCombinedDiff(cwd);
+  if (!diff.trim()) {
+    return {
+      message: COMMIT_FALLBACK(opts.fallbackHint ?? ""),
+      source: "fallback-no-changes",
+    };
+  }
+  const prompt = buildCommitPrompt(diff, opts);
+  const claudeBin = process.env.AGENTD_CLAUDE_BIN || "claude";
+  try {
+    const proc = Bun.spawn(
+      [
+        claudeBin,
+        "-p",
+        prompt,
+        "--permission-mode",
+        "bypassPermissions",
+        "--allow-dangerously-skip-permissions",
+      ],
+      {
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: process.env as Record<string, string>,
+      },
+    );
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    const cleaned = cleanCommitOutput(out);
+    if (!cleaned) {
+      return {
+        message: COMMIT_FALLBACK(opts.fallbackHint ?? ""),
+        source: "fallback-empty-output",
+      };
+    }
+    return { message: cleaned, source: "claude" };
+  } catch (e) {
+    return {
+      message: COMMIT_FALLBACK(opts.fallbackHint ?? ""),
+      source: "fallback-claude-error",
+      error: (e as Error).message,
+    };
+  }
+}
+
+/**
+ * Streaming variant. Yields chunks as Claude prints them. The caller can
+ * forward those chunks to a streaming HTTP response so the web shows the
+ * commit message being typed live. Resolves with the full cleaned message.
+ */
+export async function* streamCommitMessage(
+  cwd: string,
+  opts: { fallbackHint?: string } & CommitMessageShape = {},
+): AsyncGenerator<string, CommitMessageResult, void> {
+  const diff = await readCombinedDiff(cwd);
+  if (!diff.trim()) {
+    const fallback = COMMIT_FALLBACK(opts.fallbackHint ?? "");
+    yield fallback;
+    return { message: fallback, source: "fallback-no-changes" };
+  }
+  const prompt = buildCommitPrompt(diff, opts);
+  const claudeBin = process.env.AGENTD_CLAUDE_BIN || "claude";
+  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn({
+      cmd: [
+        claudeBin,
+        "-p",
+        prompt,
+        "--permission-mode",
+        "bypassPermissions",
+        "--allow-dangerously-skip-permissions",
+      ],
+      cwd,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+  } catch (e) {
+    const fallback = COMMIT_FALLBACK(opts.fallbackHint ?? "");
+    yield fallback;
+    return {
+      message: fallback,
+      source: "fallback-claude-error",
+      error: (e as Error).message,
+    };
+  }
+
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let raw = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      raw += chunk;
+      yield chunk;
+    }
+  } catch {
+    // stream cancelled
+  }
+  await proc.exited;
+  const cleaned = cleanCommitOutput(raw);
+  if (!cleaned) {
+    const fallback = COMMIT_FALLBACK(opts.fallbackHint ?? "");
+    return {
+      message: fallback,
+      source: "fallback-empty-output",
+    };
+  }
+  return { message: cleaned, source: "claude" };
+}
+
+/**
+ * Best-effort PR state lookup via the `gh` CLI. Returns the merge state
+ * if the URL parses to an owner/repo + number; null otherwise (no gh,
+ * not authed, not a github URL, etc.). Used to auto-close tasks once
+ * their PR merges.
+ */
+export async function getPrState(
+  prUrl: string,
+): Promise<{ state: string; merged: boolean; mergedAt: string | null } | null> {
+  const m = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(prUrl);
+  if (!m) return null;
+  const [, owner, repo, num] = m;
+  const r = await run(
+    [
+      "gh",
+      "pr",
+      "view",
+      num!,
+      "-R",
+      `${owner}/${repo}`,
+      "--json",
+      "state,mergedAt",
+    ],
+    process.cwd(),
+  );
+  if (r.exitCode !== 0) return null;
+  try {
+    const j = JSON.parse(r.stdout) as { state?: string; mergedAt?: string };
+    return {
+      state: j.state ?? "UNKNOWN",
+      merged: j.state === "MERGED",
+      mergedAt: j.mergedAt ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export interface CreatePrInput {
   cwd: string;
   title: string;
