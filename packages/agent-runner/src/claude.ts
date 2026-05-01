@@ -119,7 +119,10 @@ export class ClaudeRunner implements AgentRunner {
         args.push("--add-dir", d);
       }
     }
-    if (this.opts.model) args.push("--model", this.opts.model);
+    // Per-run model override wins; otherwise fall back to the runner's
+    // constructor-time default; if neither is set, let `claude` pick.
+    const model = (opts.model && opts.model.trim()) || this.opts.model;
+    if (model) args.push("--model", model);
     if (this.opts.extraArgs) args.push(...this.opts.extraArgs);
 
     const proc = Bun.spawn({

@@ -28,6 +28,7 @@ export interface CreateTaskInput {
   permissionMode?: PermissionMode;
   workspaceMode?: WorkspaceMode;
   thinkingLevel?: ThinkingLevel;
+  model?: string;
 }
 
 function rowToTask(row: typeof tasks.$inferSelect): Task {
@@ -71,6 +72,7 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
       (row.workspaceMode as WorkspaceMode | undefined) ?? "worktree",
     thinkingLevel:
       (row.thinkingLevel as ThinkingLevel | undefined) ?? "high",
+    model: row.model ?? "",
     closedAt: row.closedAt ?? null,
     closedReason: row.closedReason ?? null,
   };
@@ -132,6 +134,7 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       permissionMode: input.permissionMode ?? "bypassPermissions",
       workspaceMode: input.workspaceMode ?? "worktree",
       thinkingLevel: input.thinkingLevel ?? "high",
+      model: input.model ?? "",
     })
     .run();
   return getTask(db, id)!;
@@ -158,6 +161,19 @@ export function setTaskThinkingLevel(
 ): Task | null {
   db.update(tasks)
     .set({ thinkingLevel: level, updatedAt: Date.now() })
+    .where(eq(tasks.id, id))
+    .run();
+  return getTask(db, id);
+}
+
+/**
+ * Update the task's per-task model override. Empty string clears it (the
+ * task then inherits the configured default for its agent kind). Applied
+ * on the next runner spawn — current turn keeps its model.
+ */
+export function setTaskModel(db: Db, id: string, model: string): Task | null {
+  db.update(tasks)
+    .set({ model, updatedAt: Date.now() })
     .where(eq(tasks.id, id))
     .run();
   return getTask(db, id);

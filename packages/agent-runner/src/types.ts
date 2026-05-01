@@ -18,6 +18,11 @@ export interface RunnerStartOptions {
    * native flag (Claude `--effort`, Codex `model_reasoning_effort`).
    */
   thinkingLevel?: ThinkingLevel;
+  /**
+   * Per-run model override. Empty string / undefined inherits the runner's
+   * constructor-time `model` (or the CLI's own default if neither is set).
+   */
+  model?: string;
   /** Appended to the agent's system prompt for this run. */
   appendSystemPrompt?: string;
   /**

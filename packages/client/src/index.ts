@@ -450,9 +450,8 @@ export class AgentdClient {
   // ── settings ──
   async getSettings(): Promise<{
     agentInstructions: string;
-    commitPrefix: string;
-    prTitlePrefix: string;
-    prBodyTemplate: string;
+    commitInstructions: string;
+    prInstructions: string;
     maxContextTokens: number;
     aiHelpers: {
       binary: string;
@@ -460,6 +459,7 @@ export class AgentdClient {
       effort: ThinkingLevel;
     };
     defaultThinking: { claude: ThinkingLevel; codex: ThinkingLevel };
+    defaultModel: { claude: string; codex: string };
   }> {
     return this.req("/api/admin/settings");
   }
@@ -467,20 +467,31 @@ export class AgentdClient {
   async patchSettings(
     patch: Partial<{
       agentInstructions: string;
-      commitPrefix: string;
-      prTitlePrefix: string;
-      prBodyTemplate: string;
+      commitInstructions: string;
+      prInstructions: string;
       maxContextTokens: number;
       aiHelpers: { binary: string; model: string; effort: ThinkingLevel };
       defaultThinking: Partial<{
         claude: ThinkingLevel;
         codex: ThinkingLevel;
       }>;
+      defaultModel: Partial<{ claude: string; codex: string }>;
     }>,
   ): Promise<{ ok: boolean; settings: Record<string, unknown> }> {
     return this.req("/api/admin/settings", {
       method: "POST",
       body: JSON.stringify(patch),
+    });
+  }
+
+  /** Per-task model override. Empty string clears it. */
+  async setTaskModel(
+    id: string,
+    model: string,
+  ): Promise<{ task: Task | null }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/model`, {
+      method: "PATCH",
+      body: JSON.stringify({ model }),
     });
   }
 

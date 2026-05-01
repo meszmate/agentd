@@ -32,7 +32,22 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   "Keep all output focused on the task itself — no meta-commentary about how the work was performed.",
 ].join(" ");
 
-export const DEFAULT_PR_BODY_TEMPLATE = "Original prompt:\n\n{prompt}\n";
+/**
+ * User-provided guidance appended to the helper's prompt when generating
+ * commit messages. Empty by default. Example:
+ *   "Always lowercase. Don't include scope. Mention affected packages
+ *    in the body when more than one is touched."
+ */
+export const DEFAULT_COMMIT_INSTRUCTIONS = "";
+
+/**
+ * User-provided guidance appended to the helper's prompt when generating
+ * PR titles + bodies. Empty by default. Example:
+ *   "Open with a one-sentence summary, then a `## Changes` heading with
+ *    bullets. Skip 'Test plan'. Don't reference issues unless the diff
+ *    explicitly mentions them."
+ */
+export const DEFAULT_PR_INSTRUCTIONS = "";
 
 /**
  * Settings for the small Claude invocations agentd makes outside the main
@@ -61,15 +76,29 @@ export const AgentdConfig = z.object({
   pluginSessionToken: z.string().nullable().default(null),
   /** Appended to the agent's system prompt for every task. */
   agentInstructions: z.string().default(DEFAULT_AGENT_INSTRUCTIONS),
-  /** Prefix for auto-generated commit message subject lines. */
-  commitPrefix: z.string().default("agent: "),
-  /** Prefix for auto-PR titles. */
-  prTitlePrefix: z.string().default(""),
   /**
-   * PR body template. Substitutes {prompt}, {task_id}, {branch}, {title}.
-   * Empty string means use the prompt verbatim with no extra framing.
+   * Free-form guidance added to the AI commit-message generator's prompt.
+   * Use it to teach the helper your team's commit style without baking
+   * a template prefix into the message.
    */
-  prBodyTemplate: z.string().default(DEFAULT_PR_BODY_TEMPLATE),
+  commitInstructions: z.string().default(DEFAULT_COMMIT_INSTRUCTIONS),
+  /**
+   * Free-form guidance added to the AI PR-message generator's prompt.
+   * Same idea as commitInstructions but for `gh pr create` titles + bodies.
+   */
+  prInstructions: z.string().default(DEFAULT_PR_INSTRUCTIONS),
+  /**
+   * Default model passed to each agent CLI when a task doesn't pin one.
+   * Empty string means inherit the CLI's own default. The user can pick
+   * any model the underlying CLI accepts (Claude opus/sonnet/haiku tiers,
+   * Codex gpt-5 / gpt-5-codex, etc.).
+   */
+  defaultModel: z
+    .object({
+      claude: z.string().default(""),
+      codex: z.string().default(""),
+    })
+    .default({ claude: "", codex: "" }),
   /**
    * Token budget for the system-prompt suffix (agentInstructions + skill
    * bodies + repo doc). Skills get dropped (claude/codex first, then

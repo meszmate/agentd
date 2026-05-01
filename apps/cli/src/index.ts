@@ -32,9 +32,9 @@ Schedules (cron-driven template runs):
   agentd schedule disable <name|id>
   agentd schedule rm <name|id>
 
-Settings (daemon-side, edit the system prompt agents see + commit/PR templates):
+Settings (daemon-side, edit the system prompt + AI helper guidance):
   agentd settings show
-  agentd settings set <agentInstructions|commitPrefix|prTitlePrefix|prBodyTemplate> <value>
+  agentd settings set <agentInstructions|commitInstructions|prInstructions> <value>
 
 Plugins:
   agentd plugin status
@@ -521,7 +521,7 @@ async function cmdSchedule(argv: string[]) {
 
 // ───────────── settings ─────────────
 
-const SETTINGS_KEYS = ["agentInstructions", "commitPrefix", "prTitlePrefix", "prBodyTemplate"] as const;
+const SETTINGS_KEYS = ["agentInstructions", "commitInstructions", "prInstructions"] as const;
 type SettingKey = (typeof SETTINGS_KEYS)[number];
 
 async function cmdSettings(argv: string[]) {

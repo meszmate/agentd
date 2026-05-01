@@ -32,6 +32,7 @@ export const tasks = sqliteTable("tasks", {
   permissionMode: text("permission_mode").notNull().default("bypassPermissions"),
   workspaceMode: text("workspace_mode").notNull().default("worktree"),
   thinkingLevel: text("thinking_level").notNull().default("high"),
+  model: text("model").notNull().default(""),
   closedAt: integer("closed_at"),
   closedReason: text("closed_reason"),
 });
@@ -141,6 +142,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions',
   workspace_mode TEXT NOT NULL DEFAULT 'worktree',
   thinking_level TEXT NOT NULL DEFAULT 'high',
+  model TEXT NOT NULL DEFAULT '',
   closed_at INTEGER,
   closed_reason TEXT
 );
@@ -244,6 +246,7 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE tasks ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions'",
   "ALTER TABLE tasks ADD COLUMN workspace_mode TEXT NOT NULL DEFAULT 'worktree'",
   "ALTER TABLE tasks ADD COLUMN thinking_level TEXT NOT NULL DEFAULT 'high'",
+  "ALTER TABLE tasks ADD COLUMN model TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE tasks ADD COLUMN closed_at INTEGER",
   "ALTER TABLE tasks ADD COLUMN closed_reason TEXT",
 ];

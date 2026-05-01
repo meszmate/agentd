@@ -20,6 +20,7 @@ import {
   listMessages,
   generateBranchName,
   generateCommitMessage,
+  streamPrMessage,
   loadConfig,
   newId,
   renderRepoContext,
@@ -28,7 +29,6 @@ import {
   touchProject,
   pushBranch,
   removeWorktree,
-  renderConfigTemplate,
   setTaskPrUrl,
   updateTaskStatus,
   createWorktree,
@@ -64,6 +64,7 @@ export interface CreateTaskParams {
   branchName?: string;
   pullLatest?: boolean;
   thinkingLevel?: ThinkingLevel;
+  model?: string;
 }
 
 export class TaskManager {
@@ -159,6 +160,7 @@ export class TaskManager {
           const cfg = loadConfig(this.paths.root);
           return cfg.defaultThinking[params.agent];
         })(),
+      model: params.model ?? "",
     });
     touchProject(this.db, project.id);
     appendMessage(this.db, task.id, "user", params.prompt);
@@ -319,6 +321,12 @@ export class TaskManager {
       : undefined;
     const additionalReadDirs = catalog.entries.map((e) => e.skillDir);
     try {
+      // Per-task model wins; otherwise fall back to the configured default
+      // for this agent. Empty string means inherit the CLI's own default.
+      const model =
+        (task.model && task.model.trim()) ||
+        cfg.defaultModel?.[task.agent] ||
+        "";
       await runner.start({
         prompt,
         cwd: task.worktreePath,
@@ -326,6 +334,7 @@ export class TaskManager {
         ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
         permissionMode: task.permissionMode ?? "bypassPermissions",
         thinkingLevel: task.thinkingLevel ?? "high",
+        ...(model ? { model } : {}),
         ...(additionalReadDirs.length ? { additionalReadDirs } : {}),
       });
     } catch (err) {
@@ -416,20 +425,21 @@ export class TaskManager {
   private async maybeAutoCommit(taskId: string, task: Task): Promise<boolean> {
     const lastUserMsg = findLastUserMessage(this.db, taskId);
     const cfg = loadConfig(this.paths.root);
-    // Generate the commit subject from the actual diff. Falls back to the
-    // task title if claude isn't available or the diff is empty (which
-    // should be rare — we only run this when the agent left changes behind).
+    // Generate the commit subject from the actual diff. The user's
+    // commitInstructions (free-form guidance) get appended to the helper's
+    // system rules so the message matches their style.
     const ai = await generateCommitMessage(task.worktreePath, {
       fallbackHint: task.title,
       baseRef: task.baseBranch,
       helper: cfg.aiHelpers,
+      ...(cfg.commitInstructions
+        ? { extraInstructions: cfg.commitInstructions }
+        : {}),
     });
-    const fallbackTitle =
-      `${cfg.commitPrefix}${task.title}`.slice(0, 72);
     const subject =
       ai.source === "claude"
         ? ai.message.split("\n")[0]!.slice(0, 72)
-        : fallbackTitle;
+        : task.title.slice(0, 72);
     const body =
       ai.source === "claude" && ai.message.includes("\n")
         ? ai.message.split("\n").slice(1).join("\n").trim() || undefined
@@ -482,18 +492,31 @@ export class TaskManager {
     try {
       const lastUserMsg = findLastUserMessage(this.db, taskId);
       const cfg = loadConfig(this.paths.root);
-      const ctx = {
-        prompt: lastUserMsg ?? "",
-        task_id: task.id,
-        branch: task.branch,
-        title: task.title,
-      };
-      const body = cfg.prBodyTemplate
-        ? renderConfigTemplate(cfg.prBodyTemplate, ctx)
-        : (lastUserMsg ?? "");
+      // Try the AI helper first — it gets a clean title + body from the
+      // diff with the user's prInstructions appended. Falls back to the
+      // task title + last user message when the helper is unreachable.
+      const it = streamPrMessage(task.worktreePath, {
+        baseRef: task.baseBranch,
+        helper: cfg.aiHelpers,
+        taskPrompt: lastUserMsg ?? "",
+        taskTitle: task.title,
+        ...(cfg.prInstructions
+          ? { extraInstructions: cfg.prInstructions }
+          : {}),
+      });
+      let final: { title: string; body: string; source: string } | null = null;
+      while (true) {
+        const next = await it.next();
+        if (next.done) {
+          final = next.value as { title: string; body: string; source: string };
+          break;
+        }
+      }
+      const title = (final?.title || task.title).slice(0, 200);
+      const body = final?.body || lastUserMsg || "";
       const r = await createPr({
         cwd: task.worktreePath,
-        title: `${cfg.prTitlePrefix}${task.title}`.slice(0, 200),
+        title,
         body,
         baseBranch: task.baseBranch,
       });

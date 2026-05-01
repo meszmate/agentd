@@ -41,6 +41,8 @@ const AUTOPUSH_KEY = "agentd.lastAutoPush";
 const AUTOPR_KEY = "agentd.lastAutoPr";
 const PERMS_KEY = "agentd.lastPermissionMode";
 const THINK_KEY = "agentd.lastThinkingLevel";
+const MODEL_CLAUDE_KEY = "agentd.lastModelClaude";
+const MODEL_CODEX_KEY = "agentd.lastModelCodex";
 
 type PermissionMode = "bypassPermissions" | "acceptEdits" | "plan";
 type ThinkingLevel = "low" | "medium" | "high" | "max" | "xhigh";
@@ -132,6 +134,14 @@ export function SpawnSheet({
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(
     () => loadThinkingLevel(),
   );
+  // Per-agent model preference. Stored under separate keys so flipping
+  // between Claude and Codex restores the right last-picked model rather
+  // than carrying a Claude model into a Codex run (or vice versa).
+  const [model, setModel] = useState<string>("");
+  useEffect(() => {
+    const k = agent === "claude" ? MODEL_CLAUDE_KEY : MODEL_CODEX_KEY;
+    setModel(localStorage.getItem(k) ?? "");
+  }, [agent]);
   const [workspace, setWorkspace] = useState<WorkspaceSetupValue>(
     () => defaultWorkspaceSetup(localStorage.getItem(BASE_KEY) ?? "main"),
   );
@@ -179,6 +189,7 @@ export function SpawnSheet({
         autoPr,
         permissionMode,
         thinkingLevel,
+        ...(model.trim() ? { model: model.trim() } : {}),
         workspaceMode: workspace.workspaceMode,
         branchMode: workspace.branchMode,
         ...(workspace.branchName.trim()
@@ -196,6 +207,10 @@ export function SpawnSheet({
       localStorage.setItem(AUTOPR_KEY, autoPr ? "1" : "0");
       localStorage.setItem(PERMS_KEY, permissionMode);
       localStorage.setItem(THINK_KEY, thinkingLevel);
+      localStorage.setItem(
+        agent === "claude" ? MODEL_CLAUDE_KEY : MODEL_CODEX_KEY,
+        model.trim(),
+      );
       toast("Task spawned");
       onClose();
       navigate(`/tasks/${res.task.id}`);
@@ -432,6 +447,25 @@ export function SpawnSheet({
               </div>
               <p className="text-2xs text-muted-foreground mt-1">
                 {THINKING_LEVELS.find((m) => m.value === thinkingLevel)?.hint}
+              </p>
+            </Field>
+
+            <Field>
+              <Label>Model</Label>
+              <Input
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder={
+                  agent === "claude"
+                    ? "(default) e.g. claude-opus-4-7"
+                    : "(default) e.g. gpt-5-codex"
+                }
+                spellCheck={false}
+                className="font-mono text-xs"
+              />
+              <p className="text-2xs text-muted-foreground mt-1">
+                Empty falls back to your Settings → Models default. Per-task
+                override only — flips back via the chip on the task header.
               </p>
             </Field>
           </div>

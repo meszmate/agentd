@@ -465,7 +465,11 @@ async function readDiffStat(
   return "";
 }
 
-function buildCommitPrompt(diff: string, shape: CommitMessageShape): string {
+function buildCommitPrompt(
+  diff: string,
+  shape: CommitMessageShape,
+  extraInstructions?: string,
+): string {
   const rules = [
     "Output ONLY the commit message. No preamble, no fences, no quotes.",
     shape.wip
@@ -479,6 +483,9 @@ function buildCommitPrompt(diff: string, shape: CommitMessageShape): string {
       ? "After the subject add a blank line, then 1-3 short bullet points explaining what changed. No test plan, no AI attribution."
       : "Subject line only — no body.",
     shape.hint?.trim() ? `Operator hint: ${shape.hint.trim()}` : "",
+    extraInstructions?.trim()
+      ? `Project-wide commit guidance:\n${extraInstructions.trim()}`
+      : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -507,6 +514,8 @@ export async function generateCommitMessage(
     fallbackHint?: string;
     baseRef?: string;
     helper?: AiHelperOptions;
+    /** Free-form guidance appended to the helper's system rules. */
+    extraInstructions?: string;
   } & CommitMessageShape = {},
 ): Promise<CommitMessageResult> {
   const { diff, source: diffSource } = await readCombinedDiff(cwd, opts.baseRef);
@@ -520,7 +529,7 @@ export async function generateCommitMessage(
       source: "fallback-no-changes",
     };
   }
-  const prompt = buildCommitPrompt(diff, opts);
+  const prompt = buildCommitPrompt(diff, opts, opts.extraInstructions);
   const argv = buildAiHelperArgv(opts.helper ?? {});
   argv.push("-p", prompt);
   try {
@@ -569,6 +578,7 @@ export async function* streamCommitMessage(
     fallbackHint?: string;
     baseRef?: string;
     helper?: AiHelperOptions;
+    extraInstructions?: string;
   } & CommitMessageShape = {},
 ): AsyncGenerator<string, CommitMessageResult, void> {
   const { diff } = await readCombinedDiff(cwd, opts.baseRef);
@@ -582,7 +592,7 @@ export async function* streamCommitMessage(
     yield fallback;
     return { message: fallback, source: "fallback-no-changes" };
   }
-  const prompt = buildCommitPrompt(diff, opts);
+  const prompt = buildCommitPrompt(diff, opts, opts.extraInstructions);
   const argv = buildAiHelperArgv(opts.helper ?? {});
   argv.push("-p", prompt);
   let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
@@ -653,7 +663,11 @@ export interface PrMessageResult {
   error?: string;
 }
 
-function buildPrPrompt(diff: string, shape: PrMessageShape): string {
+function buildPrPrompt(
+  diff: string,
+  shape: PrMessageShape,
+  extraInstructions?: string,
+): string {
   const rules = [
     "Output ONLY two parts separated by a blank line: a single subject line, then a Markdown body.",
     "Subject: lowercase, conventional-commit style (`feat: ...`, `fix: ...`), under 70 characters, imperative mood.",
@@ -665,6 +679,9 @@ function buildPrPrompt(diff: string, shape: PrMessageShape): string {
       ? `Original task prompt (for context only — describe the diff, not the prompt):\n${shape.taskPrompt.trim()}`
       : "",
     shape.hint?.trim() ? `Operator hint: ${shape.hint.trim()}` : "",
+    extraInstructions?.trim()
+      ? `Project-wide PR guidance:\n${extraInstructions.trim()}`
+      : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -694,6 +711,7 @@ export async function* streamPrMessage(
   opts: {
     baseRef?: string;
     helper?: AiHelperOptions;
+    extraInstructions?: string;
   } & PrMessageShape = {},
 ): AsyncGenerator<string, PrMessageResult, void> {
   const { diff } = await readCombinedDiff(cwd, opts.baseRef);
@@ -703,7 +721,7 @@ export async function* streamPrMessage(
     const split = splitPrOutput(fallback);
     return { ...split, source: "fallback-no-changes" };
   }
-  const prompt = buildPrPrompt(diff, opts);
+  const prompt = buildPrPrompt(diff, opts, opts.extraInstructions);
   const argv = buildAiHelperArgv(opts.helper ?? {});
   argv.push("-p", prompt);
   let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;

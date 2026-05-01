@@ -452,6 +452,8 @@ export function TaskDetail({ task }: { task: Task }) {
         )}
         <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
         <ThinkingLevelChip task={task} />
+        <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
+        <ModelChip task={task} />
       </div>
 
       {/* Body */}
@@ -555,6 +557,107 @@ function ThinkingLevelChip({ task }: { task: Task }) {
             </span>
           </DropdownMenuItem>
         ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * Suggestion lists per agent kind. The user can also type any string they
+ * want — these are just one-tap shortcuts. Empty string clears the override
+ * so the task inherits the configured default.
+ */
+const MODEL_SUGGESTIONS: Record<string, { value: string; label: string }[]> = {
+  claude: [
+    { value: "", label: "(default)" },
+    { value: "claude-opus-4-7", label: "opus 4.7" },
+    { value: "claude-sonnet-4-6", label: "sonnet 4.6" },
+    { value: "claude-haiku-4-5", label: "haiku 4.5" },
+  ],
+  codex: [
+    { value: "", label: "(default)" },
+    { value: "gpt-5-codex", label: "gpt-5-codex" },
+    { value: "gpt-5", label: "gpt-5" },
+  ],
+};
+
+function ModelChip({ task }: { task: Task }) {
+  const client = useClient();
+  const qc = useQueryClient();
+  const { toast } = useApp();
+  const current = task.model ?? "";
+  const suggestions = MODEL_SUGGESTIONS[task.agent] ?? [{ value: "", label: "(default)" }];
+  const [draft, setDraft] = useState(current);
+  useEffect(() => setDraft(current), [current]);
+
+  const apply = async (next: string) => {
+    if (next === current) return;
+    try {
+      const res = await client.setTaskModel(task.id, next);
+      if (res.task) {
+        qc.setQueryData(qk.task(task.id), { task: res.task });
+      }
+      toast(
+        next
+          ? `model → ${next} (next turn)`
+          : "model cleared — using default (next turn)",
+      );
+    } catch (e) {
+      toast((e as Error).message, true);
+    }
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          title="Change the model for the next turn"
+          className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] bg-sky-500/10 text-sky-700 dark:text-sky-300 border border-sky-500/20 hover:bg-sky-500/20 transition-colors shrink-0 max-w-[160px]"
+        >
+          <span className="truncate">
+            model:{current || "default"}
+          </span>
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-64">
+        <DropdownMenuLabel className="text-[10px] uppercase tracking-[0.12em]">
+          Model · next turn
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {suggestions.map((s) => (
+          <DropdownMenuItem
+            key={s.value || "_default"}
+            onClick={() => void apply(s.value)}
+            className={cn(
+              "font-mono",
+              s.value === current && "text-ember-700 dark:text-ember-300",
+            )}
+          >
+            {s.label}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <form
+          className="flex items-center gap-1 px-1 py-1"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void apply(draft.trim());
+          }}
+        >
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="custom model id…"
+            className="flex-1 h-7 px-2 rounded border border-ink-900/15 bg-paper-50 font-mono text-[11px] outline-none focus:border-ember-500/40 dark:border-ink-50/15 dark:bg-ink-800"
+          />
+          <button
+            type="submit"
+            className="h-7 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+          >
+            set
+          </button>
+        </form>
       </DropdownMenuContent>
     </DropdownMenu>
   );

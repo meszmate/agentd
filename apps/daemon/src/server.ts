@@ -55,6 +55,7 @@ import {
   closeTask,
   reopenTask,
   setTaskThinkingLevel,
+  setTaskModel,
   resolveSession,
   loadConfig,
   saveConfig,
@@ -200,6 +201,7 @@ export function buildServer(opts: BuildServerOptions) {
         ...(parsed.data.thinkingLevel
           ? { thinkingLevel: parsed.data.thinkingLevel }
           : {}),
+        ...(parsed.data.model ? { model: parsed.data.model } : {}),
       });
       return c.json({ task });
     } catch (e) {
@@ -328,6 +330,9 @@ export function buildServer(opts: BuildServerOptions) {
       fallbackHint: task.title,
       baseRef: task.baseBranch,
       helper: cfg.aiHelpers,
+      ...(cfg.commitInstructions
+        ? { extraInstructions: cfg.commitInstructions }
+        : {}),
     });
     return c.json(r);
   });
@@ -351,6 +356,9 @@ export function buildServer(opts: BuildServerOptions) {
       fallbackHint: task.title,
       baseRef: task.baseBranch,
       helper: cfg.aiHelpers,
+      ...(cfg.commitInstructions
+        ? { extraInstructions: cfg.commitInstructions }
+        : {}),
     };
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -423,6 +431,9 @@ export function buildServer(opts: BuildServerOptions) {
       taskPrompt,
       taskTitle: task.title,
       helper: cfg.aiHelpers,
+      ...(cfg.prInstructions
+        ? { extraInstructions: cfg.prInstructions }
+        : {}),
     };
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -509,6 +520,9 @@ export function buildServer(opts: BuildServerOptions) {
         fallbackHint: task.title,
         baseRef: task.baseBranch,
         helper: cfg.aiHelpers,
+        ...(cfg.commitInstructions
+          ? { extraInstructions: cfg.commitInstructions }
+          : {}),
       });
       subject = ai.message;
     }
@@ -621,6 +635,24 @@ export function buildServer(opts: BuildServerOptions) {
       );
     }
     const updated = setTaskThinkingLevel(db, id, parsed.data);
+    return c.json({ task: updated });
+  });
+
+  /**
+   * Update the task's model override. Empty string clears it (next runner
+   * spawn falls back to the configured default for the agent kind).
+   */
+  api.patch("/tasks/:id/model", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => null)) as {
+      model?: string;
+    } | null;
+    if (typeof body?.model !== "string") {
+      return c.json({ error: "model must be a string" }, 400);
+    }
+    const updated = setTaskModel(db, id, body.model.trim());
     return c.json({ task: updated });
   });
 
@@ -1031,12 +1063,12 @@ export function buildServer(opts: BuildServerOptions) {
     const cfg = loadConfig(paths.root);
     return c.json({
       agentInstructions: cfg.agentInstructions,
-      commitPrefix: cfg.commitPrefix,
-      prTitlePrefix: cfg.prTitlePrefix,
-      prBodyTemplate: cfg.prBodyTemplate,
+      commitInstructions: cfg.commitInstructions,
+      prInstructions: cfg.prInstructions,
       maxContextTokens: cfg.maxContextTokens,
       aiHelpers: cfg.aiHelpers,
       defaultThinking: cfg.defaultThinking,
+      defaultModel: cfg.defaultModel,
     });
   });
 
@@ -1049,9 +1081,8 @@ export function buildServer(opts: BuildServerOptions) {
     const next = { ...cfg };
     const stringKeys = [
       "agentInstructions",
-      "commitPrefix",
-      "prTitlePrefix",
-      "prBodyTemplate",
+      "commitInstructions",
+      "prInstructions",
     ] as const;
     const numberKeys = ["maxContextTokens"] as const;
     let changed = false;
@@ -1106,18 +1137,37 @@ export function buildServer(opts: BuildServerOptions) {
       next.defaultThinking = cur;
       changed = true;
     }
+    if ("defaultModel" in body) {
+      const dm = body.defaultModel as
+        | { claude?: string; codex?: string }
+        | undefined;
+      if (!dm || typeof dm !== "object") {
+        return c.json({ error: "defaultModel must be an object" }, 400);
+      }
+      const cur = { ...cfg.defaultModel };
+      for (const k of ["claude", "codex"] as const) {
+        const v = dm[k];
+        if (v == null) continue;
+        if (typeof v !== "string") {
+          return c.json({ error: `defaultModel.${k} must be a string` }, 400);
+        }
+        cur[k] = v.trim();
+      }
+      next.defaultModel = cur;
+      changed = true;
+    }
     if (!changed) return c.json({ error: "no valid keys in patch" }, 400);
     saveConfig(paths.root, next);
     return c.json({
       ok: true,
       settings: {
         agentInstructions: next.agentInstructions,
-        commitPrefix: next.commitPrefix,
-        prTitlePrefix: next.prTitlePrefix,
-        prBodyTemplate: next.prBodyTemplate,
+        commitInstructions: next.commitInstructions,
+        prInstructions: next.prInstructions,
         maxContextTokens: next.maxContextTokens,
         aiHelpers: next.aiHelpers,
         defaultThinking: next.defaultThinking,
+        defaultModel: next.defaultModel,
       },
     });
   });

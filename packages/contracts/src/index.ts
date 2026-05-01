@@ -94,6 +94,11 @@ export const Task = z.object({
   workspaceMode: WorkspaceMode.optional(),
   thinkingLevel: ThinkingLevel.optional(),
   /**
+   * Per-task model override. Empty = inherit the configured agent default.
+   * Set per task in the spawn UI or changed mid-task from the header chip.
+   */
+  model: z.string().optional(),
+  /**
    * When set, the task is "closed" — typically because its PR merged or
    * the operator decided it's no longer relevant. Closed tasks default
    * to filtered out of list views. Closed tasks can be reopened.
@@ -221,6 +226,7 @@ export const CreateTaskRequest = z.object({
   branchName: z.string().optional(),
   pullLatest: z.boolean().optional(),
   thinkingLevel: ThinkingLevel.optional(),
+  model: z.string().optional(),
 });
 export type CreateTaskRequest = z.infer<typeof CreateTaskRequest>;
 

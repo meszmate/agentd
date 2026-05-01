@@ -30,6 +30,7 @@ interface RailItem {
 
 const SECTIONS: RailItem[] = [
   { id: "agent", glyph: "§", label: "Agent policy" },
+  { id: "models", glyph: "△", label: "Models" },
   { id: "thinking", glyph: "✦", label: "Thinking defaults" },
   { id: "ai-helpers", glyph: "✶", label: "AI helpers" },
   { id: "commits", glyph: "◆", label: "Commits & PRs" },
@@ -56,15 +57,16 @@ export function Settings() {
   const patch = usePatchSettings();
 
   const [agentInstructions, setAgentInstructions] = useState("");
-  const [commitPrefix, setCommitPrefix] = useState("");
-  const [prTitlePrefix, setPrTitlePrefix] = useState("");
-  const [prBodyTemplate, setPrBodyTemplate] = useState("");
+  const [commitInstructions, setCommitInstructions] = useState("");
+  const [prInstructions, setPrInstructions] = useState("");
   const [maxContextTokens, setMaxContextTokens] = useState<number>(8000);
   const [helperBinary, setHelperBinary] = useState("claude");
   const [helperModel, setHelperModel] = useState("");
   const [helperEffort, setHelperEffort] = useState<ThinkingLevel>("medium");
   const [defaultClaude, setDefaultClaude] = useState<ThinkingLevel>("xhigh");
   const [defaultCodex, setDefaultCodex] = useState<ThinkingLevel>("high");
+  const [defaultClaudeModel, setDefaultClaudeModel] = useState("");
+  const [defaultCodexModel, setDefaultCodexModel] = useState("");
   const [hydrated, setHydrated] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [active, setActive] = useState<string>("agent");
@@ -73,15 +75,13 @@ export function Settings() {
   const aiId = useId();
   const cpId = useId();
   const prtId = useId();
-  const prbId = useId();
   const ctxId = useId();
 
   useEffect(() => {
     if (!settingsQ.data || hydrated) return;
     setAgentInstructions(settingsQ.data.agentInstructions);
-    setCommitPrefix(settingsQ.data.commitPrefix);
-    setPrTitlePrefix(settingsQ.data.prTitlePrefix);
-    setPrBodyTemplate(settingsQ.data.prBodyTemplate);
+    setCommitInstructions(settingsQ.data.commitInstructions ?? "");
+    setPrInstructions(settingsQ.data.prInstructions ?? "");
     setMaxContextTokens(settingsQ.data.maxContextTokens ?? 8000);
     setHelperBinary(settingsQ.data.aiHelpers?.binary ?? "claude");
     setHelperModel(settingsQ.data.aiHelpers?.model ?? "");
@@ -94,6 +94,8 @@ export function Settings() {
     setDefaultCodex(
       (settingsQ.data.defaultThinking?.codex as ThinkingLevel) ?? "high",
     );
+    setDefaultClaudeModel(settingsQ.data.defaultModel?.claude ?? "");
+    setDefaultCodexModel(settingsQ.data.defaultModel?.codex ?? "");
     setHydrated(true);
   }, [settingsQ.data, hydrated]);
 
@@ -102,27 +104,29 @@ export function Settings() {
     const d = settingsQ.data;
     const isDirty =
       agentInstructions !== d.agentInstructions ||
-      commitPrefix !== d.commitPrefix ||
-      prTitlePrefix !== d.prTitlePrefix ||
-      prBodyTemplate !== d.prBodyTemplate ||
+      commitInstructions !== (d.commitInstructions ?? "") ||
+      prInstructions !== (d.prInstructions ?? "") ||
       maxContextTokens !== (d.maxContextTokens ?? 8000) ||
       helperBinary !== (d.aiHelpers?.binary ?? "claude") ||
       helperModel !== (d.aiHelpers?.model ?? "") ||
       helperEffort !== (d.aiHelpers?.effort ?? "medium") ||
       defaultClaude !== (d.defaultThinking?.claude ?? "xhigh") ||
-      defaultCodex !== (d.defaultThinking?.codex ?? "high");
+      defaultCodex !== (d.defaultThinking?.codex ?? "high") ||
+      defaultClaudeModel !== (d.defaultModel?.claude ?? "") ||
+      defaultCodexModel !== (d.defaultModel?.codex ?? "");
     setDirty(isDirty);
   }, [
     agentInstructions,
-    commitPrefix,
-    prTitlePrefix,
-    prBodyTemplate,
+    commitInstructions,
+    prInstructions,
     maxContextTokens,
     helperBinary,
     helperModel,
     helperEffort,
     defaultClaude,
     defaultCodex,
+    defaultClaudeModel,
+    defaultCodexModel,
     hydrated,
     settingsQ.data,
   ]);
@@ -162,9 +166,8 @@ export function Settings() {
     try {
       await patch.mutateAsync({
         agentInstructions,
-        commitPrefix,
-        prTitlePrefix,
-        prBodyTemplate,
+        commitInstructions,
+        prInstructions,
         maxContextTokens,
         aiHelpers: {
           binary: helperBinary.trim(),
@@ -174,6 +177,10 @@ export function Settings() {
         defaultThinking: {
           claude: defaultClaude,
           codex: defaultCodex,
+        },
+        defaultModel: {
+          claude: defaultClaudeModel.trim(),
+          codex: defaultCodexModel.trim(),
         },
       });
       setSavedFlash(true);
@@ -319,6 +326,60 @@ export function Settings() {
             </InfoRow>
           </div>
 
+          {/* Models — per-agent default. Per-task overrides live on the
+              spawn UI and the task header. */}
+          <div id="section-models">
+            <SectionHeader
+              label="Models"
+              hint="default --model passed to each agent CLI"
+              sticky
+            />
+            <InfoRow
+              label="Claude default"
+              hint={
+                <>
+                  Forwarded as <code className="font-mono">--model</code> to
+                  the <code className="font-mono">claude</code> CLI. Empty
+                  inherits Claude's own default. Common picks:{" "}
+                  <code className="font-mono">claude-opus-4-7</code>,{" "}
+                  <code className="font-mono">claude-sonnet-4-6</code>,{" "}
+                  <code className="font-mono">claude-haiku-4-5</code>.
+                </>
+              }
+              top
+            >
+              <Input
+                value={defaultClaudeModel}
+                onChange={(e) => setDefaultClaudeModel(e.target.value)}
+                placeholder="(inherit) e.g. claude-opus-4-7"
+                className="font-mono w-72"
+              />
+            </InfoRow>
+            <InfoRow
+              label="Codex default"
+              hint={
+                <>
+                  Forwarded as <code className="font-mono">--model</code> to
+                  the <code className="font-mono">codex</code> CLI. Common
+                  picks: <code className="font-mono">gpt-5-codex</code>,{" "}
+                  <code className="font-mono">gpt-5</code>.
+                </>
+              }
+            >
+              <Input
+                value={defaultCodexModel}
+                onChange={(e) => setDefaultCodexModel(e.target.value)}
+                placeholder="(inherit) e.g. gpt-5-codex"
+                className="font-mono w-72"
+              />
+            </InfoRow>
+            <p className="px-5 py-2 text-[11px] text-ink-500 dark:text-ink-400">
+              Per-task overrides live on the spawn dialog and the task
+              header — set them there to try a different model for a single
+              task without touching the global default.
+            </p>
+          </div>
+
           {/* Thinking defaults */}
           <div id="section-thinking">
             <SectionHeader
@@ -416,62 +477,53 @@ export function Settings() {
             </InfoRow>
           </div>
 
-          {/* Commits & PRs */}
+          {/* Commits & PRs — free-form guidance the AI helper appends */}
           <div id="section-commits">
             <SectionHeader
               label="Commits & PRs"
-              hint="auto-commit messages and gh pr create body"
+              hint="free-form guidance appended to the AI helper's prompt"
               sticky
             />
             <InfoRow
-              label="Commit prefix"
-              hint="prepended to every auto-commit"
-            >
-              <Input
-                id={cpId}
-                value={commitPrefix}
-                onChange={(e) => setCommitPrefix(e.target.value)}
-                placeholder="agentd: "
-                className="font-mono"
-              />
-            </InfoRow>
-            <InfoRow
-              label="PR title prefix"
-              hint="prepended to gh pr create"
-            >
-              <Input
-                id={prtId}
-                value={prTitlePrefix}
-                onChange={(e) => setPrTitlePrefix(e.target.value)}
-                placeholder="agentd: "
-                className="font-mono"
-              />
-            </InfoRow>
-            <InfoRow
-              label="PR body template"
+              label="Commit instructions"
               hint={
                 <>
-                  Placeholders:{" "}
-                  {["{prompt}", "{title}", "{task_id}", "{branch}"].map(
-                    (p) => (
-                      <code
-                        key={p}
-                        className="font-mono text-[10px] text-ink-700 dark:text-ink-200"
-                      >
-                        {p}{" "}
-                      </code>
-                    ),
-                  )}
+                  Plain English rules the helper follows when generating
+                  commit messages. Empty by default.
                 </>
               }
               top
             >
               <Textarea
-                id={prbId}
-                rows={6}
-                value={prBodyTemplate}
-                onChange={(e) => setPrBodyTemplate(e.target.value)}
+                id={cpId}
+                rows={5}
+                value={commitInstructions}
+                onChange={(e) => setCommitInstructions(e.target.value)}
                 className="font-mono text-xs"
+                placeholder={
+                  "e.g. Always lowercase. Skip scope unless one package is touched. Mention affected packages when more than one."
+                }
+              />
+            </InfoRow>
+            <InfoRow
+              label="PR instructions"
+              hint={
+                <>
+                  Same idea for the streaming PR helper that fills the title +
+                  body when you open a pull request.
+                </>
+              }
+              top
+            >
+              <Textarea
+                id={prtId}
+                rows={5}
+                value={prInstructions}
+                onChange={(e) => setPrInstructions(e.target.value)}
+                className="font-mono text-xs"
+                placeholder={
+                  "e.g. Lead with a one-sentence summary. Use a `## Changes` heading then bullets. Skip 'Test plan'."
+                }
               />
             </InfoRow>
           </div>

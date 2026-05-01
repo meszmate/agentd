@@ -89,7 +89,8 @@ export class CodexRunner implements AgentRunner {
     } else {
       args.push("--full-auto");
     }
-    if (this.opts.model) args.push("--model", this.opts.model);
+    const model = (opts.model && opts.model.trim()) || this.opts.model;
+    if (model) args.push("--model", model);
     // Reasoning effort. Codex takes the level via -c model_reasoning_effort.
     // It accepts: minimal | low | medium | high | xhigh. Our `max` is Claude's
     // top tier, which corresponds to `xhigh` on Codex.
