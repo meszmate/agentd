@@ -4,6 +4,7 @@ import type {
   BranchMode,
   PermissionMode,
   Task,
+  ThinkingLevel,
   WorkspaceMode,
 } from "@agentd/contracts";
 import {
@@ -62,6 +63,7 @@ export interface CreateTaskParams {
   branchMode?: BranchMode;
   branchName?: string;
   pullLatest?: boolean;
+  thinkingLevel?: ThinkingLevel;
 }
 
 export class TaskManager {
@@ -131,6 +133,7 @@ export class TaskManager {
       skills: params.skills ?? [],
       permissionMode: params.permissionMode ?? "bypassPermissions",
       workspaceMode,
+      thinkingLevel: params.thinkingLevel ?? "high",
     });
     touchProject(this.db, project.id);
     appendMessage(this.db, task.id, "user", params.prompt);
@@ -241,6 +244,7 @@ export class TaskManager {
         resume,
         ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
         permissionMode: task.permissionMode ?? "bypassPermissions",
+        thinkingLevel: task.thinkingLevel ?? "high",
         ...(additionalReadDirs.length ? { additionalReadDirs } : {}),
       });
     } catch (err) {
@@ -313,6 +317,7 @@ export class TaskManager {
     // should be rare — we only run this when the agent left changes behind).
     const ai = await generateCommitMessage(task.worktreePath, {
       fallbackHint: task.title,
+      baseRef: task.baseBranch,
     });
     const fallbackTitle =
       `${cfg.commitPrefix}${task.title}`.slice(0, 72);

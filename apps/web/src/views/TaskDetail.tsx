@@ -450,6 +450,17 @@ export function TaskDetail({ task }: { task: Task }) {
             </span>
           </>
         )}
+        {task.thinkingLevel && task.thinkingLevel !== "high" && (
+          <>
+            <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
+            <span
+              title={`reasoning effort: ${task.thinkingLevel}`}
+              className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] bg-violet-500/10 text-violet-700 dark:text-violet-300 border border-violet-500/20 shrink-0"
+            >
+              think:{task.thinkingLevel}
+            </span>
+          </>
+        )}
       </div>
 
       {/* Body */}

@@ -4,6 +4,7 @@ import type {
   PermissionMode,
   Task,
   TaskStatus,
+  ThinkingLevel,
   WorkspaceMode,
 } from "@agentd/contracts";
 import type { Db } from "./db.ts";
@@ -26,6 +27,7 @@ export interface CreateTaskInput {
   skills?: string[];
   permissionMode?: PermissionMode;
   workspaceMode?: WorkspaceMode;
+  thinkingLevel?: ThinkingLevel;
 }
 
 function rowToTask(row: typeof tasks.$inferSelect): Task {
@@ -67,6 +69,8 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
       (row.permissionMode as PermissionMode | undefined) ?? "bypassPermissions",
     workspaceMode:
       (row.workspaceMode as WorkspaceMode | undefined) ?? "worktree",
+    thinkingLevel:
+      (row.thinkingLevel as ThinkingLevel | undefined) ?? "high",
     closedAt: row.closedAt ?? null,
     closedReason: row.closedReason ?? null,
   };
@@ -127,6 +131,7 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       skillsJson: JSON.stringify(input.skills ?? []),
       permissionMode: input.permissionMode ?? "bypassPermissions",
       workspaceMode: input.workspaceMode ?? "worktree",
+      thinkingLevel: input.thinkingLevel ?? "high",
     })
     .run();
   return getTask(db, id)!;

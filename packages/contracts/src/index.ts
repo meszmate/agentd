@@ -41,6 +41,20 @@ export type WorkspaceMode = z.infer<typeof WorkspaceMode>;
 export const BranchMode = z.enum(["new", "existing"]);
 export type BranchMode = z.infer<typeof BranchMode>;
 
+/**
+ * Reasoning / thinking effort. Mirrors Claude CLI's `--effort` enum so
+ * Claude tasks can pass it through verbatim. Codex maps these to its
+ * `model_reasoning_effort` config (`max` → `xhigh`, the rest are 1:1).
+ *
+ *   low     — minimal reasoning; fastest and cheapest.
+ *   medium  — balanced.
+ *   high    — default. Solid for multi-step engineering work.
+ *   max     — extended thinking budget; slower, deeper.
+ *   xhigh   — Claude's deepest tier (alias of `max` on Codex).
+ */
+export const ThinkingLevel = z.enum(["low", "medium", "high", "max", "xhigh"]);
+export type ThinkingLevel = z.infer<typeof ThinkingLevel>;
+
 export const TaskStatus = z.enum([
   "pending",
   "running",
@@ -78,6 +92,7 @@ export const Task = z.object({
   skills: z.array(z.string()).optional(),
   permissionMode: PermissionMode.optional(),
   workspaceMode: WorkspaceMode.optional(),
+  thinkingLevel: ThinkingLevel.optional(),
   /**
    * When set, the task is "closed" — typically because its PR merged or
    * the operator decided it's no longer relevant. Closed tasks default
@@ -205,6 +220,7 @@ export const CreateTaskRequest = z.object({
   branchMode: BranchMode.optional(),
   branchName: z.string().optional(),
   pullLatest: z.boolean().optional(),
+  thinkingLevel: ThinkingLevel.optional(),
 });
 export type CreateTaskRequest = z.infer<typeof CreateTaskRequest>;
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -19,8 +19,8 @@ const LIGHT_THEME = {
 
 interface Props {
   /**
-   * Build the WebSocket. Called once per mount; the pane handles lifecycle.
-   * Return null to render an empty pane.
+   * Build the WebSocket. Called on every (re)connect attempt; the pane handles
+   * lifecycle. Return null to render an empty pane.
    */
   connect: () => WebSocket | null;
   /** Stable identity for connect(). When this changes, we tear down + reconnect. */
@@ -39,16 +39,23 @@ interface PtyServerMessage {
   code?: number | null;
 }
 
+type ConnState = "connecting" | "live" | "reconnecting" | "closed";
+
+// Reconnect schedule: quick first retry for transient drops, then back off.
+const BACKOFF_MS = [400, 800, 1500, 3000, 5000];
+
 /**
  * Generic xterm.js pane wired to a WebSocket. Sends the pty wire protocol:
  *   client → server : { type: "input", data } | { type: "resize", cols, rows }
  *   server → client : { type: "ready"|"output"|"exit", ... }
  *
- * Use it via <XTermPane connect={() => client.attachTerminal("dev")} />
+ * Reconnects automatically on transient drops. Surfaces a small status pill
+ * at the top so users see what's happening instead of a stale terminal.
  */
 export function XTermPane({ connect, connectionKey, onError, emptyHint }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const { resolved } = useTheme();
+  const [conn, setConn] = useState<ConnState>("connecting");
 
   useEffect(() => {
     const container = containerRef.current;
@@ -71,34 +78,50 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint }: Props)
     fit.fit();
 
     let ws: WebSocket | null = null;
-    try {
-      ws = connect();
-    } catch (e) {
-      onError?.((e as Error).message);
-    }
-
-    const sendResize = () => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      ws.send(
-        JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }),
-      );
-    };
-
-    // Track readiness so we can distinguish "couldn't connect at all"
-    // (worth a toast) from "the WS hiccupped after a successful open"
-    // (silent — the server-driven exit message in the terminal already
-    // tells the user the session ended).
+    let disposed = false;
+    let attempt = 0;
     let everOpened = false;
-    if (ws) {
-      ws.onopen = () => {
+    let exitedCleanly = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const open = () => {
+      if (disposed) return;
+      setConn(attempt === 0 ? "connecting" : "reconnecting");
+      try {
+        ws = connect();
+      } catch (e) {
+        ws = null;
+        if (attempt === 0) onError?.((e as Error).message);
+      }
+      if (!ws) {
+        setConn("closed");
+        return;
+      }
+      const sock = ws;
+
+      const sendResize = () => {
+        if (sock.readyState !== WebSocket.OPEN) return;
+        sock.send(
+          JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }),
+        );
+      };
+
+      sock.onopen = () => {
+        attempt = 0;
         everOpened = true;
+        setConn("live");
         term.focus();
         sendResize();
       };
-      ws.onerror = () => {
-        if (!everOpened) onError?.("terminal: connection error");
+
+      // We never surface this as a toast — it fires for benign things too
+      // (StrictMode teardown of a still-CONNECTING socket). The close handler
+      // decides whether to retry or give up based on what actually happened.
+      sock.onerror = () => {
+        // intentional no-op; close handler does the real work
       };
-      ws.onmessage = (ev) => {
+
+      sock.onmessage = (ev) => {
         try {
           const msg = JSON.parse(String(ev.data)) as PtyServerMessage;
           if (msg.type === "ready") {
@@ -106,6 +129,7 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint }: Props)
           } else if (msg.type === "output" && msg.data != null) {
             term.write(msg.data);
           } else if (msg.type === "exit") {
+            exitedCleanly = true;
             term.write(
               `\r\n\x1b[2m[disconnected · code=${msg.code ?? "?"}]\x1b[0m\r\n`,
             );
@@ -114,15 +138,48 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint }: Props)
           // ignore unparseable
         }
       };
-      ws.onclose = () => term.write("\r\n\x1b[2m[disconnected]\x1b[0m\r\n");
-    }
+
+      sock.onclose = () => {
+        if (disposed) return;
+        // Server told us the pty exited — don't reconnect, that would just
+        // respawn a fresh shell. Stay closed.
+        if (exitedCleanly) {
+          setConn("closed");
+          return;
+        }
+        // Never opened on first try is usually a 401 (token gone) or daemon
+        // down — surface that, then retry once on the chance it was a blip.
+        // Subsequent transient drops auto-reconnect with backoff.
+        const delay = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)]!;
+        attempt += 1;
+        if (attempt > BACKOFF_MS.length) {
+          setConn("closed");
+          if (everOpened) {
+            term.write(
+              "\r\n\x1b[2m[disconnected — gave up reconnecting]\x1b[0m\r\n",
+            );
+          }
+          return;
+        }
+        setConn("reconnecting");
+        reconnectTimer = setTimeout(open, delay);
+      };
+    };
+
+    open();
 
     const dataDisp = term.onData((data) => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "input", data }));
       }
     });
-    const resizeDisp = term.onResize(() => sendResize());
+    const resizeDisp = term.onResize(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }),
+        );
+      }
+    });
 
     const onWinResize = () => {
       try {
@@ -136,6 +193,8 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint }: Props)
     ro.observe(container);
 
     return () => {
+      disposed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       window.removeEventListener("resize", onWinResize);
       ro.disconnect();
       dataDisp.dispose();
@@ -159,7 +218,23 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint }: Props)
     );
   }
   return (
-    <div className="h-full w-full bg-ink-900 p-1.5">
+    <div className="relative h-full w-full bg-ink-900 p-1.5">
+      {conn !== "live" && (
+        <div className="pointer-events-none absolute right-3 top-3 z-10 flex items-center gap-1.5 rounded-full border border-white/10 bg-black/60 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-white/80 backdrop-blur">
+          <span
+            className={
+              conn === "closed"
+                ? "size-1.5 rounded-full bg-red-500"
+                : "size-1.5 rounded-full bg-amber-400 animate-pulse"
+            }
+          />
+          {conn === "connecting"
+            ? "connecting"
+            : conn === "reconnecting"
+              ? "reconnecting"
+              : "disconnected"}
+        </div>
+      )}
       <div ref={containerRef} className="h-full w-full" />
     </div>
   );

@@ -40,8 +40,18 @@ const AGENT_KEY = "agentd.lastAgent";
 const AUTOPUSH_KEY = "agentd.lastAutoPush";
 const AUTOPR_KEY = "agentd.lastAutoPr";
 const PERMS_KEY = "agentd.lastPermissionMode";
+const THINK_KEY = "agentd.lastThinkingLevel";
 
 type PermissionMode = "bypassPermissions" | "acceptEdits" | "plan";
+type ThinkingLevel = "low" | "medium" | "high" | "max" | "xhigh";
+
+const THINKING_LEVELS: { value: ThinkingLevel; label: string; hint: string }[] = [
+  { value: "low", label: "low", hint: "fastest, minimal reasoning — quick edits" },
+  { value: "medium", label: "medium", hint: "balanced — most everyday tasks" },
+  { value: "high", label: "high", hint: "default — solid for multi-step engineering" },
+  { value: "max", label: "max", hint: "extended thinking budget — slower, deeper" },
+  { value: "xhigh", label: "xhigh", hint: "deepest tier — gnarly debugging / architecture" },
+];
 
 const PERMISSION_MODES: { value: PermissionMode; label: string; hint: string }[] = [
   {
@@ -74,6 +84,20 @@ function loadPermissionMode(): PermissionMode {
   return "bypassPermissions";
 }
 
+function loadThinkingLevel(): ThinkingLevel {
+  const v = localStorage.getItem(THINK_KEY);
+  if (
+    v === "low" ||
+    v === "medium" ||
+    v === "high" ||
+    v === "max" ||
+    v === "xhigh"
+  ) {
+    return v;
+  }
+  return "high";
+}
+
 export function SpawnSheet({
   open,
   onClose,
@@ -104,6 +128,9 @@ export function SpawnSheet({
   const [autoPr, setAutoPr] = useState(() => loadBool(AUTOPR_KEY, false));
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(
     () => loadPermissionMode(),
+  );
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(
+    () => loadThinkingLevel(),
   );
   const [workspace, setWorkspace] = useState<WorkspaceSetupValue>(
     () => defaultWorkspaceSetup(localStorage.getItem(BASE_KEY) ?? "main"),
@@ -151,6 +178,7 @@ export function SpawnSheet({
         autoPush,
         autoPr,
         permissionMode,
+        thinkingLevel,
         workspaceMode: workspace.workspaceMode,
         branchMode: workspace.branchMode,
         ...(workspace.branchName.trim()
@@ -167,6 +195,7 @@ export function SpawnSheet({
       localStorage.setItem(AUTOPUSH_KEY, autoPush ? "1" : "0");
       localStorage.setItem(AUTOPR_KEY, autoPr ? "1" : "0");
       localStorage.setItem(PERMS_KEY, permissionMode);
+      localStorage.setItem(THINK_KEY, thinkingLevel);
       toast("Task spawned");
       onClose();
       navigate(`/tasks/${res.task.id}`);
@@ -374,6 +403,34 @@ export function SpawnSheet({
               </div>
               <p className="text-2xs text-muted-foreground mt-1">
                 {PERMISSION_MODES.find((m) => m.value === permissionMode)?.hint}
+              </p>
+            </Field>
+
+            <Field>
+              <Label>Thinking</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {THINKING_LEVELS.map((m) => {
+                  const on = thinkingLevel === m.value;
+                  return (
+                    <button
+                      key={m.value}
+                      type="button"
+                      onClick={() => setThinkingLevel(m.value)}
+                      title={m.hint}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 h-6 px-2 rounded-md border text-[11px] transition-colors",
+                        on
+                          ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+                          : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
+                      )}
+                    >
+                      <span className="font-mono">{m.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-2xs text-muted-foreground mt-1">
+                {THINKING_LEVELS.find((m) => m.value === thinkingLevel)?.hint}
               </p>
             </Field>
           </div>

@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
 import {
   Activity,
   BookText,
   CalendarClock,
+  ChevronDown,
   ChevronRight,
   FileTerminal,
   FolderGit2,
@@ -16,6 +17,7 @@ import {
   Smartphone,
   TerminalSquare,
 } from "lucide-react";
+import type { Project, Task } from "@agentd/contracts";
 import { cn, formatTs } from "@/lib/utils";
 import { Wordmark } from "@/components/wordmark";
 import { ServerCard } from "@/components/server-card";
@@ -115,8 +117,7 @@ export function Sidebar({
       </div>
 
       <nav className="flex flex-col gap-3 overflow-y-auto py-2">
-        <OpenTasksSection />
-        <ProjectsSection />
+        <ProjectsTreeSection />
         {SECTIONS.map((sec) => (
           <div key={sec.heading}>
             <div className="px-5 mb-1 font-mono text-[10px] uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500 font-medium">
@@ -366,9 +367,28 @@ function NextFireBlock({
   );
 }
 
+/* ── Projects tree (sidebar) ─────────────────────────────────────────
+ *
+ * One unified section: each project is a collapsible group; under it
+ * we list its active tasks first, then a few recent ones. Tasks not
+ * tied to any project bucket go under "Untracked".
+ *
+ * Realtime: derives off useTasks() + useProjects(), both invalidated
+ * by the WS bus on any task_updated / status / exit event. So the dot
+ * blinks, the count ticks up, the row order shuffles — all without
+ * extra polling.
+ */
+
 const PROJECT_PALETTE = [
-  "#DC2626", "#EA580C", "#D97706", "#65A30D",
-  "#059669", "#0891B2", "#2563EB", "#7C3AED", "#DB2777",
+  "#DC2626",
+  "#EA580C",
+  "#D97706",
+  "#65A30D",
+  "#059669",
+  "#0891B2",
+  "#2563EB",
+  "#7C3AED",
+  "#DB2777",
 ];
 
 function colorForProject(id: string, override: string | null | undefined): string {
@@ -378,10 +398,99 @@ function colorForProject(id: string, override: string | null | undefined): strin
   return PROJECT_PALETTE[Math.abs(hash) % PROJECT_PALETTE.length]!;
 }
 
-function ProjectsSection() {
+const PROJECT_OPEN_KEY = "agentd.sidebar.openProjects";
+
+interface ProjectGroup {
+  id: string;
+  /** null for untracked — synthesizes a "Untracked" group. */
+  project: Project | null;
+  active: Task[];
+  recent: Task[];
+  total: number;
+}
+
+function ProjectsTreeSection() {
+  const tasksQ = useTasks();
   const projectsQ = useProjects();
+  const tasks = tasksQ.data?.tasks ?? [];
+  const projects = projectsQ.data?.projects ?? [];
   const unread = useStore((s) => s.unreadByProject);
-  const items = (projectsQ.data?.projects ?? []).slice(0, 8);
+
+  // Persisted expand/collapse map. By default a project is expanded
+  // when it has any active task.
+  const [openMap, setOpenMap] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem(PROJECT_OPEN_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
+  const toggle = (key: string): void => {
+    setOpenMap((cur) => {
+      const next = { ...cur, [key]: !(cur[key] ?? false) };
+      try {
+        localStorage.setItem(PROJECT_OPEN_KEY, JSON.stringify(next));
+      } catch {
+        // ignore quota
+      }
+      return next;
+    });
+  };
+
+  const groups = useMemo<ProjectGroup[]>(() => {
+    // open: any task currently working
+    const isActive = (t: Task): boolean =>
+      t.status === "running" ||
+      t.status === "waiting_input" ||
+      t.status === "waiting_perm" ||
+      t.status === "pending";
+    const isClosed = (t: Task): boolean => !!t.closedAt;
+
+    const byProject = new Map<string, Task[]>();
+    const untracked: Task[] = [];
+    for (const t of tasks) {
+      if (isClosed(t)) continue;
+      if (t.projectId) {
+        const arr = byProject.get(t.projectId) ?? [];
+        arr.push(t);
+        byProject.set(t.projectId, arr);
+      } else {
+        untracked.push(t);
+      }
+    }
+
+    const buildGroup = (id: string, p: Project | null, list: Task[]): ProjectGroup => {
+      const sorted = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
+      const active = sorted.filter(isActive);
+      const recent = sorted.filter((t) => !isActive(t)).slice(0, 5);
+      return { id, project: p, active, recent, total: list.length };
+    };
+
+    const out: ProjectGroup[] = [];
+    for (const p of projects) {
+      const list = byProject.get(p.id) ?? [];
+      out.push(buildGroup(p.id, p, list));
+    }
+    // Catch tasks whose projectId isn't in the projects list yet.
+    for (const [pid, list] of byProject) {
+      if (out.some((g) => g.id === pid)) continue;
+      out.push(buildGroup(pid, null, list));
+    }
+    if (untracked.length > 0) {
+      out.push(buildGroup("untracked", null, untracked));
+    }
+    // Sort: groups with active tasks first, then by total task count.
+    out.sort((a, b) => {
+      if ((a.active.length > 0) !== (b.active.length > 0)) {
+        return a.active.length > 0 ? -1 : 1;
+      }
+      return b.total - a.total;
+    });
+    return out;
+  }, [tasks, projects]);
+
+  const totalActive = groups.reduce((s, g) => s + g.active.length, 0);
 
   return (
     <div>
@@ -389,59 +498,42 @@ function ProjectsSection() {
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500 font-medium">
           Projects
         </span>
+        {totalActive > 0 && (
+          <span className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
+            <span className="h-1 w-1 rounded-full bg-ember-500 animate-blink" />
+            {totalActive} live
+          </span>
+        )}
         <span className="ml-auto font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-          {projectsQ.data?.projects.length ?? 0}
+          {projects.length}
         </span>
       </div>
       <div className="flex flex-col px-2 gap-0.5">
-        {items.length === 0 ? (
+        {groups.length === 0 ? (
           <div className="px-2.5 py-1.5 text-[11px] text-ink-400 dark:text-ink-500 italic">
             spawn a task to start
           </div>
         ) : (
-          items.map((p) => {
-            const u = unread[p.id] ?? 0;
-            const active = p.activeCount ?? 0;
+          groups.map((g) => {
+            const open = openMap[g.id] ?? g.active.length > 0;
             return (
-              <NavLink
-                key={p.id}
-                to={`/projects/${p.slug}`}
-                end
-                className={({ isActive }) =>
-                  cn(
-                    "group h-7 flex items-center gap-2 rounded-md px-2.5 text-[12px] transition-colors duration-100",
-                    isActive
-                      ? "bg-ink-900/[0.05] text-ink-900 font-medium dark:bg-ink-50/[0.06] dark:text-ink-50"
-                      : "text-ink-600 hover:bg-ink-900/[0.03] hover:text-ink-900 dark:text-ink-400 dark:hover:bg-ink-50/[0.03] dark:hover:text-ink-50",
-                  )
-                }
-              >
-                <span
-                  className="size-2 rounded-sm shrink-0"
-                  style={{ background: colorForProject(p.id, p.color) }}
-                />
-                <span className="flex-1 truncate">{p.name}</span>
-                {active > 0 && (
-                  <span
-                    className="h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink"
-                    title={`${active} active`}
-                  />
-                )}
-                {u > 0 && (
-                  <span className="font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300">
-                    +{u}
-                  </span>
-                )}
-              </NavLink>
+              <ProjectGroupRow
+                key={g.id}
+                group={g}
+                open={open}
+                unread={g.project ? unread[g.project.id] ?? 0 : 0}
+                onToggle={() => toggle(g.id)}
+              />
             );
           })
         )}
+
         <NavLink
           to="/projects"
           end
           className={({ isActive }) =>
             cn(
-              "group h-7 flex items-center gap-2 rounded-md px-2.5 text-[11px] transition-colors duration-100",
+              "group mt-1 h-7 flex items-center gap-2 rounded-md px-2.5 text-[11px] transition-colors duration-100",
               isActive
                 ? "bg-ink-900/[0.05] text-ink-900 font-medium dark:bg-ink-50/[0.06] dark:text-ink-50"
                 : "text-ink-500 hover:bg-ink-900/[0.03] hover:text-ink-900 dark:text-ink-400 dark:hover:bg-ink-50/[0.03] dark:hover:text-ink-50",
@@ -457,131 +549,192 @@ function ProjectsSection() {
   );
 }
 
-/**
- * Live list of currently-running tasks. Surfaces what the operator
- * actually wants to peek at on a busy day — agents that are working,
- * waiting on input, or waiting on permission. Driven by the same
- * useTasks() cache the rest of the app uses, so it ticks with the
- * realtime bus without extra fetches.
- */
-function OpenTasksSection() {
-  const tasksQ = useTasks();
-  const tasks = tasksQ.data?.tasks ?? [];
-  const projectsQ = useProjects();
-  const projects = projectsQ.data?.projects ?? [];
+function ProjectGroupRow({
+  group,
+  open,
+  unread,
+  onToggle,
+}: {
+  group: ProjectGroup;
+  open: boolean;
+  unread: number;
+  onToggle: () => void;
+}) {
+  const { project, active, recent } = group;
+  const id = project?.id ?? group.id;
+  const color = project ? colorForProject(project.id, project.color) : "#71717A";
+  const name = project?.name ?? "Untracked";
+  const total = group.total;
+  const liveTasks = active.length;
+  const visible = open ? [...active, ...recent] : [];
 
-  // "Current" = anything actively in flight, then the most recent done /
-  // failed / stopped tasks so the operator can quickly resume one. Up to 8
-  // total. We don't render the section if the user has no tasks at all
-  // (that's the proper first-run state).
-  const active = tasks.filter(
-    (t) =>
-      t.status === "running" ||
-      t.status === "waiting_input" ||
-      t.status === "waiting_perm" ||
-      t.status === "pending",
+  // One integrated row: clicking the chevron area toggles, clicking
+  // the rest navigates to the project (or just toggles for untracked).
+  // The chevron is part of the same surface so it doesn't read as a
+  // separate UI control.
+  const Chev = open ? ChevronDown : ChevronRight;
+  void id;
+
+  const Inner = (
+    <>
+      <Chev className="h-3 w-3 shrink-0 text-ink-400 dark:text-ink-500 transition-transform" />
+      <span
+        className="size-2 rounded-sm shrink-0"
+        style={{ background: color }}
+      />
+      <span className={cn("flex-1 truncate", !project && "italic")}>{name}</span>
+      {liveTasks > 0 && (
+        <span className="h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink shrink-0" />
+      )}
+      {unread > 0 && (
+        <span className="font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300 shrink-0">
+          +{unread}
+        </span>
+      )}
+      <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 shrink-0">
+        {total}
+      </span>
+    </>
   );
-  const recent = tasks
-    .filter((t) => !active.includes(t))
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .slice(0, Math.max(0, 8 - active.length));
-  const open = [...active, ...recent].slice(0, 8);
-  if (open.length === 0) return null;
-
-  const projectColor = (id: string | null | undefined): string => {
-    if (!id) return "#FF5C28";
-    const p = projects.find((x) => x.id === id);
-    return p?.color ?? "#FF5C28";
-  };
 
   return (
     <div>
-      <div className="px-5 mb-1 flex items-center gap-2">
-        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ember-700 dark:text-ember-300 font-medium">
-          Tasks
-        </span>
-        {active.length > 0 && (
-          <span className="font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300">
-            {active.length} live
+      {project ? (
+        <NavLink
+          to={`/projects/${project.slug}`}
+          end
+          // Alt-click (or click on the chevron-icon area) toggles expand;
+          // plain click navigates. Chevron's mousedown handler stops
+          // navigation when it fires, so users can fold/unfold without
+          // leaving the page.
+          className={({ isActive }) =>
+            cn(
+              "group h-7 flex items-center gap-2 rounded-md px-2 text-[12px] transition-colors duration-100 min-w-0",
+              isActive
+                ? "bg-ink-900/[0.05] text-ink-900 font-medium dark:bg-ink-50/[0.06] dark:text-ink-50"
+                : "text-ink-700 hover:bg-ink-900/[0.03] hover:text-ink-900 dark:text-ink-200 dark:hover:bg-ink-700 dark:hover:text-ink-50",
+            )
+          }
+          onClick={(e) => {
+            // Click on the chevron icon → toggle, don't navigate.
+            const target = e.target as HTMLElement;
+            if (target.closest("[data-chevron]")) {
+              e.preventDefault();
+              onToggle();
+            }
+          }}
+        >
+          <span
+            data-chevron
+            role="button"
+            aria-label={open ? "collapse" : "expand"}
+            className="grid place-items-center -ml-0.5"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onToggle();
+            }}
+          >
+            <Chev className="h-3 w-3 shrink-0 text-ink-400 dark:text-ink-500 transition-transform" />
           </span>
-        )}
-        <span className="ml-auto font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-          {open.length}
-        </span>
-      </div>
-      <div className="flex flex-col px-2 gap-0.5">
-        {open.map((t) => {
-          const isActive =
-            t.status === "running" ||
-            t.status === "waiting_input" ||
-            t.status === "waiting_perm" ||
-            t.status === "pending";
-          const tone =
-            t.status === "running"
-              ? "text-ember-700 dark:text-ember-300"
-              : t.status === "waiting_input" || t.status === "waiting_perm"
-                ? "text-amber-700 dark:text-amber-300"
-                : t.status === "done"
-                  ? "text-emerald-700 dark:text-emerald-300"
-                  : t.status === "failed"
-                    ? "text-red-700 dark:text-red-300"
-                    : "text-ink-400 dark:text-ink-500";
-          const dot =
-            t.status === "running"
-              ? "bg-ember-500 animate-blink"
-              : t.status === "waiting_input" || t.status === "waiting_perm"
-                ? "bg-amber-500 animate-blink"
-                : t.status === "done"
-                  ? "bg-emerald-500"
-                  : t.status === "failed"
-                    ? "bg-red-500"
-                    : "bg-ink-300 dark:bg-ink-600";
-          void isActive;
-          return (
-            <NavLink
-              key={t.id}
-              to={`/tasks/${t.id}`}
-              end
-              className={({ isActive }) =>
-                cn(
-                  "group h-auto min-h-[28px] flex items-start gap-2 rounded-md px-2.5 py-1 text-[12px] transition-colors duration-100",
-                  isActive
-                    ? "bg-ink-900/[0.05] dark:bg-ink-50/[0.06]"
-                    : "hover:bg-ink-900/[0.03] dark:hover:bg-ink-700",
-                )
-              }
-            >
-              <span
-                className="size-2 rounded-sm shrink-0 mt-1"
-                style={{ background: projectColor(t.projectId) }}
-              />
-              <span className="flex-1 min-w-0">
-                <span className="block truncate text-ink-900 dark:text-ink-50">
-                  {t.title}
-                </span>
-                <span className="mt-0.5 flex items-center gap-1.5 font-mono text-[10px]">
-                  <span className={cn("h-1 w-1 rounded-full", dot)} />
-                  <span className={cn("uppercase tracking-[0.12em]", tone)}>
-                    {t.status === "running"
-                      ? "running"
-                      : t.status === "waiting_input"
-                        ? "needs you"
-                        : t.status === "waiting_perm"
-                          ? "needs ok"
-                          : t.status === "pending"
-                            ? "queued"
-                            : t.status}
-                  </span>
-                  <span className="text-ink-400 dark:text-ink-500">·</span>
-                  <span className="text-ink-400 dark:text-ink-500">
-                    {t.agent}
-                  </span>
-                </span>
-              </span>
-            </NavLink>
-          );
-        })}
-      </div>
+          <span
+            className="size-2 rounded-sm shrink-0"
+            style={{ background: color }}
+          />
+          <span className="flex-1 truncate">{name}</span>
+          {liveTasks > 0 && (
+            <span className="h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink shrink-0" />
+          )}
+          {unread > 0 && (
+            <span className="font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300 shrink-0">
+              +{unread}
+            </span>
+          )}
+          <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 shrink-0">
+            {total}
+          </span>
+        </NavLink>
+      ) : (
+        <button
+          type="button"
+          onClick={onToggle}
+          className="group w-full h-7 flex items-center gap-2 rounded-md px-2 text-[12px] text-ink-500 hover:bg-ink-900/[0.03] hover:text-ink-900 dark:text-ink-400 dark:hover:bg-ink-700 dark:hover:text-ink-50 transition-colors min-w-0"
+        >
+          {Inner}
+        </button>
+      )}
+
+      {open && visible.length > 0 && (
+        <ul className="ml-3 mt-0.5 mb-1 space-y-0.5 border-l border-ink-900/[0.06] pl-2 dark:border-ink-50/[0.06]">
+          {visible.map((t) => (
+            <SidebarTaskRow key={t.id} task={t} />
+          ))}
+        </ul>
+      )}
     </div>
+  );
+}
+
+function SidebarTaskRow({ task: t }: { task: Task }) {
+  const tone =
+    t.status === "running"
+      ? "text-ember-700 dark:text-ember-300"
+      : t.status === "waiting_input" || t.status === "waiting_perm"
+        ? "text-amber-700 dark:text-amber-300"
+        : t.status === "done"
+          ? "text-emerald-700 dark:text-emerald-300"
+          : t.status === "failed"
+            ? "text-red-700 dark:text-red-300"
+            : "text-ink-400 dark:text-ink-500";
+  const dot =
+    t.status === "running"
+      ? "bg-ember-500 animate-blink"
+      : t.status === "waiting_input" || t.status === "waiting_perm"
+        ? "bg-amber-500 animate-blink"
+        : t.status === "done"
+          ? "bg-emerald-500"
+          : t.status === "failed"
+            ? "bg-red-500"
+            : "bg-ink-300 dark:bg-ink-600";
+  return (
+    <li>
+      <NavLink
+        to={`/tasks/${t.id}`}
+        end
+        className={({ isActive }) =>
+          cn(
+            "group flex items-start gap-1.5 rounded-md px-1.5 py-1 text-[11.5px] transition-colors duration-100",
+            isActive
+              ? "bg-ink-900/[0.05] dark:bg-ink-50/[0.06]"
+              : "hover:bg-ink-900/[0.03] dark:hover:bg-ink-700",
+          )
+        }
+      >
+        <span className={cn("h-1.5 w-1.5 rounded-full mt-1.5 shrink-0", dot)} />
+        <span className="flex-1 min-w-0">
+          <span className="block truncate text-ink-900 dark:text-ink-50">
+            {t.title}
+          </span>
+          <span className="mt-0.5 flex items-center gap-1.5 font-mono text-[9px]">
+            <span className={cn("uppercase tracking-[0.12em]", tone)}>
+              {t.status === "running"
+                ? "running"
+                : t.status === "waiting_input"
+                  ? "needs you"
+                  : t.status === "waiting_perm"
+                    ? "needs ok"
+                    : t.status === "pending"
+                      ? "queued"
+                      : t.status}
+            </span>
+            <span className="text-ink-400 dark:text-ink-500">·</span>
+            <span className="text-ink-400 dark:text-ink-500">{t.agent}</span>
+            <span className="ml-auto text-ink-400 dark:text-ink-500">
+              {formatTs(t.updatedAt)}
+            </span>
+          </span>
+        </span>
+      </NavLink>
+    </li>
   );
 }

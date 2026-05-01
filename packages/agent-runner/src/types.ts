@@ -6,11 +6,18 @@ export type PermissionMode =
   | "bypassPermissions"
   | "plan";
 
+export type ThinkingLevel = "low" | "medium" | "high" | "max" | "xhigh";
+
 export interface RunnerStartOptions {
   prompt: string;
   cwd: string;
   resume?: boolean;
   permissionMode?: PermissionMode;
+  /**
+   * Reasoning effort — `high` by default. Each runner translates it to its
+   * native flag (Claude `--effort`, Codex `model_reasoning_effort`).
+   */
+  thinkingLevel?: ThinkingLevel;
   /** Appended to the agent's system prompt for this run. */
   appendSystemPrompt?: string;
   /**

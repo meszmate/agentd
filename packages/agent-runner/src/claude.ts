@@ -103,6 +103,11 @@ export class ClaudeRunner implements AgentRunner {
     if (mode === "bypassPermissions") {
       args.push("--allow-dangerously-skip-permissions");
     }
+    // Reasoning effort. Claude's CLI takes --effort directly; we just clamp
+    // to its accepted set. Default to `high` so casual single-line prompts
+    // still get real thinking time.
+    const effort = opts.thinkingLevel ?? "high";
+    args.push("--effort", effort);
     if (opts.appendSystemPrompt && opts.appendSystemPrompt.trim().length > 0) {
       args.push("--append-system-prompt", opts.appendSystemPrompt);
     }

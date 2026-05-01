@@ -90,6 +90,12 @@ export class CodexRunner implements AgentRunner {
       args.push("--full-auto");
     }
     if (this.opts.model) args.push("--model", this.opts.model);
+    // Reasoning effort. Codex takes the level via -c model_reasoning_effort.
+    // It accepts: minimal | low | medium | high | xhigh. Our `max` is Claude's
+    // top tier, which corresponds to `xhigh` on Codex.
+    const effort = opts.thinkingLevel ?? "high";
+    const codexEffort = effort === "max" ? "xhigh" : effort;
+    args.push("--config", `model_reasoning_effort="${codexEffort}"`);
     if (opts.appendSystemPrompt && opts.appendSystemPrompt.trim().length > 0) {
       // codex doesn't have a dedicated --append-system-prompt flag; the next
       // best thing is prepending the instructions to the user prompt with a

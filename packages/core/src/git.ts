@@ -370,12 +370,65 @@ const COMMIT_DIFF_LIMIT = 12000;
 const COMMIT_FALLBACK = (hint: string) =>
   `chore: ${(hint || "update").slice(0, 60).replace(/\s+/g, " ").trim()}`;
 
-async function readCombinedDiff(cwd: string): Promise<string> {
+/**
+ * Read the diff Claude should describe.
+ *
+ *   1. Prefer staged + working-tree changes (`git diff --staged` + `git diff`).
+ *      That's "what's about to be committed".
+ *   2. If that's empty AND we have a baseRef, fall back to `git diff
+ *      <base>...HEAD` — i.e. "what does this feature branch contain vs
+ *      its starting point". This is the case after auto-commit-on-exit:
+ *      the working tree is clean but the branch has the agent's commits.
+ *
+ * Returns the diff text plus a small marker for the caller's logs.
+ */
+async function readCombinedDiff(
+  cwd: string,
+  baseRef?: string,
+): Promise<{ diff: string; source: "uncommitted" | "branch" | "empty" }> {
   const [staged, working] = await Promise.all([
     run(["git", "diff", "--staged", "--no-color"], cwd),
     run(["git", "diff", "--no-color"], cwd),
   ]);
-  return (staged.stdout + "\n" + working.stdout).slice(0, COMMIT_DIFF_LIMIT);
+  const uncommitted = staged.stdout + (staged.stdout && working.stdout ? "\n" : "") + working.stdout;
+  if (uncommitted.trim().length > 0) {
+    return { diff: uncommitted.slice(0, COMMIT_DIFF_LIMIT), source: "uncommitted" };
+  }
+  if (baseRef) {
+    // Make sure baseRef resolves; if not we just give up.
+    const ok = await run(["git", "rev-parse", "--verify", baseRef], cwd);
+    if (ok.exitCode === 0) {
+      const branch = await run(
+        ["git", "diff", "--no-color", `${baseRef}...HEAD`],
+        cwd,
+      );
+      if (branch.stdout.trim().length > 0) {
+        return { diff: branch.stdout.slice(0, COMMIT_DIFF_LIMIT), source: "branch" };
+      }
+    }
+  }
+  return { diff: "", source: "empty" };
+}
+
+/** Short `git diff --stat` summary used to enrich deterministic fallbacks. */
+async function readDiffStat(
+  cwd: string,
+  baseRef?: string,
+): Promise<string> {
+  // Prefer the same range we'd describe — uncommitted first, branch second.
+  const wt = await run(["git", "diff", "--stat"], cwd);
+  if (wt.stdout.trim()) return wt.stdout.trim().split("\n").slice(-1)[0]!;
+  if (baseRef) {
+    const ok = await run(["git", "rev-parse", "--verify", baseRef], cwd);
+    if (ok.exitCode === 0) {
+      const r = await run(
+        ["git", "diff", "--stat", `${baseRef}...HEAD`],
+        cwd,
+      );
+      if (r.stdout.trim()) return r.stdout.trim().split("\n").slice(-1)[0]!;
+    }
+  }
+  return "";
 }
 
 function buildCommitPrompt(diff: string, shape: CommitMessageShape): string {
@@ -409,15 +462,23 @@ function cleanCommitOutput(raw: string): string {
 /**
  * Synchronous-ish generator: spawn claude, wait, return the cleaned
  * message. Falls back gracefully when claude is missing or empty.
+ *
+ * `baseRef` lets the generator describe the whole feature branch when
+ * the working tree is clean (the post-auto-commit state). Without it,
+ * a clean tree falls back to the deterministic message.
  */
 export async function generateCommitMessage(
   cwd: string,
-  opts: { fallbackHint?: string } & CommitMessageShape = {},
+  opts: { fallbackHint?: string; baseRef?: string } & CommitMessageShape = {},
 ): Promise<CommitMessageResult> {
-  const diff = await readCombinedDiff(cwd);
+  const { diff, source: diffSource } = await readCombinedDiff(cwd, opts.baseRef);
   if (!diff.trim()) {
+    const stat = await readDiffStat(cwd, opts.baseRef);
+    const hint = stat
+      ? `${opts.fallbackHint ?? "update"} (${stat})`
+      : opts.fallbackHint ?? "";
     return {
-      message: COMMIT_FALLBACK(opts.fallbackHint ?? ""),
+      message: COMMIT_FALLBACK(hint),
       source: "fallback-no-changes",
     };
   }
@@ -444,11 +505,17 @@ export async function generateCommitMessage(
     await proc.exited;
     const cleaned = cleanCommitOutput(out);
     if (!cleaned) {
+      const stat = await readDiffStat(cwd, opts.baseRef);
       return {
-        message: COMMIT_FALLBACK(opts.fallbackHint ?? ""),
+        message: COMMIT_FALLBACK(
+          stat
+            ? `${opts.fallbackHint ?? "update"} (${stat})`
+            : opts.fallbackHint ?? "",
+        ),
         source: "fallback-empty-output",
       };
     }
+    void diffSource;
     return { message: cleaned, source: "claude" };
   } catch (e) {
     return {
@@ -466,11 +533,16 @@ export async function generateCommitMessage(
  */
 export async function* streamCommitMessage(
   cwd: string,
-  opts: { fallbackHint?: string } & CommitMessageShape = {},
+  opts: { fallbackHint?: string; baseRef?: string } & CommitMessageShape = {},
 ): AsyncGenerator<string, CommitMessageResult, void> {
-  const diff = await readCombinedDiff(cwd);
+  const { diff } = await readCombinedDiff(cwd, opts.baseRef);
   if (!diff.trim()) {
-    const fallback = COMMIT_FALLBACK(opts.fallbackHint ?? "");
+    const stat = await readDiffStat(cwd, opts.baseRef);
+    const fallback = COMMIT_FALLBACK(
+      stat
+        ? `${opts.fallbackHint ?? "update"} (${stat})`
+        : opts.fallbackHint ?? "",
+    );
     yield fallback;
     return { message: fallback, source: "fallback-no-changes" };
   }
