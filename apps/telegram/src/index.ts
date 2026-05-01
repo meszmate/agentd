@@ -586,6 +586,23 @@ async function main() {
       const tag = ev.done ? "✓ done" : "↻";
       body = `${tag} [${taskId.slice(-8)}] ${ev.text}`;
       if (ev.done) awaitingDone.add(taskId);
+    } else if (ev.kind === "share") {
+      // The agent sharing what it's thinking BEFORE acting. Ideal nudge moment.
+      body = `💭 [${taskId.slice(-8)}] ${ev.text}\n_(reply to steer; the agent will keep working unless you do)_`;
+    } else if (ev.kind === "ask") {
+      // The agent is BLOCKED waiting for an answer. Format options
+      // as a numbered list so a reply of "1" / "2" / etc resolves
+      // cleanly via the latestOptions map below.
+      latestOptions.set(taskId, ev.options);
+      const numbered =
+        ev.options.length > 0
+          ? "\n" +
+            ev.options.map((o, i) => `${i + 1}. ${o}`).join("\n")
+          : "";
+      body = `❓ [${taskId.slice(-8)}] ${ev.prompt}${numbered}\n_reply with a number or your own answer — the agent is waiting._`;
+    } else if (ev.kind === "answer") {
+      // Quiet ack so the operator sees their reply landed.
+      body = `↳ [${taskId.slice(-8)}] answered: ${ev.answer.slice(0, 200)}`;
     } else if (ev.kind === "permission_request") {
       // Standardize as a 1/2 prompt so a numeric reply is enough.
       const opts = ["approve", "deny"];

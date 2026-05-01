@@ -130,6 +130,103 @@ export class TaskManager {
     });
   }
 
+  /**
+   * Non-blocking thought share. The agent calls `agentd-share "..."` to
+   * broadcast a forward-looking idea ("I'm thinking we should ...") so
+   * the operator can intervene before action. The chat mirror surfaces
+   * these distinctly from progress so they read as opinions, not facts.
+   */
+  recordShare(taskId: string, text: string): void {
+    appendMessage(this.db, taskId, "system", `[share] ${text}`);
+    this.bus.publish({
+      taskId,
+      event: { kind: "share", text },
+      ts: Date.now(),
+    });
+  }
+
+  /**
+   * Pending decisions — the agent's `agentd-ask` blocks until one of
+   * these resolves. We park a Promise per askId and resolve it when the
+   * operator's reply (a steer / chat reply) lands.
+   *
+   * Auto-expires after a generous window so a forgotten dialog doesn't
+   * pin the agent forever.
+   */
+  private pendingAsks = new Map<
+    string,
+    { taskId: string; resolve: (answer: string) => void; expiresAt: number }
+  >();
+
+  /**
+   * Register a blocking decision request. Returns a promise that
+   * resolves with the operator's chosen text. Caller's HTTP handler
+   * holds the response open while the agent waits.
+   */
+  awaitAsk(
+    taskId: string,
+    askId: string,
+    prompt: string,
+    options: string[],
+    timeoutMs = 60 * 60 * 1000,
+  ): Promise<string> {
+    appendMessage(
+      this.db,
+      taskId,
+      "system",
+      `[ask] ${prompt}\n${options.map((o, i) => `${i + 1}. ${o}`).join("\n")}`,
+    );
+    this.bus.publish({
+      taskId,
+      event: { kind: "ask", askId, prompt, options },
+      ts: Date.now(),
+    });
+    return new Promise<string>((resolve) => {
+      const expiresAt = Date.now() + timeoutMs;
+      this.pendingAsks.set(askId, { taskId, resolve, expiresAt });
+    });
+  }
+
+  /**
+   * Resolve the *oldest* pending ask for a task with the given answer.
+   * Called when the operator replies via chat or web. Returns true if
+   * the answer was matched to an in-flight ask.
+   *
+   * The matcher is "oldest pending" rather than askId-keyed so the
+   * operator can reply naturally without quoting an id — there's at
+   * most one ask in flight per task by design (the agent blocks).
+   */
+  answerAsk(taskId: string, answer: string): boolean {
+    let oldestAskId: string | null = null;
+    let oldestExp = Infinity;
+    for (const [id, entry] of this.pendingAsks) {
+      if (entry.taskId !== taskId) continue;
+      if (entry.expiresAt < oldestExp) {
+        oldestExp = entry.expiresAt;
+        oldestAskId = id;
+      }
+    }
+    if (!oldestAskId) return false;
+    const entry = this.pendingAsks.get(oldestAskId)!;
+    this.pendingAsks.delete(oldestAskId);
+    appendMessage(this.db, taskId, "user", `[answer · ${oldestAskId}] ${answer}`);
+    this.bus.publish({
+      taskId,
+      event: { kind: "answer", askId: oldestAskId, answer },
+      ts: Date.now(),
+    });
+    entry.resolve(answer);
+    return true;
+  }
+
+  /** True when the task has a question waiting on the operator. */
+  hasPendingAsk(taskId: string): boolean {
+    for (const e of this.pendingAsks.values()) {
+      if (e.taskId === taskId) return true;
+    }
+    return false;
+  }
+
   async create(params: CreateTaskParams): Promise<Task> {
     const baseBranch =
       params.baseBranch ?? (await detectDefaultBranch(params.repoPath));
@@ -204,9 +301,12 @@ export class TaskManager {
   async sendInput(taskId: string, text: string): Promise<void> {
     const task = getTask(this.db, taskId);
     if (!task) throw new Error("task not found");
-    // If the task is mid-turn we queue the message and surface it in the
-    // timeline as a "queued" user note. The exit handler drains the queue
-    // and starts a fresh `--continue` invocation with the joined text.
+    // 1. If the agent is blocked on an `agentd-ask`, this input is its
+    //    answer. Resolve the pending Promise — the agent's curl call
+    //    unblocks and the runner keeps going.
+    if (this.answerAsk(taskId, text)) return;
+    // 2. Otherwise, if the task is mid-turn, queue the message as a
+    //    steer note and let the exit-time drain pick it up.
     if (this.isRunning(taskId)) {
       this.queueInput(taskId, text);
       return;
@@ -228,6 +328,10 @@ export class TaskManager {
   ): Promise<void> {
     const task = getTask(this.db, taskId);
     if (!task) throw new Error("task not found");
+    // Block-on-ask wins: if there's a pending decision, this becomes the
+    // answer regardless of the requested steer mode. The agent unblocks
+    // and continues, so neither queue nor interrupt is appropriate.
+    if (this.answerAsk(taskId, text)) return;
     if (!this.isRunning(taskId)) {
       // Idle path — same as a normal sendInput so callers don't have to
       // branch on running state themselves.
@@ -355,8 +459,11 @@ export class TaskManager {
     // diff. The daemon-side post-hook still runs as a safety net (it
     // becomes a no-op when there's nothing left to commit / push).
     const finishParts: string[] = [
-      "After every meaningful step (a file edit, a successful build, a tool call that produced a useful result, or whenever you're about to wait on the user), report what you did by running this exact Bash command: `agentd-progress \"<one-line summary of what you just did>\"`.",
-      "When you believe the entire task is finished, run `agentd-progress \"<final summary>\" --done` and then stop. The operator may be on their phone watching the chat mirror — that progress stream is how they see your work in real time.",
+      "You have three small Bash tools for talking to the operator. They are the ONLY way they see what you're doing when away from the laptop.",
+      "  - `agentd-progress \"<text>\"`  — past-tense status. Run it after every meaningful step (file edit, successful build, useful tool result). One short line each.",
+      "  - `agentd-share \"<text>\"`     — forward-looking thought, non-blocking. Use it BEFORE big moves (\"thinking we should X first then Y\") so the operator can nudge before you commit. Don't wait for an answer.",
+      "  - `agentd-ask \"<question>\" \"opt1\" \"opt2\" ...`  — blocking decision. Use this at real forks (architectural choice, library to pick, ambiguous naming, \"should I also do X?\"). Stops you until the operator picks. The chosen option text comes back on stdout — capture it: `answer=$(agentd-ask \"Which approach?\" \"rewrite\" \"refactor\" \"add a flag\")`. Don't fabricate a default when you genuinely don't know — ASK.",
+      "When you believe the entire task is finished, run `agentd-progress \"<final summary>\" --done` and then stop.",
       "When your work is complete, stage everything and commit it inside this worktree BEFORE the final `--done` progress call.",
       "Use a single conventional-commit subject line (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `style:`, `test:`, `perf:`, `ci:`, `build:`) under 70 characters, lowercase, imperative mood, with no scope unless one is obvious.",
       "Do NOT add `Co-Authored-By`, `Generated with`, or any AI attribution to commit messages.",

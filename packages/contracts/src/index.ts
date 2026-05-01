@@ -237,6 +237,40 @@ export const AgentEvent = z.discriminatedUnion("kind", [
     text: z.string(),
     done: z.boolean().optional(),
   }),
+  z.object({
+    /**
+     * Non-blocking forward-looking thought. The agent broadcasts what it
+     * is *considering* next so the operator can nudge before commitment.
+     * No reply required — the agent keeps working. Posted via
+     * `agentd-share "<thought>"`.
+     */
+    kind: z.literal("share"),
+    text: z.string(),
+  }),
+  z.object({
+    /**
+     * Blocking decision request. The agent stops, lists 1-N options, and
+     * waits for the operator to pick one (by index or free-form text).
+     * The next steered input from the user becomes the answer.
+     *
+     *   askId   — short stable id, used to correlate the answer
+     *   prompt  — one-line question
+     *   options — ordered choices the operator can pick by index
+     */
+    kind: z.literal("ask"),
+    askId: z.string(),
+    prompt: z.string(),
+    options: z.array(z.string()),
+  }),
+  z.object({
+    /**
+     * The operator's answer to a previous `ask`. Surfaced as its own
+     * event so the timeline shows the full Q→A pair clearly.
+     */
+    kind: z.literal("answer"),
+    askId: z.string(),
+    answer: z.string(),
+  }),
 ]);
 export type AgentEvent = z.infer<typeof AgentEvent>;
 

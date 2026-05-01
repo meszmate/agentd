@@ -93,6 +93,12 @@ function describe(ev: AgentEvent): string | null {
       return ev.text.slice(0, 140);
     case "progress":
       return `${ev.done ? "✓ done · " : "↻ "}${ev.text.slice(0, 140)}`;
+    case "share":
+      return `💭 ${ev.text.slice(0, 140)}`;
+    case "ask":
+      return `❓ ${ev.prompt.slice(0, 140)}`;
+    case "answer":
+      return `↳ ${ev.answer.slice(0, 140)}`;
     // Streaming partials are too noisy for the activity ticker — drop them.
     case "message_delta":
     case "message_end":

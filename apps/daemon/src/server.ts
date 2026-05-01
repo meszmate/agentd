@@ -712,6 +712,64 @@ export function buildServer(opts: BuildServerOptions) {
   });
 
   /**
+   * Non-blocking thought share — the agent broadcasts what it's
+   * considering doing next, no answer required.
+   */
+  api.post("/tasks/:id/share", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => null)) as {
+      text?: string;
+    } | null;
+    const text = (body?.text ?? "").trim();
+    if (!text) return c.json({ error: "text required" }, 400);
+    tasks.recordShare(id, text);
+    return c.json({ ok: true });
+  });
+
+  /**
+   * Blocking decision request. Holds the response open until the
+   * operator answers (via chat reply, web steer, or `/api/tasks/:id/answer`).
+   * Body: { prompt, options }. Returns: { answer }.
+   */
+  api.post("/tasks/:id/ask", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => null)) as {
+      prompt?: string;
+      options?: string[];
+    } | null;
+    const prompt = (body?.prompt ?? "").trim();
+    if (!prompt) return c.json({ error: "prompt required" }, 400);
+    const options =
+      Array.isArray(body?.options) && body!.options.length > 0
+        ? body!.options.map((s) => String(s)).slice(0, 9)
+        : [];
+    const askId = `ask_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const answer = await tasks.awaitAsk(id, askId, prompt, options);
+    return c.json({ answer, askId });
+  });
+
+  /**
+   * Resolve the oldest pending ask for a task. Used by the web "answer"
+   * UI; chat plugins go through `steerTask` which also routes here.
+   */
+  api.post("/tasks/:id/answer", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => null)) as {
+      answer?: string;
+    } | null;
+    const answer = (body?.answer ?? "").trim();
+    if (!answer) return c.json({ error: "answer required" }, 400);
+    const matched = tasks.answerAsk(id, answer);
+    return c.json({ ok: true, matched });
+  });
+
+  /**
    * Update the task's model override. Empty string clears it (next runner
    * spawn falls back to the configured default for the agent kind).
    */

@@ -50,6 +50,9 @@ const KIND_LABEL: Record<Kind, string> = {
   exit: "exit",
   usage: "usage",
   progress: "step",
+  share: "💭 share",
+  ask: "❓ ask",
+  answer: "↳ answer",
 };
 
 const KIND_TONE: Record<Kind, string> = {
@@ -64,11 +67,17 @@ const KIND_TONE: Record<Kind, string> = {
   exit: "text-ink-500 dark:text-ink-400",
   usage: "text-emerald-700 dark:text-emerald-300",
   progress: "text-violet-700 dark:text-violet-300",
+  share: "text-violet-700 dark:text-violet-300",
+  ask: "text-amber-700 dark:text-amber-300",
+  answer: "text-amber-700 dark:text-amber-300",
 };
 
 const ALL_KINDS: Kind[] = [
   "message",
   "progress",
+  "share",
+  "ask",
+  "answer",
   "tool_call",
   "tool_result",
   "permission_request",
@@ -117,6 +126,17 @@ function renderEvent(ev: AgentEvent): { primary: string; secondary?: string } {
       return {
         primary: ev.done ? `✓ done · ${ev.text}` : `↻ ${ev.text}`,
       };
+    case "share":
+      return { primary: ev.text };
+    case "ask": {
+      const opts =
+        ev.options.length > 0
+          ? ev.options.map((o, i) => `${i + 1}) ${o}`).join("  ")
+          : "";
+      return { primary: ev.prompt, secondary: opts };
+    }
+    case "answer":
+      return { primary: ev.answer };
   }
 }
 
@@ -224,6 +244,9 @@ export function Activity() {
       exit: 0,
       usage: 0,
       progress: 0,
+      share: 0,
+      ask: 0,
+      answer: 0,
     };
     for (const e of events) c[e.kind] += 1;
     return c;
