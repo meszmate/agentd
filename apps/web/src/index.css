@@ -2,6 +2,33 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Symbols-Only Nerd Font — terminal apps (lazygit, starship,
+ * neovim status lines, oh-my-zsh themes, etc.) emit unicode
+ * private-use glyphs that JetBrains Mono lacks. Without a fallback
+ * those render as empty boxes. This @font-face points at the
+ * upstream patched font on jsDelivr; the browser substitutes per
+ * codepoint, so JetBrains Mono still draws ASCII / regular text.
+ */
+@font-face {
+  font-family: "Symbols Nerd Font Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("https://cdn.jsdelivr.net/gh/ryanoasis/nerd-fonts@v3.2.1/patched-fonts/NerdFontsSymbolsOnly/SymbolsNerdFontMono-Regular.ttf")
+    format("truetype");
+  unicode-range:
+    U+E000-F8FF,    /* Private Use Area (most Nerd Font glyphs) */
+    U+F0000-FFFFD,  /* Supplementary Private Use Area-A */
+    U+2500-257F,    /* Box Drawing */
+    U+2580-259F,    /* Block Elements */
+    U+25A0-25FF,    /* Geometric Shapes */
+    U+2600-26FF,    /* Miscellaneous Symbols */
+    U+2700-27BF,    /* Dingbats */
+    U+E0A0-E0A2,    /* Powerline (legacy) */
+    U+E0B0-E0B3;    /* Powerline */
+}
+
 /* ──────────────────────────────────────────────────────────────────────
    /agentd — paper + ember (logo red).
    Light is canonical; dark inverts to ink-base with a slightly warmer

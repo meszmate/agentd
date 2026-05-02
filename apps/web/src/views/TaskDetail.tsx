@@ -72,6 +72,20 @@ export function TaskDetail({ task }: { task: Task }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
   const [lastToolHint, setLastToolHint] = useState<string | null>(null);
+  // Viewport-width gate for the two-column body. Mobile (<1024px)
+  // collapses the workspace panel since both fitting side-by-side
+  // produces unreadable column widths.
+  const [isWide, setIsWide] = useState<boolean>(() =>
+    typeof window === "undefined"
+      ? true
+      : window.matchMedia("(min-width: 1024px)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const onChange = () => setIsWide(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
   /**
    * In-flight streaming bubbles — one per content-block. Accumulates
    * `message_delta` events into the bubble's text; `message_end` removes
@@ -516,7 +530,12 @@ export function TaskDetail({ task }: { task: Task }) {
 
       {/* Body */}
       <div className="flex-1 min-h-0">
-        {workspaceOpen ? (
+        {/* The two-column split is desktop-only — on mobile the
+            workspace panel would crowd out the chat. Mobile gets
+            the chat full-width and an inline "Workspace" link the
+            operator can tap to drill in (TaskWorkspace itself has
+            tabs for files/diff/log/etc). */}
+        {workspaceOpen && isWide ? (
           <PanelGroup direction="horizontal" className="h-full">
             <Panel id={`tl-${task.id}`} defaultSize={52} minSize={32}>
               <TaskTimeline

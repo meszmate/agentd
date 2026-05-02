@@ -64,7 +64,8 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint }: Props)
 
     const term = new XTerm({
       cursorBlink: true,
-      fontFamily: "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace",
+      fontFamily:
+        "'JetBrains Mono', 'JetBrainsMono Nerd Font', 'Hack Nerd Font', 'FiraCode Nerd Font', 'Cascadia Mono', 'Symbols Nerd Font Mono', ui-monospace, 'SF Mono', Menlo, 'DejaVu Sans Mono', monospace",
       fontSize: 12,
       theme: resolved === "dark" ? DARK_THEME : LIGHT_THEME,
       // Real PTY → tmux handles its own line endings; don't double-convert.

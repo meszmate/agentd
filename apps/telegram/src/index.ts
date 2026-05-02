@@ -555,18 +555,69 @@ async function main() {
   // "yes"/"ok"/"go" reply doesn't get queued as steer noise.
   const awaitingDone = new Set<string>();
 
+  // Cache of per-project Bot instances keyed by token. The global
+  // bot handles polling + commands; project-specific bots are send-
+  // only so events for that project appear from a dedicated DM
+  // identity (different name, sound profile, etc).
+  const projectBotsByToken = new Map<string, Bot>();
+  function getProjectBot(token: string): Bot {
+    let b = projectBotsByToken.get(token);
+    if (!b) {
+      b = new Bot(token);
+      projectBotsByToken.set(token, b);
+    }
+    return b;
+  }
+
+  // Per-task project resolution cache. Avoids hammering the API on
+  // every event. Cleared lazily — the next event for the same task
+  // re-uses the cached project pointer.
+  const projectByTask = new Map<string, string | null>();
+  async function projectForTask(
+    taskId: string,
+  ): Promise<{ telegramBotToken: string | null; telegramChatId: string | null } | null> {
+    let projectId = projectByTask.get(taskId);
+    if (projectId === undefined) {
+      try {
+        const { task } = await client.getTask(taskId);
+        projectId = task.projectId ?? null;
+        projectByTask.set(taskId, projectId);
+      } catch {
+        projectByTask.set(taskId, null);
+        return null;
+      }
+    }
+    if (!projectId) return null;
+    try {
+      const { project } = await client.getProject(projectId);
+      return {
+        telegramBotToken: project.telegramBotToken ?? null,
+        telegramChatId: project.telegramChatId ?? null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Send a chat message tagged with the originating task. Records the
    * outbound message id in replyMap so the operator can reply to it
    * (Telegram threading) and we route the reply back as task input.
+   *
+   * The `botOverride` lets a per-project bot send the notification.
+   * When omitted, the global bot is used. Replies route back through
+   * the global bot's polling regardless, so command interaction
+   * still works from any chat.
    */
   async function sendForTask(
     chatId: number,
     taskId: string,
     text: string,
+    botOverride?: Bot,
   ): Promise<void> {
+    const sender = botOverride ?? bot;
     try {
-      const sent = await bot.api.sendMessage(
+      const sent = await sender.api.sendMessage(
         chatId,
         text.slice(0, 4000),
       );
@@ -673,11 +724,25 @@ async function main() {
     } catch {
       // task may have been removed mid-event; nothing to do
     }
+
+    // Per-project bot routing. When the task's project has a
+    // dedicated bot token + chat id, fan the event to that bot's
+    // chat (so each project lives in its own DM identity). Falls
+    // back to the global bot when the project hasn't configured
+    // its own routing.
+    const projectRouting = await projectForTask(taskId);
     const allChats = new Set<number>([
       ...focusChats,
       ...(mirrorChat != null ? [mirrorChat] : []),
     ]);
-    if (allChats.size === 0) return;
+    let projectBot: Bot | null = null;
+    let projectChatId: number | null = null;
+    if (projectRouting?.telegramBotToken && projectRouting.telegramChatId) {
+      projectBot = getProjectBot(projectRouting.telegramBotToken);
+      const id = Number(projectRouting.telegramChatId);
+      if (Number.isFinite(id)) projectChatId = id;
+    }
+    if (allChats.size === 0 && projectChatId == null) return;
 
     // Format per-event-kind. Drop everything that isn't on the curated list.
     let body: string | null = null;
@@ -734,8 +799,13 @@ async function main() {
     // surfacing via `agentd-progress`.
     if (!body) return;
 
+    // Global-bot fan-out: focused chats + mirror target.
     for (const chatId of allChats) {
       void sendForTask(chatId, taskId, body);
+    }
+    // Per-project bot fan-out: dedicated DM for that project.
+    if (projectBot && projectChatId != null) {
+      void sendForTask(projectChatId, taskId, body, projectBot);
     }
   });
   ws.addEventListener("close", () => console.error("ws closed"));

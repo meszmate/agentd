@@ -592,6 +592,22 @@ export const Project = z.object({
    * lives in the daemon DB so it doesn't pollute the repo.
    */
   instructions: z.string().nullable().optional(),
+  /**
+   * Per-project Telegram bot token. When set, this project's task
+   * events go to a dedicated bot (operator chats with each project
+   * in its own DM). Falls back to `cfg.plugins.telegram` global bot
+   * when null. Pair with `telegramChatId` for the destination DM.
+   */
+  telegramBotToken: z.string().nullable().optional(),
+  /** DM/group chat id for the per-project Telegram bot. */
+  telegramChatId: z.string().nullable().optional(),
+  /**
+   * Per-project Discord channel id. Discord uses a single global
+   * bot (one server, many channels), so just the channel id is
+   * enough to fan events to the right place. Falls back to the
+   * global `defaultRepo` mapping when null.
+   */
+  discordChannelId: z.string().nullable().optional(),
 });
 export type Project = z.infer<typeof Project>;
 
@@ -606,6 +622,9 @@ export const UpdateProjectRequest = z.object({
   name: z.string().min(1).optional(),
   color: z.string().optional(),
   instructions: z.string().nullable().optional(),
+  telegramBotToken: z.string().nullable().optional(),
+  telegramChatId: z.string().nullable().optional(),
+  discordChannelId: z.string().nullable().optional(),
 });
 export type UpdateProjectRequest = z.infer<typeof UpdateProjectRequest>;
 

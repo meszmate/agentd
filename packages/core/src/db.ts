@@ -109,6 +109,11 @@ export const projects = sqliteTable("projects", {
    * `agentd-instructions write "<text>"`.
    */
   instructions: text("instructions"),
+  /** Per-project Telegram bot — separate DM channel per project. */
+  telegramBotToken: text("telegram_bot_token"),
+  telegramChatId: text("telegram_chat_id"),
+  /** Per-project Discord channel — single bot, channel-routed. */
+  discordChannelId: text("discord_channel_id"),
 });
 
 export const templates = sqliteTable("templates", {
@@ -243,7 +248,10 @@ CREATE TABLE IF NOT EXISTS projects (
   color TEXT,
   created_at INTEGER NOT NULL,
   last_active_at INTEGER NOT NULL,
-  instructions TEXT
+  instructions TEXT,
+  telegram_bot_token TEXT,
+  telegram_chat_id TEXT,
+  discord_channel_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS councils (
@@ -404,6 +412,9 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE tasks ADD COLUMN sort_order INTEGER",
   "ALTER TABLE projects ADD COLUMN instructions TEXT",
   "ALTER TABLE tasks ADD COLUMN last_compacted_at INTEGER",
+  "ALTER TABLE projects ADD COLUMN telegram_bot_token TEXT",
+  "ALTER TABLE projects ADD COLUMN telegram_chat_id TEXT",
+  "ALTER TABLE projects ADD COLUMN discord_channel_id TEXT",
 ];
 
 function migrate(sqlite: Database): void {

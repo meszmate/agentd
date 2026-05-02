@@ -273,6 +273,7 @@ export function ProjectDetail() {
 
         <aside className="hidden lg:flex flex-col overflow-y-auto bg-paper-100/40 dark:bg-ink-900/30">
           <ProjectInstructionsPanel project={project} />
+          <ProjectChatTargetsPanel project={project} />
           <AutoContextPanel projectPath={project.path} />
           <RecentChatter tasks={tasksForProject} />
           <PathReference path={project.path} />
@@ -815,6 +816,119 @@ function ProjectInstructionsPanel({ project }: { project: Project }) {
         )}
         <span className="ml-auto font-mono text-[9.5px] text-ink-400 dark:text-ink-500">
           prepended to every task spawn
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Per-project chat targets — Telegram (separate bot per project)
+ * and Discord (separate channel per project, single bot). Falls
+ * back to the daemon's global config when these are blank.
+ */
+function ProjectChatTargetsPanel({ project }: { project: Project }) {
+  const update = useUpdateProject();
+  const [tgToken, setTgToken] = useState(project.telegramBotToken ?? "");
+  const [tgChat, setTgChat] = useState(project.telegramChatId ?? "");
+  const [dcChannel, setDcChannel] = useState(
+    project.discordChannelId ?? "",
+  );
+
+  useEffect(() => {
+    setTgToken(project.telegramBotToken ?? "");
+    setTgChat(project.telegramChatId ?? "");
+    setDcChannel(project.discordChannelId ?? "");
+  }, [project.telegramBotToken, project.telegramChatId, project.discordChannelId]);
+
+  const dirty =
+    tgToken.trim() !== (project.telegramBotToken ?? "") ||
+    tgChat.trim() !== (project.telegramChatId ?? "") ||
+    dcChannel.trim() !== (project.discordChannelId ?? "");
+
+  const save = () => {
+    if (!dirty) return;
+    void update.mutateAsync({
+      idOrSlug: project.id,
+      patch: {
+        telegramBotToken: tgToken.trim() || null,
+        telegramChatId: tgChat.trim() || null,
+        discordChannelId: dcChannel.trim() || null,
+      },
+    });
+  };
+
+  return (
+    <div className="border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] px-4 py-3 space-y-2">
+      <div className="flex items-baseline gap-2">
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+          Chat targets
+        </span>
+        <span className="font-mono text-[9px] text-ink-400 dark:text-ink-500">
+          per project
+        </span>
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="block">
+          <span className="block font-mono text-[9.5px] uppercase tracking-[0.1em] text-ink-500 dark:text-ink-400 mb-0.5">
+            Telegram bot token
+          </span>
+          <input
+            value={tgToken}
+            onChange={(e) => setTgToken(e.target.value)}
+            onBlur={save}
+            type="password"
+            placeholder="123456:ABC-..."
+            className="w-full h-7 px-2 rounded border border-ink-900/15 bg-paper-50 font-mono text-[11px] outline-none focus:border-ember-500/40 dark:border-ink-50/15 dark:bg-ink-800"
+            spellCheck={false}
+          />
+        </label>
+        <label className="block">
+          <span className="block font-mono text-[9.5px] uppercase tracking-[0.1em] text-ink-500 dark:text-ink-400 mb-0.5">
+            Telegram chat id
+          </span>
+          <input
+            value={tgChat}
+            onChange={(e) => setTgChat(e.target.value)}
+            onBlur={save}
+            placeholder="-100... or user id"
+            className="w-full h-7 px-2 rounded border border-ink-900/15 bg-paper-50 font-mono text-[11px] outline-none focus:border-ember-500/40 dark:border-ink-50/15 dark:bg-ink-800"
+            spellCheck={false}
+          />
+        </label>
+        <label className="block">
+          <span className="block font-mono text-[9.5px] uppercase tracking-[0.1em] text-ink-500 dark:text-ink-400 mb-0.5">
+            Discord channel id
+          </span>
+          <input
+            value={dcChannel}
+            onChange={(e) => setDcChannel(e.target.value)}
+            onBlur={save}
+            placeholder="channel snowflake"
+            className="w-full h-7 px-2 rounded border border-ink-900/15 bg-paper-50 font-mono text-[11px] outline-none focus:border-ember-500/40 dark:border-ink-50/15 dark:bg-ink-800"
+            spellCheck={false}
+          />
+        </label>
+      </div>
+
+      <div className="flex items-center gap-2">
+        {dirty ? (
+          <button
+            type="button"
+            onClick={save}
+            disabled={update.isPending}
+            className="h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300 disabled:opacity-40"
+          >
+            {update.isPending ? "saving" : "save"}
+          </button>
+        ) : (
+          <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+            saved
+          </span>
+        )}
+        <span className="ml-auto font-mono text-[9.5px] text-ink-400 dark:text-ink-500">
+          empty falls back to global
         </span>
       </div>
     </div>

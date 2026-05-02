@@ -30,6 +30,9 @@ function rowToProject(row: typeof projects.$inferSelect): Project {
     createdAt: row.createdAt,
     lastActiveAt: row.lastActiveAt,
     instructions: row.instructions ?? null,
+    telegramBotToken: row.telegramBotToken ?? null,
+    telegramChatId: row.telegramChatId ?? null,
+    discordChannelId: row.discordChannelId ?? null,
   };
 }
 
@@ -102,6 +105,9 @@ export interface UpdateProjectInput {
   name?: string;
   color?: string;
   instructions?: string | null;
+  telegramBotToken?: string | null;
+  telegramChatId?: string | null;
+  discordChannelId?: string | null;
 }
 
 export function updateProject(
@@ -115,6 +121,12 @@ export function updateProject(
   if (patch.name != null) next.name = patch.name;
   if (patch.color != null) next.color = patch.color;
   if (patch.instructions !== undefined) next.instructions = patch.instructions;
+  if (patch.telegramBotToken !== undefined)
+    next.telegramBotToken = patch.telegramBotToken;
+  if (patch.telegramChatId !== undefined)
+    next.telegramChatId = patch.telegramChatId;
+  if (patch.discordChannelId !== undefined)
+    next.discordChannelId = patch.discordChannelId;
   // Drizzle's .set() throws "No values to set" on an empty object —
   // skip the UPDATE entirely when the patch had nothing meaningful.
   if (Object.keys(next).length === 0) return cur;

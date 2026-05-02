@@ -428,20 +428,83 @@ async function main() {
     }
   });
 
-  // Push notifications
-  const ws = client.watch(null, (event: WsServerEvent) => {
-    if (event.type !== "event") return;
-    if (event.event.kind !== "message" || event.event.role !== "agent") return;
-    const text = event.event.text.trim();
-    if (!text) return;
-    for (const [channelId, taskId] of focus.entries()) {
-      if (taskId !== event.taskId) continue;
-      const ch = bot.channels.cache.get(channelId);
-      if (ch && "send" in ch) {
-        void (ch as TextBasedChannel & { send: (s: string) => Promise<unknown> })
-          .send(`**[${taskId.slice(-8)}]** ${text}`.slice(0, 1900))
-          .catch((e: unknown) => console.error("notify failed:", e));
+  // Cache project lookup per task to avoid hitting the API every event.
+  const projectByTask = new Map<string, string | null>();
+  async function projectChannelForTask(
+    taskId: string,
+  ): Promise<string | null> {
+    let projectId = projectByTask.get(taskId);
+    if (projectId === undefined) {
+      try {
+        const { task } = await client.getTask(taskId);
+        projectId = task.projectId ?? null;
+        projectByTask.set(taskId, projectId);
+      } catch {
+        projectByTask.set(taskId, null);
+        return null;
       }
+    }
+    if (!projectId) return null;
+    try {
+      const { project } = await client.getProject(projectId);
+      return project.discordChannelId ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function sendToChannel(channelId: string, text: string): void {
+    const ch = bot.channels.cache.get(channelId);
+    if (ch && "send" in ch) {
+      void (ch as TextBasedChannel & { send: (s: string) => Promise<unknown> })
+        .send(text.slice(0, 1900))
+        .catch((e: unknown) => console.error("notify failed:", e));
+    }
+  }
+
+  // Push notifications. Curated: agent messages, progress notes,
+  // shares, asks, terminal status. Skip the firehose stuff.
+  const ws = client.watch(null, async (event: WsServerEvent) => {
+    if (event.type !== "event") return;
+    const ev = event.event;
+    const taskId = event.taskId;
+
+    // Compose the message body per event kind.
+    let body: string | null = null;
+    if (ev.kind === "message" && ev.role === "agent") {
+      body = `**[${taskId.slice(-8)}]** ${ev.text.trim()}`;
+    } else if (ev.kind === "progress") {
+      body = `${ev.done ? "✓ done" : "↻"} **[${taskId.slice(-8)}]** ${ev.text}`;
+    } else if (ev.kind === "share") {
+      body = `💭 **[${taskId.slice(-8)}]** ${ev.text}`;
+    } else if (ev.kind === "ask") {
+      const numbered = ev.options.length
+        ? "\n" + ev.options.map((o, i) => `${i + 1}. ${o}`).join("\n")
+        : "";
+      body = `❓ **[${taskId.slice(-8)}]** ${ev.prompt}${numbered}`;
+    } else if (
+      ev.kind === "status" &&
+      (ev.status === "done" ||
+        ev.status === "failed" ||
+        ev.status === "stopped" ||
+        ev.status === "waiting_input")
+    ) {
+      body = `**[${taskId.slice(-8)}]** ${ev.status}`;
+    }
+    if (!body) return;
+
+    // Fan-out targets: focused channels + the project's dedicated
+    // channel (if it has one configured). De-dup so a channel that's
+    // both focused AND the project's channel only gets one copy.
+    const targets = new Set<string>();
+    for (const [channelId, focusedId] of focus.entries()) {
+      if (focusedId === taskId) targets.add(channelId);
+    }
+    const projectChannel = await projectChannelForTask(taskId);
+    if (projectChannel) targets.add(projectChannel);
+
+    for (const channelId of targets) {
+      sendToChannel(channelId, body);
     }
   });
   ws.addEventListener("close", () => console.error("ws closed"));
