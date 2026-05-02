@@ -13,9 +13,12 @@ import type {
   CreateTerminalSessionRequest,
   CreateTerminalWindowRequest,
   DeviceSession,
+  DiscordGuildLite,
   PairExchangeRequest,
   PairExchangeResponse,
   Project,
+  ProjectBridgeSummary,
+  BridgeDeliveryStats,
   RenameTerminalSessionRequest,
   RenameTerminalWindowRequest,
   RunTemplateRequest,
@@ -23,6 +26,8 @@ import type {
   SendTerminalKeysRequest,
   Skill,
   Task,
+  TelegramBotIdentity,
+  TelegramChatInfo,
   Template,
   TerminalSession,
   TerminalWindow,
@@ -104,7 +109,6 @@ export interface TelegramPluginPatch {
   enabled?: boolean;
   botToken?: string;
   allowedUserIds?: number[];
-  allowedChatIds?: number[];
   defaultRepo?: string | null;
 }
 
@@ -112,7 +116,6 @@ export interface DiscordPluginPatch {
   enabled?: boolean;
   botToken?: string;
   allowedUserIds?: string[];
-  allowedChannelIds?: string[];
   defaultRepo?: string | null;
 }
 
@@ -886,6 +889,85 @@ export class AgentdClient {
     return this.req(`/api/admin/plugins/${encodeURIComponent(name)}/restart`, {
       method: "POST",
     });
+  }
+
+  // ── chat bridges (Connect-chat wizard + plugins page) ──
+  async validateTelegramToken(
+    token: string,
+  ): Promise<{ ok: true; bot: TelegramBotIdentity } | { ok: false; error: string }> {
+    return this.req("/api/plugins/telegram/validate", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
+  }
+  async getTelegramChat(
+    token: string,
+    chatId: string,
+  ): Promise<{ ok: true; chat: TelegramChatInfo } | { ok: false; error: string }> {
+    return this.req("/api/plugins/telegram/get-chat", {
+      method: "POST",
+      body: JSON.stringify({ token, chatId }),
+    });
+  }
+  async telegramTestSend(
+    token: string,
+    chatId: string,
+    text?: string,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    return this.req("/api/plugins/telegram/test-send", {
+      method: "POST",
+      body: JSON.stringify({ token, chatId, text }),
+    });
+  }
+  async listDiscordChannels(): Promise<{
+    guilds: DiscordGuildLite[];
+    updatedAt: number;
+  }> {
+    return this.req("/api/plugins/discord/channels");
+  }
+  async reportDiscordChannels(
+    guilds: DiscordGuildLite[],
+  ): Promise<{ ok: true }> {
+    return this.req("/api/plugins/discord/channels", {
+      method: "POST",
+      body: JSON.stringify({ guilds }),
+    });
+  }
+  async discordTestSend(
+    channelId: string,
+    text?: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    return this.req("/api/plugins/discord/test-send", {
+      method: "POST",
+      body: JSON.stringify({ channelId, text }),
+    });
+  }
+  async reportDiscordCommandResult(
+    requestId: string,
+    ok: boolean,
+    error?: string,
+    threadId?: string,
+  ): Promise<{ ok: true }> {
+    return this.req("/api/plugins/discord/command-result", {
+      method: "POST",
+      body: JSON.stringify({ requestId, ok, error, threadId }),
+    });
+  }
+  async reportDelivery(
+    projectId: string | null,
+    platform: "telegram" | "discord",
+  ): Promise<{ ok: true }> {
+    return this.req("/api/plugins/delivery", {
+      method: "POST",
+      body: JSON.stringify({ projectId, platform }),
+    });
+  }
+  async getBridgeSummary(): Promise<{
+    projects: ProjectBridgeSummary[];
+    totals: { telegram: BridgeDeliveryStats; discord: BridgeDeliveryStats };
+    discordChannelsKnown: boolean;
+  }> {
+    return this.req("/api/plugins/bridge-summary");
   }
 
   // ── projects ──

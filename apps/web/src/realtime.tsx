@@ -299,6 +299,25 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           });
           return;
         }
+        if (msg.type === "plugin_delivery") {
+          // Refresh the bridge summary so per-project counters tick up
+          // live without polling. Cheap — single endpoint.
+          void qc.invalidateQueries({ queryKey: qk.bridgeSummary() });
+          return;
+        }
+        if (msg.type === "discord_channels_updated") {
+          void qc.invalidateQueries({ queryKey: qk.discordChannels() });
+          void qc.invalidateQueries({ queryKey: qk.bridgeSummary() });
+          return;
+        }
+        if (
+          msg.type === "discord_test_send" ||
+          msg.type === "discord_create_thread" ||
+          msg.type === "discord_archive_thread"
+        ) {
+          // Web ignores these — they're meant for the discord subprocess.
+          return;
+        }
         if (msg.type === "terminal_sessions") {
           qc.setQueryData<{ sessions: TerminalSession[] }>(
             ["terminal", "sessions"],

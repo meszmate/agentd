@@ -6,8 +6,14 @@ import { z } from "zod";
 export const TelegramPluginConfig = z.object({
   enabled: z.boolean().default(false),
   botToken: z.string().default(""),
+  /**
+   * Allowlisted Telegram user IDs. The user-id gate is the only one
+   * that matters: someone with an allowed user id is trusted no
+   * matter which chat / group they message from. (We previously
+   * also gated by chat id, but the channel/chat gate is redundant
+   * given the user-id gate and just confused operators.)
+   */
   allowedUserIds: z.array(z.number()).default([]),
-  allowedChatIds: z.array(z.number()).default([]),
   defaultRepo: z.string().nullable().default(null),
 });
 export type TelegramPluginConfig = z.infer<typeof TelegramPluginConfig>;
@@ -15,8 +21,11 @@ export type TelegramPluginConfig = z.infer<typeof TelegramPluginConfig>;
 export const DiscordPluginConfig = z.object({
   enabled: z.boolean().default(false),
   botToken: z.string().default(""),
+  /**
+   * Allowlisted Discord user (snowflake) IDs. Same rationale as
+   * Telegram — the user-id gate is sufficient.
+   */
   allowedUserIds: z.array(z.string()).default([]),
-  allowedChannelIds: z.array(z.string()).default([]),
   defaultRepo: z.string().nullable().default(null),
 });
 export type DiscordPluginConfig = z.infer<typeof DiscordPluginConfig>;
@@ -339,14 +348,12 @@ export const AgentdConfig = z.object({
         enabled: false,
         botToken: "",
         allowedUserIds: [],
-        allowedChatIds: [],
         defaultRepo: null,
       }),
       discord: DiscordPluginConfig.default({
         enabled: false,
         botToken: "",
         allowedUserIds: [],
-        allowedChannelIds: [],
         defaultRepo: null,
       }),
     })
@@ -355,14 +362,12 @@ export const AgentdConfig = z.object({
         enabled: false,
         botToken: "",
         allowedUserIds: [],
-        allowedChatIds: [],
         defaultRepo: null,
       },
       discord: {
         enabled: false,
         botToken: "",
         allowedUserIds: [],
-        allowedChannelIds: [],
         defaultRepo: null,
       },
     }),

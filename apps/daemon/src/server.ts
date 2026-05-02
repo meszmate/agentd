@@ -56,6 +56,7 @@ import {
   streamCommitMessage,
   streamPrMessage,
   getPrState,
+  setTaskDiscordThread,
   setTaskPrUrl,
   aggregateToolStats,
   closeTask,
@@ -183,6 +184,227 @@ export function buildServer(opts: BuildServerOptions) {
   }
   function pubProjectRemoved(projectId: string): void {
     bus.publishSystem({ kind: "project_removed", projectId });
+  }
+
+  /**
+   * Chat-bridge admin state.
+   *
+   *  - `discordChannelCache` is the snapshot the discord subprocess
+   *    posts up on Ready / guildCreate / channelUpdate. The Plugins +
+   *    project Connect-chat UIs read from it.
+   *  - `discordCommandReplies` resolves the test-send round-trip: web
+   *    POSTs `/discord/test-send`, daemon broadcasts a `discord_command`
+   *    on the bus (the discord subprocess is also a /ws subscriber and
+   *    handles it), discord posts the result back to
+   *    `/discord/command-result`, daemon resolves the pending promise.
+   *  - `deliveryTimestamps` is per-{projectId|"global"}+platform and
+   *    holds raw timestamps so the stats endpoint can compute
+   *    "lastDeliveredAt" + "count24h" without any persistence.
+   *  - `telegramBotIdentityCache` memoizes the result of `getMe` per
+   *    token so the Plugins page bridge-summary doesn't hammer
+   *    Telegram on every render.
+   */
+  interface DiscordChannelsSnapshot {
+    guilds: import("@agentd/contracts").DiscordGuildLite[];
+    updatedAt: number;
+  }
+  let discordChannelCache: DiscordChannelsSnapshot = {
+    guilds: [],
+    updatedAt: 0,
+  };
+  const discordCommandReplies = new Map<
+    string,
+    {
+      resolve: (r: { ok: boolean; error?: string; threadId?: string }) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  const deliveryTimestamps = new Map<string, number[]>();
+  const telegramBotIdentityCache = new Map<
+    string,
+    { identity: import("@agentd/contracts").TelegramBotIdentity; ts: number }
+  >();
+
+  function deliveryKey(
+    projectId: string | null,
+    platform: "telegram" | "discord",
+  ): string {
+    return `${projectId ?? "_global"}::${platform}`;
+  }
+  function recordDelivery(
+    projectId: string | null,
+    platform: "telegram" | "discord",
+  ): void {
+    const k = deliveryKey(projectId, platform);
+    const arr = deliveryTimestamps.get(k) ?? [];
+    const now = Date.now();
+    const cutoff = now - 24 * 60 * 60 * 1000;
+    const trimmed = arr.filter((t) => t >= cutoff);
+    trimmed.push(now);
+    deliveryTimestamps.set(k, trimmed);
+    bus.publishSystem({ kind: "plugin_delivery", projectId, platform });
+  }
+  function deliveryStatsFor(
+    projectId: string | null,
+    platform: "telegram" | "discord",
+  ): import("@agentd/contracts").BridgeDeliveryStats {
+    const k = deliveryKey(projectId, platform);
+    const arr = deliveryTimestamps.get(k) ?? [];
+    const now = Date.now();
+    const cutoff = now - 24 * 60 * 60 * 1000;
+    const fresh = arr.filter((t) => t >= cutoff);
+    if (fresh.length !== arr.length) deliveryTimestamps.set(k, fresh);
+    return {
+      lastDeliveredAt: fresh.length ? fresh[fresh.length - 1]! : null,
+      count24h: fresh.length,
+    };
+  }
+  async function fetchTelegramBotIdentity(
+    token: string,
+  ): Promise<import("@agentd/contracts").TelegramBotIdentity | null> {
+    const cached = telegramBotIdentityCache.get(token);
+    if (cached && Date.now() - cached.ts < 5 * 60 * 1000) return cached.identity;
+    try {
+      const r = await fetch(
+        `https://api.telegram.org/bot${encodeURIComponent(token)}/getMe`,
+      );
+      const j = (await r.json()) as {
+        ok: boolean;
+        result?: {
+          id: number;
+          is_bot: boolean;
+          first_name: string;
+          username?: string;
+          can_join_groups?: boolean;
+          can_read_all_group_messages?: boolean;
+          supports_inline_queries?: boolean;
+        };
+        description?: string;
+      };
+      if (!j.ok || !j.result) return null;
+      const identity = {
+        id: j.result.id,
+        isBot: j.result.is_bot,
+        firstName: j.result.first_name,
+        username: j.result.username,
+        canJoinGroups: j.result.can_join_groups,
+        canReadAllGroupMessages: j.result.can_read_all_group_messages,
+        supportsInlineQueries: j.result.supports_inline_queries,
+      };
+      telegramBotIdentityCache.set(token, { identity, ts: Date.now() });
+      return identity;
+    } catch {
+      return null;
+    }
+  }
+  async function fetchTelegramChat(
+    token: string,
+    chatId: string,
+  ): Promise<import("@agentd/contracts").TelegramChatInfo | null> {
+    try {
+      const r = await fetch(
+        `https://api.telegram.org/bot${encodeURIComponent(token)}/getChat?chat_id=${encodeURIComponent(chatId)}`,
+      );
+      const j = (await r.json()) as {
+        ok: boolean;
+        result?: {
+          id: number;
+          type: string;
+          title?: string;
+          username?: string;
+          first_name?: string;
+          last_name?: string;
+        };
+      };
+      if (!j.ok || !j.result) return null;
+      return {
+        id: j.result.id,
+        type: j.result.type,
+        title: j.result.title,
+        username: j.result.username,
+        firstName: j.result.first_name,
+        lastName: j.result.last_name,
+      };
+    } catch {
+      return null;
+    }
+  }
+  async function sendTelegramMessage(
+    token: string,
+    chatId: string,
+    text: string,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    try {
+      const r = await fetch(
+        `https://api.telegram.org/bot${encodeURIComponent(token)}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text }),
+        },
+      );
+      const j = (await r.json()) as { ok: boolean; description?: string };
+      if (!j.ok) return { ok: false, error: j.description ?? "send failed" };
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+  }
+  function awaitDiscordReply(
+    requestId: string,
+    timeoutMs = 8000,
+  ): Promise<{ ok: boolean; error?: string; threadId?: string }> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (discordCommandReplies.delete(requestId)) {
+          resolve({
+            ok: false,
+            error: `discord plugin did not respond in ${timeoutMs}ms`,
+          });
+        }
+      }, timeoutMs);
+      discordCommandReplies.set(requestId, { resolve, timer });
+    });
+  }
+  function dispatchDiscordTestSend(
+    channelId: string,
+    text: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const requestId = Math.random().toString(36).slice(2, 12);
+    const p = awaitDiscordReply(requestId);
+    bus.publishSystem({
+      kind: "discord_test_send",
+      channelId,
+      text,
+      requestId,
+    });
+    return p;
+  }
+  function dispatchDiscordCreateThread(
+    channelId: string,
+    name: string,
+  ): Promise<{ ok: boolean; error?: string; threadId?: string }> {
+    const requestId = Math.random().toString(36).slice(2, 12);
+    const p = awaitDiscordReply(requestId);
+    bus.publishSystem({
+      kind: "discord_create_thread",
+      channelId,
+      name,
+      requestId,
+    });
+    return p;
+  }
+  function dispatchDiscordArchiveThread(
+    threadId: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const requestId = Math.random().toString(36).slice(2, 12);
+    const p = awaitDiscordReply(requestId);
+    bus.publishSystem({
+      kind: "discord_archive_thread",
+      threadId,
+      requestId,
+    });
+    return p;
   }
 
   app.get("/health", (c) =>
@@ -367,11 +589,52 @@ export function buildServer(opts: BuildServerOptions) {
         ...(parsed.data.model ? { model: parsed.data.model } : {}),
       });
       pubTaskChanged(task.id);
+      void maybeSpawnTaskThread(task.id);
       return c.json({ task });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
   });
+
+  /**
+   * If the task's project has `autoTaskThread` + `discordChannelId`
+   * set, ask the discord subprocess to spawn a thread named after
+   * the task and persist its id. Errors are logged but don't fail
+   * task creation — the operator can recover by toggling the
+   * project flag off and back on.
+   */
+  async function maybeSpawnTaskThread(taskId: string): Promise<void> {
+    const task = tasks.get(taskId);
+    if (!task || !task.projectId || task.discordThreadId) return;
+    const project = getProjectById(db, task.projectId);
+    if (!project?.autoTaskThread || !project.discordChannelId) return;
+    const cleanTitle = task.title.replace(/[\r\n]+/g, " ").slice(0, 90);
+    const name = `${task.id.slice(-6)}-${cleanTitle}`.slice(0, 100);
+    try {
+      const r = await dispatchDiscordCreateThread(
+        project.discordChannelId,
+        name,
+      );
+      if (r.ok && r.threadId) {
+        setTaskDiscordThread(db, task.id, r.threadId);
+        pubTaskChanged(task.id);
+      } else if (!r.ok) {
+        console.warn(
+          `[discord] thread spawn failed for task ${task.id}: ${r.error ?? "unknown"}`,
+        );
+      }
+    } catch (e) {
+      console.warn(`[discord] thread spawn error: ${(e as Error).message}`);
+    }
+  }
+  async function maybeArchiveTaskThread(taskId: string): Promise<void> {
+    const task = tasks.get(taskId);
+    if (!task || !task.discordThreadId) return;
+    const threadId = task.discordThreadId;
+    setTaskDiscordThread(db, task.id, null);
+    pubTaskChanged(task.id);
+    void dispatchDiscordArchiveThread(threadId).catch(() => {});
+  }
 
   api.get("/tasks/:id", (c) => {
     const id = c.req.param("id");
@@ -859,6 +1122,7 @@ export function buildServer(opts: BuildServerOptions) {
         ts: Date.now(),
       });
       pubTaskChanged(id);
+      void maybeArchiveTaskThread(id);
     }
     return c.json({ task: updated });
   });
@@ -1041,6 +1305,8 @@ export function buildServer(opts: BuildServerOptions) {
     const state = await getPrState(task.prUrl);
     if (state?.merged && c.req.query("autoClose") === "1") {
       const updated = closeTask(db, id, "merged");
+      pubTaskChanged(id);
+      void maybeArchiveTaskThread(id);
       return c.json({
         prUrl: task.prUrl,
         ...state,
@@ -1790,6 +2056,228 @@ export function buildServer(opts: BuildServerOptions) {
     return c.json({ ok: r.restarted, reason: r.reason ?? null, status: plugins.status() });
   });
 
+  // ── Chat-bridge admin (used by the Connect-chat wizard) ─────────────
+  //
+  // These power the polished chat-target UX. Telegram endpoints proxy
+  // straight to the public Bot API; Discord endpoints round-trip
+  // through the supervised discord subprocess via the system bus.
+
+  api.post("/plugins/telegram/validate", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      token?: string;
+    } | null;
+    const token = (body?.token ?? "").trim();
+    if (!token) return c.json({ ok: false, error: "token required" }, 400);
+    const identity = await fetchTelegramBotIdentity(token);
+    if (!identity) {
+      return c.json(
+        { ok: false, error: "telegram rejected the token" },
+        200,
+      );
+    }
+    return c.json({ ok: true, bot: identity });
+  });
+
+  api.post("/plugins/telegram/get-chat", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      token?: string;
+      chatId?: string;
+    } | null;
+    const token = (body?.token ?? "").trim();
+    const chatId = (body?.chatId ?? "").trim();
+    if (!token || !chatId) {
+      return c.json({ ok: false, error: "token + chatId required" }, 400);
+    }
+    const chat = await fetchTelegramChat(token, chatId);
+    if (!chat) {
+      return c.json(
+        { ok: false, error: "couldn't fetch chat (id wrong, or bot has never been messaged there)" },
+        200,
+      );
+    }
+    return c.json({ ok: true, chat });
+  });
+
+  api.post("/plugins/telegram/test-send", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      token?: string;
+      chatId?: string;
+      text?: string;
+    } | null;
+    const token = (body?.token ?? "").trim();
+    const chatId = (body?.chatId ?? "").trim();
+    if (!token || !chatId) {
+      return c.json({ ok: false, error: "token + chatId required" }, 400);
+    }
+    const text =
+      (body?.text ?? "").trim() ||
+      "agentd test message — chat connected.";
+    const r = await sendTelegramMessage(token, chatId, text);
+    return c.json(r, 200);
+  });
+
+  api.get("/plugins/discord/channels", (c) => {
+    return c.json({
+      guilds: discordChannelCache.guilds,
+      updatedAt: discordChannelCache.updatedAt,
+    });
+  });
+
+  /** Internal — discord subprocess reports its current channel snapshot. */
+  api.post("/plugins/discord/channels", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      guilds?: import("@agentd/contracts").DiscordGuildLite[];
+    } | null;
+    if (!body || !Array.isArray(body.guilds)) {
+      return c.json({ ok: false, error: "guilds[] required" }, 400);
+    }
+    discordChannelCache = {
+      guilds: body.guilds,
+      updatedAt: Date.now(),
+    };
+    bus.publishSystem({ kind: "discord_channels_updated" });
+    return c.json({ ok: true });
+  });
+
+  api.post("/plugins/discord/test-send", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      channelId?: string;
+      text?: string;
+    } | null;
+    const channelId = (body?.channelId ?? "").trim();
+    if (!channelId) {
+      return c.json({ ok: false, error: "channelId required" }, 400);
+    }
+    const text =
+      (body?.text ?? "").trim() ||
+      "agentd test message — channel connected.";
+    const r = await dispatchDiscordTestSend(channelId, text);
+    return c.json(r, 200);
+  });
+
+  /** Internal — discord subprocess returns the result of any IPC command. */
+  api.post("/plugins/discord/command-result", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      requestId?: string;
+      ok?: boolean;
+      error?: string;
+      threadId?: string;
+    } | null;
+    if (!body?.requestId) {
+      return c.json({ error: "requestId required" }, 400);
+    }
+    const pending = discordCommandReplies.get(body.requestId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      discordCommandReplies.delete(body.requestId);
+      pending.resolve({
+        ok: !!body.ok,
+        error: body.error,
+        threadId: body.threadId,
+      });
+    }
+    return c.json({ ok: true });
+  });
+
+  /** Internal — subprocesses report each successful delivery. */
+  api.post("/plugins/delivery", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      projectId?: string | null;
+      platform?: "telegram" | "discord";
+    } | null;
+    if (!body || (body.platform !== "telegram" && body.platform !== "discord")) {
+      return c.json({ error: "platform required" }, 400);
+    }
+    recordDelivery(body.projectId ?? null, body.platform);
+    return c.json({ ok: true });
+  });
+
+  /**
+   * Bridge summary for the Plugins page "Project routing" section
+   * and the project Connect-chat panel. Bundles per-project bot/
+   * channel identity + delivery stats so the UI doesn't make N
+   * round-trips per row.
+   */
+  api.get("/plugins/bridge-summary", async (c) => {
+    const projectsList = listProjects(db);
+    const channelByid = new Map<
+      string,
+      { name: string; guildId: string; guildName: string }
+    >();
+    for (const g of discordChannelCache.guilds) {
+      for (const ch of g.channels) {
+        channelByid.set(ch.id, {
+          name: ch.name,
+          guildId: g.id,
+          guildName: g.name,
+        });
+      }
+    }
+
+    const out: import("@agentd/contracts").ProjectBridgeSummary[] = [];
+    for (const p of projectsList) {
+      const hasTg = !!p.telegramBotToken && !!p.telegramChatId;
+      const hasDc = !!p.discordChannelId;
+      if (!hasTg && !hasDc) continue;
+
+      let telegram:
+        | import("@agentd/contracts").ProjectBridgeSummary["telegram"]
+        | null = null;
+      if (hasTg && p.telegramBotToken && p.telegramChatId) {
+        const identity = await fetchTelegramBotIdentity(p.telegramBotToken);
+        const chat = await fetchTelegramChat(
+          p.telegramBotToken,
+          p.telegramChatId,
+        );
+        const chatLabel = chat
+          ? chat.title ||
+            chat.username ||
+            [chat.firstName, chat.lastName].filter(Boolean).join(" ") ||
+            null
+          : null;
+        telegram = {
+          botUsername: identity?.username ?? null,
+          botFirstName: identity?.firstName ?? null,
+          chatId: p.telegramChatId,
+          chatLabel,
+          stats: deliveryStatsFor(p.id, "telegram"),
+        };
+      }
+
+      let discord:
+        | import("@agentd/contracts").ProjectBridgeSummary["discord"]
+        | null = null;
+      if (hasDc && p.discordChannelId) {
+        const ch = channelByid.get(p.discordChannelId);
+        discord = {
+          channelId: p.discordChannelId,
+          channelName: ch?.name ?? null,
+          guildId: ch?.guildId ?? null,
+          guildName: ch?.guildName ?? null,
+          stats: deliveryStatsFor(p.id, "discord"),
+        };
+      }
+
+      out.push({
+        projectId: p.id,
+        slug: p.slug,
+        name: p.name,
+        color: p.color ?? null,
+        telegram,
+        discord,
+      });
+    }
+
+    return c.json({
+      projects: out,
+      totals: {
+        telegram: deliveryStatsFor(null, "telegram"),
+        discord: deliveryStatsFor(null, "discord"),
+      },
+      discordChannelsKnown: discordChannelCache.updatedAt > 0,
+    });
+  });
+
   // ── Projects ────────────────────────────────────────────────────────
   api.get("/projects", (c) => {
     return c.json({ projects: listProjects(db) });
@@ -2320,6 +2808,41 @@ export function buildServer(opts: BuildServerOptions) {
             send({
               type: "project_removed",
               projectId: env.event.projectId,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "discord_test_send") {
+            send({
+              type: "discord_test_send",
+              channelId: env.event.channelId,
+              text: env.event.text,
+              requestId: env.event.requestId,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "discord_create_thread") {
+            send({
+              type: "discord_create_thread",
+              channelId: env.event.channelId,
+              name: env.event.name,
+              requestId: env.event.requestId,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "discord_archive_thread") {
+            send({
+              type: "discord_archive_thread",
+              threadId: env.event.threadId,
+              requestId: env.event.requestId,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "plugin_delivery") {
+            send({
+              type: "plugin_delivery",
+              projectId: env.event.projectId,
+              platform: env.event.platform,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "discord_channels_updated") {
+            send({
+              type: "discord_channels_updated",
               ts: env.ts,
             });
           }

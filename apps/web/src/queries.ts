@@ -23,6 +23,8 @@ export const qk = {
   skills: (repoPath?: string) => ["skills", repoPath ?? null] as const,
   projects: () => ["projects"] as const,
   project: (idOrSlug: string) => ["project", idOrSlug] as const,
+  bridgeSummary: () => ["bridge-summary"] as const,
+  discordChannels: () => ["discord-channels"] as const,
 };
 
 export function useProjects() {
@@ -472,6 +474,64 @@ export function useRestartPlugin() {
   return useMutation({
     mutationFn: (name: "telegram" | "discord") => client.restartPlugin(name),
     onSuccess: () => void qc.invalidateQueries({ queryKey: qk.plugins() }),
+  });
+}
+
+/**
+ * Connect-chat wizard hooks. The validate / get-chat / test-send
+ * mutations don't go through React Query's cache — they're imperative
+ * round-trips kicked off from the wizard's button handlers.
+ */
+export function useValidateTelegramToken() {
+  const client = useClient();
+  return useMutation({
+    mutationFn: (token: string) => client.validateTelegramToken(token),
+  });
+}
+export function useGetTelegramChat() {
+  const client = useClient();
+  return useMutation({
+    mutationFn: ({ token, chatId }: { token: string; chatId: string }) =>
+      client.getTelegramChat(token, chatId),
+  });
+}
+export function useTelegramTestSend() {
+  const client = useClient();
+  return useMutation({
+    mutationFn: ({
+      token,
+      chatId,
+      text,
+    }: {
+      token: string;
+      chatId: string;
+      text?: string;
+    }) => client.telegramTestSend(token, chatId, text),
+  });
+}
+export function useDiscordChannels(refetchInterval?: number) {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.discordChannels(),
+    queryFn: () => client.listDiscordChannels(),
+    staleTime: 30_000,
+    refetchInterval,
+  });
+}
+export function useDiscordTestSend() {
+  const client = useClient();
+  return useMutation({
+    mutationFn: ({ channelId, text }: { channelId: string; text?: string }) =>
+      client.discordTestSend(channelId, text),
+  });
+}
+export function useBridgeSummary(refetchInterval = 6000) {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.bridgeSummary(),
+    queryFn: () => client.getBridgeSummary(),
+    staleTime: 5_000,
+    refetchInterval,
   });
 }
 

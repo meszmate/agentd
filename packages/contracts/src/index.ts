@@ -202,6 +202,12 @@ export const Task = z.object({
    * working memory vs. those summarized away.
    */
   lastCompactedAt: z.number().nullable().optional(),
+  /**
+   * Discord thread spawned for this task when the parent project has
+   * `autoTaskThread` enabled. Events route to this thread instead of
+   * the parent channel, and it auto-archives when the task closes.
+   */
+  discordThreadId: z.string().nullable().optional(),
 });
 export type Task = z.infer<typeof Task>;
 
@@ -608,6 +614,16 @@ export const Project = z.object({
    * global `defaultRepo` mapping when null.
    */
   discordChannelId: z.string().nullable().optional(),
+  /**
+   * When true, every task spawned in this project gets its own
+   * Discord thread under `discordChannelId`. The thread is named
+   * after the task, all events route there instead of (or in
+   * addition to) the parent channel, and the thread auto-archives
+   * when the task closes.
+   *
+   * Requires `discordChannelId` to be set; ignored otherwise.
+   */
+  autoTaskThread: z.boolean().optional(),
 });
 export type Project = z.infer<typeof Project>;
 
@@ -625,6 +641,7 @@ export const UpdateProjectRequest = z.object({
   telegramBotToken: z.string().nullable().optional(),
   telegramChatId: z.string().nullable().optional(),
   discordChannelId: z.string().nullable().optional(),
+  autoTaskThread: z.boolean().optional(),
 });
 export type UpdateProjectRequest = z.infer<typeof UpdateProjectRequest>;
 
@@ -818,5 +835,126 @@ export const WsServerEvent = z.discriminatedUnion("type", [
     projectId: z.string(),
     ts: z.number(),
   }),
+  // Daemon → discord plugin command channel. The daemon emits these
+  // when something on the web/daemon side wants the discord subprocess
+  // to act (test-send a message, spawn a thread for a task, archive
+  // a thread when the task closes). Other subscribers ignore it.
+  z.object({
+    type: z.literal("discord_test_send"),
+    channelId: z.string(),
+    text: z.string(),
+    requestId: z.string(),
+    ts: z.number(),
+  }),
+  z.object({
+    type: z.literal("discord_create_thread"),
+    channelId: z.string(),
+    name: z.string(),
+    requestId: z.string(),
+    ts: z.number(),
+  }),
+  z.object({
+    type: z.literal("discord_archive_thread"),
+    threadId: z.string(),
+    requestId: z.string(),
+    ts: z.number(),
+  }),
+  // Pushed when delivery stats change so live counters in the UI
+  // refresh without polling.
+  z.object({
+    type: z.literal("plugin_delivery"),
+    projectId: z.string().nullable(),
+    platform: z.enum(["telegram", "discord"]),
+    ts: z.number(),
+  }),
+  // Pushed when the discord subprocess re-reports its guild/channel
+  // list (on Ready, on guildCreate, on channelCreate/Delete).
+  z.object({
+    type: z.literal("discord_channels_updated"),
+    ts: z.number(),
+  }),
 ]);
 export type WsServerEvent = z.infer<typeof WsServerEvent>;
+
+// ── Plugin chat-bridge admin ───────────────────────────────────────
+//
+// These power the polished "Connect chat" flow on the project page.
+// Telegram validation/test-send hits the public Bot API directly from
+// the daemon. Discord channel list + test-send round-trip through
+// the supervised discord subprocess.
+
+export const TelegramBotIdentity = z.object({
+  id: z.number(),
+  isBot: z.boolean(),
+  firstName: z.string(),
+  username: z.string().optional(),
+  canJoinGroups: z.boolean().optional(),
+  canReadAllGroupMessages: z.boolean().optional(),
+  supportsInlineQueries: z.boolean().optional(),
+});
+export type TelegramBotIdentity = z.infer<typeof TelegramBotIdentity>;
+
+export const TelegramChatInfo = z.object({
+  id: z.number(),
+  type: z.string(),
+  title: z.string().optional(),
+  username: z.string().optional(),
+  firstName: z.string().optional(),
+  lastName: z.string().optional(),
+});
+export type TelegramChatInfo = z.infer<typeof TelegramChatInfo>;
+
+export const DiscordChannelLite = z.object({
+  id: z.string(),
+  name: z.string(),
+  type: z.number(),
+  parentId: z.string().nullable().optional(),
+});
+export type DiscordChannelLite = z.infer<typeof DiscordChannelLite>;
+
+export const DiscordGuildLite = z.object({
+  id: z.string(),
+  name: z.string(),
+  iconUrl: z.string().nullable().optional(),
+  channels: z.array(DiscordChannelLite),
+});
+export type DiscordGuildLite = z.infer<typeof DiscordGuildLite>;
+
+export const BridgeDeliveryStats = z.object({
+  /** Wall-clock of the most recent successful send for this scope. */
+  lastDeliveredAt: z.number().nullable(),
+  /** Sends in the last 24 hours. */
+  count24h: z.number(),
+});
+export type BridgeDeliveryStats = z.infer<typeof BridgeDeliveryStats>;
+
+/**
+ * One row on the Plugins page "Project routing" section. Every project
+ * with a custom Telegram bot or Discord channel shows up here with its
+ * resolved bot/channel identity + recent delivery stats.
+ */
+export const ProjectBridgeSummary = z.object({
+  projectId: z.string(),
+  slug: z.string(),
+  name: z.string(),
+  color: z.string().nullable().optional(),
+  telegram: z
+    .object({
+      botUsername: z.string().nullable(),
+      botFirstName: z.string().nullable(),
+      chatId: z.string(),
+      chatLabel: z.string().nullable(),
+      stats: BridgeDeliveryStats,
+    })
+    .nullable(),
+  discord: z
+    .object({
+      channelId: z.string(),
+      channelName: z.string().nullable(),
+      guildId: z.string().nullable(),
+      guildName: z.string().nullable(),
+      stats: BridgeDeliveryStats,
+    })
+    .nullable(),
+});
+export type ProjectBridgeSummary = z.infer<typeof ProjectBridgeSummary>;

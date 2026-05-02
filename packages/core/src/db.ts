@@ -50,6 +50,11 @@ export const tasks = sqliteTable("tasks", {
    * working memory vs. ones that have been summarized away.
    */
   lastCompactedAt: integer("last_compacted_at"),
+  /**
+   * Discord thread spawned for this task when the parent project
+   * has `autoTaskThread` enabled. Cleared on archive.
+   */
+  discordThreadId: text("discord_thread_id"),
 });
 
 export const todos = sqliteTable("todos", {
@@ -114,6 +119,8 @@ export const projects = sqliteTable("projects", {
   telegramChatId: text("telegram_chat_id"),
   /** Per-project Discord channel — single bot, channel-routed. */
   discordChannelId: text("discord_channel_id"),
+  /** When 1, every task in this project spawns its own Discord thread. */
+  autoTaskThread: integer("auto_task_thread").notNull().default(0),
 });
 
 export const templates = sqliteTable("templates", {
@@ -415,6 +422,8 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE projects ADD COLUMN telegram_bot_token TEXT",
   "ALTER TABLE projects ADD COLUMN telegram_chat_id TEXT",
   "ALTER TABLE projects ADD COLUMN discord_channel_id TEXT",
+  "ALTER TABLE projects ADD COLUMN auto_task_thread INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE tasks ADD COLUMN discord_thread_id TEXT",
 ];
 
 function migrate(sqlite: Database): void {

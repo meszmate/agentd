@@ -6,7 +6,6 @@ interface BotConfig {
   token: string;
   server: string;
   session: string;
-  allowedChatIds: Set<number>;
   allowedUserIds: Set<number>;
 }
 
@@ -33,18 +32,16 @@ function loadConfig(): BotConfig {
     console.error("AGENTD_TOKEN is required (an agentd session token, not a pairing token)");
     process.exit(2);
   }
-  const allowedChatIds = parseIdList(process.env.TELEGRAM_ALLOWED_CHAT_IDS);
   const allowedUserIds = parseIdList(process.env.TELEGRAM_ALLOWED_USER_IDS);
-  if (allowedChatIds.size === 0 && allowedUserIds.size === 0) {
+  if (allowedUserIds.size === 0) {
     console.error(
-      "TELEGRAM_ALLOWED_USER_IDS or TELEGRAM_ALLOWED_CHAT_IDS must list at least one id. Use /whoami in a chat to discover yours after launch.",
+      "TELEGRAM_ALLOWED_USER_IDS must list at least one id. Use /whoami after launch to find yours.",
     );
   }
   return {
     token,
     server,
     session,
-    allowedChatIds,
     allowedUserIds,
   };
 }
@@ -97,22 +94,14 @@ async function main() {
   }, 60_000);
 
   /**
-   * Two-axis check: a request is allowed only if the chat is on the chat
-   * allowlist OR the user is on the user allowlist (whichever is configured).
-   * If only user ids are configured, chat ids are not required (and vice
-   * versa) — but at least one axis MUST match. If neither list is configured,
-   * everything is denied. This keeps personal DMs and shared groups both
-   * lockable, and it lets a user-id allowlist work even in groups where the
-   * chat id varies.
+   * Single-axis user-id allowlist. Trusted users are trusted no matter
+   * which chat they message from — there's no separate chat-id gate.
+   * (The chat-id gate used to be a thing but it was redundant: if a
+   * user is allowlisted, we trust them; otherwise we don't.)
    */
-  function isAllowed(chatId: number | undefined, userId: number | undefined): boolean {
-    if (cfg.allowedUserIds.size === 0 && cfg.allowedChatIds.size === 0) return false;
-    const userOk = userId != null && cfg.allowedUserIds.has(userId);
-    const chatOk = chatId != null && cfg.allowedChatIds.has(chatId);
-    if (cfg.allowedUserIds.size > 0 && cfg.allowedChatIds.size > 0) {
-      return userOk && chatOk;
-    }
-    return userOk || chatOk;
+  function isAllowed(_chatId: number | undefined, userId: number | undefined): boolean {
+    if (cfg.allowedUserIds.size === 0) return false;
+    return userId != null && cfg.allowedUserIds.has(userId);
   }
 
   bot.command("whoami", async (ctx) => {
@@ -575,7 +564,11 @@ async function main() {
   const projectByTask = new Map<string, string | null>();
   async function projectForTask(
     taskId: string,
-  ): Promise<{ telegramBotToken: string | null; telegramChatId: string | null } | null> {
+  ): Promise<{
+    projectId: string;
+    telegramBotToken: string | null;
+    telegramChatId: string | null;
+  } | null> {
     let projectId = projectByTask.get(taskId);
     if (projectId === undefined) {
       try {
@@ -591,6 +584,7 @@ async function main() {
     try {
       const { project } = await client.getProject(projectId);
       return {
+        projectId,
         telegramBotToken: project.telegramBotToken ?? null,
         telegramChatId: project.telegramChatId ?? null,
       };
@@ -614,6 +608,7 @@ async function main() {
     taskId: string,
     text: string,
     botOverride?: Bot,
+    projectId?: string | null,
   ): Promise<void> {
     const sender = botOverride ?? bot;
     try {
@@ -622,6 +617,9 @@ async function main() {
         text.slice(0, 4000),
       );
       replyMap.set(replyKey(chatId, sent.message_id), taskId);
+      // Bump the daemon's per-project delivery counter so the Plugins
+      // page + Connect-chat panel can show "last delivered Xm ago".
+      void client.reportDelivery(projectId ?? null, "telegram").catch(() => {});
     } catch (e) {
       console.error("notify failed:", (e as Error).message);
     }
@@ -665,10 +663,8 @@ async function main() {
       ]
         .filter((s) => s.length > 0)
         .join("\n");
-      const targets = new Set<number>([
-        ...cfg.allowedChatIds,
-        ...cfg.allowedUserIds,
-      ]);
+      // Suggestions broadcast as DMs to every allowlisted user.
+      const targets = new Set<number>([...cfg.allowedUserIds]);
       for (const chatId of targets) {
         try {
           const sent = await bot.api.sendMessage(chatId, body, {
@@ -746,7 +742,13 @@ async function main() {
 
     // Format per-event-kind. Drop everything that isn't on the curated list.
     let body: string | null = null;
-    if (ev.kind === "progress") {
+    if (ev.kind === "message" && ev.role === "agent") {
+      // The agent's natural-language reply for a turn. Without this
+      // an operator who steered the task from chat sees nothing
+      // beyond the steer ack — they need the actual answer.
+      const txt = ev.text.trim();
+      if (txt.length > 0) body = `[${taskId.slice(-8)}] ${txt}`;
+    } else if (ev.kind === "progress") {
       const tag = ev.done ? "✓ done" : "↻";
       body = `${tag} [${taskId.slice(-8)}] ${ev.text}`;
       if (ev.done) awaitingDone.add(taskId);
@@ -799,20 +801,27 @@ async function main() {
     // surfacing via `agentd-progress`.
     if (!body) return;
 
+    const routedProjectId = projectRouting?.projectId ?? null;
     // Global-bot fan-out: focused chats + mirror target.
     for (const chatId of allChats) {
-      void sendForTask(chatId, taskId, body);
+      void sendForTask(chatId, taskId, body, undefined, routedProjectId);
     }
     // Per-project bot fan-out: dedicated DM for that project.
     if (projectBot && projectChatId != null) {
-      void sendForTask(projectChatId, taskId, body, projectBot);
+      void sendForTask(
+        projectChatId,
+        taskId,
+        body,
+        projectBot,
+        routedProjectId,
+      );
     }
   });
   ws.addEventListener("close", () => console.error("ws closed"));
   ws.addEventListener("error", () => console.error("ws error"));
 
   console.log(
-    `telegram bot ready · server=${cfg.server} · ${cfg.allowedUserIds.size} allowed user(s) · ${cfg.allowedChatIds.size} allowed chat(s)`,
+    `telegram bot ready · server=${cfg.server} · ${cfg.allowedUserIds.size} allowed user(s)`,
   );
   await bot.start();
 }

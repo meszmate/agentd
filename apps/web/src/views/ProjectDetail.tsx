@@ -11,9 +11,13 @@ import {
   ExternalLink,
   FileText,
   FolderGit2,
+  Hash,
   Loader2,
+  MessageCircle,
   Plus,
   Rocket,
+  Settings2,
+  Send,
   TerminalSquare,
   Trash2,
   XCircle,
@@ -41,8 +45,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  useBridgeSummary,
   useCreateTask,
   useDeleteProject,
+  useDiscordChannels,
   useModels,
   usePatchPrefs,
   usePrefs,
@@ -51,6 +57,10 @@ import {
   useTasks,
   useUpdateProject,
 } from "@/queries";
+import {
+  ChatConnectSheet,
+  type ChatPlatform,
+} from "@/components/chat-connect-sheet";
 import { useApp, useClient } from "@/AppContext";
 import { useStore } from "@/store";
 import {
@@ -273,7 +283,7 @@ export function ProjectDetail() {
 
         <aside className="hidden lg:flex flex-col overflow-y-auto bg-paper-100/40 dark:bg-ink-900/30">
           <ProjectInstructionsPanel project={project} />
-          <ProjectChatTargetsPanel project={project} />
+          <ConnectChatPanel project={project} />
           <AutoContextPanel projectPath={project.path} />
           <RecentChatter tasks={tasksForProject} />
           <PathReference path={project.path} />
@@ -779,23 +789,34 @@ function ProjectInstructionsPanel({ project }: { project: Project }) {
   };
 
   return (
-    <div className="border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] px-4 py-3">
-      <div className="flex items-baseline gap-2 mb-2">
-        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
-          Instructions
-        </span>
-        <span className="font-mono text-[9px] text-ink-400 dark:text-ink-500">
-          agent-editable
-        </span>
-        <span className="ml-auto font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-          {wordCount} {wordCount === 1 ? "word" : "words"}
+    <div className="border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] px-4 py-4">
+      <div className="flex items-start gap-2 mb-2">
+        <BookText className="h-3.5 w-3.5 text-ember-500 shrink-0 mt-0.5" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline gap-2">
+            <span className="text-[13px] font-medium text-ink-900 dark:text-ink-50">
+              Instructions
+            </span>
+            <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+              agent-editable
+            </span>
+          </div>
+          <p className="mt-0.5 text-[11px] text-ink-500 dark:text-ink-400 leading-relaxed">
+            Prepended to every task spawn for this project. Lives in the
+            daemon DB — never committed.
+          </p>
+        </div>
+        <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 shrink-0 mt-0.5">
+          {wordCount}w
         </span>
       </div>
       <Textarea
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={save}
-        placeholder="Free-text guidance for any task in this project. Stored in the daemon DB — not committed to the repo. The agent can read &amp; modify via `agentd-instructions`."
+        placeholder={
+          "e.g. always run `bun --filter @agentd/web typecheck` after touching React components.\nor: don't migrate the schema in this repo without asking first."
+        }
         rows={6}
         className="text-[12px] font-mono leading-relaxed resize-y min-h-[7rem]"
       />
@@ -810,12 +831,13 @@ function ProjectInstructionsPanel({ project }: { project: Project }) {
             {update.isPending ? "saving…" : "save"}
           </button>
         ) : (
-          <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+          <span className="inline-flex items-center gap-1 font-mono text-[10px] text-emerald-700 dark:text-emerald-300">
+            <CheckCircle2 className="h-2.5 w-2.5" />
             saved
           </span>
         )}
         <span className="ml-auto font-mono text-[9.5px] text-ink-400 dark:text-ink-500">
-          prepended to every task spawn
+          agentd-instructions
         </span>
       </div>
     </div>
@@ -823,115 +845,245 @@ function ProjectInstructionsPanel({ project }: { project: Project }) {
 }
 
 /**
- * Per-project chat targets — Telegram (separate bot per project)
- * and Discord (separate channel per project, single bot). Falls
- * back to the daemon's global config when these are blank.
+ * Polished "Connect chat" experience. Replaces three raw token / id
+ * inputs with brand tiles → guided sheet that validates the token
+ * via Telegram's `getMe`, lists Discord channels, lets the operator
+ * test-send before saving, and shows live delivery counters once
+ * connected.
  */
-function ProjectChatTargetsPanel({ project }: { project: Project }) {
-  const update = useUpdateProject();
-  const [tgToken, setTgToken] = useState(project.telegramBotToken ?? "");
-  const [tgChat, setTgChat] = useState(project.telegramChatId ?? "");
-  const [dcChannel, setDcChannel] = useState(
-    project.discordChannelId ?? "",
+function ConnectChatPanel({ project }: { project: Project }) {
+  const summaryQ = useBridgeSummary();
+  const channelsQ = useDiscordChannels();
+  const [openFor, setOpenFor] = useState<ChatPlatform | null>(null);
+
+  const summary = (summaryQ.data?.projects ?? []).find(
+    (p) => p.projectId === project.id,
   );
+  const tg = summary?.telegram ?? null;
+  const dc = summary?.discord ?? null;
 
-  useEffect(() => {
-    setTgToken(project.telegramBotToken ?? "");
-    setTgChat(project.telegramChatId ?? "");
-    setDcChannel(project.discordChannelId ?? "");
-  }, [project.telegramBotToken, project.telegramChatId, project.discordChannelId]);
+  // Discord channel name fallback: even if bridge-summary hasn't
+  // recomputed yet, look up the live channel cache so we can show a
+  // real `#channel` label immediately after save.
+  const dcLiveName = useMemo(() => {
+    if (!project.discordChannelId) return null;
+    for (const g of channelsQ.data?.guilds ?? []) {
+      for (const c of g.channels) {
+        if (c.id === project.discordChannelId) {
+          return { guild: g.name, channel: c.name };
+        }
+      }
+    }
+    return null;
+  }, [project.discordChannelId, channelsQ.data]);
 
-  const dirty =
-    tgToken.trim() !== (project.telegramBotToken ?? "") ||
-    tgChat.trim() !== (project.telegramChatId ?? "") ||
-    dcChannel.trim() !== (project.discordChannelId ?? "");
-
-  const save = () => {
-    if (!dirty) return;
-    void update.mutateAsync({
-      idOrSlug: project.id,
-      patch: {
-        telegramBotToken: tgToken.trim() || null,
-        telegramChatId: tgChat.trim() || null,
-        discordChannelId: dcChannel.trim() || null,
-      },
-    });
-  };
+  const connectedCount =
+    (project.telegramBotToken && project.telegramChatId ? 1 : 0) +
+    (project.discordChannelId ? 1 : 0);
 
   return (
-    <div className="border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] px-4 py-3 space-y-2">
-      <div className="flex items-baseline gap-2">
+    <div className="border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] px-4 py-4">
+      <div className="flex items-baseline gap-2 mb-3">
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
-          Chat targets
+          Connect chat
         </span>
         <span className="font-mono text-[9px] text-ink-400 dark:text-ink-500">
           per project
         </span>
-      </div>
-
-      <div className="space-y-1.5">
-        <label className="block">
-          <span className="block font-mono text-[9.5px] uppercase tracking-[0.1em] text-ink-500 dark:text-ink-400 mb-0.5">
-            Telegram bot token
-          </span>
-          <input
-            value={tgToken}
-            onChange={(e) => setTgToken(e.target.value)}
-            onBlur={save}
-            type="password"
-            placeholder="123456:ABC-..."
-            className="w-full h-7 px-2 rounded border border-ink-900/15 bg-paper-50 font-mono text-[11px] outline-none focus:border-ember-500/40 dark:border-ink-50/15 dark:bg-ink-800"
-            spellCheck={false}
-          />
-        </label>
-        <label className="block">
-          <span className="block font-mono text-[9.5px] uppercase tracking-[0.1em] text-ink-500 dark:text-ink-400 mb-0.5">
-            Telegram chat id
-          </span>
-          <input
-            value={tgChat}
-            onChange={(e) => setTgChat(e.target.value)}
-            onBlur={save}
-            placeholder="-100... or user id"
-            className="w-full h-7 px-2 rounded border border-ink-900/15 bg-paper-50 font-mono text-[11px] outline-none focus:border-ember-500/40 dark:border-ink-50/15 dark:bg-ink-800"
-            spellCheck={false}
-          />
-        </label>
-        <label className="block">
-          <span className="block font-mono text-[9.5px] uppercase tracking-[0.1em] text-ink-500 dark:text-ink-400 mb-0.5">
-            Discord channel id
-          </span>
-          <input
-            value={dcChannel}
-            onChange={(e) => setDcChannel(e.target.value)}
-            onBlur={save}
-            placeholder="channel snowflake"
-            className="w-full h-7 px-2 rounded border border-ink-900/15 bg-paper-50 font-mono text-[11px] outline-none focus:border-ember-500/40 dark:border-ink-50/15 dark:bg-ink-800"
-            spellCheck={false}
-          />
-        </label>
-      </div>
-
-      <div className="flex items-center gap-2">
-        {dirty ? (
-          <button
-            type="button"
-            onClick={save}
-            disabled={update.isPending}
-            className="h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300 disabled:opacity-40"
-          >
-            {update.isPending ? "saving" : "save"}
-          </button>
-        ) : (
-          <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
-            saved
-          </span>
-        )}
-        <span className="ml-auto font-mono text-[9.5px] text-ink-400 dark:text-ink-500">
-          empty falls back to global
+        <span className="ml-auto font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
+          {connectedCount}/2
         </span>
       </div>
+
+      <div className="grid grid-cols-1 gap-2">
+        <BridgeCard
+          platform="telegram"
+          connected={!!project.telegramBotToken && !!project.telegramChatId}
+          headline={
+            tg?.botFirstName ||
+            (project.telegramBotToken ? "Telegram bot" : "Telegram")
+          }
+          subline={
+            tg?.botUsername
+              ? `@${tg.botUsername}` +
+                (tg.chatLabel ? ` → ${tg.chatLabel}` : "")
+              : project.telegramBotToken
+                ? "fetching identity…"
+                : "DM / group via your own bot"
+          }
+          stats={tg?.stats ?? null}
+          onClick={() => setOpenFor("telegram")}
+        />
+        <BridgeCard
+          platform="discord"
+          connected={!!project.discordChannelId}
+          headline={
+            dc?.channelName
+              ? `#${dc.channelName}`
+              : dcLiveName
+                ? `#${dcLiveName.channel}`
+                : project.discordChannelId
+                  ? "channel id saved"
+                  : "Discord"
+          }
+          subline={
+            dc?.guildName
+              ? dc.guildName
+              : dcLiveName
+                ? dcLiveName.guild
+                : project.discordChannelId
+                  ? "looking up server…"
+                  : "channel via the global Discord bot"
+          }
+          stats={dc?.stats ?? null}
+          onClick={() => setOpenFor("discord")}
+        />
+      </div>
+
+      {project.discordChannelId && (
+        <AutoTaskThreadToggle project={project} />
+      )}
+
+      <p className="mt-3 font-mono text-[9.5px] text-ink-400 dark:text-ink-500 leading-relaxed">
+        Empty falls back to the global plugin. Saved here, the project's
+        events route to its own bot / channel.
+      </p>
+
+      {openFor && (
+        <ChatConnectSheet
+          project={project}
+          platform={openFor}
+          onClose={() => setOpenFor(null)}
+        />
+      )}
     </div>
+  );
+}
+
+function AutoTaskThreadToggle({ project }: { project: Project }) {
+  const update = useUpdateProject();
+  const enabled = !!project.autoTaskThread;
+  const toggle = () => {
+    void update.mutateAsync({
+      idOrSlug: project.id,
+      patch: { autoTaskThread: !enabled },
+    });
+  };
+  return (
+    <button
+      type="button"
+      onClick={toggle}
+      disabled={update.isPending}
+      className={cn(
+        "mt-2 w-full flex items-start gap-2.5 rounded-md border p-2.5 text-left transition-colors",
+        enabled
+          ? "border-ember-500/40 bg-ember-500/5 hover:bg-ember-500/10"
+          : "border-ink-900/10 bg-paper-50 hover:bg-paper-100 dark:border-ink-50/10 dark:bg-ink-800 dark:hover:bg-ink-700",
+      )}
+    >
+      <span
+        className={cn(
+          "mt-0.5 inline-flex h-3.5 w-6 shrink-0 rounded-full border transition-colors items-center px-0.5",
+          enabled
+            ? "bg-ember-500 border-ember-500 justify-end"
+            : "bg-paper-100 border-ink-900/15 dark:bg-ink-900 dark:border-ink-50/15",
+        )}
+      >
+        <span
+          className={cn(
+            "h-2.5 w-2.5 rounded-full transition-colors",
+            enabled ? "bg-white" : "bg-ink-300 dark:bg-ink-600",
+          )}
+        />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-[12px] font-medium text-ink-900 dark:text-ink-50">
+          Spawn a thread per task
+        </div>
+        <p className="mt-0.5 text-[10.5px] text-ink-500 dark:text-ink-400 leading-relaxed">
+          New tasks open a fresh Discord thread under this channel. The
+          thread auto-archives when the task closes.
+        </p>
+      </div>
+    </button>
+  );
+}
+
+function BridgeCard({
+  platform,
+  connected,
+  headline,
+  subline,
+  stats,
+  onClick,
+}: {
+  platform: ChatPlatform;
+  connected: boolean;
+  headline: string;
+  subline: string;
+  stats: { lastDeliveredAt: number | null; count24h: number } | null;
+  onClick: () => void;
+}) {
+  const brand = platform === "telegram" ? "#229ED9" : "#5865F2";
+  const Icon = platform === "telegram" ? Send : Hash;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "group flex items-center gap-3 rounded-md border p-2.5 text-left transition-colors",
+        connected
+          ? "border-ink-900/10 bg-paper-50 hover:bg-paper-100 dark:border-ink-50/10 dark:bg-ink-800 dark:hover:bg-ink-700"
+          : "border-dashed border-ink-900/15 bg-transparent hover:bg-paper-100 dark:border-ink-50/15 dark:hover:bg-ink-800",
+      )}
+    >
+      <span
+        className={cn(
+          "h-8 w-8 shrink-0 rounded-md grid place-items-center font-mono text-[11px] font-semibold",
+          connected ? "text-white" : "text-ink-400 dark:text-ink-500",
+        )}
+        style={{
+          background: connected ? brand : "transparent",
+          border: connected ? "none" : "1px dashed currentColor",
+        }}
+      >
+        <Icon className="h-3.5 w-3.5" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-1.5">
+          <span
+            className={cn(
+              "text-[12px] font-medium truncate",
+              connected
+                ? "text-ink-900 dark:text-ink-50"
+                : "text-ink-700 dark:text-ink-200",
+            )}
+          >
+            {headline}
+          </span>
+          {connected && (
+            <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-emerald-700 dark:text-emerald-300">
+              live
+            </span>
+          )}
+        </div>
+        <div className="font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate">
+          {subline}
+        </div>
+        {connected && stats && (
+          <div className="mt-1 flex items-center gap-2 font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
+            <span>{stats.count24h} sent · 24h</span>
+            <span>·</span>
+            <span>
+              {stats.lastDeliveredAt
+                ? `last ${formatTs(stats.lastDeliveredAt)}`
+                : "no deliveries yet"}
+            </span>
+          </div>
+        )}
+      </div>
+      <Settings2 className="h-3.5 w-3.5 text-ink-400 dark:text-ink-500 opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
+    </button>
   );
 }
 

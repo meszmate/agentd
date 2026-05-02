@@ -99,7 +99,21 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     closedReason: row.closedReason ?? null,
     sortOrder: row.sortOrder ?? undefined,
     lastCompactedAt: row.lastCompactedAt ?? null,
+    discordThreadId: row.discordThreadId ?? null,
   };
+}
+
+/** Persist the Discord thread spawned for this task. Cleared on archive. */
+export function setTaskDiscordThread(
+  db: Db,
+  id: string,
+  threadId: string | null,
+): Task | null {
+  db.update(tasks)
+    .set({ discordThreadId: threadId, updatedAt: Date.now() })
+    .where(eq(tasks.id, id))
+    .run();
+  return getTask(db, id);
 }
 
 /** Set or clear the `lastCompactedAt` watermark. */

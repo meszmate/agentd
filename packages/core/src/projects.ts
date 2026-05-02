@@ -33,6 +33,7 @@ function rowToProject(row: typeof projects.$inferSelect): Project {
     telegramBotToken: row.telegramBotToken ?? null,
     telegramChatId: row.telegramChatId ?? null,
     discordChannelId: row.discordChannelId ?? null,
+    autoTaskThread: !!row.autoTaskThread,
   };
 }
 
@@ -108,6 +109,7 @@ export interface UpdateProjectInput {
   telegramBotToken?: string | null;
   telegramChatId?: string | null;
   discordChannelId?: string | null;
+  autoTaskThread?: boolean;
 }
 
 export function updateProject(
@@ -127,6 +129,8 @@ export function updateProject(
     next.telegramChatId = patch.telegramChatId;
   if (patch.discordChannelId !== undefined)
     next.discordChannelId = patch.discordChannelId;
+  if (patch.autoTaskThread !== undefined)
+    next.autoTaskThread = patch.autoTaskThread ? 1 : 0;
   // Drizzle's .set() throws "No values to set" on an empty object —
   // skip the UPDATE entirely when the patch had nothing meaningful.
   if (Object.keys(next).length === 0) return cur;

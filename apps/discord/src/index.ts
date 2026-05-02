@@ -2,6 +2,7 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   Client,
   Events,
   GatewayIntentBits,
@@ -10,13 +11,12 @@ import {
   type TextBasedChannel,
 } from "discord.js";
 import { AgentdClient } from "@agentd/client";
-import type { WsServerEvent } from "@agentd/contracts";
+import type { DiscordGuildLite, WsServerEvent } from "@agentd/contracts";
 
 interface BotConfig {
   token: string;
   server: string;
   session: string;
-  allowedChannelIds: Set<string>;
   allowedUserIds: Set<string>;
 }
 
@@ -41,18 +41,16 @@ function loadConfig(): BotConfig {
     console.error("AGENTD_TOKEN is required (an agentd session token)");
     process.exit(2);
   }
-  const allowedChannelIds = parseIdList(process.env.DISCORD_ALLOWED_CHANNEL_IDS);
   const allowedUserIds = parseIdList(process.env.DISCORD_ALLOWED_USER_IDS);
-  if (allowedChannelIds.size === 0 && allowedUserIds.size === 0) {
+  if (allowedUserIds.size === 0) {
     console.error(
-      "DISCORD_ALLOWED_USER_IDS or DISCORD_ALLOWED_CHANNEL_IDS must list at least one id. Use !whoami to discover yours after launch.",
+      "DISCORD_ALLOWED_USER_IDS must list at least one id. Use !whoami after launch to find yours.",
     );
   }
   return {
     token,
     server,
     session,
-    allowedChannelIds,
     allowedUserIds,
   };
 }
@@ -116,25 +114,66 @@ async function main() {
   }, 60_000);
 
   /**
-   * Same two-axis rule as Telegram. If both lists are configured, BOTH must
-   * match (channel allowed AND user allowed). If only one is configured, that
-   * one alone gates access.
+   * User-id allowlist only. Mirrors the Telegram side: if you're on
+   * the user list, you can drive the bot from any channel it can see.
    */
-  function isAllowed(channelId: string, userId: string): boolean {
-    if (cfg.allowedChannelIds.size === 0 && cfg.allowedUserIds.size === 0) return false;
-    const channelOk = cfg.allowedChannelIds.has(channelId);
-    const userOk = cfg.allowedUserIds.has(userId);
-    if (cfg.allowedChannelIds.size > 0 && cfg.allowedUserIds.size > 0) {
-      return channelOk && userOk;
+  function isAllowed(_channelId: string, userId: string): boolean {
+    if (cfg.allowedUserIds.size === 0) return false;
+    return cfg.allowedUserIds.has(userId);
+  }
+
+  /**
+   * Snapshot the current guild + text-channel list and post it to the
+   * daemon so the web UI can render a real channel picker. The
+   * daemon caches it; we re-post on Ready, channelCreate / Delete /
+   * Update, and guildCreate / Delete.
+   */
+  async function reportChannels(): Promise<void> {
+    const guilds: DiscordGuildLite[] = [];
+    for (const [, g] of bot.guilds.cache) {
+      const channels: DiscordGuildLite["channels"] = [];
+      for (const [, ch] of g.channels.cache) {
+        if (
+          ch.type === ChannelType.GuildText ||
+          ch.type === ChannelType.GuildAnnouncement ||
+          ch.type === ChannelType.PublicThread ||
+          ch.type === ChannelType.PrivateThread
+        ) {
+          channels.push({
+            id: ch.id,
+            name: ch.name,
+            type: ch.type as number,
+            parentId: "parentId" in ch ? (ch.parentId ?? null) : null,
+          });
+        }
+      }
+      channels.sort((a, b) => a.name.localeCompare(b.name));
+      guilds.push({
+        id: g.id,
+        name: g.name,
+        iconUrl: g.iconURL?.({ size: 64 }) ?? null,
+        channels,
+      });
     }
-    return channelOk || userOk;
+    guilds.sort((a, b) => a.name.localeCompare(b.name));
+    try {
+      await client.reportDiscordChannels(guilds);
+    } catch (e) {
+      console.error("failed to report channels:", (e as Error).message);
+    }
   }
 
   bot.once(Events.ClientReady, (c) => {
     console.log(
-      `discord bot ready as ${c.user.tag} · ${cfg.allowedUserIds.size} allowed user(s) · ${cfg.allowedChannelIds.size} allowed channel(s)`,
+      `discord bot ready as ${c.user.tag} · ${cfg.allowedUserIds.size} allowed user(s)`,
     );
+    void reportChannels();
   });
+  bot.on(Events.GuildCreate, () => void reportChannels());
+  bot.on(Events.GuildDelete, () => void reportChannels());
+  bot.on(Events.ChannelCreate, () => void reportChannels());
+  bot.on(Events.ChannelDelete, () => void reportChannels());
+  bot.on(Events.ChannelUpdate, () => void reportChannels());
 
   bot.on(Events.MessageCreate, async (msg: Message) => {
     if (msg.author.bot) return;
@@ -429,42 +468,146 @@ async function main() {
   });
 
   // Cache project lookup per task to avoid hitting the API every event.
+  // Also resolves the per-task thread id when the project has
+  // `autoTaskThread` enabled — events flow into the thread instead of
+  // the parent channel so each task gets its own focused conversation.
+  interface TaskRoute {
+    projectId: string;
+    channelId: string;
+    threadId: string | null;
+  }
   const projectByTask = new Map<string, string | null>();
-  async function projectChannelForTask(
-    taskId: string,
-  ): Promise<string | null> {
+  async function routeForTask(taskId: string): Promise<TaskRoute | null> {
     let projectId = projectByTask.get(taskId);
+    let task;
+    try {
+      task = (await client.getTask(taskId)).task;
+    } catch {
+      return null;
+    }
     if (projectId === undefined) {
-      try {
-        const { task } = await client.getTask(taskId);
-        projectId = task.projectId ?? null;
-        projectByTask.set(taskId, projectId);
-      } catch {
-        projectByTask.set(taskId, null);
-        return null;
-      }
+      projectId = task.projectId ?? null;
+      projectByTask.set(taskId, projectId);
     }
     if (!projectId) return null;
     try {
       const { project } = await client.getProject(projectId);
-      return project.discordChannelId ?? null;
+      if (!project.discordChannelId) return null;
+      return {
+        projectId,
+        channelId: project.discordChannelId,
+        threadId: task.discordThreadId ?? null,
+      };
     } catch {
       return null;
     }
   }
 
-  function sendToChannel(channelId: string, text: string): void {
+  function sendToChannel(
+    channelId: string,
+    text: string,
+    projectId?: string | null,
+  ): void {
     const ch = bot.channels.cache.get(channelId);
-    if (ch && "send" in ch) {
-      void (ch as TextBasedChannel & { send: (s: string) => Promise<unknown> })
-        .send(text.slice(0, 1900))
-        .catch((e: unknown) => console.error("notify failed:", e));
-    }
+    if (!ch || !("send" in ch)) return;
+    void (ch as TextBasedChannel & { send: (s: string) => Promise<unknown> })
+      .send(text.slice(0, 1900))
+      .then(() => {
+        // Bump the daemon's per-project delivery counter so the Plugins
+        // page + Connect-chat panel can show "last delivered Xm ago".
+        void client
+          .reportDelivery(projectId ?? null, "discord")
+          .catch(() => {});
+      })
+      .catch((e: unknown) => console.error("notify failed:", e));
   }
 
   // Push notifications. Curated: agent messages, progress notes,
   // shares, asks, terminal status. Skip the firehose stuff.
   const ws = client.watch(null, async (event: WsServerEvent) => {
+    if (event.type === "discord_test_send") {
+      try {
+        const ch = bot.channels.cache.get(event.channelId);
+        if (!ch || !("send" in ch)) {
+          await client.reportDiscordCommandResult(
+            event.requestId,
+            false,
+            "channel not found in cache",
+          );
+          return;
+        }
+        await (ch as TextBasedChannel & {
+          send: (s: string) => Promise<unknown>;
+        }).send(event.text.slice(0, 1900));
+        await client.reportDiscordCommandResult(event.requestId, true);
+      } catch (e) {
+        await client.reportDiscordCommandResult(
+          event.requestId,
+          false,
+          (e as Error).message,
+        );
+      }
+      return;
+    }
+    if (event.type === "discord_create_thread") {
+      try {
+        const ch = bot.channels.cache.get(event.channelId);
+        if (!ch || ch.type !== ChannelType.GuildText) {
+          await client.reportDiscordCommandResult(
+            event.requestId,
+            false,
+            "parent channel not text or not in cache",
+          );
+          return;
+        }
+        const thread = await (
+          ch as { threads: { create: (o: unknown) => Promise<{ id: string }> } }
+        ).threads.create({
+          name: event.name.slice(0, 100),
+          autoArchiveDuration: 1440, // 1 day
+          reason: "agentd: per-task thread",
+        });
+        await client.reportDiscordCommandResult(
+          event.requestId,
+          true,
+          undefined,
+          thread.id,
+        );
+      } catch (e) {
+        await client.reportDiscordCommandResult(
+          event.requestId,
+          false,
+          (e as Error).message,
+        );
+      }
+      return;
+    }
+    if (event.type === "discord_archive_thread") {
+      try {
+        const t = await bot.channels.fetch(event.threadId).catch(() => null);
+        if (
+          !t ||
+          (t.type !== ChannelType.PublicThread &&
+            t.type !== ChannelType.PrivateThread)
+        ) {
+          await client.reportDiscordCommandResult(
+            event.requestId,
+            false,
+            "thread not found",
+          );
+          return;
+        }
+        await (t as { setArchived: (a: boolean) => Promise<unknown> }).setArchived(true);
+        await client.reportDiscordCommandResult(event.requestId, true);
+      } catch (e) {
+        await client.reportDiscordCommandResult(
+          event.requestId,
+          false,
+          (e as Error).message,
+        );
+      }
+      return;
+    }
     if (event.type !== "event") return;
     const ev = event.event;
     const taskId = event.taskId;
@@ -494,17 +637,25 @@ async function main() {
     if (!body) return;
 
     // Fan-out targets: focused channels + the project's dedicated
-    // channel (if it has one configured). De-dup so a channel that's
-    // both focused AND the project's channel only gets one copy.
-    const targets = new Set<string>();
+    // routing target (per-task thread if one exists, else the parent
+    // channel). De-dup so a channel that's both focused AND the
+    // project's target only gets one copy.
+    const focusTargets = new Set<string>();
     for (const [channelId, focusedId] of focus.entries()) {
-      if (focusedId === taskId) targets.add(channelId);
+      if (focusedId === taskId) focusTargets.add(channelId);
     }
-    const projectChannel = await projectChannelForTask(taskId);
-    if (projectChannel) targets.add(projectChannel);
+    const route = await routeForTask(taskId);
+    const projectTarget = route
+      ? (route.threadId ?? route.channelId)
+      : null;
 
-    for (const channelId of targets) {
-      sendToChannel(channelId, body);
+    for (const channelId of focusTargets) {
+      const projectId =
+        route && projectTarget === channelId ? route.projectId : null;
+      sendToChannel(channelId, body, projectId);
+    }
+    if (projectTarget && !focusTargets.has(projectTarget)) {
+      sendToChannel(projectTarget, body, route!.projectId);
     }
   });
   ws.addEventListener("close", () => console.error("ws closed"));

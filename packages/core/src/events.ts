@@ -55,7 +55,38 @@ export type SystemEvent =
   | { kind: "task_removed"; taskId: string }
   | { kind: "project_changed"; project: Project }
   | { kind: "project_created"; project: Project }
-  | { kind: "project_removed"; projectId: string };
+  | { kind: "project_removed"; projectId: string }
+  /**
+   * Daemon → discord-subprocess command. The discord plugin watches
+   * the bus for these and acts on them (test-send a message, spawn
+   * a per-task thread, archive a thread on task close). Other
+   * subscribers see the type and ignore.
+   */
+  | {
+      kind: "discord_test_send";
+      channelId: string;
+      text: string;
+      requestId: string;
+    }
+  | {
+      kind: "discord_create_thread";
+      channelId: string;
+      name: string;
+      requestId: string;
+    }
+  | {
+      kind: "discord_archive_thread";
+      threadId: string;
+      requestId: string;
+    }
+  /** A plugin successfully delivered a message — bumps live stats. */
+  | {
+      kind: "plugin_delivery";
+      projectId: string | null;
+      platform: "telegram" | "discord";
+    }
+  /** Discord subprocess re-reported its guild/channel snapshot. */
+  | { kind: "discord_channels_updated" };
 
 export type SystemEventEnvelope = {
   event: SystemEvent;

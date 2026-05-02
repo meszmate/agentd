@@ -189,7 +189,6 @@ export class PluginManager {
       }
       env.TELEGRAM_BOT_TOKEN = tg.botToken;
       env.TELEGRAM_ALLOWED_USER_IDS = tg.allowedUserIds.join(",");
-      env.TELEGRAM_ALLOWED_CHAT_IDS = tg.allowedChatIds.join(",");
       if (tg.defaultRepo) env.AGENTD_DEFAULT_REPO = tg.defaultRepo;
     } else {
       const dc = cfg.plugins.discord;
@@ -199,7 +198,6 @@ export class PluginManager {
       }
       env.DISCORD_BOT_TOKEN = dc.botToken;
       env.DISCORD_ALLOWED_USER_IDS = dc.allowedUserIds.join(",");
-      env.DISCORD_ALLOWED_CHANNEL_IDS = dc.allowedChannelIds.join(",");
       if (dc.defaultRepo) env.AGENTD_DEFAULT_REPO = dc.defaultRepo;
     }
 

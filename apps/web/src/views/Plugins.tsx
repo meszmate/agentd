@@ -1,16 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   ChevronRight,
   ExternalLink,
   Eye,
   EyeOff,
-  HelpCircle,
+  Hash,
   Loader2,
   Power,
   PowerOff,
   RefreshCw,
   Save,
-  Terminal as TerminalIcon,
+  Send,
   Trash2,
 } from "lucide-react";
 import type { PluginStatus } from "@agentd/client";
@@ -31,10 +32,13 @@ import {
   VRule,
 } from "@/components/ui/page-topbar";
 import {
+  useBridgeSummary,
+  useDiscordChannels,
   usePatchDiscord,
   usePatchTelegram,
   usePluginsStatus,
   useRestartPlugin,
+  useValidateTelegramToken,
 } from "@/queries";
 import { useApp } from "@/AppContext";
 import { cn, formatTs } from "@/lib/utils";
@@ -44,8 +48,6 @@ interface PluginConfigRaw {
   botToken: string;
   defaultRepo: string | null;
   allowedUserIds: Array<number | string>;
-  allowedChatIds?: number[];
-  allowedChannelIds?: string[];
 }
 
 type BridgeName = "telegram" | "discord";
@@ -55,13 +57,10 @@ interface BridgeMeta {
   display: string;
   initials: string;
   brandHex: string;
-  // Visual brand color, used for the avatar tile only when configured.
-  // Telegram = #229ED9, Discord = #5865F2.
   helpLink: string;
   helpSteps: string[];
-  idsLabel: string;
-  idsKey: "allowedChatIds" | "allowedChannelIds";
-  idsHint: string;
+  /** Where the user finds their numeric user ID for the allowlist. */
+  userIdHelp: { label: string; href: string; tip: string };
 }
 
 const BRIDGES: BridgeMeta[] = [
@@ -74,12 +73,13 @@ const BRIDGES: BridgeMeta[] = [
     helpSteps: [
       "DM @BotFather and send /newbot.",
       "Pick a name + a username ending in 'bot'.",
-      "BotFather replies with a token like 1234567890:ABC… — paste it here.",
-      "DM @userinfobot to get your numeric user ID for the allowlist.",
+      "BotFather replies with a token — paste it in step 1.",
     ],
-    idsLabel: "Allowed chat IDs",
-    idsKey: "allowedChatIds",
-    idsHint: "comma-separated chat IDs · empty = any chat",
+    userIdHelp: {
+      label: "@userinfobot",
+      href: "https://t.me/userinfobot",
+      tip: "DM @userinfobot — it replies with your numeric user id.",
+    },
   },
   {
     name: "discord",
@@ -90,17 +90,20 @@ const BRIDGES: BridgeMeta[] = [
     helpSteps: [
       "discord.com/developers/applications → New Application → Bot.",
       "Copy the bot token (Discord shows it once — paste it before navigating away).",
-      "User Settings → Advanced → Developer Mode ON, then right-click yourself → Copy User ID.",
-      "Use the OAuth2 URL Generator with the `bot` scope to invite the bot.",
+      "Use the OAuth2 URL Generator with the `bot` scope to invite the bot to your server.",
     ],
-    idsLabel: "Allowed channel IDs",
-    idsKey: "allowedChannelIds",
-    idsHint: "comma-separated channel IDs · empty = any channel",
+    userIdHelp: {
+      label: "Developer Mode",
+      href: "https://discord.com/developers/docs/reference",
+      tip: "Settings → Advanced → Developer Mode on, then right-click yourself → Copy User ID.",
+    },
   },
 ];
 
 export function Plugins() {
   const q = usePluginsStatus();
+  const summaryQ = useBridgeSummary();
+  const channelsQ = useDiscordChannels();
   const [open, setOpen] = useState<BridgeName | null>(null);
 
   if (q.isLoading || !q.data) {
@@ -141,6 +144,15 @@ export function Plugins() {
   };
   const runningCount = [tgStatus, dcStatus].filter((s) => s?.running).length;
   const configuredCount = [tg, dc].filter((c) => !!c.botToken).length;
+  const projectBridges = summaryQ.data?.projects ?? [];
+  const projectBotCount = projectBridges.reduce(
+    (acc, p) => acc + (p.telegram ? 1 : 0) + (p.discord ? 1 : 0),
+    0,
+  );
+  const totalBots = runningCount + projectBotCount;
+  const totals = summaryQ.data?.totals;
+  const totalToday =
+    (totals?.telegram.count24h ?? 0) + (totals?.discord.count24h ?? 0);
 
   return (
     <div className="flex h-full flex-col">
@@ -154,14 +166,16 @@ export function Plugins() {
         <span
           className={cn(
             "font-mono text-[10px] uppercase tracking-[0.12em] tabular-nums",
-            runningCount === 2
+            totalBots > 0
               ? "text-emerald-700 dark:text-emerald-300"
-              : runningCount > 0
-              ? "text-amber-700 dark:text-amber-300"
               : "text-ink-400 dark:text-ink-500",
           )}
         >
-          {runningCount} live · {configuredCount} configured
+          {totalBots} bot{totalBots === 1 ? "" : "s"}
+        </span>
+        <span className="text-ink-300 dark:text-ink-600">·</span>
+        <span className="font-mono text-[10px] uppercase tracking-[0.12em] tabular-nums text-ink-500 dark:text-ink-400">
+          {totalToday} sent today
         </span>
         <Spacer />
         <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 hidden md:inline">
@@ -190,6 +204,12 @@ export function Plugins() {
                 />
               ))}
             </ul>
+
+            <ProjectRoutingSection
+              bridges={projectBridges}
+              discordChannelsKnown={!!summaryQ.data?.discordChannelsKnown}
+              hasGuilds={(channelsQ.data?.guilds.length ?? 0) > 0}
+            />
           </div>
 
           <aside className="hidden lg:flex flex-col border-l border-ink-900/10 bg-paper-100/40 dark:border-ink-50/10 dark:bg-ink-900/30">
@@ -343,11 +363,6 @@ function BridgeRow({
   const running = !!status?.running;
 
   const userCount = (cfg.allowedUserIds ?? []).length;
-  const scopeCount = (
-    (cfg.allowedChatIds as Array<number | string> | undefined) ??
-    (cfg.allowedChannelIds as Array<number | string> | undefined) ??
-    []
-  ).length;
 
   let stateLabel: string;
   let stateClass: string;
@@ -423,11 +438,6 @@ function BridgeRow({
                 <span>
                   {userCount} user{userCount === 1 ? "" : "s"}
                 </span>
-                <span className="text-ink-300 dark:text-ink-600">·</span>
-                <span>
-                  {scopeCount} {meta.name === "telegram" ? "chat" : "channel"}
-                  {scopeCount === 1 ? "" : "s"}
-                </span>
               </>
             )}
           </div>
@@ -460,6 +470,7 @@ function BridgeSheet({
   const restart = useRestartPlugin();
   const patchTg = usePatchTelegram();
   const patchDc = usePatchDiscord();
+  const validateTg = useValidateTelegramToken();
   const mutate = meta.name === "telegram" ? patchTg : patchDc;
 
   const configured = !!cfg.botToken;
@@ -469,28 +480,44 @@ function BridgeSheet({
   const [token, setToken] = useState(cfg.botToken);
   const [revealToken, setRevealToken] = useState(false);
   const [users, setUsers] = useState((cfg.allowedUserIds ?? []).join(", "));
-  const [scopes, setScopes] = useState(
-    (
-      ((cfg[meta.idsKey] as Array<number | string> | undefined) ?? []) as Array<number | string>
-    ).join(", "),
-  );
-  const [showHelp, setShowHelp] = useState(false);
-  const [showCmds, setShowCmds] = useState(false);
+  const [identity, setIdentity] =
+    useState<import("@agentd/contracts").TelegramBotIdentity | null>(null);
+  const [tokenError, setTokenError] = useState<string | null>(null);
 
   // Reset whenever the sheet opens (so we always show the truth from server).
   useEffect(() => {
     if (!open) return;
     setToken(cfg.botToken);
     setUsers((cfg.allowedUserIds ?? []).join(", "));
-    setScopes(
-      (
-        ((cfg[meta.idsKey] as Array<number | string> | undefined) ?? []) as Array<number | string>
-      ).join(", "),
-    );
     setRevealToken(false);
-    setShowHelp(!configured);
-    setShowCmds(false);
-  }, [open, cfg, meta.idsKey, configured]);
+    setIdentity(null);
+    setTokenError(null);
+  }, [open, cfg]);
+
+  // Live Telegram getMe whenever a plausibly-shaped token is in the box.
+  // Discord doesn't have a free unauthenticated identity probe, so we
+  // skip live validation there.
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
+  useEffect(() => {
+    if (meta.name !== "telegram") return;
+    setIdentity(null);
+    setTokenError(null);
+    const t = token.trim();
+    if (!/^\d+:[\w-]+/.test(t)) return;
+    let cancelled = false;
+    const handle = setTimeout(async () => {
+      const r = await validateTg.mutateAsync(t);
+      if (cancelled || tokenRef.current !== token) return;
+      if (r.ok) setIdentity(r.bot);
+      else setTokenError(r.error);
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, meta.name]);
 
   const parseList = (raw: string) =>
     raw
@@ -505,14 +532,10 @@ function BridgeSheet({
     }
     return parseList(raw);
   };
-  const parseScopes = (raw: string) => {
-    if (meta.name === "telegram") {
-      return parseList(raw)
-        .map((x) => Number(x))
-        .filter((n) => Number.isFinite(n));
-    }
-    return parseList(raw);
-  };
+
+  const userIds = parseUsers(users);
+  const tokenLooksValid = /^\d+:[\w-]+/.test(token.trim()) || configured;
+  const ready = tokenLooksValid && userIds.length > 0;
 
   const apply = async (nextEnabled: boolean) => {
     try {
@@ -520,7 +543,6 @@ function BridgeSheet({
       if (nextEnabled) {
         if (token) patch.botToken = token;
         patch.allowedUserIds = parseUsers(users);
-        patch[meta.idsKey] = parseScopes(scopes);
         // Drop any legacy default — projects are picked at /new time now.
         patch.defaultRepo = null;
       }
@@ -572,58 +594,30 @@ function BridgeSheet({
           </SheetDescription>
         </SheetHeader>
 
-        <div className="flex-1 overflow-y-auto px-6 pb-3 space-y-3">
-          {!configured && (
-            <button
-              type="button"
-              onClick={() => setShowHelp((v) => !v)}
-              className="flex w-full items-center gap-2 rounded-md border border-ember-500/30 bg-ember-500/5 px-3 py-2 text-left hover:bg-ember-500/10 transition-colors"
+        <div className="flex-1 overflow-y-auto px-6 pb-3">
+          <ol className="mt-2 space-y-5">
+            <SheetStep
+              n={1}
+              title="Bot token"
+              hint={
+                <>
+                  Get one from{" "}
+                  <a
+                    href={meta.helpLink}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-ember-700 hover:underline dark:text-ember-300 inline-flex items-center gap-0.5"
+                  >
+                    {meta.name === "telegram"
+                      ? "@BotFather"
+                      : "the developer portal"}
+                    <ExternalLink className="h-2.5 w-2.5" />
+                  </a>
+                  .{" "}
+                  {meta.helpSteps[meta.helpSteps.length - 1]}
+                </>
+              }
             >
-              <HelpCircle className="h-3.5 w-3.5 text-ember-700 dark:text-ember-300 shrink-0" />
-              <span className="flex-1 text-[12px] text-ink-700 dark:text-ink-200">
-                {showHelp ? "Hide setup steps" : "How to get a token"}
-              </span>
-              <ChevronRight
-                className={cn(
-                  "h-3.5 w-3.5 text-ember-700 dark:text-ember-300 transition-transform",
-                  showHelp && "rotate-90",
-                )}
-              />
-            </button>
-          )}
-
-          {showHelp && (
-            <div className="rounded-md border border-ink-900/10 bg-paper-100 dark:border-ink-50/10 dark:bg-ink-900/40 p-3">
-              <a
-                href={meta.helpLink}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 font-mono text-[11px] text-ember-700 hover:underline dark:text-ember-300"
-              >
-                {meta.helpLink}
-                <ExternalLink className="h-2.5 w-2.5" />
-              </a>
-              <ol className="mt-2 space-y-1.5 text-[12px] text-ink-700 dark:text-ink-200">
-                {meta.helpSteps.map((step, i) => (
-                  <li key={i} className="flex gap-2.5">
-                    <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 shrink-0 w-3">
-                      {i + 1}
-                    </span>
-                    <span className="leading-snug">{step}</span>
-                  </li>
-                ))}
-              </ol>
-            </div>
-          )}
-
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void apply(true);
-            }}
-            className="space-y-3"
-          >
-            <FormRow label="Bot token" required={!configured}>
               <div className="relative">
                 <Input
                   type={revealToken ? "text" : "password"}
@@ -647,81 +641,92 @@ function BridgeSheet({
                   )}
                 </button>
               </div>
-            </FormRow>
+              {meta.name === "telegram" && (
+                <div className="mt-2 min-h-[2.4rem]">
+                  {validateTg.isPending && (
+                    <span className="inline-flex items-center gap-1.5 font-mono text-[11px] text-ink-500 dark:text-ink-400">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      checking with Telegram…
+                    </span>
+                  )}
+                  {!validateTg.isPending && tokenError && (
+                    <span className="inline-flex items-center gap-1.5 font-mono text-[11px] text-red-700 dark:text-red-300">
+                      {tokenError}
+                    </span>
+                  )}
+                  {identity && (
+                    <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 flex items-center gap-2.5">
+                      <span
+                        className="h-7 w-7 shrink-0 rounded-full grid place-items-center text-white font-mono text-[11px] font-semibold"
+                        style={{ background: meta.brandHex }}
+                      >
+                        {(identity.firstName.trim().slice(0, 1) || "?").toUpperCase()}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[13px] font-medium text-ink-900 dark:text-ink-50 truncate">
+                          {identity.firstName}
+                        </div>
+                        {identity.username && (
+                          <div className="font-mono text-[11px] text-ink-500 dark:text-ink-400 truncate">
+                            @{identity.username}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </SheetStep>
 
-            <FormRow
-              label="Allowed users"
-              hint="comma-separated user IDs · required for security"
+            <SheetStep
+              n={2}
+              title="Allowed users"
+              dim={!tokenLooksValid}
+              hint={
+                <>
+                  {meta.userIdHelp.tip}{" "}
+                  <a
+                    href={meta.userIdHelp.href}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-ember-700 hover:underline dark:text-ember-300 inline-flex items-center gap-0.5"
+                  >
+                    {meta.userIdHelp.label}
+                    <ExternalLink className="h-2.5 w-2.5" />
+                  </a>
+                </>
+              }
             >
               <Input
                 value={users}
                 onChange={(e) => setUsers(e.target.value)}
-                placeholder={meta.name === "telegram" ? "123, 456" : "111111111111111111"}
+                placeholder={
+                  meta.name === "telegram"
+                    ? "123456, 789012"
+                    : "111111111111111111"
+                }
                 className="font-mono text-xs"
                 spellCheck={false}
+                disabled={!tokenLooksValid}
               />
-            </FormRow>
+              <div className="mt-1.5 font-mono text-[10px] text-ink-400 dark:text-ink-500">
+                {userIds.length === 0
+                  ? "comma-separated · required"
+                  : `${userIds.length} user${userIds.length === 1 ? "" : "s"} on the allowlist`}
+              </div>
+            </SheetStep>
 
-            <FormRow label={meta.idsLabel} hint={meta.idsHint}>
-              <Input
-                value={scopes}
-                onChange={(e) => setScopes(e.target.value)}
-                placeholder=""
-                className="font-mono text-xs"
-                spellCheck={false}
-              />
-            </FormRow>
-          </form>
-
-          <div className="rounded-md border border-ink-900/10 bg-paper-100/50 dark:border-ink-50/10 dark:bg-ink-900/30 px-3 py-2">
-            <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400 mb-1">
-              Spawning a task
-            </div>
-            <p className="text-[11px] text-ink-700 dark:text-ink-200 leading-relaxed">
-              Type <code className="font-mono text-[10px] text-ember-700 dark:text-ember-300">{meta.name === "telegram" ? "/" : "!"}new &lt;prompt&gt;</code> in chat. The bot replies with your saved projects — tap one to spawn the task in it.
-            </p>
-          </div>
-
-          {/* Bot capabilities — collapsed inside the sheet, not on the page */}
-          <div className="rounded-md border border-ink-900/10 bg-paper-100/50 dark:border-ink-50/10 dark:bg-ink-900/30 overflow-hidden">
-            <button
-              type="button"
-              onClick={() => setShowCmds((v) => !v)}
-              className="flex w-full items-center gap-2 px-3 py-2 hover:bg-paper-100 dark:hover:bg-ink-700 transition-colors"
-            >
-              <TerminalIcon className="h-3 w-3 text-ember-500" />
-              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
-                Bot commands
-              </span>
-              <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-                {BOT_COMMANDS.length}
-              </span>
-              <ChevronRight
-                className={cn(
-                  "ml-auto h-3 w-3 text-ink-400 transition-transform",
-                  showCmds && "rotate-90",
-                )}
-              />
-            </button>
-            {showCmds && (
-              <ul className="border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] divide-y divide-ink-900/[0.04] dark:divide-ink-50/[0.04]">
-                {BOT_COMMANDS.map((c) => (
-                  <li
-                    key={c.cmd}
-                    className="grid grid-cols-[140px_1fr] items-baseline gap-3 px-3 py-1.5"
-                  >
-                    <code className="font-mono text-[11px] text-ember-700 dark:text-ember-300">
-                      {c.prefix(meta.name)}
-                      {c.cmd}
-                    </code>
-                    <span className="text-[11px] text-ink-700 dark:text-ink-200">
-                      {c.body}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+            <SheetStep n={3} title="Save & enable" dim={!ready}>
+              <p className="text-[11px] text-ink-500 dark:text-ink-400 leading-relaxed">
+                The daemon supervises this subprocess — crashes auto-restart with
+                backoff. Type{" "}
+                <code className="font-mono text-[10px] text-ember-700 dark:text-ember-300">
+                  {meta.name === "telegram" ? "/" : "!"}new &lt;prompt&gt;
+                </code>{" "}
+                in chat to spawn a task once it's live.
+              </p>
+            </SheetStep>
+          </ol>
         </div>
 
         <SheetFooter className="border-t border-ink-900/10 bg-paper-50 px-6 py-3 dark:border-ink-50/10 dark:bg-ink-800">
@@ -760,7 +765,7 @@ function BridgeSheet({
                 <Button
                   size="sm"
                   onClick={() => void apply(true)}
-                  disabled={mutate.isPending}
+                  disabled={mutate.isPending || !ready}
                 >
                   {mutate.isPending ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -779,7 +784,7 @@ function BridgeSheet({
               <Button
                 size="sm"
                 onClick={() => void apply(true)}
-                disabled={mutate.isPending || !token}
+                disabled={mutate.isPending || !ready}
               >
                 {mutate.isPending ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -835,56 +840,183 @@ function BridgeStatusPill({
   );
 }
 
-function FormRow({
-  label,
-  hint,
-  required,
+function SheetStep({
+  n,
+  title,
   children,
+  hint,
+  dim,
 }: {
-  label: string;
-  hint?: string;
-  required?: boolean;
+  n: number;
+  title: string;
   children: React.ReactNode;
+  hint?: React.ReactNode;
+  dim?: boolean;
 }) {
   return (
-    <div>
-      <div className="flex items-baseline gap-1.5 mb-1">
-        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400 font-medium">
-          {label}
+    <li className={cn(dim && "opacity-50 pointer-events-none")}>
+      <div className="flex items-baseline gap-2 mb-1.5">
+        <span className="grid place-items-center h-4 w-4 rounded-full border border-ink-900/15 dark:border-ink-50/15 font-mono text-[9px] tabular-nums text-ink-500">
+          {n}
         </span>
-        {required && (
-          <span className="font-mono text-[9px] text-ember-600 dark:text-ember-400">
-            required
-          </span>
-        )}
-        {hint && (
-          <span className="text-[10px] text-ink-400 dark:text-ink-500">
-            · {hint}
-          </span>
-        )}
+        <span className="text-[13px] font-medium text-ink-900 dark:text-ink-50">
+          {title}
+        </span>
       </div>
-      {children}
+      {hint && (
+        <p className="ml-6 mb-2 text-[11px] text-ink-500 dark:text-ink-400 leading-relaxed">
+          {hint}
+        </p>
+      )}
+      <div className="ml-6">{children}</div>
+    </li>
+  );
+}
+
+/* ── Project routing ───────────────────────────────────────────── */
+
+function ProjectRoutingSection({
+  bridges,
+  discordChannelsKnown,
+  hasGuilds,
+}: {
+  bridges: import("@agentd/contracts").ProjectBridgeSummary[];
+  discordChannelsKnown: boolean;
+  hasGuilds: boolean;
+}) {
+  if (bridges.length === 0) {
+    return (
+      <div className="mt-8">
+        <div className="flex items-baseline gap-2 mb-2">
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+            Project routing
+          </span>
+          <span className="font-mono text-[9px] text-ink-400 dark:text-ink-500">
+            none yet
+          </span>
+        </div>
+        <div className="rounded-md border border-dashed border-ink-900/15 dark:border-ink-50/15 px-4 py-6 text-[12px] text-ink-500 dark:text-ink-400 leading-relaxed">
+          Each project can have its own Telegram bot or Discord channel.
+          Open any project's right rail → "Connect chat" to wire one up.
+          {discordChannelsKnown && !hasGuilds ? (
+            <span className="block mt-1 text-ink-400 dark:text-ink-500">
+              The Discord bot reported zero guilds — invite it via the
+              OAuth2 URL Generator first.
+            </span>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-baseline gap-2 mb-2">
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+          Project routing
+        </span>
+        <span className="font-mono text-[9px] text-ink-400 dark:text-ink-500">
+          per-project bots / channels
+        </span>
+        <span className="ml-auto font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
+          {bridges.length} project{bridges.length === 1 ? "" : "s"}
+        </span>
+      </div>
+      <ul className="rounded-md border border-ink-900/10 bg-paper-50 divide-y divide-ink-900/[0.06] overflow-hidden dark:border-ink-50/10 dark:bg-ink-800 dark:divide-ink-50/[0.06]">
+        {bridges.map((b) => (
+          <ProjectRoutingRow key={b.projectId} summary={b} />
+        ))}
+      </ul>
     </div>
   );
 }
 
-const BOT_COMMANDS: {
-  cmd: string;
-  body: string;
-  prefix: (n: BridgeName) => string;
-}[] = [
-  { cmd: "new <repo> <prompt>", body: "Spawn a task in the given repo.", prefix: (n) => (n === "telegram" ? "/" : "!") },
-  { cmd: "ls", body: "List recent tasks.", prefix: (n) => (n === "telegram" ? "/" : "!") },
-  { cmd: "use <id>", body: "Pin focus; messages route to that task.", prefix: (n) => (n === "telegram" ? "/" : "!") },
-  { cmd: "show [id]", body: "Status, branch, last 6 messages.", prefix: (n) => (n === "telegram" ? "/" : "!") },
-  { cmd: "in <text>", body: "Send input to the focused task.", prefix: (n) => (n === "telegram" ? "/" : "!") },
-  { cmd: "stop [id]", body: "Stop a running task.", prefix: (n) => (n === "telegram" ? "/" : "!") },
-  { cmd: "diff [id]", body: "Show the unified diff.", prefix: (n) => (n === "telegram" ? "/" : "!") },
-  { cmd: "log [id]", body: "Recent commits in the worktree.", prefix: (n) => (n === "telegram" ? "/" : "!") },
-  { cmd: "tpl", body: "List templates.", prefix: (n) => (n === "telegram" ? "/" : "!") },
-  { cmd: "run <name>", body: "Fire a template by name.", prefix: (n) => (n === "telegram" ? "/" : "!") },
-  { cmd: "sched", body: "List schedules + next-fire times.", prefix: (n) => (n === "telegram" ? "/" : "!") },
-  { cmd: "whoami", body: "Print your user id for the allowlist.", prefix: (n) => (n === "telegram" ? "/" : "!") },
-];
+function ProjectRoutingRow({
+  summary,
+}: {
+  summary: import("@agentd/contracts").ProjectBridgeSummary;
+}) {
+  const tg = summary.telegram;
+  const dc = summary.discord;
+  return (
+    <li>
+      <Link
+        to={`/projects/${encodeURIComponent(summary.slug)}`}
+        className="flex items-center gap-3 px-4 py-3 hover:bg-paper-100 dark:hover:bg-ink-700 transition-colors"
+      >
+        <span
+          className="size-3 rounded-md shrink-0"
+          style={{ background: summary.color || "#DC2626" }}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-medium text-ink-900 dark:text-ink-50 truncate">
+            {summary.name}
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+            {tg && <RoutingPill platform="telegram" label={
+              tg.botUsername ? `@${tg.botUsername}` : tg.botFirstName || "bot"
+            } sub={tg.chatLabel ?? `chat ${tg.chatId.slice(-6)}`} stats={tg.stats} />}
+            {dc && (
+              <RoutingPill
+                platform="discord"
+                label={dc.channelName ? `#${dc.channelName}` : `channel ${dc.channelId.slice(-6)}`}
+                sub={dc.guildName ?? null}
+                stats={dc.stats}
+              />
+            )}
+          </div>
+        </div>
+        <ChevronRight className="h-3.5 w-3.5 text-ink-400 dark:text-ink-500 shrink-0" />
+      </Link>
+    </li>
+  );
+}
+
+function RoutingPill({
+  platform,
+  label,
+  sub,
+  stats,
+}: {
+  platform: "telegram" | "discord";
+  label: string;
+  sub: string | null;
+  stats: import("@agentd/contracts").BridgeDeliveryStats;
+}) {
+  const brand = platform === "telegram" ? "#229ED9" : "#5865F2";
+  const Icon = platform === "telegram" ? Send : Hash;
+  return (
+    <span className="inline-flex items-center gap-1.5 font-mono text-[10px] text-ink-700 dark:text-ink-200">
+      <span
+        className="h-3 w-3 rounded grid place-items-center text-white"
+        style={{ background: brand }}
+      >
+        <Icon className="h-2 w-2" />
+      </span>
+      <span className="truncate max-w-[20ch]">{label}</span>
+      {sub && (
+        <span className="text-ink-400 dark:text-ink-500 truncate max-w-[18ch]">
+          · {sub}
+        </span>
+      )}
+      <span className="text-ink-300 dark:text-ink-600">·</span>
+      <span
+        className={cn(
+          "tabular-nums",
+          stats.count24h > 0
+            ? "text-emerald-700 dark:text-emerald-300"
+            : "text-ink-400 dark:text-ink-500",
+        )}
+      >
+        {stats.count24h}/24h
+      </span>
+      {stats.lastDeliveredAt && (
+        <span className="text-ink-400 dark:text-ink-500">
+          · {formatTs(stats.lastDeliveredAt)}
+        </span>
+      )}
+    </span>
+  );
+}
 
 void PowerOff;

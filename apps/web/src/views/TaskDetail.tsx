@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckSquare,
   ExternalLink,
+  Hash,
   MoreHorizontal,
   PanelRight,
   PanelRightClose,
@@ -39,9 +40,11 @@ import {
 } from "@/components/ui/tooltip";
 import {
   qk,
+  useDiscordChannels,
   useModels,
   usePatchPrefs,
   usePrefs,
+  useProject,
   useRemoveTask,
   useStopTask,
   useTask,
@@ -400,6 +403,13 @@ export function TaskDetail({ task }: { task: Task }) {
               <ExternalLink className="h-3 w-3" /> PR
             </a>
           </Button>
+        )}
+        {task.discordThreadId && (
+          <DiscordThreadChip
+            taskId={task.id}
+            projectId={task.projectId ?? null}
+            threadId={task.discordThreadId}
+          />
         )}
         <ShipMenu task={task} />
         {!isTerminal && (
@@ -1191,4 +1201,55 @@ function statusLabel(s: Task["status"]): string {
   if (s === "waiting_perm") return "needs ok";
   if (s === "pending") return "queued";
   return s;
+}
+
+/**
+ * Chip linking to the per-task Discord thread. Resolves the parent
+ * channel's guildId from the cached channel snapshot so we can
+ * build a clickable `https://discord.com/channels/<guild>/<thread>`
+ * link. Falls back to a non-clickable badge if the guild isn't
+ * known yet (e.g. the discord subprocess hasn't reported channels).
+ */
+function DiscordThreadChip({
+  taskId,
+  projectId,
+  threadId,
+}: {
+  taskId: string;
+  projectId: string | null;
+  threadId: string;
+}) {
+  void taskId;
+  const projectQ = useProject(projectId);
+  const channelsQ = useDiscordChannels();
+  const project = projectQ.data?.project;
+  const channelId = project?.discordChannelId ?? null;
+  const guildId = useMemo(() => {
+    if (!channelId) return null;
+    for (const g of channelsQ.data?.guilds ?? []) {
+      if (g.channels.some((c) => c.id === channelId)) return g.id;
+    }
+    return null;
+  }, [channelId, channelsQ.data]);
+  const href = guildId
+    ? `https://discord.com/channels/${guildId}/${threadId}`
+    : null;
+  const label = "Thread";
+  if (!href) {
+    return (
+      <span
+        className="inline-flex h-7 items-center gap-1 px-2 rounded-md border border-ink-900/10 bg-paper-50 font-mono text-[11px] text-ink-500 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400"
+        title={`thread ${threadId}`}
+      >
+        <Hash className="h-3 w-3" /> {label}
+      </span>
+    );
+  }
+  return (
+    <Button asChild variant="outline" size="xs">
+      <a href={href} target="_blank" rel="noreferrer">
+        <Hash className="h-3 w-3" /> {label}
+      </a>
+    </Button>
+  );
 }
