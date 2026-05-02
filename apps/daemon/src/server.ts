@@ -374,6 +374,20 @@ export function buildServer(opts: BuildServerOptions) {
     });
   });
 
+  /** Drop a single queued line before it drains. Body: { index }. */
+  api.post("/tasks/:id/steer/remove", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => null)) as {
+      index?: number;
+    } | null;
+    const index = Number(body?.index);
+    if (!Number.isFinite(index)) {
+      return c.json({ error: "index required" }, 400);
+    }
+    const queue = tasks.removeQueuedInput(id, index);
+    return c.json({ queue });
+  });
+
   api.delete("/tasks/:id", async (c) => {
     const id = c.req.param("id");
     await tasks.remove(id);

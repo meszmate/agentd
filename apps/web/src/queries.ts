@@ -231,8 +231,49 @@ export function usePickCouncilWinner() {
 
 export function useSendInput(taskId: string) {
   const client = useClient();
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: (text: string) => client.sendInput(taskId, text),
+    onSuccess: () => {
+      void qc.invalidateQueries({
+        queryKey: ["task-steer", taskId] as const,
+      });
+    },
+  });
+}
+
+/**
+ * Live snapshot of a task's running state + steer queue. Polls a small
+ * tick because the queue mutates outside our control (chat plugin steer,
+ * exit-time drain) and we don't want a stale UI.
+ */
+export function useTaskSteer(taskId: string) {
+  const client = useClient();
+  return useQuery({
+    queryKey: ["task-steer", taskId] as const,
+    queryFn: () => client.getTaskSteerState(taskId),
+    refetchInterval: 2_000,
+    staleTime: 1_500,
+    enabled: !!taskId,
+  });
+}
+
+export function useRemoveQueuedSteer(taskId: string) {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (index: number) => client.removeQueuedSteer(taskId, index),
+    onSuccess: (data) => {
+      qc.setQueryData(["task-steer", taskId], (cur: unknown) => {
+        const prev = cur as
+          | { running: boolean; queue: string[] }
+          | undefined;
+        return {
+          running: prev?.running ?? false,
+          queue: data.queue,
+        };
+      });
+    },
   });
 }
 

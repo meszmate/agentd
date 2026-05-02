@@ -131,6 +131,23 @@ export class TaskManager {
   }
 
   /**
+   * Remove a single queued line by its current index. Used by the
+   * timeline's queue strip — the operator can drop something they
+   * decided against before the next turn drains it. Returns the
+   * remaining queue snapshot so the caller can re-render.
+   */
+  removeQueuedInput(taskId: string, index: number): string[] {
+    const cur = this.inputQueue.get(taskId);
+    if (!cur || index < 0 || index >= cur.length) {
+      return cur?.slice() ?? [];
+    }
+    cur.splice(index, 1);
+    if (cur.length === 0) this.inputQueue.delete(taskId);
+    else this.inputQueue.set(taskId, cur);
+    return cur.slice();
+  }
+
+  /**
    * Persist a structured progress note from the running agent and fan it
    * out to the bus. The mirror plugin and web timeline both subscribe.
    */

@@ -86,6 +86,16 @@ export function TaskDetail({ task }: { task: Task }) {
    */
   const [plan, setPlan] = useState<TaskPlanItem[]>([]);
   const [planUpdatedAt, setPlanUpdatedAt] = useState<number | null>(null);
+  /**
+   * Per-turn meter — accumulates tokens reported via `usage` events and
+   * tracks when the turn started so the timeline can render an
+   * elapsed-thinking display next to the pulse. `startedAt = null` means
+   * the turn has settled; `tokens` stays put so the operator sees the
+   * final cost of the last turn until the next one begins.
+   */
+  const [turn, setTurn] = useState<{ startedAt: number | null; tokens: number }>(
+    { startedAt: null, tokens: 0 },
+  );
   const prefsQ = usePrefs();
   const patchPrefs = usePatchPrefs();
   const [workspaceOpen, setWorkspaceOpenState] = useState<boolean>(true);
@@ -158,39 +168,48 @@ export function TaskDetail({ task }: { task: Task }) {
         if (planItems) {
           setPlan(planItems);
           setPlanUpdatedAt(Date.now());
-          setLastToolHint(`✓ plan · ${planItems.length} item${planItems.length === 1 ? "" : "s"}`);
+          setLastToolHint(
+            `✓ plan · ${planItems.length} item${planItems.length === 1 ? "" : "s"}`,
+          );
           // Don't litter the timeline with the raw JSON for plan tools.
           return;
         }
-        const args =
-          typeof event.args === "object" && event.args
-            ? Object.entries(event.args)
-                .slice(0, 1)
-                .map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 40)}`)
-                .join(" ")
-            : "";
-        setLastToolHint(`→ ${event.tool}${args ? " " + args : ""}`);
+        setLastToolHint(`→ ${event.tool}`);
+        // Persist in the same `[call <tool>] <argsJson>` shape the daemon
+        // writes server-side so the ToolLine renderer treats live + history
+        // identically.
         appendLocal(
           "tool",
-          `[${event.tool}] ${JSON.stringify(event.args).slice(0, 400)}`,
+          `[call ${event.tool}] ${JSON.stringify(event.args ?? {})}`,
         );
-      } else if (event.kind === "tool_result") {
-        appendLocal(
-          "tool",
-          `[${event.tool}] ${event.ok ? "ok" : "err"}: ${String(
-            event.output,
-          ).slice(0, 400)}`,
-        );
+        // tool_result events are intentionally dropped from the timeline —
+        // the result of "Read foo.ts" is the file contents, which was the
+        // noise we just got rid of. Failures still surface via raw stderr.
       } else if (event.kind === "raw") {
         appendLocal("system", event.text);
-      } else if (
-        event.kind === "status" ||
-        event.kind === "exit" ||
-        event.kind === "usage"
-      ) {
-        if (event.kind === "exit" || event.kind === "status") {
+      } else if (event.kind === "status") {
+        if (event.status === "running") {
+          setTurn({ startedAt: Date.now(), tokens: 0 });
+        } else {
+          // Freeze the meter on the final value when the turn settles.
+          setTurn((cur) => ({ startedAt: null, tokens: cur.tokens }));
           setLastToolHint(null);
         }
+        void qc.invalidateQueries({ queryKey: qk.tasks() });
+        void qc.invalidateQueries({ queryKey: qk.task(task.id) });
+      } else if (event.kind === "exit") {
+        setTurn((cur) => ({ startedAt: null, tokens: cur.tokens }));
+        setLastToolHint(null);
+        void qc.invalidateQueries({ queryKey: qk.tasks() });
+        void qc.invalidateQueries({ queryKey: qk.task(task.id) });
+      } else if (event.kind === "usage") {
+        // Accumulate per-turn tokens. Cleared by the next "running" status.
+        const delta =
+          (event.inputTokens ?? 0) +
+          (event.outputTokens ?? 0) +
+          (event.cacheReadTokens ?? 0) +
+          (event.cacheWriteTokens ?? 0);
+        setTurn((cur) => ({ ...cur, tokens: cur.tokens + delta }));
         void qc.invalidateQueries({ queryKey: qk.tasks() });
         void qc.invalidateQueries({ queryKey: qk.task(task.id) });
       }
@@ -486,6 +505,7 @@ export function TaskDetail({ task }: { task: Task }) {
                 lastToolHint={lastToolHint}
                 streams={streams}
                 totalTokens={totalTokens}
+                turn={turn}
               />
             </Panel>
             <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-ember-500/40 transition-colors dark:bg-ink-50/10" />
@@ -500,9 +520,10 @@ export function TaskDetail({ task }: { task: Task }) {
             appendLocal={appendLocal}
             onError={onError}
             disabled={isRunning}
-                lastToolHint={lastToolHint}
-                streams={streams}
-                totalTokens={totalTokens}
+            lastToolHint={lastToolHint}
+            streams={streams}
+            totalTokens={totalTokens}
+            turn={turn}
           />
         )}
       </div>

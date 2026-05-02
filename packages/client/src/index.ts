@@ -363,6 +363,17 @@ export class AgentdClient {
     return this.req(`/api/tasks/${encodeURIComponent(id)}/steer`);
   }
 
+  /** Drop a queued steer line by index before the next turn drains it. */
+  async removeQueuedSteer(
+    id: string,
+    index: number,
+  ): Promise<{ queue: string[] }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/steer/remove`, {
+      method: "POST",
+      body: JSON.stringify({ index }),
+    });
+  }
+
   async checkPrState(
     id: string,
     autoClose = false,

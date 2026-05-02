@@ -8,7 +8,7 @@ import {
   Send,
   User2,
   Wrench,
-  Zap,
+  X,
 } from "lucide-react";
 import type { Message } from "@agentd/contracts";
 import { Button } from "@/components/ui/button";
@@ -16,9 +16,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { Kbd } from "@/components/ui/kbd";
 import { useApp, useClient } from "@/AppContext";
 import { cn, formatTokens, formatTs } from "@/lib/utils";
-import { useSendInput } from "@/queries";
-
-type SteerMode = "queue" | "interrupt";
+import { ToolLine } from "@/components/tool-line";
+import {
+  useRemoveQueuedSteer,
+  useSendInput,
+  useTaskSteer,
+} from "@/queries";
 
 const ROLE_GLYPH: Record<Message["role"], React.ReactNode> = {
   user: <User2 className="h-3 w-3" />,
@@ -44,6 +47,7 @@ export function TaskTimeline({
   streams,
   totalTokens,
   contextWindow,
+  turn,
 }: {
   taskId: string;
   messages: Message[];
@@ -59,6 +63,8 @@ export function TaskTimeline({
   totalTokens?: number;
   /** Model context window (default 200_000). */
   contextWindow?: number;
+  /** Per-turn meter — `startedAt` set => mid-turn, `tokens` accumulated. */
+  turn?: { startedAt: number | null; tokens: number };
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [text, setText] = useState("");
@@ -93,24 +99,33 @@ export function TaskTimeline({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length, streamEntries.map(([, t]) => t.length).join("|")]);
 
-  const [steerMode, setSteerMode] = useState<SteerMode>("queue");
+  // Tick once a second while a turn is live so the elapsed display moves.
+  // When the turn settles (`startedAt = null`) we stop ticking — the meter
+  // freezes on the final value until the next turn starts.
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!turn?.startedAt) return;
+    const id = setInterval(() => force((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [turn?.startedAt]);
+  const elapsedMs = turn?.startedAt ? Date.now() - turn.startedAt : 0;
+
+  // Live queue snapshot — server-side state, polled. Renders as the
+  // strip above the input so the operator can see what's pending.
+  const steerQ = useTaskSteer(taskId);
+  const removeQueued = useRemoveQueuedSteer(taskId);
+  const queue = steerQ.data?.queue ?? [];
 
   const submit = async () => {
     const msg = text.trim();
     if (!msg) return;
     setText("");
     if (disabled) {
-      // Mid-turn: route through /steer so the daemon can queue or interrupt
-      // explicitly, and we get a "queued" badge in the timeline. The daemon
-      // also returns the queue depth so the UI can surface it.
-      appendLocal("user", `[${steerMode}] ${msg}`);
+      // Mid-turn: queue. Always. Drains at the next turn boundary.
+      // The chip strip above the input shows what's piling up.
       try {
-        await client.steerTask(taskId, msg, steerMode);
-        toast(
-          steerMode === "interrupt"
-            ? "Interrupted — agent will pick up your note next"
-            : "Queued — fires after this turn",
-        );
+        await client.steerTask(taskId, msg, "queue");
+        await steerQ.refetch();
       } catch (e) {
         onError((e as Error).message);
       }
@@ -218,10 +233,18 @@ export function TaskTimeline({
                   <span className="absolute -left-9 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-ember-500/30 bg-ember-500/15">
                     <span className="h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink" />
                   </span>
-                  <div className="flex items-baseline gap-2">
+                  <div className="flex items-baseline gap-2 flex-wrap">
                     <span className="text-[12px] text-ember-700 dark:text-ember-300 font-medium">
                       agent is thinking
                     </span>
+                    {turn?.startedAt && (
+                      <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
+                        {formatElapsed(elapsedMs)}
+                        {turn.tokens > 0
+                          ? ` · ${formatTokens(turn.tokens)} tok`
+                          : ""}
+                      </span>
+                    )}
                     <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate">
                       {lastToolHint ?? "…"}
                     </span>
@@ -242,6 +265,34 @@ export function TaskTimeline({
         className="border-t border-ink-900/10 dark:border-ink-50/10 px-6 py-4"
       >
         <div className="mx-auto max-w-3xl">
+          {/* Queue strip — sits above the input so the operator always
+              sees what's piling up. Each chip is removable. Drains at
+              the next turn boundary on the daemon side. */}
+          {queue.length > 0 && (
+            <div className="mb-2 flex flex-wrap items-center gap-1.5">
+              <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-violet-700 dark:text-violet-300 shrink-0">
+                queued · {queue.length}
+              </span>
+              {queue.map((line, i) => (
+                <span
+                  key={`${i}-${line.slice(0, 12)}`}
+                  className="group inline-flex items-center gap-1 max-w-full rounded-md border border-violet-500/30 bg-violet-500/[0.08] px-2 py-1 font-mono text-[11px] text-violet-700 dark:text-violet-300"
+                  title={line}
+                >
+                  <span className="truncate max-w-[42ch]">{line}</span>
+                  <button
+                    type="button"
+                    onClick={() => void removeQueued.mutateAsync(i)}
+                    title="Remove from queue"
+                    className="rounded p-0.5 opacity-50 hover:opacity-100 hover:bg-violet-500/20"
+                  >
+                    <X className="h-2.5 w-2.5" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
           <div className="relative">
             <Textarea
               value={text}
@@ -254,51 +305,18 @@ export function TaskTimeline({
               }}
               placeholder={
                 disabled
-                  ? steerMode === "interrupt"
-                    ? "Stop the current turn and steer with this note…"
-                    : "Queue a note for the next turn…"
+                  ? "Append to queue — fires after the next turn…"
                   : "Send input to the agent…"
               }
               rows={3}
               data-shortcut-target="chat-input"
               className={cn(
                 "resize-none pr-28 text-sm transition",
-                disabled &&
-                  (steerMode === "interrupt"
-                    ? "ring-1 ring-amber-500/40"
-                    : "ring-1 ring-violet-500/30"),
+                disabled && "ring-1 ring-violet-500/30",
               )}
               aria-label="Message"
             />
             <div className="absolute right-2 bottom-2 flex items-center gap-2">
-              {disabled && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    setSteerMode((m) =>
-                      m === "queue" ? "interrupt" : "queue",
-                    )
-                  }
-                  title={
-                    steerMode === "queue"
-                      ? "Queue: fires after the current turn finishes"
-                      : "Interrupt: stop the agent now and steer with this note"
-                  }
-                  className={cn(
-                    "h-7 inline-flex items-center gap-1.5 rounded-md border px-2 font-mono text-[10px] uppercase tracking-[0.08em] transition",
-                    steerMode === "queue"
-                      ? "border-violet-500/40 bg-violet-500/10 text-violet-700 dark:text-violet-300"
-                      : "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300",
-                  )}
-                >
-                  {steerMode === "queue" ? (
-                    <ListPlus className="h-3 w-3" />
-                  ) : (
-                    <Zap className="h-3 w-3" />
-                  )}
-                  {steerMode}
-                </button>
-              )}
               <span className="hidden sm:flex items-center gap-1 text-2xs text-ink-400 dark:text-ink-500">
                 <Kbd>⌘</Kbd>
                 <Kbd>↵</Kbd>
@@ -310,18 +328,12 @@ export function TaskTimeline({
               >
                 {send.isPending ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : disabled && steerMode === "interrupt" ? (
-                  <Zap className="h-3.5 w-3.5" />
                 ) : disabled ? (
                   <ListPlus className="h-3.5 w-3.5" />
                 ) : (
                   <Send className="h-3.5 w-3.5" />
                 )}
-                {disabled
-                  ? steerMode === "interrupt"
-                    ? "Steer"
-                    : "Queue"
-                  : "Send"}
+                {disabled ? "Queue" : "Send"}
               </Button>
             </div>
           </div>
@@ -371,9 +383,7 @@ function TimelineItem({ message: m }: { message: Message }) {
           </span>
         </div>
         {m.role === "tool" ? (
-          <pre className="whitespace-pre-wrap break-words font-mono text-xs text-ink-500 dark:text-ink-400 rounded-md border border-ink-900/10 bg-ink-900/[0.03] px-2.5 py-1.5 dark:border-ink-50/10 dark:bg-ink-50/[0.03]">
-            {m.content}
-          </pre>
+          <ToolLine content={m.content} />
         ) : m.role === "user" ? (
           <div className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-900 dark:text-ink-50">
             {m.content}
@@ -491,4 +501,14 @@ function Markdown({ text }: { text: string }) {
       </ReactMarkdown>
     </div>
   );
+}
+
+/** "0.4s", "12s", "1m 03s" — compact like Codex/claude-code. */
+function formatElapsed(ms: number): string {
+  if (ms < 1000) return `${(ms / 1000).toFixed(1)}s`;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}m ${rem.toString().padStart(2, "0")}s`;
 }
