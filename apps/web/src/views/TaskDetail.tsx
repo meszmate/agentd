@@ -325,7 +325,7 @@ export function TaskDetail({ task }: { task: Task }) {
             statusTone,
           )}
         >
-          {task.status}
+          {statusLabel(task.status)}
         </span>
         {task.closedAt && (
           <span
@@ -1048,4 +1048,17 @@ function parsePlan(tool: string, args: unknown): TaskPlanItem[] | null {
     out.push(item);
   }
   return out;
+}
+
+/**
+ * Human-friendly task status label for the topbar badge. Distinct
+ * from `t.status` which is the wire-level enum.
+ */
+function statusLabel(s: Task["status"]): string {
+  if (s === "running") return "working";
+  if (s === "idle") return "ready";
+  if (s === "waiting_input") return "needs you";
+  if (s === "waiting_perm") return "needs ok";
+  if (s === "pending") return "queued";
+  return s;
 }

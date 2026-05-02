@@ -410,7 +410,7 @@ export function TaskTimeline({
                         onClick={() => void fireRow(i, line)}
                         disabled={fireQueued.isPending}
                         title="Steer — send to the agent now (lands after the next tool call)"
-                        className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md font-mono text-[10px] uppercase tracking-[0.1em] font-semibold bg-gradient-to-b from-violet-500 to-violet-600 text-white shadow-sm shadow-violet-900/20 hover:from-violet-400 hover:to-violet-500 active:from-violet-600 active:to-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all hover:scale-[1.03] active:scale-[0.98]"
+                        className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md font-mono text-[10px] uppercase tracking-[0.1em] font-semibold bg-gradient-to-b from-violet-500 to-violet-600 text-white shadow-sm shadow-violet-900/20 hover:from-violet-400 hover:to-violet-500 active:from-violet-600 active:to-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                       >
                         {fireQueued.isPending ? (
                           <Loader2 className="h-3 w-3 animate-spin" />
@@ -720,25 +720,27 @@ function PlanStrip({ plan }: { plan: TaskPlanItem[] }) {
       {expanded ? (
         <ul
           ref={planRef}
-          className="px-3 pb-2 space-y-1 border-t border-ink-900/[0.04] dark:border-ink-50/[0.04] pt-1.5"
+          className="relative px-4 pb-3 pt-2 border-t border-ink-900/[0.04] dark:border-ink-50/[0.04] before:absolute before:left-[1.45rem] before:top-3 before:bottom-3 before:w-px before:bg-gradient-to-b before:from-ink-900/15 before:via-ink-900/10 before:to-ink-900/5 dark:before:from-ink-50/15 dark:before:via-ink-50/10 dark:before:to-ink-50/5"
         >
           {plan.map((item, i) => (
             <li
               key={i}
               className={cn(
-                "flex items-start gap-2 rounded-md px-1.5 py-0.5 transition-all animate-slide-in",
+                "group relative flex items-start gap-2.5 pl-7 py-1.5 -ml-2 pr-2 rounded-md transition-colors duration-300",
                 item.status === "in_progress" &&
-                  "bg-gradient-to-r from-ember-500/[0.08] to-transparent",
+                  "bg-gradient-to-r from-ember-500/[0.10] via-ember-500/[0.04] to-transparent",
+                item.status === "pending" &&
+                  "hover:bg-ink-900/[0.025] dark:hover:bg-ink-50/[0.025]",
               )}
             >
-              <span className="mt-1">
+              <span className="absolute left-[0.3rem] top-2 z-10">
                 <PlanGlyph status={item.status} />
               </span>
               <span
                 className={cn(
-                  "flex-1 min-w-0 text-[12.5px] leading-snug transition-all duration-300",
+                  "flex-1 min-w-0 text-[12.5px] leading-snug break-words transition-colors duration-300",
                   item.status === "completed" &&
-                    "line-through text-emerald-700/85 dark:text-emerald-300/85",
+                    "line-through decoration-emerald-500/70 decoration-[1.5px] text-emerald-700/85 dark:text-emerald-300/85",
                   item.status === "in_progress" &&
                     "text-ink-900 dark:text-ink-50 font-medium",
                   item.status === "pending" && "text-ink-700 dark:text-ink-200",
@@ -748,6 +750,12 @@ function PlanStrip({ plan }: { plan: TaskPlanItem[] }) {
                   ? (item.activeForm ?? item.content)
                   : item.content}
               </span>
+              {item.status === "in_progress" && (
+                <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-ember-700 dark:text-ember-300 shrink-0 inline-flex items-center gap-1">
+                  <span className="size-1 rounded-full bg-ember-500 animate-blink" />
+                  now
+                </span>
+              )}
             </li>
           ))}
         </ul>

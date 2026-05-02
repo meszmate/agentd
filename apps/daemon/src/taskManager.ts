@@ -498,6 +498,39 @@ export class TaskManager {
   }
 
   /**
+   * Drain all queued items into a live-input runner — used at turn
+   * boundaries so anything the operator queued during the agent's
+   * thinking flushes automatically. Each item lands as a separate
+   * user message and stdin write, in queue order.
+   */
+  private async autoDrainQueue(taskId: string): Promise<void> {
+    const cur = this.inputQueue.get(taskId);
+    if (!cur || cur.length === 0) return;
+    const session = this.running.get(taskId);
+    if (!session?.runner.supportsLiveInput || !session.runner.running) return;
+    // Snapshot + clear up front so concurrent steers don't double-send.
+    const items = cur.slice();
+    this.inputQueue.delete(taskId);
+    for (const text of items) {
+      appendMessage(this.db, taskId, "user", text);
+      try {
+        await session.runner.sendInput(text);
+      } catch (e) {
+        this.bus.publish({
+          taskId,
+          event: {
+            kind: "raw",
+            stream: "stderr",
+            text: `[auto-drain failed] ${(e as Error).message}`,
+          },
+          ts: Date.now(),
+        });
+        return;
+      }
+    }
+  }
+
+  /**
    * In-memory queue tracker — drives the chip strip in the web UI
    * (polled via `GET /api/tasks/:id/steer`). Pure state, no DB write
    * and no extra timeline text: the user's message itself is already
@@ -703,9 +736,18 @@ export class TaskManager {
       }
     } else if (event.kind === "status") {
       updateTaskStatus(this.db, taskId, event.status);
-      // Don't auto-clear the queue on turn end — items live until
-      // the operator fires them (per-row Steer button) or removes
-      // them. That gives explicit "send when ready" semantics.
+      // Auto-fire any queued items at the turn boundary for
+      // long-lived runners (claude). `idle` means the agent
+      // finished its turn and is waiting for the next stdin
+      // message — perfect moment to flush the queue. The per-row
+      // Steer button is the manual mid-turn force; if the operator
+      // just lets the queue sit, items drain themselves here.
+      if (event.status === "idle") {
+        const sess = this.running.get(taskId);
+        if (sess?.runner.supportsLiveInput) {
+          void this.autoDrainQueue(taskId);
+        }
+      }
     } else if (event.kind === "usage") {
       addTaskUsage(this.db, taskId, {
         inputTokens: event.inputTokens,

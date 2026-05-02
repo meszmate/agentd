@@ -125,6 +125,12 @@ export const TaskStatus = z.enum([
   "running",
   "waiting_input",
   "waiting_perm",
+  // Between-turns for long-lived runners (claude in stream-json mode):
+  // the runner process is alive and ready for input, but no agent
+  // turn is in flight. Distinct from `done` (which now means the
+  // task itself is finished — proc exited) so the sidebar doesn't
+  // mislabel an idle but ongoing chat as "done".
+  "idle",
   "done",
   "failed",
   "stopped",

@@ -328,10 +328,12 @@ export class ClaudeRunner implements AgentRunner {
         });
       }
       // Turn boundary — agent is now idle waiting for the next stdin
-      // message. The proc stays alive; only the per-turn meter resets.
+      // message. Emit `idle` (not `done`) so the sidebar doesn't show
+      // a still-active task as finished. `done` is reserved for the
+      // proc actually exiting (kind:"exit").
       if (this.inTurn) {
         this.inTurn = false;
-        this.emit({ kind: "status", status: "done" });
+        this.emit({ kind: "status", status: "idle" });
       }
       return;
     }

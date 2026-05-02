@@ -89,7 +89,8 @@ export function Sidebar({
       (t) =>
         t.status === "running" ||
         t.status === "waiting_input" ||
-        t.status === "waiting_perm",
+        t.status === "waiting_perm" ||
+        t.status === "idle",
     ).length ?? 0;
 
   return (
@@ -451,12 +452,13 @@ function ProjectsTreeSection() {
   };
 
   const groups = useMemo<ProjectGroup[]>(() => {
-    // open: any task currently working
+    // open: any task currently working OR alive between turns
     const isActive = (t: Task): boolean =>
       t.status === "running" ||
       t.status === "waiting_input" ||
       t.status === "waiting_perm" ||
-      t.status === "pending";
+      t.status === "pending" ||
+      t.status === "idle";
     const isClosed = (t: Task): boolean => !!t.closedAt;
 
     const byProject = new Map<string, Task[]>();
@@ -719,21 +721,25 @@ function SidebarTaskRow({ task: t }: { task: Task }) {
       ? "text-ember-700 dark:text-ember-300"
       : t.status === "waiting_input" || t.status === "waiting_perm"
         ? "text-amber-700 dark:text-amber-300"
-        : t.status === "done"
-          ? "text-emerald-700 dark:text-emerald-300"
-          : t.status === "failed"
-            ? "text-red-700 dark:text-red-300"
-            : "text-ink-400 dark:text-ink-500";
+        : t.status === "idle"
+          ? "text-ink-500 dark:text-ink-400"
+          : t.status === "done"
+            ? "text-emerald-700 dark:text-emerald-300"
+            : t.status === "failed"
+              ? "text-red-700 dark:text-red-300"
+              : "text-ink-400 dark:text-ink-500";
   const dot =
     t.status === "running"
       ? "bg-ember-500 animate-blink"
       : t.status === "waiting_input" || t.status === "waiting_perm"
         ? "bg-amber-500 animate-blink"
-        : t.status === "done"
-          ? "bg-emerald-500"
-          : t.status === "failed"
-            ? "bg-red-500"
-            : "bg-ink-300 dark:bg-ink-600";
+        : t.status === "idle"
+          ? "bg-ink-300 dark:bg-ink-600"
+          : t.status === "done"
+            ? "bg-emerald-500"
+            : t.status === "failed"
+              ? "bg-red-500"
+              : "bg-ink-300 dark:bg-ink-600";
   return (
     <li>
       <NavLink
@@ -763,7 +769,9 @@ function SidebarTaskRow({ task: t }: { task: Task }) {
                     ? "needs ok"
                     : t.status === "pending"
                       ? "queued"
-                      : t.status}
+                      : t.status === "idle"
+                        ? "ready"
+                        : t.status}
             </span>
             <span className="text-ink-400 dark:text-ink-500">·</span>
             <span className="text-ink-400 dark:text-ink-500">{t.agent}</span>
