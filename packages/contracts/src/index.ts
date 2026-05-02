@@ -188,6 +188,20 @@ export const Task = z.object({
   closedAt: z.number().nullable().optional(),
   /** Why the task was closed: "merged" | "abandoned" | "manual" | etc. */
   closedReason: z.string().nullable().optional(),
+  /**
+   * Operator-defined sort order. Tasks with an explicit sortOrder
+   * sort by it (ascending) — the operator can drag rows around in
+   * the sidebar to prioritize. Tasks without one fall back to
+   * `updatedAt desc`. Higher sortOrder means lower in the list.
+   */
+  sortOrder: z.number().optional(),
+  /**
+   * Timestamp of the last /compact. The web draws a "context
+   * compacted" divider in the timeline at this point so the
+   * operator can see which prior messages are still in the agent's
+   * working memory vs. those summarized away.
+   */
+  lastCompactedAt: z.number().nullable().optional(),
 });
 export type Task = z.infer<typeof Task>;
 
@@ -571,6 +585,13 @@ export const Project = z.object({
   // Aggregates (populated on list endpoint).
   taskCount: z.number().optional(),
   activeCount: z.number().optional(),
+  /**
+   * Free-text guidance the operator (or the agent itself, via
+   * `agentd-instructions write`) wants prepended to every task
+   * spawn's system prompt. Like an AGENTS.md / CLAUDE.md file but
+   * lives in the daemon DB so it doesn't pollute the repo.
+   */
+  instructions: z.string().nullable().optional(),
 });
 export type Project = z.infer<typeof Project>;
 
@@ -584,6 +605,7 @@ export type CreateProjectRequest = z.infer<typeof CreateProjectRequest>;
 export const UpdateProjectRequest = z.object({
   name: z.string().min(1).optional(),
   color: z.string().optional(),
+  instructions: z.string().nullable().optional(),
 });
 export type UpdateProjectRequest = z.infer<typeof UpdateProjectRequest>;
 

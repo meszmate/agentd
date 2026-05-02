@@ -14,6 +14,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { CodeBlock } from "@/components/code-block";
 
 /**
  * Compact one-line render for an agent tool call. Mirrors the realtime
@@ -37,47 +38,70 @@ export function ToolLine({
   className?: string;
 }) {
   const parsed = parseToolCall(content);
-  const [open, setOpen] = useState(false);
   const Icon = ICONS[parsed.kind] ?? Wrench;
+  // Code-bearing tools render their detail inline (no chevron, always
+  // visible) — claude-code feel. Other tools (Glob, Grep, Read,
+  // WebFetch, Task) keep the compact one-liner.
+  const showInlineCode = parsed.detail != null && parsed.detailLanguage != null;
+  // Plain-text detail (e.g. Bash description, Task prompt) — kept
+  // collapsible so it doesn't dominate.
+  const [openText, setOpenText] = useState(false);
+  const showTextToggle = parsed.detail != null && parsed.detailLanguage == null;
 
   return (
     <div
       className={cn(
-        "group flex items-start gap-2 font-mono text-[11px] text-ink-600 dark:text-ink-400 leading-snug",
+        "group font-mono text-[11px] text-ink-600 dark:text-ink-400 leading-snug",
         className,
       )}
     >
-      <span className="grid place-items-center size-4 mt-px shrink-0 text-ink-400 dark:text-ink-500">
-        {running ? (
-          <Loader2 className="h-3 w-3 animate-spin text-ember-500" />
-        ) : (
-          <Icon className="h-3 w-3" />
-        )}
-      </span>
-      <span className="font-medium text-ink-700 dark:text-ink-200 shrink-0">
-        {parsed.name}
-      </span>
-      {parsed.summary && (
-        <span className="truncate min-w-0 flex-1 text-ink-500 dark:text-ink-400">
-          {parsed.summary}
-        </span>
-      )}
-      {parsed.detail && (
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
-          className="shrink-0 inline-flex items-center text-ink-400 dark:text-ink-500 hover:text-ink-700 dark:hover:text-ink-200"
-          title={open ? "Hide details" : "Show details"}
-        >
-          {open ? (
-            <ChevronDown className="h-3 w-3" />
+      <div className="flex items-start gap-2">
+        <span className="grid place-items-center size-4 mt-px shrink-0 text-ink-400 dark:text-ink-500">
+          {running ? (
+            <Loader2 className="h-3 w-3 animate-spin text-ember-500" />
           ) : (
-            <ChevronRight className="h-3 w-3" />
+            <Icon className="h-3 w-3" />
           )}
-        </button>
+        </span>
+        <span className="font-semibold text-ink-700 dark:text-ink-200 shrink-0">
+          {parsed.name}
+        </span>
+        {parsed.summary && (
+          <>
+            <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
+            <span className="truncate min-w-0 flex-1 text-ink-500 dark:text-ink-400">
+              {parsed.summary}
+            </span>
+          </>
+        )}
+        {showTextToggle && (
+          <button
+            type="button"
+            onClick={() => setOpenText((o) => !o)}
+            className="shrink-0 inline-flex items-center text-ink-400 dark:text-ink-500 hover:text-ink-700 dark:hover:text-ink-200"
+            title={openText ? "Hide details" : "Show details"}
+          >
+            {openText ? (
+              <ChevronDown className="h-3 w-3" />
+            ) : (
+              <ChevronRight className="h-3 w-3" />
+            )}
+          </button>
+        )}
+      </div>
+      {showInlineCode && (
+        <div className="mt-1.5">
+          <CodeBlock
+            code={parsed.detail!}
+            language={parsed.detailLanguage}
+            filename={parsed.detailFilename}
+            showLineNumbers={parsed.detailLanguage !== "bash"}
+            diffMarks={parsed.detailDiffMarks}
+          />
+        </div>
       )}
-      {open && parsed.detail && (
-        <pre className="basis-full mt-1 ml-6 whitespace-pre-wrap break-words rounded border border-ink-900/[0.06] bg-ink-900/[0.03] px-2 py-1 text-[10.5px] text-ink-500 dark:border-ink-50/[0.06] dark:bg-ink-50/[0.03] dark:text-ink-400">
+      {showTextToggle && openText && parsed.detail && (
+        <pre className="mt-1 ml-6 whitespace-pre-wrap break-words rounded border border-ink-900/[0.06] bg-ink-900/[0.03] px-2 py-1 text-[10.5px] text-ink-500 dark:border-ink-50/[0.06] dark:bg-ink-50/[0.03] dark:text-ink-400">
           {parsed.detail}
         </pre>
       )}
@@ -115,6 +139,16 @@ interface ParsedTool {
   kind: ToolKind;
   summary: string;
   detail: string | null;
+  /** When set, render `detail` as a syntax-highlighted CodeBlock. */
+  detailLanguage?: string;
+  /** Optional path label shown in the CodeBlock header. */
+  detailFilename?: string;
+  /**
+   * Per-line diff markers. When present, each line of `detail` gets
+   * a green/red wash based on its mark — and the file's native
+   * language still colors the code itself (no plain-blue diff).
+   */
+  detailDiffMarks?: Array<"+" | "-" | " " | null>;
 }
 
 /**
@@ -165,7 +199,9 @@ function parseToolCall(content: string): ParsedTool {
         name,
         kind,
         summary: `${shortPath(path)}${lines ? ` (${lines} lines)` : ""}`,
-        detail: null,
+        detail: content ?? null,
+        detailLanguage: content ? langFromPath(path) : undefined,
+        detailFilename: shortPath(path),
       };
     }
     case "Edit":
@@ -174,26 +210,50 @@ function parseToolCall(content: string): ParsedTool {
       const oldStr = get("old_string");
       const newStr = get("new_string");
       const replaceAll = args.replace_all === true ? " (all)" : "";
-      // Rough hunk size for at-a-glance flavor.
-      const adds = newStr ? newStr.split("\n").length : 0;
-      const dels = oldStr ? oldStr.split("\n").length : 0;
+      const oldLines = oldStr ? oldStr.split("\n") : [];
+      const newLines = newStr ? newStr.split("\n") : [];
+      // Build raw code (no +/- prefixes) so prism highlights it in
+      // the file's native language. The diffMarks array carries the
+      // +/- info per line, used by CodeBlock to wash the row green/red.
+      const detail =
+        oldLines.length + newLines.length > 0
+          ? [...oldLines, ...newLines].join("\n")
+          : null;
+      const detailDiffMarks: Array<"+" | "-"> | undefined = detail
+        ? [
+            ...oldLines.map(() => "-" as const),
+            ...newLines.map(() => "+" as const),
+          ]
+        : undefined;
       return {
         name,
         kind,
         summary: `${shortPath(path)}${replaceAll}${
-          adds || dels ? ` +${adds} -${dels}` : ""
+          oldLines.length || newLines.length
+            ? ` +${newLines.length} -${oldLines.length}`
+            : ""
         }`,
-        detail: null,
+        detail,
+        detailLanguage: detail ? langFromPath(path) : undefined,
+        detailFilename: shortPath(path),
+        detailDiffMarks,
       };
     }
     case "Bash": {
       const cmd = get("command") ?? "";
       const desc = get("description");
+      // Only show the bash code block when it adds value: multi-line
+      // scripts, or commands the summary had to truncate. For a short
+      // single-line command the summary already shows everything.
+      const isMultiline = cmd.includes("\n");
+      const wasTruncated = cmd.length > 100;
+      const showBlock = cmd && (isMultiline || wasTruncated);
       return {
         name,
         kind,
         summary: trimOneLine(cmd, 100),
-        detail: desc && desc !== cmd ? desc : null,
+        detail: showBlock ? cmd : desc && desc !== cmd ? desc : null,
+        detailLanguage: showBlock ? "bash" : undefined,
       };
     }
     case "Glob": {
@@ -285,7 +345,55 @@ function trimOneLine(s: string, max: number): string {
 /** Show only the last 2-3 path segments so wide repos stay readable. */
 function shortPath(p: string): string {
   if (!p) return "?";
-  const parts = p.split("/");
+  const parts = p.split("/").filter(Boolean);
   if (parts.length <= 3) return p;
-  return ".../" + parts.slice(-3).join("/");
+  return parts.slice(-3).join("/");
+}
+
+/** Best-effort filename → prism language. Falls through to "tsx". */
+function langFromPath(p: string): string {
+  const ext = p.split(".").pop()?.toLowerCase() ?? "";
+  switch (ext) {
+    case "ts":
+    case "tsx":
+      return "tsx";
+    case "js":
+    case "jsx":
+    case "mjs":
+    case "cjs":
+      return "jsx";
+    case "py":
+      return "python";
+    case "rs":
+      return "rust";
+    case "go":
+      return "go";
+    case "rb":
+      return "ruby";
+    case "sh":
+    case "bash":
+    case "zsh":
+      return "bash";
+    case "yml":
+    case "yaml":
+      return "yaml";
+    case "json":
+    case "jsonc":
+      return "json";
+    case "md":
+    case "markdown":
+      return "markdown";
+    case "html":
+    case "htm":
+      return "markup";
+    case "css":
+      return "css";
+    case "sql":
+      return "sql";
+    case "diff":
+    case "patch":
+      return "diff";
+    default:
+      return "tsx";
+  }
 }

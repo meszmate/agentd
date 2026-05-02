@@ -97,7 +97,18 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     councilId: row.councilId ?? null,
     closedAt: row.closedAt ?? null,
     closedReason: row.closedReason ?? null,
+    sortOrder: row.sortOrder ?? undefined,
+    lastCompactedAt: row.lastCompactedAt ?? null,
   };
+}
+
+/** Set or clear the `lastCompactedAt` watermark. */
+export function markTaskCompacted(db: Db, id: string): Task | null {
+  db.update(tasks)
+    .set({ lastCompactedAt: Date.now(), updatedAt: Date.now() })
+    .where(eq(tasks.id, id))
+    .run();
+  return getTask(db, id);
 }
 
 /** Mark a task as closed with an optional reason ("merged" / "abandoned" / etc.). */
@@ -124,6 +135,22 @@ export function reopenTask(db: Db, id: string): Task | null {
     .where(eq(tasks.id, id))
     .run();
   return getTask(db, id);
+}
+
+/**
+ * Bulk-update task sort order — used by the sidebar drag-drop. The
+ * caller passes an ordered array of task ids; each task receives an
+ * incrementing sortOrder starting from 0. Tasks not in the array
+ * keep their existing value.
+ */
+export function reorderTasks(db: Db, orderedIds: string[]): void {
+  for (let i = 0; i < orderedIds.length; i++) {
+    const id = orderedIds[i]!;
+    db.update(tasks)
+      .set({ sortOrder: i })
+      .where(eq(tasks.id, id))
+      .run();
+  }
 }
 
 export function createTask(db: Db, input: CreateTaskInput): Task {
@@ -373,12 +400,27 @@ export function aggregateToolStats(
   return { total, counts, recent, earliest };
 }
 
-export function listMessages(db: Db, taskId: string, limit = 200): Message[] {
-  return db
+export function listMessages(db: Db, taskId: string, limit?: number): Message[] {
+  // Return all messages for this task in chronological order. The
+  // implicit limit is the agent's own context window (~200k tokens)
+  // since rows produced past that get compacted away. Callers that
+  // genuinely want a tail can pass an explicit limit.
+  if (limit == null) {
+    return db
+      .select()
+      .from(messages)
+      .where(eq(messages.taskId, taskId))
+      .orderBy(messages.ts)
+      .all() as Message[];
+  }
+  // Bounded tail: pull the latest N then reverse for chronological
+  // display. Used by spots that don't need the full history.
+  const rows = db
     .select()
     .from(messages)
     .where(eq(messages.taskId, taskId))
-    .orderBy(messages.ts)
+    .orderBy(desc(messages.ts))
     .limit(limit)
     .all() as Message[];
+  return rows.slice().reverse();
 }

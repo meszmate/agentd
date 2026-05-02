@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useAutoAnimate } from "@formkit/auto-animate/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -22,6 +22,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Kbd } from "@/components/ui/kbd";
 import { useApp, useClient } from "@/AppContext";
 import { cn, formatTokens, formatTs } from "@/lib/utils";
+import { CodeBlock } from "@/components/code-block";
 import { ToolLine } from "@/components/tool-line";
 import type { TaskPlanItem } from "@/views/TaskPlan";
 import {
@@ -57,6 +58,7 @@ export function TaskTimeline({
   contextWindow,
   turn,
   plan,
+  compactedAt,
 }: {
   taskId: string;
   messages: Message[];
@@ -76,6 +78,13 @@ export function TaskTimeline({
   turn?: { startedAt: number | null; tokens: number };
   /** Live plan from the agent's most recent TodoWrite/update_plan call. */
   plan?: TaskPlanItem[];
+  /**
+   * Timestamp of the most recent /compact. The timeline draws a
+   * "context compacted" divider before the first message that came
+   * after this point, so the operator can see which prior messages
+   * have been summarized out of the agent's working memory.
+   */
+  compactedAt?: number | null;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [text, setText] = useState("");
@@ -105,14 +114,24 @@ export function TaskTimeline({
 
   /**
    * Stick-to-bottom UX. Auto-scroll runs only when the operator is
-   * already at (or within ~80px of) the bottom. The moment they
+   * already at (or within ~120px of) the bottom. The moment they
    * scroll up to read older context, we lift the lock so new content
    * doesn't yank them back. Resume sticky as soon as they return to
    * the bottom — manually or via the "↓ jump" pill.
+   *
+   * Implementation: sentinel <div> at the very bottom of the message
+   * list + a ResizeObserver on the scrollable inner content. Whenever
+   * the inner content's height changes (new message, streaming token,
+   * markdown layout settling, code block mounting) and we're sticky,
+   * we scroll the sentinel into view. This is far more robust than
+   * race-y rAF + scrollHeight math.
    */
   const [stickToBottom, setStickToBottom] = useState(true);
   const [hasNewBelow, setHasNewBelow] = useState(false);
-  const STICK_THRESHOLD = 80;
+  const STICK_THRESHOLD = 120;
+  const stickRef = useRef(true);
+  stickRef.current = stickToBottom;
+  const innerRef = useRef<HTMLDivElement | null>(null);
 
   const isAtBottom = useCallback(() => {
     const el = scrollRef.current;
@@ -142,23 +161,26 @@ export function TaskTimeline({
     return () => el.removeEventListener("scroll", onScroll);
   }, [isAtBottom]);
 
-  // Apply auto-scroll on new content, gated on sticky state. If the
-  // user is scrolled up, surface the "↓ jump" pill instead.
+  // ResizeObserver on the inner content — fires whenever content
+  // height changes (new message added, streaming token, async-loaded
+  // image, markdown laid out). If we're sticky, snap the scrollbar
+  // to the absolute bottom (scrollTop = scrollHeight) so even the
+  // container's padding is fully scrolled past — visually flush.
   useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    if (stickToBottom) {
-      el.scrollTo({ top: el.scrollHeight });
-      setHasNewBelow(false);
-    } else {
-      setHasNewBelow(true);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    messages.length,
-    streamEntries.map(([, t]) => t.length).join("|"),
-    stickToBottom,
-  ]);
+    const inner = innerRef.current;
+    const scroller = scrollRef.current;
+    if (!inner || !scroller) return;
+    const ro = new ResizeObserver(() => {
+      if (stickRef.current) {
+        scroller.scrollTop = scroller.scrollHeight;
+        setHasNewBelow(false);
+      } else {
+        setHasNewBelow(true);
+      }
+    });
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, []);
 
   // Tick once a second while a turn is live so the elapsed display moves.
   // When the turn settles (`startedAt = null`) we stop ticking — the meter
@@ -284,7 +306,7 @@ export function TaskTimeline({
           </button>
         )}
         <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
-        <div className="mx-auto max-w-3xl px-6 py-6 lg:py-8">
+        <div ref={innerRef} className="mx-auto max-w-3xl px-6 py-6 lg:py-8">
           {messages.length === 0 ? (
             <div className="flex h-full items-center justify-center py-16">
               <div className="text-center text-sm text-ink-500 dark:text-ink-400">
@@ -293,9 +315,22 @@ export function TaskTimeline({
             </div>
           ) : (
             <ol className="relative space-y-4 pl-9 before:absolute before:left-3 before:top-2 before:bottom-2 before:w-px before:bg-ink-900/10 dark:before:bg-ink-50/10">
-              {messages.map((m) => (
-                <TimelineItem key={m.id} message={m} />
-              ))}
+              {messages.map((m, i) => {
+                // Insert a compact divider before the first message
+                // whose ts falls after the most recent /compact —
+                // visually separates "summarized out of agent memory"
+                // from "still in working memory."
+                const showDivider =
+                  compactedAt != null &&
+                  m.ts >= compactedAt &&
+                  (i === 0 || messages[i - 1]!.ts < compactedAt);
+                return (
+                  <Fragment key={m.id}>
+                    {showDivider && <CompactDivider ts={compactedAt!} />}
+                    <TimelineItem message={m} />
+                  </Fragment>
+                );
+              })}
               {/* In-flight streaming bubbles. Each delta growing here will
                   vanish when its message_end arrives — the final text lands
                   via the regular message event right after. */}
@@ -485,6 +520,14 @@ export function TaskTimeline({
 }
 
 function TimelineItem({ message: m }: { message: Message }) {
+  // Structured system messages — `agentd-progress`, `agentd-share`,
+  // `agentd-ask` — get pulled into a styled chip so the operator's
+  // eye reads them as "agent told me X" instead of generic sys text.
+  if (m.role === "system") {
+    const meta = parseSystemMessage(m.content);
+    if (meta) return <StructuredItem ts={m.ts} {...meta} />;
+  }
+
   return (
     <li className="relative">
       {/* Glyph in gutter */}
@@ -532,6 +575,143 @@ function TimelineItem({ message: m }: { message: Message }) {
         ) : (
           <Markdown text={m.content} />
         )}
+      </div>
+    </li>
+  );
+}
+
+type StructuredKind = "progress" | "progress-done" | "share" | "ask";
+
+interface ParsedSystem {
+  kind: StructuredKind;
+  text: string;
+}
+
+/**
+ * Recognize the system-message shapes the daemon writes for the
+ * agent's structured calls:
+ *   [progress · done] X      → progress-done
+ *   [progress] X             → progress
+ *   [share] X                → share
+ *   [ask] question\n1. opt   → ask
+ * Anything else falls back to the generic system rendering.
+ */
+function parseSystemMessage(content: string): ParsedSystem | null {
+  if (content.startsWith("[progress · done]")) {
+    return {
+      kind: "progress-done",
+      text: content.slice("[progress · done]".length).trim(),
+    };
+  }
+  if (content.startsWith("[progress]")) {
+    return {
+      kind: "progress",
+      text: content.slice("[progress]".length).trim(),
+    };
+  }
+  if (content.startsWith("[share]")) {
+    return {
+      kind: "share",
+      text: content.slice("[share]".length).trim(),
+    };
+  }
+  if (content.startsWith("[ask]")) {
+    return {
+      kind: "ask",
+      text: content.slice("[ask]".length).trim(),
+    };
+  }
+  return null;
+}
+
+function StructuredItem({
+  kind,
+  text,
+  ts,
+}: ParsedSystem & { ts: number }) {
+  // Per-kind styling: emerald for done, ember for in-flight progress,
+  // violet for shares, amber for asks.
+  const style = (() => {
+    switch (kind) {
+      case "progress-done":
+        return {
+          border: "border-emerald-500/30",
+          bg: "bg-emerald-500/[0.07]",
+          dot: "bg-emerald-500",
+          dotPulse: false,
+          tone: "text-emerald-700 dark:text-emerald-300",
+          label: "✓ done",
+        };
+      case "progress":
+        return {
+          border: "border-ember-500/30",
+          bg: "bg-ember-500/[0.06]",
+          dot: "bg-ember-500",
+          dotPulse: true,
+          tone: "text-ember-700 dark:text-ember-300",
+          label: "progress",
+        };
+      case "share":
+        return {
+          border: "border-violet-500/30",
+          bg: "bg-violet-500/[0.06]",
+          dot: "bg-violet-500",
+          dotPulse: false,
+          tone: "text-violet-700 dark:text-violet-300",
+          label: "💭 share",
+        };
+      case "ask":
+        return {
+          border: "border-amber-500/30",
+          bg: "bg-amber-500/[0.07]",
+          dot: "bg-amber-500",
+          dotPulse: true,
+          tone: "text-amber-700 dark:text-amber-300",
+          label: "❓ ask",
+        };
+    }
+  })();
+
+  return (
+    <li className="relative">
+      <span
+        className={cn(
+          "absolute -left-9 top-0 grid h-6 w-6 place-items-center rounded-full border",
+          style.border,
+          style.bg,
+        )}
+      >
+        <span
+          className={cn(
+            "size-1.5 rounded-full",
+            style.dot,
+            style.dotPulse && "animate-blink",
+          )}
+        />
+      </span>
+      <div
+        className={cn(
+          "rounded-md border px-3 py-2 transition-all",
+          style.border,
+          style.bg,
+        )}
+      >
+        <div className="flex items-baseline gap-2 mb-0.5">
+          <span
+            className={cn(
+              "font-mono text-2xs font-semibold uppercase tracking-[0.1em]",
+              style.tone,
+            )}
+          >
+            {style.label}
+          </span>
+          <span className="font-mono text-2xs text-ink-400 dark:text-ink-500">
+            {formatTs(ts)}
+          </span>
+        </div>
+        <div className="whitespace-pre-wrap break-words text-[13px] leading-snug text-ink-800 dark:text-ink-100">
+          {text}
+        </div>
       </div>
     </li>
   );
@@ -594,15 +774,21 @@ function Markdown({ text }: { text: string }) {
               children?: React.ReactNode;
               className?: string;
             };
-            // Inline code (no language class) renders as a small chip;
-            // fenced code (className like `language-ts`) is rendered by `pre`.
+            // Fenced block: hand off to <CodeBlock> for syntax
+            // highlighting + line numbers + copy button (claude-code
+            // style). Inline code: render as a small chip.
             const isFenced = (className ?? "").includes("language-");
             if (isFenced) {
-              return (
-                <code className={cn(className, "font-mono text-[12px]")}>
-                  {children}
-                </code>
-              );
+              const lang = (className ?? "")
+                .replace(/^language-/, "")
+                .trim();
+              const text =
+                typeof children === "string"
+                  ? children
+                  : Array.isArray(children)
+                    ? children.join("")
+                    : String(children ?? "");
+              return <CodeBlock code={text} language={lang} />;
             }
             return (
               <code className="rounded bg-ink-900/[0.06] px-1 py-0.5 font-mono text-[12px] text-ink-900 dark:bg-ink-50/[0.08] dark:text-ink-50">
@@ -610,11 +796,10 @@ function Markdown({ text }: { text: string }) {
               </code>
             );
           },
-          pre: ({ children }) => (
-            <pre className="my-2 overflow-x-auto rounded-md border border-ink-900/10 bg-ink-900/[0.04] p-2.5 font-mono text-[12px] leading-relaxed text-ink-700 dark:border-ink-50/10 dark:bg-ink-50/[0.04] dark:text-ink-200">
-              {children}
-            </pre>
-          ),
+          // <pre> wraps a <code> block — but we replace the whole
+          // code path with <CodeBlock> above, so <pre> just renders
+          // children to preserve any non-fenced cases.
+          pre: ({ children }) => <>{children}</>,
           blockquote: ({ children }) => (
             <blockquote className="my-1.5 border-l-2 border-ember-500/40 pl-3 text-ink-700 dark:text-ink-200">
               {children}
@@ -800,6 +985,28 @@ function PlanGlyph({ status }: { status: TaskPlanItem["status"] }) {
   }
   return (
     <span className="inline-block size-3.5 rounded-full border-[1.5px] border-ink-900/25 dark:border-ink-50/25 shrink-0 transition-colors hover:border-ember-500/50" />
+  );
+}
+
+/**
+ * Visual divider at the most recent /compact watermark. Messages
+ * above are still in the agent's working memory; messages below
+ * have been summarized away. Doesn't hide the older messages —
+ * the operator can still scroll up and read them.
+ */
+function CompactDivider({ ts }: { ts: number }) {
+  return (
+    <li
+      aria-hidden
+      className="relative -ml-9 my-3 flex items-center gap-2 list-none"
+    >
+      <span className="h-px flex-1 bg-gradient-to-r from-transparent via-violet-500/30 to-violet-500/30" />
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-violet-500/30 bg-violet-500/[0.07] px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-violet-700 dark:text-violet-300">
+        <span className="size-1 rounded-full bg-violet-500" />
+        context compacted · {formatTs(ts)}
+      </span>
+      <span className="h-px flex-1 bg-gradient-to-l from-transparent via-violet-500/30 to-violet-500/30" />
+    </li>
   );
 }
 

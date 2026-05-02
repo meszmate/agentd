@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { AgentdClient } from "@agentd/client";
-import type { WsServerEvent, AgentEvent } from "@agentd/contracts";
+import type { Task, WsServerEvent, AgentEvent } from "@agentd/contracts";
 import { useClient } from "./AppContext";
 
 /**
@@ -42,6 +42,24 @@ export function useProject(idOrSlug: string | null | undefined) {
     queryKey: qk.project(idOrSlug ?? "_none"),
     queryFn: () => client.getProject(idOrSlug!),
     enabled: !!idOrSlug,
+  });
+}
+
+export function useUpdateProject() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      idOrSlug,
+      patch,
+    }: {
+      idOrSlug: string;
+      patch: Parameters<AgentdClient["updateProject"]>[1];
+    }) => client.updateProject(idOrSlug, patch),
+    onSuccess: (_data, variables) => {
+      void qc.invalidateQueries({ queryKey: qk.project(variables.idOrSlug) });
+      void qc.invalidateQueries({ queryKey: qk.projects() });
+    },
   });
 }
 
@@ -238,6 +256,10 @@ export function useSendInput(taskId: string) {
       void qc.invalidateQueries({
         queryKey: ["task-steer", taskId] as const,
       });
+      // Invalidate the task's messages cache so coming back to this
+      // task after a tab-switch refetches fresh history (including
+      // anything the agent has produced since this send landed).
+      void qc.invalidateQueries({ queryKey: qk.task(taskId) });
     },
   });
 }
@@ -283,6 +305,37 @@ export function useRemoveQueuedSteer(taskId: string) {
  * stdin (claude) or kicks off a respawn (codex). Updates the cache
  * with the returned queue snapshot so the row vanishes on click.
  */
+/**
+ * Persist a new sidebar task ordering. Optimistically updates the
+ * task list cache so the new order shows the moment the user drops,
+ * then syncs to the server.
+ */
+export function useReorderTasks() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (taskIds: string[]) => client.reorderTasks(taskIds),
+    onMutate: async (taskIds) => {
+      await qc.cancelQueries({ queryKey: qk.tasks() });
+      const prev = qc.getQueryData<{ tasks: Task[] }>(qk.tasks());
+      if (prev) {
+        const idx = new Map(taskIds.map((id, i) => [id, i] as const));
+        const next = prev.tasks.map((t) =>
+          idx.has(t.id) ? { ...t, sortOrder: idx.get(t.id)! } : t,
+        );
+        qc.setQueryData(qk.tasks(), { tasks: next });
+      }
+      return { prev };
+    },
+    onError: (_err, _ids, ctx) => {
+      if (ctx?.prev) qc.setQueryData(qk.tasks(), ctx.prev);
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+    },
+  });
+}
+
 export function useFireQueuedSteer(taskId: string) {
   const client = useClient();
   const qc = useQueryClient();
@@ -298,10 +351,11 @@ export function useFireQueuedSteer(taskId: string) {
           queue: data.queue,
         };
       });
-      // The fired item is now a user message in the DB. Refetching
-      // the task's messages would round-trip; the timeline view
-      // already does optimistic appendLocal at click time so we
-      // skip the invalidation and trust the WS stream.
+      // The fired item is now a user message in the DB. Invalidate
+      // the task cache so a later return to this task picks up the
+      // fresh server-side persisted version (without it, the cache
+      // would still hold the pre-fire snapshot).
+      void qc.invalidateQueries({ queryKey: qk.task(taskId) });
     },
   });
 }

@@ -123,6 +123,8 @@ import {
   selectTmuxWindow,
   renameTmuxWindow,
   sendTmuxKeys,
+  reorderTasks,
+  markTaskCompacted,
 } from "@agentd/core";
 import type { PluginManager } from "./pluginManager.ts";
 import { requireSession, bearerOrHeader } from "./auth.ts";
@@ -266,6 +268,25 @@ export function buildServer(opts: BuildServerOptions) {
         Number.isFinite(recentLimit) && recentLimit > 0 ? recentLimit : 50,
     });
     return c.json(stats);
+  });
+
+  /**
+   * Bulk-reorder open tasks. Body: { taskIds: string[] }. Each id
+   * gets an incrementing sortOrder (0, 1, 2, ...) so the sidebar's
+   * drag-drop persists across reloads.
+   */
+  api.post("/tasks/reorder", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      taskIds?: unknown;
+    } | null;
+    const ids = Array.isArray(body?.taskIds)
+      ? body.taskIds.filter((v): v is string => typeof v === "string")
+      : null;
+    if (!ids || ids.length === 0) {
+      return c.json({ error: "taskIds[] required" }, 400);
+    }
+    reorderTasks(db, ids);
+    return c.json({ ok: true, count: ids.length });
   });
 
   api.post("/tasks", async (c) => {
@@ -1090,16 +1111,20 @@ export function buildServer(opts: BuildServerOptions) {
     if (!task) return c.json({ error: "not found" }, 404);
     const body = (await c.req.json().catch(() => ({}))) as { focus?: string };
     const focus = (body.focus ?? "").trim();
-    let directive: string;
-    if (task.agent === "claude") {
-      directive = focus ? `/compact ${focus}` : "/compact";
-    } else {
-      directive = focus
-        ? `Please summarize what you've done so far in 200 words, focusing on "${focus}". Discard intermediate scratch work, then continue with the smaller context.`
-        : "Please summarize what you've done so far in 200 words and discard any intermediate scratch work; continue from this compact summary.";
-    }
+    // Slash commands like `/compact` only work in claude-code's
+    // interactive mode. We're driving claude in stream-json input
+    // mode where everything is treated as a literal user message,
+    // so a textual directive is the only thing that actually
+    // compresses context. Same instruction works for codex too.
+    const directive = focus
+      ? `Please summarize what you've done so far in this conversation in ~200 words, focusing on "${focus}". Drop intermediate scratch work and continue from the compact summary.`
+      : "Please summarize what you've done so far in this conversation in ~200 words. Drop intermediate scratch work and continue from the compact summary.";
     try {
       await tasks.sendInput(id, directive);
+      // Watermark — the web draws a "context compacted" divider in
+      // the timeline at this ts so the operator can tell which
+      // earlier messages are still in working memory.
+      markTaskCompacted(db, id);
       return c.json({ ok: true, agent: task.agent, directive });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
@@ -1707,6 +1732,41 @@ export function buildServer(opts: BuildServerOptions) {
     }
     const next = updateProject(db, project.id, parsed.data);
     return c.json({ project: next });
+  });
+
+  /**
+   * Project instructions — read/write the free-text guidance the
+   * project carries. Resolved via the task's projectId so agents
+   * (and helpers like `agentd-instructions`) only need their own
+   * task id, not the project id.
+   */
+  api.get("/tasks/:taskId/project-instructions", (c) => {
+    const taskId = c.req.param("taskId");
+    const task = tasks.get(taskId);
+    if (!task) return c.json({ error: "task not found" }, 404);
+    if (!task.projectId) return c.json({ instructions: "" });
+    const project = getProjectById(db, task.projectId);
+    return c.json({ instructions: project?.instructions ?? "" });
+  });
+
+  api.put("/tasks/:taskId/project-instructions", async (c) => {
+    const taskId = c.req.param("taskId");
+    const task = tasks.get(taskId);
+    if (!task) return c.json({ error: "task not found" }, 404);
+    if (!task.projectId) {
+      return c.json({ error: "task has no project" }, 400);
+    }
+    const body = (await c.req.json().catch(() => null)) as {
+      instructions?: string;
+    } | null;
+    const text = (body?.instructions ?? "").trim();
+    const next = updateProject(db, task.projectId, {
+      instructions: text || null,
+    });
+    return c.json({
+      ok: true,
+      instructions: next?.instructions ?? "",
+    });
   });
 
   api.delete("/projects/:idOrSlug", (c) => {

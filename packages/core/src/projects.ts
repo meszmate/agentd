@@ -29,6 +29,7 @@ function rowToProject(row: typeof projects.$inferSelect): Project {
     color: row.color ?? null,
     createdAt: row.createdAt,
     lastActiveAt: row.lastActiveAt,
+    instructions: row.instructions ?? null,
   };
 }
 
@@ -100,6 +101,7 @@ export function touchProject(db: Db, id: string): void {
 export interface UpdateProjectInput {
   name?: string;
   color?: string;
+  instructions?: string | null;
 }
 
 export function updateProject(
@@ -113,6 +115,9 @@ export function updateProject(
     .set({
       ...(patch.name != null ? { name: patch.name } : {}),
       ...(patch.color != null ? { color: patch.color } : {}),
+      ...(patch.instructions !== undefined
+        ? { instructions: patch.instructions }
+        : {}),
     })
     .where(eq(projects.id, id))
     .run();

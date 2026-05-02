@@ -30,8 +30,25 @@ import {
   useSchedules,
   useTasks,
 } from "@/queries";
-import { usePluginsStatus } from "@/queries";
+import { usePluginsStatus, useReorderTasks } from "@/queries";
 import { useRealtime } from "@/realtime";
+import { useAutoAnimate } from "@formkit/auto-animate/react";
+import {
+  DndContext,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  closestCenter,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { GripVertical } from "lucide-react";
 import { useStore } from "@/store";
 
 const SECTIONS: {
@@ -475,9 +492,24 @@ function ProjectsTreeSection() {
     }
 
     const buildGroup = (id: string, p: Project | null, list: Task[]): ProjectGroup => {
-      const sorted = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
-      const active = sorted.filter(isActive);
-      const recent = sorted.filter((t) => !isActive(t)).slice(0, 5);
+      // Explicit sortOrder (set by drag-drop) wins for the active
+      // tasks — operators want their reordered list to stay put.
+      // Tasks without sortOrder fall back to recency. Recent (closed
+      // / done in the past) stays time-sorted.
+      const active = list
+        .filter(isActive)
+        .sort((a, b) => {
+          const ao = a.sortOrder;
+          const bo = b.sortOrder;
+          if (ao != null && bo != null) return ao - bo;
+          if (ao != null) return -1;
+          if (bo != null) return 1;
+          return b.updatedAt - a.updatedAt;
+        });
+      const recent = list
+        .filter((t) => !isActive(t))
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 5);
       return { id, project: p, active, recent, total: list.length };
     };
 
@@ -582,7 +614,7 @@ function ProjectGroupRow({
   const liveTasks = active.length;
   // Always populate so the collapse animation has content to shrink.
   // The wrapper grid track + opacity drives visibility.
-  const visible = [...active, ...recent];
+  const visible = active.length + recent.length;
 
   // One integrated row: clicking the chevron area toggles, clicking
   // the rest navigates to the project (or just toggles for untracked).
@@ -697,25 +729,139 @@ function ProjectGroupRow({
       <div
         className={cn(
           "grid transition-[grid-template-rows,opacity] duration-200 ease-out",
-          open && visible.length > 0
+          open && visible > 0
             ? "grid-rows-[1fr] opacity-100"
             : "grid-rows-[0fr] opacity-0",
         )}
         aria-hidden={!open}
       >
         <div className="min-h-0 overflow-hidden">
-          <ul className="ml-3 mt-0.5 mb-1 space-y-0.5 border-l border-ink-900/[0.06] pl-2 dark:border-ink-50/[0.06]">
-            {visible.map((t) => (
-              <SidebarTaskRow key={t.id} task={t} />
-            ))}
-          </ul>
+          <SidebarTaskList active={active} recent={recent} />
         </div>
       </div>
     </div>
   );
 }
 
-function SidebarTaskRow({ task: t }: { task: Task }) {
+function SidebarTaskList({
+  active,
+  recent,
+}: {
+  active: Task[];
+  recent: Task[];
+}) {
+  // FLIP-animate row reorder (auto-animate) PLUS @dnd-kit for the
+  // active section so the operator can drag-prioritize tasks within
+  // a project. Recent (closed/done) rows stay time-sorted, no drag.
+  const [ref] = useAutoAnimate<HTMLUListElement>({
+    duration: 380,
+    easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+  });
+  const sensors = useSensors(
+    // 6px activation distance keeps clicks-to-navigate intact —
+    // dragging requires a deliberate pointer move first.
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  );
+  const reorder = useReorderTasks();
+  const [orderOverride, setOrderOverride] = useState<string[] | null>(null);
+  // Live ordering is the override (if a drag just happened) else the
+  // server-supplied order; rebuild from `active` whenever the server
+  // confirms.
+  const liveActive = orderOverride
+    ? orderOverride
+        .map((id) => active.find((t) => t.id === id))
+        .filter((t): t is Task => !!t)
+    : active;
+
+  const onDragEnd = (e: DragEndEvent) => {
+    const { active: dragged, over } = e;
+    if (!over || dragged.id === over.id) return;
+    const ids = liveActive.map((t) => t.id);
+    const fromIdx = ids.indexOf(String(dragged.id));
+    const toIdx = ids.indexOf(String(over.id));
+    if (fromIdx < 0 || toIdx < 0) return;
+    const next = arrayMove(ids, fromIdx, toIdx);
+    setOrderOverride(next);
+    reorder.mutate(next, {
+      onSettled: () => setOrderOverride(null),
+    });
+  };
+
+  return (
+    <ul
+      ref={ref}
+      className="ml-3 mt-0.5 mb-1 space-y-0.5 border-l border-ink-900/[0.06] pl-2 dark:border-ink-50/[0.06]"
+    >
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={onDragEnd}
+      >
+        <SortableContext
+          items={liveActive.map((t) => t.id)}
+          strategy={verticalListSortingStrategy}
+        >
+          {liveActive.map((t) => (
+            <SortableSidebarTaskRow key={t.id} task={t} />
+          ))}
+        </SortableContext>
+      </DndContext>
+      {recent.map((t) => (
+        <SidebarTaskRow key={t.id} task={t} />
+      ))}
+    </ul>
+  );
+}
+
+function SortableSidebarTaskRow({ task }: { task: Task }) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: task.id });
+  const style: React.CSSProperties = {
+    transform: CSS.Translate.toString(transform),
+    transition,
+    zIndex: isDragging ? 10 : undefined,
+  };
+  return (
+    <SidebarTaskRow
+      task={task}
+      dragRef={setNodeRef}
+      dragStyle={style}
+      dragHandleProps={{ ...attributes, ...listeners }}
+      isDragging={isDragging}
+    />
+  );
+}
+
+function SidebarTaskRow({
+  task: t,
+  dragRef,
+  dragStyle,
+  dragHandleProps,
+  isDragging,
+}: {
+  task: Task;
+  dragRef?: (el: HTMLElement | null) => void;
+  dragStyle?: React.CSSProperties;
+  dragHandleProps?: React.HTMLAttributes<HTMLButtonElement>;
+  isDragging?: boolean;
+}) {
+  const { latestByTask } = useRealtime();
+  const liveEvent = latestByTask[t.id];
+  // Compose the "currently doing" subtitle from the most recent
+  // meaningful event for this task. Skip showing it when the task
+  // is closed / done / failed since there's no work in flight.
+  const showLive =
+    liveEvent &&
+    (t.status === "running" ||
+      t.status === "waiting_input" ||
+      t.status === "waiting_perm" ||
+      t.status === "idle");
   const tone =
     t.status === "running"
       ? "text-ember-700 dark:text-ember-300"
@@ -741,7 +887,25 @@ function SidebarTaskRow({ task: t }: { task: Task }) {
               ? "bg-red-500"
               : "bg-ink-300 dark:bg-ink-600";
   return (
-    <li>
+    <li
+      ref={dragRef as ((el: HTMLLIElement | null) => void) | undefined}
+      style={dragStyle}
+      className={cn(
+        "group/row relative",
+        isDragging && "opacity-60",
+      )}
+    >
+      {dragHandleProps && (
+        <button
+          type="button"
+          {...dragHandleProps}
+          className="absolute -left-3 top-1.5 grid place-items-center size-4 rounded text-ink-300 hover:text-ink-700 dark:text-ink-600 dark:hover:text-ink-200 opacity-0 group-hover/row:opacity-100 transition-opacity cursor-grab active:cursor-grabbing"
+          title="Drag to reorder"
+          aria-label="Drag handle"
+        >
+          <GripVertical className="h-3 w-3" />
+        </button>
+      )}
       <NavLink
         to={`/tasks/${t.id}`}
         end
@@ -759,6 +923,26 @@ function SidebarTaskRow({ task: t }: { task: Task }) {
           <span className="block truncate text-ink-900 dark:text-ink-50">
             {t.title}
           </span>
+          {showLive && liveEvent && (
+            <span
+              key={liveEvent.id}
+              className={cn(
+                "mt-0.5 block truncate text-[10px] animate-fade-in",
+                liveEvent.kind === "tool_call"
+                  ? "text-sky-700 dark:text-sky-300"
+                  : liveEvent.kind === "progress"
+                    ? "text-violet-700 dark:text-violet-300"
+                    : liveEvent.kind === "share"
+                      ? "text-violet-700 dark:text-violet-300"
+                      : liveEvent.kind === "ask"
+                        ? "text-amber-700 dark:text-amber-300"
+                        : "text-ink-500 dark:text-ink-400",
+              )}
+              title={liveEvent.text}
+            >
+              {liveEvent.text}
+            </span>
+          )}
           <span className="mt-0.5 flex items-center gap-1.5 font-mono text-[9px]">
             <span className={cn("uppercase tracking-[0.12em]", tone)}>
               {t.status === "running"

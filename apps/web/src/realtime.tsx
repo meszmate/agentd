@@ -58,6 +58,13 @@ interface RtState {
   recent: RtEntry[];
   pulses: Record<string, number>;
   latest: RtEntry | null;
+  /**
+   * Per-task latest meaningful event — used by the sidebar to show
+   * "what is task X doing right now" (active tool, last progress
+   * note, current in-progress thought). Skips low-signal events like
+   * usage / message_delta so the line doesn't jitter on every token.
+   */
+  latestByTask: Record<string, RtEntry | undefined>;
   lastStatusChange: Record<
     string,
     { status: TaskStatus; ts: number } | undefined
@@ -114,6 +121,9 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<RtStatus>("connecting");
   const [recent, setRecent] = useState<RtEntry[]>([]);
   const [pulses, setPulses] = useState<Record<string, number>>({});
+  const [latestByTask, setLatestByTask] = useState<
+    Record<string, RtEntry | undefined>
+  >({});
   const [lastStatusChange, setLastStatusChange] = useState<
     Record<string, { status: TaskStatus; ts: number } | undefined>
   >({});
@@ -251,6 +261,19 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         };
         setRecent((prev) => [entry, ...prev].slice(0, RECENT_CAP));
         setPulses((p) => ({ ...p, [msg.taskId]: msg.ts }));
+        // Per-task "currently doing" line for the sidebar. Only
+        // capture meaningful events — skip raw streaming token
+        // deltas / usage so the line doesn't jitter every frame.
+        if (
+          msg.event.kind === "tool_call" ||
+          msg.event.kind === "progress" ||
+          msg.event.kind === "share" ||
+          msg.event.kind === "ask" ||
+          msg.event.kind === "message" ||
+          msg.event.kind === "status"
+        ) {
+          setLatestByTask((cur) => ({ ...cur, [msg.taskId]: entry }));
+        }
 
         // Bump unread on the parent project for any meaningful event kind.
         if (
@@ -296,6 +319,18 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           void qc.invalidateQueries({
             queryKey: ["task-steer", msg.taskId],
           });
+        }
+        // Also refresh the task's messages cache on turn boundaries
+        // so a tab-switch + return sees the agent's just-finished
+        // reply (it was already in the DB; the cache just hadn't
+        // been told to refetch). Idle for claude (between turns)
+        // and exit for codex (proc death).
+        if (
+          msg.event.kind === "exit" ||
+          (msg.event.kind === "status" &&
+            (msg.event.status === "idle" || msg.event.status === "done"))
+        ) {
+          void qc.invalidateQueries({ queryKey: qk.task(msg.taskId) });
         }
       });
       ws.addEventListener("open", () => {
@@ -353,8 +388,16 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   const live = status === "live";
 
   const value = useMemo<RtContext>(
-    () => ({ status, live, recent, pulses, latest, lastStatusChange }),
-    [status, live, recent, pulses, latest, lastStatusChange],
+    () => ({
+      status,
+      live,
+      recent,
+      pulses,
+      latest,
+      latestByTask,
+      lastStatusChange,
+    }),
+    [status, live, recent, pulses, latest, latestByTask, lastStatusChange],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
@@ -369,6 +412,7 @@ export function useRealtime(): RtContext {
       recent: [],
       pulses: {},
       latest: null,
+      latestByTask: {},
       lastStatusChange: {},
     };
   }

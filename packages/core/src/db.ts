@@ -37,6 +37,19 @@ export const tasks = sqliteTable("tasks", {
   councilId: text("council_id"),
   closedAt: integer("closed_at"),
   closedReason: text("closed_reason"),
+  /**
+   * Operator-defined sort order. Tasks with NULL sortOrder fall
+   * back to updatedAt-based ordering. Drag-drop reorder in the
+   * sidebar persists explicit values here.
+   */
+  sortOrder: integer("sort_order"),
+  /**
+   * Timestamp of the last `/compact`. Used by the web to draw a
+   * "context compacted at HH:MM" divider in the timeline so the
+   * operator can see which messages are still in the agent's
+   * working memory vs. ones that have been summarized away.
+   */
+  lastCompactedAt: integer("last_compacted_at"),
 });
 
 export const todos = sqliteTable("todos", {
@@ -88,6 +101,14 @@ export const projects = sqliteTable("projects", {
   color: text("color"),
   createdAt: integer("created_at").notNull(),
   lastActiveAt: integer("last_active_at").notNull(),
+  /**
+   * Per-project free-text guidance — like an AGENTS.md file but
+   * stored in the daemon DB so it never gets committed. Prepended
+   * to every task's appendSystemPrompt for this project. Editable
+   * from the web UI and from the agent itself via
+   * `agentd-instructions write "<text>"`.
+   */
+  instructions: text("instructions"),
 });
 
 export const templates = sqliteTable("templates", {
@@ -209,7 +230,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   mirror_to TEXT,
   council_id TEXT,
   closed_at INTEGER,
-  closed_reason TEXT
+  closed_reason TEXT,
+  sort_order INTEGER,
+  last_compacted_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -219,7 +242,8 @@ CREATE TABLE IF NOT EXISTS projects (
   path TEXT NOT NULL UNIQUE,
   color TEXT,
   created_at INTEGER NOT NULL,
-  last_active_at INTEGER NOT NULL
+  last_active_at INTEGER NOT NULL,
+  instructions TEXT
 );
 
 CREATE TABLE IF NOT EXISTS councils (
@@ -377,6 +401,9 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE templates ADD COLUMN pull_latest INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE templates ADD COLUMN skills_json TEXT NOT NULL DEFAULT '[]'",
   "ALTER TABLE templates ADD COLUMN kind TEXT NOT NULL DEFAULT 'task'",
+  "ALTER TABLE tasks ADD COLUMN sort_order INTEGER",
+  "ALTER TABLE projects ADD COLUMN instructions TEXT",
+  "ALTER TABLE tasks ADD COLUMN last_compacted_at INTEGER",
 ];
 
 function migrate(sqlite: Database): void {

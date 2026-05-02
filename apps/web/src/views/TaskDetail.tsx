@@ -113,10 +113,33 @@ export function TaskDetail({ task }: { task: Task }) {
   };
 
   useEffect(() => {
-    if (loadedFor === task.id) return;
     if (!taskQ.data) return;
-    setMessages(taskQ.data.messages);
-    setLoadedFor(task.id);
+    // Always re-sync from the server when the cache updates. The
+    // previous `loadedFor` guard meant only the FIRST snapshot ever
+    // landed — so if the operator tab-switched away mid-chat and
+    // back, the cached pre-chat messages would lock in and the new
+    // ones (now persisted server-side) wouldn't appear.
+    //
+    // Dedupe by id so optimistic tmp_ messages survive briefly
+    // until the server-side version arrives. Server-persisted
+    // messages always replace tmp_ duplicates with the same ts/role.
+    setMessages((prev) => {
+      const serverMsgs = taskQ.data.messages;
+      const tmpPending = prev.filter(
+        (m) =>
+          m.id.startsWith("tmp_") &&
+          !serverMsgs.some(
+            (s) =>
+              s.role === m.role &&
+              s.content === m.content &&
+              Math.abs(s.ts - m.ts) < 10_000,
+          ),
+      );
+      const merged = [...serverMsgs, ...tmpPending];
+      merged.sort((a, b) => a.ts - b.ts);
+      return merged;
+    });
+    if (loadedFor !== task.id) setLoadedFor(task.id);
   }, [task.id, taskQ.data, loadedFor]);
 
   const appendLocal = useCallback(
@@ -507,6 +530,7 @@ export function TaskDetail({ task }: { task: Task }) {
                 totalTokens={totalTokens}
                 turn={turn}
                 plan={plan}
+                compactedAt={task.lastCompactedAt ?? null}
               />
             </Panel>
             <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-ember-500/40 transition-colors dark:bg-ink-50/10" />
@@ -959,39 +983,98 @@ function LiveBadge({ live, terminal }: { live: boolean; terminal: boolean }) {
 function ContextUsage({ totalTokens }: { totalTokens: number }) {
   const window = 200_000;
   const pct = Math.min(100, Math.round((totalTokens / window) * 100));
-  const tone =
+  const tone: "danger" | "warn" | "ok" =
     pct >= 80 ? "danger" : pct >= 60 ? "warn" : "ok";
-  const dot =
+
+  // SVG donut. r=10 gives circumference ~62.8; we paint the fill arc
+  // by setting strokeDasharray to (filled, total) and rotating -90°
+  // so the arc starts at 12 o'clock.
+  const radius = 10;
+  const circ = 2 * Math.PI * radius;
+  const filled = (pct / 100) * circ;
+
+  const stroke =
     tone === "danger"
-      ? "bg-red-500 animate-blink"
+      ? "stroke-red-500"
       : tone === "warn"
-      ? "bg-amber-500"
-      : "bg-emerald-500";
+        ? "stroke-amber-500"
+        : "stroke-emerald-500";
   const text =
     tone === "danger"
       ? "text-red-700 dark:text-red-300"
       : tone === "warn"
-      ? "text-amber-700 dark:text-amber-300"
-      : "text-ink-400 dark:text-ink-500";
+        ? "text-amber-700 dark:text-amber-300"
+        : "text-emerald-700 dark:text-emerald-300";
+
   return (
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger asChild>
-          <span
-            className={cn(
-              "hidden md:inline-flex items-center gap-1.5 font-mono text-[10px] tabular-nums uppercase tracking-[0.06em] cursor-help",
-              text,
-            )}
+          <button
+            type="button"
+            className="hidden md:inline-flex items-center gap-1.5 cursor-help group"
+            aria-label={`Context usage: ${pct}%`}
           >
-            <span className={cn("h-1.5 w-1.5 rounded-full", dot)} />
-            ctx {pct}%
-          </span>
+            <span className="relative grid place-items-center size-6">
+              <svg
+                viewBox="0 0 24 24"
+                className="size-6 -rotate-90 overflow-visible"
+              >
+                <circle
+                  cx="12"
+                  cy="12"
+                  r={radius}
+                  className="stroke-ink-900/15 dark:stroke-ink-50/15"
+                  strokeWidth={2.5}
+                  fill="none"
+                />
+                <circle
+                  cx="12"
+                  cy="12"
+                  r={radius}
+                  className={cn(
+                    stroke,
+                    "transition-[stroke-dasharray] duration-500",
+                    tone === "danger" && "animate-pulse",
+                  )}
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                  strokeDasharray={`${filled} ${circ}`}
+                  fill="none"
+                />
+              </svg>
+              <span
+                className={cn(
+                  "absolute inset-0 grid place-items-center font-mono text-[8.5px] font-bold tabular-nums leading-none",
+                  text,
+                )}
+              >
+                {pct}
+              </span>
+            </span>
+            <span
+              className={cn(
+                "font-mono text-[10px] uppercase tracking-[0.08em] hidden lg:inline",
+                text,
+              )}
+            >
+              ctx
+            </span>
+          </button>
         </TooltipTrigger>
         <TooltipContent>
-          <span className="font-mono text-[10px]">
-            {totalTokens.toLocaleString()} / {window.toLocaleString()} ·
-            open the Context tab to compact
-          </span>
+          <div className="font-mono text-[10px] space-y-0.5">
+            <div>
+              {totalTokens.toLocaleString()} / {window.toLocaleString()} tokens
+            </div>
+            <div className="text-ink-400 dark:text-ink-500">
+              {pct >= 80
+                ? "compact soon — context nearly full"
+                : pct >= 60
+                  ? "context filling up"
+                  : "plenty of room"}
+            </div>
+          </div>
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>

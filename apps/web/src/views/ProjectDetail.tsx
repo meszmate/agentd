@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import type {
   PermissionMode,
+  Project,
   Task,
   TaskStatus,
   ThinkingLevel,
@@ -48,6 +49,7 @@ import {
   useProject,
   useSkills,
   useTasks,
+  useUpdateProject,
 } from "@/queries";
 import { useApp, useClient } from "@/AppContext";
 import { useStore } from "@/store";
@@ -270,6 +272,7 @@ export function ProjectDetail() {
         </main>
 
         <aside className="hidden lg:flex flex-col overflow-y-auto bg-paper-100/40 dark:bg-ink-900/30">
+          <ProjectInstructionsPanel project={project} />
           <AutoContextPanel projectPath={project.path} />
           <RecentChatter tasks={tasksForProject} />
           <PathReference path={project.path} />
@@ -736,6 +739,87 @@ function StatusGlyph({ status }: { status: TaskStatus }) {
 }
 
 /* ── Right rail panels ─────────────────────────────────────────── */
+
+/**
+ * Free-text guidance the operator (or the agent itself, via
+ * `agentd-instructions write`) prepends to every task's system
+ * prompt for this project. Stored in the daemon DB, not the repo —
+ * so it doesn't get committed.
+ *
+ * Save-on-blur, with an explicit Save button for the keyboard-only
+ * crowd. The "edited by agent" hint surfaces when the value differs
+ * from the last save the operator made (we don't track who wrote
+ * what, but a delta indicates an agent update).
+ */
+function ProjectInstructionsPanel({ project }: { project: Project }) {
+  const update = useUpdateProject();
+  const [draft, setDraft] = useState(project.instructions ?? "");
+  const [savedSnapshot, setSavedSnapshot] = useState(
+    project.instructions ?? "",
+  );
+  // Re-sync local draft if the project's instructions change from
+  // outside (e.g. the agent ran `agentd-instructions write`).
+  useEffect(() => {
+    const next = project.instructions ?? "";
+    setDraft(next);
+    setSavedSnapshot(next);
+  }, [project.instructions]);
+
+  const dirty = draft !== savedSnapshot;
+  const wordCount = draft.trim() ? draft.trim().split(/\s+/).length : 0;
+
+  const save = () => {
+    if (!dirty) return;
+    void update.mutateAsync({
+      idOrSlug: project.id,
+      patch: { instructions: draft.trim() ? draft : null },
+    });
+    setSavedSnapshot(draft);
+  };
+
+  return (
+    <div className="border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] px-4 py-3">
+      <div className="flex items-baseline gap-2 mb-2">
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+          Instructions
+        </span>
+        <span className="font-mono text-[9px] text-ink-400 dark:text-ink-500">
+          agent-editable
+        </span>
+        <span className="ml-auto font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
+          {wordCount} {wordCount === 1 ? "word" : "words"}
+        </span>
+      </div>
+      <Textarea
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={save}
+        placeholder="Free-text guidance for any task in this project. Stored in the daemon DB — not committed to the repo. The agent can read &amp; modify via `agentd-instructions`."
+        rows={6}
+        className="text-[12px] font-mono leading-relaxed resize-y min-h-[7rem]"
+      />
+      <div className="mt-2 flex items-center gap-2">
+        {dirty ? (
+          <button
+            type="button"
+            onClick={save}
+            disabled={update.isPending}
+            className="h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300 disabled:opacity-40"
+          >
+            {update.isPending ? "saving…" : "save"}
+          </button>
+        ) : (
+          <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+            saved
+          </span>
+        )}
+        <span className="ml-auto font-mono text-[9.5px] text-ink-400 dark:text-ink-500">
+          prepended to every task spawn
+        </span>
+      </div>
+    </div>
+  );
+}
 
 function AutoContextPanel({ projectPath }: { projectPath: string }) {
   const skillsQ = useSkills(projectPath);

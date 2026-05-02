@@ -27,6 +27,7 @@ export function ensurePaths(p: AgentdPaths): void {
   writeAgentdProgressScript(p.bin);
   writeAgentdShareScript(p.bin);
   writeAgentdAskScript(p.bin);
+  writeAgentdInstructionsScript(p.bin);
 }
 
 /**
@@ -179,6 +180,74 @@ fi
 # Pull the answer field out of the JSON.
 echo "\$resp" | python3 -c 'import sys, json; print(json.loads(sys.stdin.read())["answer"])' 2>/dev/null || \\
   echo "\$resp" | sed -n 's/.*"answer":"\\([^"]*\\)".*/\\1/p'
+`;
+  writeFileSync(path, body);
+  try {
+    chmodSync(path, 0o755);
+  } catch {
+    // best effort
+  }
+}
+
+/**
+ * `agentd-instructions` — read or write the project's free-text
+ * guidance (like an AGENTS.md but stored in the daemon DB so it
+ * doesn't get committed). The agent uses this to persist learnings
+ * for future runs of the same project.
+ *
+ *   agentd-instructions read
+ *   agentd-instructions write "<markdown text>"
+ */
+function writeAgentdInstructionsScript(binDir: string): void {
+  const path = join(binDir, "agentd-instructions");
+  const body = `#!/usr/bin/env bash
+# agentd project instructions — read/write the project's persisted
+# guidance for the current task's project.
+set -e
+if [ "$#" -lt 1 ]; then
+  echo "agentd-instructions: usage: agentd-instructions read | write \\"<text>\\"" >&2
+  exit 2
+fi
+sub="$1"; shift
+if [ -z "\${AGENTD_TASK_ID:-}" ] || [ -z "\${AGENTD_DAEMON_URL:-}" ] || [ -z "\${AGENTD_TOKEN:-}" ]; then
+  echo "agentd-instructions: env not set" >&2
+  exit 1
+fi
+case "$sub" in
+  read)
+    resp=\$(curl -fsS \\
+      -H "Authorization: Bearer \${AGENTD_TOKEN}" \\
+      "\${AGENTD_DAEMON_URL%/}/api/tasks/\${AGENTD_TASK_ID}/project-instructions") || {
+      echo "agentd-instructions: read failed" >&2
+      exit 1
+    }
+    echo "\$resp" | python3 -c 'import sys, json; print(json.loads(sys.stdin.read()).get("instructions", ""))' 2>/dev/null
+    ;;
+  write)
+    text=""
+    for arg in "$@"; do
+      if [ -z "$text" ]; then text="$arg"; else text="$text $arg"; fi
+    done
+    if [ -z "$text" ]; then
+      echo "agentd-instructions: write needs a body" >&2
+      exit 2
+    fi
+    escaped=\$(printf '%s' "\$text" | python3 -c 'import sys,json; sys.stdout.write(json.dumps(sys.stdin.read()))' 2>/dev/null) || \\
+      escaped=\$(printf '%s' "\$text" | sed -e 's/\\\\/\\\\\\\\/g' -e 's/"/\\\\"/g' -e ':a;N;\$!ba;s/\\n/\\\\n/g')
+    curl -fsS -X PUT \\
+      -H "Content-Type: application/json" \\
+      -H "Authorization: Bearer \${AGENTD_TOKEN}" \\
+      -d "{\\"instructions\\":\${escaped}}" \\
+      "\${AGENTD_DAEMON_URL%/}/api/tasks/\${AGENTD_TASK_ID}/project-instructions" >/dev/null || {
+      echo "agentd-instructions: write failed" >&2
+      exit 1
+    }
+    ;;
+  *)
+    echo "agentd-instructions: unknown subcommand '\$sub' (expected: read | write)" >&2
+    exit 2
+    ;;
+esac
 `;
   writeFileSync(path, body);
   try {

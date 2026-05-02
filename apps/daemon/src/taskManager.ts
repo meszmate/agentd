@@ -627,6 +627,18 @@ export class TaskManager {
     }
     const appendParts: string[] = [];
     if (cfg.agentInstructions) appendParts.push(cfg.agentInstructions);
+    // Per-project instructions — like an AGENTS.md but stored in
+    // the daemon DB (not the repo, so they don't get committed).
+    // The agent can also self-modify these via `agentd-instructions`.
+    if (task.projectId) {
+      const project = getProjectById(this.db, task.projectId);
+      const projectInstructions = project?.instructions?.trim();
+      if (projectInstructions) {
+        appendParts.push(
+          `# Project instructions\n\n${projectInstructions}\n\nYou can update this guidance with \`agentd-instructions write "<text>"\` if you discover something important worth persisting for future runs.`,
+        );
+      }
+    }
     if (catalog.text) appendParts.push(catalog.text);
     if (repoCtx.text) appendParts.push(repoCtx.text);
     // Tell the agent to land its own work. We always ask it to commit
@@ -639,6 +651,7 @@ export class TaskManager {
       "  - `agentd-progress \"<text>\"`  — past-tense status. Run it after every meaningful step (file edit, successful build, useful tool result). One short line each.",
       "  - `agentd-share \"<text>\"`     — forward-looking thought, non-blocking. Use it BEFORE big moves (\"thinking we should X first then Y\") so the operator can nudge before you commit. Don't wait for an answer.",
       "  - `agentd-ask \"<question>\" \"opt1\" \"opt2\" ...`  — blocking decision. Use this at real forks (architectural choice, library to pick, ambiguous naming, \"should I also do X?\"). Stops you until the operator picks. The chosen option text comes back on stdout — capture it: `answer=$(agentd-ask \"Which approach?\" \"rewrite\" \"refactor\" \"add a flag\")`. Don't fabricate a default when you genuinely don't know — ASK.",
+      "  - `agentd-instructions read` / `agentd-instructions write \"<text>\"` — read or update the project's persistent guidance (like AGENTS.md but stored in the daemon, not the repo). Use it to persist hard-won knowledge that should survive into future runs of the same project: conventions, gotchas, where things live, what NOT to do. Read at the start when in doubt; write after you've discovered something a future agent should know.",
       "When you believe the entire task is finished, run `agentd-progress \"<final summary>\" --done` and then stop.",
       "When your work is complete, stage everything and commit it inside this worktree BEFORE the final `--done` progress call.",
       "Use a single conventional-commit subject line (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `style:`, `test:`, `perf:`, `ci:`, `build:`) under 70 characters, lowercase, imperative mood, with no scope unless one is obvious.",

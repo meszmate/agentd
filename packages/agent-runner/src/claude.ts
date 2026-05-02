@@ -107,9 +107,14 @@ export class ClaudeRunner implements AgentRunner {
       "--include-partial-messages",
       "--verbose",
     ];
-    // `--continue` is for fresh-process resume; the long-lived runner
-    // already holds the conversation in-memory so resume is a no-op.
-    void opts.resume;
+    // Resume the prior session when respawning after a daemon restart
+    // so the agent doesn't lose context. claude-code keeps session
+    // history in `~/.claude/projects/<cwd-slug>/...` and `--continue`
+    // pulls the most recent one for this cwd. The first turn of a
+    // fresh task passes resume=false (no prior session to resume).
+    if (opts.resume) {
+      args.push("--continue");
+    }
     const mode =
       opts.permissionMode ??
       this.opts.defaultPermissionMode ??
@@ -390,16 +395,28 @@ export class ClaudeRunner implements AgentRunner {
   async stop(signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
     const proc = this.proc;
     if (!proc) return;
-    // Try graceful shutdown first — closing stdin makes claude exit
-    // cleanly after it finishes whatever tool call is in flight.
+    // Graceful shutdown: close stdin so claude reads EOF and exits
+    // with code 0 the moment its current turn settles. Don't send a
+    // signal alongside — that would force a non-zero exit and the
+    // task would be marked "failed" even when the agent finished
+    // cleanly via `agentd-progress --done`.
     try {
       const stdin = proc.stdin as { end?: () => unknown };
       stdin.end?.();
     } catch {
       // ignore
     }
-    // Belt-and-suspenders: send the signal too in case stdin close
-    // doesn't trigger a quick exit (e.g. agent is mid-thought).
+    // Race the graceful exit against a generous timeout. If claude
+    // hasn't exited within ~10s (e.g. it's stuck mid-tool-call), THEN
+    // we escalate to a signal.
+    const graceful = new Promise<boolean>((resolve) => {
+      const t = setTimeout(() => resolve(false), 10_000);
+      void proc.exited.then(() => {
+        clearTimeout(t);
+        resolve(true);
+      });
+    });
+    if (await graceful) return;
     try {
       proc.kill(signal);
     } catch {

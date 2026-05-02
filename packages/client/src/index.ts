@@ -363,6 +363,18 @@ export class AgentdClient {
     return this.req(`/api/tasks/${encodeURIComponent(id)}/steer`);
   }
 
+  /**
+   * Persist an explicit task ordering for the sidebar drag-drop.
+   * Each id in `taskIds` receives an incrementing sortOrder (0, 1,
+   * 2, ...). Tasks not in the array keep their existing value.
+   */
+  async reorderTasks(taskIds: string[]): Promise<{ ok: true; count: number }> {
+    return this.req(`/api/tasks/reorder`, {
+      method: "POST",
+      body: JSON.stringify({ taskIds }),
+    });
+  }
+
   /** Drop a queued steer line by index before the next turn drains it. */
   async removeQueuedSteer(
     id: string,
