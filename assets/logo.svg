@@ -1,14 +1,19 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 140" width="480" height="140" role="img" aria-label="/agentd">
-  <title>/agentd</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 580 140" width="580" height="140" role="img" aria-label="agentd">
+  <title>agentd</title>
+  <!-- Geometric "a" mark — bowl + stem in ember. -->
+  <g transform="translate(40, 36)">
+    <rect x="0" y="32" width="42" height="34" rx="9" fill="#DC2626" />
+    <rect x="42" y="12" width="14" height="54" rx="7" fill="#DC2626" />
+  </g>
+  <!-- Wordmark in Geist 800. -->
   <text
-    x="50%"
-    y="50%"
-    text-anchor="middle"
+    x="125"
+    y="70"
     dominant-baseline="central"
-    font-family="Inter, 'Helvetica Neue', 'Arial Black', Arial, sans-serif"
-    font-weight="700"
-    font-size="96"
-    letter-spacing="-4">
-    <tspan fill="#dc2626">/</tspan><tspan fill="#0a0a0a">agentd</tspan>
-  </text>
+    font-family="Geist, 'Helvetica Neue', 'Arial Black', Arial, sans-serif"
+    font-weight="800"
+    font-size="86"
+    letter-spacing="-3"
+    fill="#0A0805"
+  >agentd</text>
 </svg>
