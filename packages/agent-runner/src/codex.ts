@@ -46,6 +46,9 @@ export interface CodexRunnerOptions {
 
 export class CodexRunner implements AgentRunner {
   readonly kind = "codex" as const;
+  // Codex's `exec` subcommand is single-shot: each user input is a
+  // fresh process. Mid-turn steering falls back to the queue path.
+  readonly supportsLiveInput = false;
   private listeners = new Set<RunnerEventListener>();
   private proc: Bun.Subprocess<"pipe", "pipe", "pipe"> | null = null;
   private streamTask: Promise<void> | null = null;

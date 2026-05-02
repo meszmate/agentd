@@ -55,10 +55,18 @@ export interface ClaudeRunnerOptions {
 
 export class ClaudeRunner implements AgentRunner {
   readonly kind = "claude" as const;
+  readonly supportsLiveInput = true;
   private listeners = new Set<RunnerEventListener>();
   private proc: Bun.Subprocess<"pipe", "pipe", "pipe"> | null = null;
   private streamTask: Promise<void> | null = null;
   private exitTask: Promise<void> | null = null;
+  /**
+   * True between writing a user message to stdin and seeing the
+   * matching `result` event. We use it to gate status events: turn
+   * boundaries get `running` / `done`, the proc-exit lifecycle is
+   * separate (`kind:"exit"`).
+   */
+  private inTurn = false;
 
   constructor(private readonly opts: ClaudeRunnerOptions = {}) {}
 
@@ -86,15 +94,22 @@ export class ClaudeRunner implements AgentRunner {
       throw new Error("claude runner already running");
     }
     const binary = this.opts.binary ?? "claude";
+    // Long-lived stream-json mode: stdin drives the conversation. The
+    // initial prompt is the first user message we write to stdin after
+    // spawn — we don't pass `-p` here. Subsequent `sendInput` calls
+    // inject between tool calls, so mid-turn steering works natively.
     const args = [
       "-p",
-      opts.prompt,
+      "--input-format",
+      "stream-json",
       "--output-format",
       "stream-json",
       "--include-partial-messages",
       "--verbose",
     ];
-    if (opts.resume) args.push("--continue");
+    // `--continue` is for fresh-process resume; the long-lived runner
+    // already holds the conversation in-memory so resume is a no-op.
+    void opts.resume;
     const mode =
       opts.permissionMode ??
       this.opts.defaultPermissionMode ??
@@ -138,8 +153,10 @@ export class ClaudeRunner implements AgentRunner {
       } as Record<string, string>,
     });
     this.proc = proc;
-    this.emit({ kind: "status", status: "running" });
-
+    // Don't emit `status:running` on spawn — the agent isn't doing work
+    // yet. We emit it the moment we write the first user message to
+    // stdin (`sendInput` below) so the meter only counts thinking time,
+    // not boot time.
     this.streamTask = (async () => {
       try {
         for await (const line of readLines(proc.stdout)) {
@@ -173,8 +190,15 @@ export class ClaudeRunner implements AgentRunner {
       });
       this.emit({ kind: "exit", code: code ?? null });
       if (this.proc === proc) this.proc = null;
+      this.inTurn = false;
       void Promise.allSettled([this.streamTask, stderrTask]);
     })();
+
+    // Kick off the conversation by writing the user's first prompt.
+    // From here the runner is fully driven by stdin: the task manager
+    // calls `sendInput` for every subsequent turn (and for steering
+    // mid-turn).
+    await this.sendInput(opts.prompt);
   }
 
   /**
@@ -299,6 +323,12 @@ export class ClaudeRunner implements AgentRunner {
           ...(cost != null ? { costUsd: cost } : {}),
         });
       }
+      // Turn boundary — agent is now idle waiting for the next stdin
+      // message. The proc stays alive; only the per-turn meter resets.
+      if (this.inTurn) {
+        this.inTurn = false;
+        this.emit({ kind: "status", status: "done" });
+      }
       return;
     }
     if (type === "system") {
@@ -314,19 +344,60 @@ export class ClaudeRunner implements AgentRunner {
     this.emit({ kind: "raw", stream: "stdout", text: line });
   }
 
-  async sendInput(_text: string): Promise<void> {
-    // MVP: each user input is a fresh `claude --continue` invocation by the
-    // task manager. Live stdin streaming requires --input-format stream-json
-    // with a different process model and lands in a follow-up.
-    throw new Error(
-      "sendInput requires the task manager to spawn a new --continue invocation",
-    );
+  /**
+   * Write a user message to claude's stdin in the stream-json input
+   * format. Claude reads stdin between tool calls so this doubles as
+   * "send next turn" (when idle) and "steer mid-turn" (when running).
+   * The CLI buffers messages itself — we don't need to wait for a turn
+   * boundary before writing.
+   */
+  async sendInput(text: string): Promise<void> {
+    const proc = this.proc;
+    if (!proc) throw new Error("claude runner not started");
+    if (!this.inTurn) {
+      this.inTurn = true;
+      this.emit({ kind: "status", status: "running" });
+    }
+    const userMsg = {
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "text", text }],
+      },
+    };
+    const line = JSON.stringify(userMsg) + "\n";
+    try {
+      const stdin = proc.stdin as { write: (s: string) => unknown; flush?: () => unknown };
+      stdin.write(line);
+      stdin.flush?.();
+    } catch (e) {
+      this.emit({
+        kind: "raw",
+        stream: "stderr",
+        text: `[stdin write failed] ${(e as Error).message}`,
+      });
+      throw e;
+    }
   }
 
   async stop(signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
     const proc = this.proc;
     if (!proc) return;
-    proc.kill(signal);
+    // Try graceful shutdown first — closing stdin makes claude exit
+    // cleanly after it finishes whatever tool call is in flight.
+    try {
+      const stdin = proc.stdin as { end?: () => unknown };
+      stdin.end?.();
+    } catch {
+      // ignore
+    }
+    // Belt-and-suspenders: send the signal too in case stdin close
+    // doesn't trigger a quick exit (e.g. agent is mid-thought).
+    try {
+      proc.kill(signal);
+    } catch {
+      // already dead
+    }
     try {
       await proc.exited;
     } catch {

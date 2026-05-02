@@ -48,6 +48,7 @@ import {
   pushBranch,
   removeWorktree,
   setTaskPrUrl,
+  syncAgentPlan,
   updateTaskStatus,
   createWorktree,
   type AgentdPaths,
@@ -163,6 +164,17 @@ export class TaskManager {
       event: { kind: "progress", text, done },
       ts: Date.now(),
     });
+    // For long-lived runners (claude in stream-json mode), the agent
+    // signaling "done" is our cue to close stdin → proc exits cleanly
+    // → completion hooks fire (commit, push, PR). Without this the
+    // runner would idle forever waiting for the next stdin line.
+    if (done) {
+      const session = this.running.get(taskId);
+      if (session?.runner.supportsLiveInput && session.runner.running) {
+        // Fire-and-forget — `stop` closes stdin then waits for exit.
+        void session.runner.stop("SIGTERM").catch(() => {});
+      }
+    }
   }
 
   /**
@@ -340,8 +352,33 @@ export class TaskManager {
     //    answer. Resolve the pending Promise — the agent's curl call
     //    unblocks and the runner keeps going.
     if (this.answerAsk(taskId, text)) return;
-    // 2. Otherwise, if the task is mid-turn, queue the message as a
-    //    steer note and let the exit-time drain pick it up.
+    // 2. Live-input agents (claude in stream-json mode): the runner
+    //    holds the conversation state across turns. Each input is just
+    //    another stdin line — claude buffers between tool calls.
+    const session = this.running.get(taskId);
+    if (session?.runner.supportsLiveInput && session.runner.running) {
+      appendMessage(this.db, taskId, "user", text);
+      try {
+        await session.runner.sendInput(text);
+      } catch (e) {
+        // Stdin write failed — runner died unexpectedly. Fall through
+        // to a fresh spawn so the operator's message isn't lost.
+        this.bus.publish({
+          taskId,
+          event: {
+            kind: "raw",
+            stream: "stderr",
+            text: `[stdin closed, respawning] ${(e as Error).message}`,
+          },
+          ts: Date.now(),
+        });
+        this.running.delete(taskId);
+        await this.spawnRunner(task, text, true);
+      }
+      return;
+    }
+    // 3. Codex (or claude not yet started): mid-turn means queue;
+    //    idle means spawn a fresh runner with --continue.
     if (this.isRunning(taskId)) {
       this.queueInput(taskId, text);
       return;
@@ -352,7 +389,10 @@ export class TaskManager {
 
   /**
    * Steer modes:
-   *   queue     — append to the queue, fires on the next turn.
+   *   queue     — for live-input runners (claude), inject as the next
+   *               stdin message; the agent picks it up between tool
+   *               calls. For spawn-per-turn runners (codex), append to
+   *               the local queue and drain on next turn.
    *   interrupt — stop the current runner now, then fire as the next turn.
    *               The current turn's partial work is preserved in messages.
    */
@@ -372,6 +412,28 @@ export class TaskManager {
       // branch on running state themselves.
       appendMessage(this.db, taskId, "user", text);
       await this.spawnRunner(task, text, true);
+      return;
+    }
+    // Live-input runner: write to stdin directly. Claude reads stdin
+    // between tool calls so the message lands at the next safe point
+    // mid-turn — true steer semantics, no respawn needed.
+    const session = this.running.get(taskId);
+    if (session?.runner.supportsLiveInput && session.runner.running) {
+      appendMessage(this.db, taskId, "user", text);
+      try {
+        await session.runner.sendInput(text);
+      } catch (e) {
+        this.bus.publish({
+          taskId,
+          event: {
+            kind: "raw",
+            stream: "stderr",
+            text: `[steer write failed, queueing] ${(e as Error).message}`,
+          },
+          ts: Date.now(),
+        });
+        this.queueInput(taskId, text);
+      }
       return;
     }
     this.queueInput(taskId, text);
@@ -572,6 +634,27 @@ export class TaskManager {
         "tool",
         `[call ${event.tool}] ${JSON.stringify(event.args).slice(0, 500)}`,
       );
+      // TodoWrite (claude) / update_plan (codex) carries the agent's
+      // current plan. Mirror it into the todos table tagged source=agent
+      // so the UI's right-side todos panel (and any other consumer)
+      // sees the plan alongside user-added todos.
+      const planItems = parseAgentPlan(event.tool, event.args);
+      if (planItems) {
+        const task = getTask(this.db, taskId);
+        if (task) {
+          try {
+            syncAgentPlan(this.db, taskId, task.projectId ?? null, planItems);
+            this.bus.publish({
+              taskId,
+              event: { kind: "todos_updated" },
+              ts: Date.now(),
+            });
+          } catch {
+            // Don't let a sync hiccup break the event loop — the raw
+            // tool_call event still flows through to the timeline.
+          }
+        }
+      }
     } else if (event.kind === "status") {
       updateTaskStatus(this.db, taskId, event.status);
     } else if (event.kind === "usage") {
@@ -1145,4 +1228,56 @@ function findLastUserMessage(db: Db, taskId: string): string | null {
     if (m.role === "user") return m.content;
   }
   return null;
+}
+
+/**
+ * Parse a TodoWrite (claude) / update_plan (codex) tool call's args
+ * into syncAgentPlan-compatible items. Returns null when the tool
+ * isn't a plan tool or the shape is unrecognized — caller falls
+ * through to the generic tool_call render.
+ */
+function parseAgentPlan(
+  tool: string,
+  args: unknown,
+): Array<{ text: string; status: "pending" | "in_progress" | "done" }> | null {
+  if (
+    tool !== "TodoWrite" &&
+    tool !== "todo_write" &&
+    tool !== "update_plan" &&
+    tool !== "UpdatePlan" &&
+    tool !== "Plan"
+  ) {
+    return null;
+  }
+  if (!args || typeof args !== "object") return null;
+  const a = args as Record<string, unknown>;
+  const list =
+    (Array.isArray(a.todos) && (a.todos as unknown[])) ||
+    (Array.isArray(a.plan) && (a.plan as unknown[])) ||
+    (Array.isArray(a.items) && (a.items as unknown[])) ||
+    null;
+  if (!list) return null;
+  const out: Array<{ text: string; status: "pending" | "in_progress" | "done" }> = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    const text = String(
+      r.content ?? r.step ?? r.task ?? r.title ?? "",
+    ).trim();
+    if (!text) continue;
+    const rawStatus = String(r.status ?? r.state ?? "pending").toLowerCase();
+    const status: "pending" | "in_progress" | "done" =
+      rawStatus === "completed" ||
+      rawStatus === "done" ||
+      rawStatus === "complete"
+        ? "done"
+        : rawStatus === "in_progress" ||
+            rawStatus === "in-progress" ||
+            rawStatus === "active" ||
+            rawStatus === "running"
+          ? "in_progress"
+          : "pending";
+    out.push({ text, status });
+  }
+  return out;
 }

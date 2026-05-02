@@ -102,6 +102,7 @@ function describe(ev: AgentEvent): string | null {
     // Streaming partials are too noisy for the activity ticker — drop them.
     case "message_delta":
     case "message_end":
+    case "todos_updated":
       return null;
   }
 }
@@ -278,6 +279,13 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         // with a `task_updated` push that updates the cache directly.
         // Per-task detail (qk.task) is only fetched on first open and stays
         // hydrated by the messages we append locally.
+
+        // Todos are the exception — the runner mirrors TodoWrite into the
+        // todos table and emits this signal so the right-side panel
+        // refreshes without polling.
+        if (msg.event.kind === "todos_updated") {
+          void qc.invalidateQueries({ queryKey: ["todos"] });
+        }
       });
       ws.addEventListener("open", () => {
         console.log("[rt] WS open");

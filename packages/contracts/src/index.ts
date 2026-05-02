@@ -350,6 +350,15 @@ export const AgentEvent = z.discriminatedUnion("kind", [
     askId: z.string(),
     answer: z.string(),
   }),
+  z.object({
+    /**
+     * Fan-out signal that the task's todos table changed — emitted
+     * after the runner's TodoWrite/update_plan plan is mirrored into
+     * the todos table. The web invalidates its `todos` query on this
+     * to refresh the sidebar without polling.
+     */
+    kind: z.literal("todos_updated"),
+  }),
 ]);
 export type AgentEvent = z.infer<typeof AgentEvent>;
 

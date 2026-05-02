@@ -44,6 +44,17 @@ export type RunnerEventListener = (event: AgentEvent) => void;
 export interface AgentRunner {
   readonly kind: AgentKind;
   readonly running: boolean;
+  /**
+   * True if `sendInput` works on a live runner (long-lived stream-json
+   * model). False means each input requires a fresh `start()` call (the
+   * task manager's spawn-per-turn fallback).
+   *
+   * Claude runs in long-lived stream-json mode so `sendInput` injects
+   * user messages between tool calls — true mid-turn steering. Codex's
+   * `exec` subcommand is single-shot and doesn't accept stdin streaming,
+   * so the manager keeps spawning fresh codex processes per turn.
+   */
+  readonly supportsLiveInput: boolean;
   start(opts: RunnerStartOptions): Promise<void>;
   sendInput(text: string): Promise<void>;
   stop(signal?: NodeJS.Signals): Promise<void>;

@@ -3,6 +3,9 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   AlertTriangle,
+  Check,
+  ChevronDown,
+  ChevronRight,
   ListPlus,
   Loader2,
   Send,
@@ -17,6 +20,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { useApp, useClient } from "@/AppContext";
 import { cn, formatTokens, formatTs } from "@/lib/utils";
 import { ToolLine } from "@/components/tool-line";
+import type { TaskPlanItem } from "@/views/TaskPlan";
 import {
   useRemoveQueuedSteer,
   useSendInput,
@@ -48,6 +52,7 @@ export function TaskTimeline({
   totalTokens,
   contextWindow,
   turn,
+  plan,
 }: {
   taskId: string;
   messages: Message[];
@@ -65,6 +70,8 @@ export function TaskTimeline({
   contextWindow?: number;
   /** Per-turn meter — `startedAt` set => mid-turn, `tokens` accumulated. */
   turn?: { startedAt: number | null; tokens: number };
+  /** Live plan from the agent's most recent TodoWrite/update_plan call. */
+  plan?: TaskPlanItem[];
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [text, setText] = useState("");
@@ -265,6 +272,12 @@ export function TaskTimeline({
         className="border-t border-ink-900/10 dark:border-ink-50/10 px-6 py-4"
       >
         <div className="mx-auto max-w-3xl">
+          {/* Inline plan strip — shows the agent's live TodoWrite plan
+              right above the input, claude-code style. Highlights the
+              in-progress item, lists pending below it, collapses
+              completed into a count. Full history lives in the right
+              sidebar's Todos tab. */}
+          {plan && plan.length > 0 && <PlanStrip plan={plan} />}
           {/* Queue strip — sits above the input so the operator always
               sees what's piling up. Each chip is removable. Drains at
               the next turn boundary on the daemon side. */}
@@ -500,6 +513,122 @@ function Markdown({ text }: { text: string }) {
         {text}
       </ReactMarkdown>
     </div>
+  );
+}
+
+/**
+ * Compact plan render that lives above the chat input. Shows the
+ * in-progress item front-and-center plus the next pending steps; the
+ * full list is one click away. Mirrors what claude-code shows in its
+ * scratchpad above the prompt.
+ */
+function PlanStrip({ plan }: { plan: TaskPlanItem[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const inProgress = plan.find((p) => p.status === "in_progress");
+  const pending = plan.filter((p) => p.status === "pending");
+  const done = plan.filter((p) => p.status === "completed").length;
+  const total = plan.length;
+
+  // Show the in-progress item plus up to two upcoming when collapsed,
+  // everything when expanded. If nothing is in progress, the first
+  // pending takes the spotlight.
+  const head = inProgress ?? pending[0];
+  const restPending = inProgress ? pending : pending.slice(1);
+  const collapsedRest = restPending.slice(0, 2);
+  const overflow = restPending.length - collapsedRest.length;
+
+  return (
+    <div className="mb-2 rounded-md border border-ink-900/[0.08] bg-paper-50/60 px-3 py-2 dark:border-ink-50/[0.08] dark:bg-ink-800/40">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center gap-2 text-left"
+        title={expanded ? "Collapse plan" : "Expand plan"}
+      >
+        {expanded ? (
+          <ChevronDown className="h-3 w-3 text-ink-400 dark:text-ink-500 shrink-0" />
+        ) : (
+          <ChevronRight className="h-3 w-3 text-ink-400 dark:text-ink-500 shrink-0" />
+        )}
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-violet-700 dark:text-violet-300 shrink-0">
+          plan
+        </span>
+        <span className="font-mono text-[10px] tabular-nums text-ink-500 dark:text-ink-400 shrink-0">
+          {done}/{total}
+        </span>
+        {head && !expanded && (
+          <span className="flex items-center gap-1.5 min-w-0 flex-1">
+            <PlanGlyph status={head.status} />
+            <span className="truncate text-[12px] text-ink-700 dark:text-ink-200">
+              {head.activeForm ?? head.content}
+            </span>
+          </span>
+        )}
+      </button>
+      {expanded ? (
+        <ul className="mt-1.5 space-y-0.5 pl-5">
+          {plan.map((item, i) => (
+            <li key={i} className="flex items-start gap-1.5">
+              <span className="mt-0.5">
+                <PlanGlyph status={item.status} />
+              </span>
+              <span
+                className={cn(
+                  "text-[12px] leading-snug",
+                  item.status === "completed" &&
+                    "line-through text-ink-500 dark:text-ink-400",
+                  item.status === "in_progress" &&
+                    "text-ink-900 dark:text-ink-50 font-medium",
+                  item.status === "pending" && "text-ink-700 dark:text-ink-200",
+                )}
+              >
+                {item.status === "in_progress"
+                  ? (item.activeForm ?? item.content)
+                  : item.content}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        collapsedRest.length > 0 && (
+          <ul className="mt-1 space-y-0.5 pl-5">
+            {collapsedRest.map((item, i) => (
+              <li key={i} className="flex items-center gap-1.5">
+                <PlanGlyph status="pending" />
+                <span className="truncate text-[11px] text-ink-500 dark:text-ink-400">
+                  {item.content}
+                </span>
+              </li>
+            ))}
+            {overflow > 0 && (
+              <li className="pl-4 font-mono text-[10px] text-ink-400 dark:text-ink-500">
+                +{overflow} more
+              </li>
+            )}
+          </ul>
+        )
+      )}
+    </div>
+  );
+}
+
+function PlanGlyph({ status }: { status: TaskPlanItem["status"] }) {
+  if (status === "completed") {
+    return (
+      <span className="inline-grid place-items-center size-3 rounded-full border border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 shrink-0">
+        <Check className="h-2 w-2" />
+      </span>
+    );
+  }
+  if (status === "in_progress") {
+    return (
+      <span className="inline-grid place-items-center size-3 rounded-full border border-ember-500/60 bg-ember-500/20 shrink-0">
+        <span className="size-1 rounded-full bg-ember-500 animate-blink" />
+      </span>
+    );
+  }
+  return (
+    <span className="inline-block size-3 rounded-full border border-ink-900/25 dark:border-ink-50/25 shrink-0" />
   );
 }
 

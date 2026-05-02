@@ -55,6 +55,7 @@ const KIND_LABEL: Record<Kind, string> = {
   share: "💭 share",
   ask: "❓ ask",
   answer: "↳ answer",
+  todos_updated: "todos",
 };
 
 const KIND_TONE: Record<Kind, string> = {
@@ -72,6 +73,7 @@ const KIND_TONE: Record<Kind, string> = {
   share: "text-violet-700 dark:text-violet-300",
   ask: "text-amber-700 dark:text-amber-300",
   answer: "text-amber-700 dark:text-amber-300",
+  todos_updated: "text-violet-700 dark:text-violet-300",
 };
 
 const ALL_KINDS: Kind[] = [
@@ -139,6 +141,8 @@ function renderEvent(ev: AgentEvent): { primary: string; secondary?: string } {
     }
     case "answer":
       return { primary: ev.answer };
+    case "todos_updated":
+      return { primary: "todos updated" };
   }
 }
 
@@ -255,6 +259,7 @@ export function Activity() {
       share: 0,
       ask: 0,
       answer: 0,
+      todos_updated: 0,
     };
     for (const e of events) c[e.kind] += 1;
     return c;

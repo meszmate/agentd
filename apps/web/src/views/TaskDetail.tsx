@@ -506,6 +506,7 @@ export function TaskDetail({ task }: { task: Task }) {
                 streams={streams}
                 totalTokens={totalTokens}
                 turn={turn}
+                plan={plan}
               />
             </Panel>
             <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-ember-500/40 transition-colors dark:bg-ink-50/10" />
@@ -524,6 +525,7 @@ export function TaskDetail({ task }: { task: Task }) {
             streams={streams}
             totalTokens={totalTokens}
             turn={turn}
+            plan={plan}
           />
         )}
       </div>
