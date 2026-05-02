@@ -1,4 +1,4 @@
-import { eq, desc } from "drizzle-orm";
+import { and, eq, desc, type SQL } from "drizzle-orm";
 import type { Suggestion, SuggestionStatus } from "@agentd/contracts";
 import { suggestions, type Db } from "./db.ts";
 import { newId } from "./auth.ts";
@@ -75,11 +75,23 @@ export function getSuggestion(db: Db, id: string): Suggestion | null {
 
 export function listSuggestions(
   db: Db,
-  opts: { status?: SuggestionStatus; limit?: number } = {},
+  opts: {
+    status?: SuggestionStatus;
+    projectId?: string | null;
+    limit?: number;
+  } = {},
 ): Suggestion[] {
-  let query = db.select().from(suggestions).orderBy(desc(suggestions.createdAt));
-  if (opts.status) {
-    query = query.where(eq(suggestions.status, opts.status)) as typeof query;
+  const filters: SQL[] = [];
+  if (opts.status) filters.push(eq(suggestions.status, opts.status));
+  if (opts.projectId) filters.push(eq(suggestions.projectId, opts.projectId));
+  let query = db
+    .select()
+    .from(suggestions)
+    .orderBy(desc(suggestions.createdAt));
+  if (filters.length === 1) {
+    query = query.where(filters[0]!) as typeof query;
+  } else if (filters.length > 1) {
+    query = query.where(and(...filters)!) as typeof query;
   }
   const rows = opts.limit ? query.limit(opts.limit).all() : query.all();
   return rows.map(rowToSuggestion);

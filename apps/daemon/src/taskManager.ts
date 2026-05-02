@@ -5,6 +5,7 @@ import type {
   Council,
   CouncilMember,
   PermissionMode,
+  ResolveSuggestionRequest,
   Suggestion,
   Task,
   Template,
@@ -878,7 +879,7 @@ export class TaskManager {
    */
   async resolveSuggestionToTask(
     suggestionId: string,
-    pick: { index?: number; text?: string },
+    pick: ResolveSuggestionRequest,
   ): Promise<{ suggestion: Suggestion; task: Task } | null> {
     const sug = getSuggestion(this.db, suggestionId);
     if (!sug) throw new Error("suggestion not found");
@@ -911,12 +912,20 @@ export class TaskManager {
       }
       throw new Error("no repo path resolvable for suggestion");
     })();
+    const titleSeed =
+      pick.title?.trim() || chosenText.split("\n")[0]!.slice(0, 80);
     const task = await this.create({
-      agent: "claude",
+      agent: pick.agent ?? "claude",
       repoPath,
       prompt: chosenText,
-      title: chosenText.split("\n")[0]!.slice(0, 80),
-      ...(sug.projectId ? {} : {}),
+      title: titleSeed,
+      ...(pick.model ? { model: pick.model } : {}),
+      ...(pick.thinkingLevel ? { thinkingLevel: pick.thinkingLevel } : {}),
+      ...(pick.permissionMode ? { permissionMode: pick.permissionMode } : {}),
+      ...(pick.workspaceMode ? { workspaceMode: pick.workspaceMode } : {}),
+      ...(pick.branchMode ? { branchMode: pick.branchMode } : {}),
+      ...(pick.branchName ? { branchName: pick.branchName } : {}),
+      ...(pick.pullLatest != null ? { pullLatest: pick.pullLatest } : {}),
     });
     const updated = dbResolveSuggestion(
       this.db,

@@ -2,8 +2,13 @@ import type {
   Council,
   CreateCouncilRequest,
   CreateTodoRequest,
+  Idea,
+  IdeaMessage,
+  IdeaStatus,
+  SavedIdea,
   Suggestion,
   Todo,
+  UpdateIdeaRequest,
   UpdateTodoRequest,
   CreateProjectRequest,
   CreateScheduleRequest,
@@ -215,24 +220,349 @@ export class AgentdClient {
   // ── suggestions ──
   async listSuggestions(opts?: {
     status?: "pending" | "resolved" | "dismissed";
+    projectId?: string;
     limit?: number;
   }): Promise<{ suggestions: Suggestion[] }> {
     const qs: string[] = [];
     if (opts?.status) qs.push(`status=${opts.status}`);
+    if (opts?.projectId)
+      qs.push(`projectId=${encodeURIComponent(opts.projectId)}`);
     if (opts?.limit) qs.push(`limit=${opts.limit}`);
     return this.req(`/api/suggestions${qs.length ? "?" + qs.join("&") : ""}`);
+  }
+  /**
+   * Kicks off an on-demand "brainstorm" against a project. Runs the
+   * Claude ideation helper synchronously (~10–30s) and returns the
+   * persisted Suggestion, or `{ ok: false, error }` if the helper
+   * returned nothing useful.
+   */
+  async ideateForProject(
+    idOrSlug: string,
+    body: {
+      prompt: string;
+      max?: number;
+      title?: string;
+      agent?: "claude" | "codex";
+      model?: string;
+      effort?: ThinkingLevel;
+    },
+  ): Promise<
+    | { ok: true; suggestion: Suggestion }
+    | { ok: false; source: string; error: string }
+  > {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/ideate`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    );
+  }
+  /**
+   * Streams brainstorm options as they arrive, calling `onOption`
+   * for each. Resolves with the persisted suggestion once the
+   * helper finishes. Wire shape: each option arrives prefixed by
+   * `\x1f`, then a final `\x1e<JSON>` envelope.
+   */
+  async streamIdeateForProject(
+    idOrSlug: string,
+    body: {
+      prompt: string;
+      max?: number;
+      title?: string;
+      agent?: "claude" | "codex";
+      model?: string;
+      effort?: ThinkingLevel;
+    },
+    onOption: (text: string) => void,
+    signal?: AbortSignal,
+  ): Promise<
+    | { ok: true; suggestion: Suggestion; source: string }
+    | { ok: false; source: string; error: string }
+  > {
+    const r = await fetch(
+      `${this.server}/api/projects/${encodeURIComponent(idOrSlug)}/ideate/stream`,
+      {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(body),
+        signal,
+      },
+    );
+    if (!r.ok || !r.body) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`ideate stream failed: ${r.status} ${text}`);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let envelope = "";
+    let sawSentinel = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      buffer += chunk;
+      while (!sawSentinel) {
+        const sIdx = buffer.indexOf("\x1e");
+        const oIdx = buffer.indexOf("\x1f");
+        // Final envelope first if present.
+        if (sIdx >= 0 && (oIdx < 0 || sIdx < oIdx)) {
+          envelope += buffer.slice(sIdx + 1);
+          buffer = "";
+          sawSentinel = true;
+          break;
+        }
+        if (oIdx < 0) break;
+        // option line: \x1f<text>\n
+        const eol = buffer.indexOf("\n", oIdx + 1);
+        if (eol < 0) break;
+        const line = buffer.slice(oIdx + 1, eol);
+        if (line.trim()) onOption(line);
+        buffer = buffer.slice(eol + 1);
+      }
+      if (sawSentinel) envelope += buffer.length ? buffer : "";
+      if (sawSentinel) buffer = "";
+    }
+    try {
+      return JSON.parse(envelope || "{}");
+    } catch {
+      return {
+        ok: false,
+        source: "fallback-error",
+        error: envelope || "empty stream",
+      };
+    }
+  }
+  // ── ideas (per-project library) ──
+  async listSavedIdeas(
+    idOrSlug: string,
+    opts?: { includeSpawned?: boolean; statuses?: IdeaStatus[] },
+  ): Promise<{ ideas: Idea[] }> {
+    const qs: string[] = [];
+    if (opts?.includeSpawned) qs.push("includeSpawned=1");
+    if (opts?.statuses && opts.statuses.length > 0) {
+      qs.push(`status=${opts.statuses.join(",")}`);
+    }
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/saved-ideas${qs.length ? "?" + qs.join("&") : ""}`,
+    );
+  }
+  async getIdea(
+    id: string,
+  ): Promise<{ idea: Idea; messages: IdeaMessage[] }> {
+    return this.req(`/api/saved-ideas/${encodeURIComponent(id)}`);
+  }
+  async createSavedIdea(
+    idOrSlug: string,
+    body: {
+      text: string;
+      description?: string;
+      status?: IdeaStatus;
+      tags?: string[];
+      suggestionId?: string;
+      optionIndex?: number;
+      planDraft?: string;
+    },
+  ): Promise<{ idea: Idea }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/saved-ideas`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    );
+  }
+  async updateIdea(
+    id: string,
+    patch: UpdateIdeaRequest,
+  ): Promise<{ idea: Idea }> {
+    return this.req(`/api/saved-ideas/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  }
+  async listIdeaMessages(
+    id: string,
+  ): Promise<{ messages: IdeaMessage[] }> {
+    return this.req(
+      `/api/saved-ideas/${encodeURIComponent(id)}/messages`,
+    );
+  }
+  /**
+   * Stream a workshop chat reply. `mode: "challenge"` flips the
+   * directive so the agent self-critiques the idea.
+   */
+  async streamIdeaChat(
+    id: string,
+    body: {
+      text?: string;
+      mode?: "chat" | "challenge";
+      agent?: "claude" | "codex";
+      model?: string;
+      effort?: ThinkingLevel;
+    },
+    onChunk: (chunk: string) => void,
+    signal?: AbortSignal,
+  ): Promise<
+    | { ok: true; message: IdeaMessage; ideaStatus: IdeaStatus }
+    | { ok: false; source: string; error: string }
+  > {
+    const r = await fetch(
+      `${this.server}/api/saved-ideas/${encodeURIComponent(id)}/chat/stream`,
+      {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(body),
+        signal,
+      },
+    );
+    if (!r.ok || !r.body) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`idea chat failed: ${r.status} ${text}`);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let envelope = "";
+    let sawSentinel = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      if (!sawSentinel) {
+        const sIdx = chunk.indexOf("\x1e");
+        if (sIdx >= 0) {
+          const before = chunk.slice(0, sIdx);
+          if (before) onChunk(before);
+          envelope += chunk.slice(sIdx + 1);
+          sawSentinel = true;
+          continue;
+        }
+        onChunk(chunk);
+      } else {
+        envelope += chunk;
+      }
+    }
+    try {
+      return JSON.parse(envelope || "{}");
+    } catch {
+      return {
+        ok: false,
+        source: "fallback-error",
+        error: envelope || "empty stream",
+      };
+    }
+  }
+  async deleteSavedIdea(id: string): Promise<{ ok: true }> {
+    return this.req(`/api/saved-ideas/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  }
+  async updateSavedIdeaPlan(
+    id: string,
+    planDraft: string | null,
+  ): Promise<{ idea: SavedIdea }> {
+    return this.req(`/api/saved-ideas/${encodeURIComponent(id)}/plan`, {
+      method: "PUT",
+      body: JSON.stringify({ planDraft }),
+    });
+  }
+  async spawnFromSavedIdea(
+    id: string,
+    body: {
+      prompt?: string;
+      agent?: "claude" | "codex";
+      model?: string;
+      thinkingLevel?: ThinkingLevel;
+      permissionMode?: "bypassPermissions" | "acceptEdits" | "plan";
+      title?: string;
+    },
+  ): Promise<{ idea: SavedIdea; task: Task }> {
+    return this.req(`/api/saved-ideas/${encodeURIComponent(id)}/spawn`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
   }
   async getSuggestion(id: string): Promise<{ suggestion: Suggestion }> {
     return this.req(`/api/suggestions/${encodeURIComponent(id)}`);
   }
   async resolveSuggestion(
     id: string,
-    pick: { index?: number; text?: string },
+    pick: {
+      index?: number;
+      text?: string;
+      agent?: "claude" | "codex";
+      model?: string;
+      thinkingLevel?: ThinkingLevel;
+      permissionMode?: "bypassPermissions" | "acceptEdits" | "plan";
+      workspaceMode?: "worktree" | "in_place";
+      branchMode?: "new" | "existing";
+      branchName?: string;
+      pullLatest?: boolean;
+      title?: string;
+    },
   ): Promise<{ suggestion: Suggestion; task: Task }> {
     return this.req(`/api/suggestions/${encodeURIComponent(id)}/resolve`, {
       method: "POST",
       body: JSON.stringify(pick),
     });
+  }
+  /**
+   * Stream a planning helper for a picked option. Emits raw text
+   * chunks until the final separator (`\x1e`), after which a single
+   * JSON envelope arrives. The callback receives chunks; the
+   * promise resolves with `{ plan, source }`.
+   */
+  async streamSuggestionPlan(
+    id: string,
+    pick: {
+      index?: number;
+      text?: string;
+      agent?: "claude" | "codex";
+      model?: string;
+      effort?: ThinkingLevel;
+    },
+    onChunk: (chunk: string) => void,
+    signal?: AbortSignal,
+  ): Promise<{ plan: string; source: string; error?: string }> {
+    const r = await fetch(
+      `${this.server}/api/suggestions/${encodeURIComponent(id)}/plan`,
+      {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(pick),
+        signal,
+      },
+    );
+    if (!r.ok || !r.body) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`plan stream failed: ${r.status} ${text}`);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let sawSentinel = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      const sentinelIdx = chunk.indexOf("\x1e");
+      if (sentinelIdx >= 0 && !sawSentinel) {
+        const before = chunk.slice(0, sentinelIdx);
+        if (before) onChunk(before);
+        buffer = chunk.slice(sentinelIdx + 1);
+        sawSentinel = true;
+      } else if (sawSentinel) {
+        buffer += chunk;
+      } else {
+        onChunk(chunk);
+      }
+    }
+    try {
+      return JSON.parse(buffer || "{}");
+    } catch {
+      return { plan: "", source: "fallback-error", error: buffer };
+    }
   }
   async dismissSuggestion(id: string): Promise<{ suggestion: Suggestion }> {
     return this.req(`/api/suggestions/${encodeURIComponent(id)}/dismiss`, {

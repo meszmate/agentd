@@ -55,6 +55,16 @@ const Projects = lazy(() =>
 const ProjectDetail = lazy(() =>
   import("@/views/ProjectDetail").then((m) => ({ default: m.ProjectDetail })),
 );
+const ProjectBrainstorm = lazy(() =>
+  import("@/views/ProjectBrainstorm").then((m) => ({
+    default: m.ProjectBrainstorm,
+  })),
+);
+const IdeaWorkshop = lazy(() =>
+  import("@/views/IdeaWorkshop").then((m) => ({
+    default: m.IdeaWorkshop,
+  })),
+);
 const TerminalView = lazy(() =>
   import("@/views/Terminal").then((m) => ({ default: m.TerminalView })),
 );
@@ -141,6 +151,22 @@ const router = createBrowserRouter([
         element: (
           <ViewSuspense>
             <ProjectDetail />
+          </ViewSuspense>
+        ),
+      },
+      {
+        path: "projects/:slug/brainstorm",
+        element: (
+          <ViewSuspense>
+            <ProjectBrainstorm />
+          </ViewSuspense>
+        ),
+      },
+      {
+        path: "projects/:slug/ideas/:id",
+        element: (
+          <ViewSuspense>
+            <IdeaWorkshop />
           </ViewSuspense>
         ),
       },

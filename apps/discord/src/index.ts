@@ -525,6 +525,38 @@ async function main() {
   // Push notifications. Curated: agent messages, progress notes,
   // shares, asks, terminal status. Skip the firehose stuff.
   const ws = client.watch(null, async (event: WsServerEvent) => {
+    if (event.type === "suggestion_created") {
+      // Route project-scoped suggestions to the project's Discord
+      // channel when one is configured. Without project routing we
+      // skip Discord entirely (Telegram does the global broadcast)
+      // — Discord is channel-based and there's no obvious "everyone"
+      // target.
+      const sug = event.suggestion;
+      if (!sug.projectId) return;
+      let channelId: string | null = null;
+      try {
+        const { project } = await client.getProject(sug.projectId);
+        channelId = project.discordChannelId ?? null;
+      } catch {
+        return;
+      }
+      if (!channelId) return;
+      const numbered = sug.options
+        .map((o, i) => `**${i + 1}.** ${o}`)
+        .join("\n");
+      const body = [
+        `💡 **${sug.title}**`,
+        sug.prompt.split("\n")[0] ?? "",
+        "",
+        numbered,
+        "",
+        `_Reply with a number or your own direction — picking spawns a task in a fresh worktree._`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      sendToChannel(channelId, body, sug.projectId);
+      return;
+    }
     if (event.type === "discord_test_send") {
       try {
         const ch = bot.channels.cache.get(event.channelId);

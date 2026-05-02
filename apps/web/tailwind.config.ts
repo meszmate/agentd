@@ -163,6 +163,33 @@ const config: Config = {
           "0%, 100%": { boxShadow: "0 0 0 0 rgba(247, 127, 0, 0.25)" },
           "50%": { boxShadow: "0 0 0 4px rgba(247, 127, 0, 0)" },
         },
+        // Multi-color "playing colors" gradient sweep for the active
+        // brainstorm card. Drifts a wide multi-stop gradient across
+        // the element while the agent is reading the repo.
+        "aurora-sweep": {
+          "0%": { backgroundPosition: "0% 50%" },
+          "50%": { backgroundPosition: "100% 50%" },
+          "100%": { backgroundPosition: "0% 50%" },
+        },
+        // Idea card lands with a small lift + ember-tinted flash that
+        // fades in under a second. Pairs with `fade-in` for the row.
+        "idea-pop": {
+          "0%": {
+            opacity: "0",
+            transform: "translateY(6px) scale(0.985)",
+            backgroundColor: "rgba(247, 127, 0, 0.10)",
+          },
+          "60%": {
+            opacity: "1",
+            transform: "translateY(0) scale(1)",
+            backgroundColor: "rgba(247, 127, 0, 0.06)",
+          },
+          "100%": {
+            opacity: "1",
+            transform: "translateY(0) scale(1)",
+            backgroundColor: "rgba(247, 127, 0, 0)",
+          },
+        },
       },
       animation: {
         shimmer: "shimmer 2s linear infinite",
@@ -176,6 +203,8 @@ const config: Config = {
         "strike-in": "strike-in 0.35s cubic-bezier(0.4, 0, 0.2, 1) both",
         "slide-in": "slide-in 0.25s ease-out both",
         "active-glow": "active-glow 2.4s ease-in-out infinite",
+        "aurora-sweep": "aurora-sweep 6s ease-in-out infinite",
+        "idea-pop": "idea-pop 0.85s cubic-bezier(0.2, 0.7, 0.2, 1) both",
       },
     },
   },

@@ -29,17 +29,52 @@ async function run(
  * per-call (e.g. higher effort for PR bodies than commit subjects).
  */
 export interface AiHelperOptions {
+  /**
+   * Which CLI to drive the helper through. Defaults to `claude` —
+   * existing helpers (commit message, branch name, ideation, plan)
+   * have always run there. `codex` lets the operator brainstorm /
+   * plan with OpenAI's models too.
+   */
+  agent?: "claude" | "codex";
   binary?: string;
   model?: string;
   effort?: "low" | "medium" | "high" | "max" | "xhigh";
 }
 
 /**
- * Build the `claude -p ...` argv from helper settings. Caller appends the
- * actual prompt as the final positional. Honors AGENTD_CLAUDE_BIN as a
- * legacy override for the binary so existing installs keep working.
+ * Build the helper argv ending with `-p <prompt>` (claude) or
+ * `<prompt>` as positional (codex). Caller passes the prompt + cwd.
+ *
+ * For claude: `claude --permission-mode bypassPermissions --allow-… --effort … [--model …] [--add-dir …] -p <prompt>`
+ * For codex:  `codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox [--model …] --config model_reasoning_effort="…" <prompt>`
+ *
+ * Honors AGENTD_CLAUDE_BIN / AGENTD_CODEX_BIN as legacy binary
+ * overrides so existing installs keep working.
  */
-function buildAiHelperArgv(opts: AiHelperOptions): string[] {
+function buildAiHelperArgv(
+  opts: AiHelperOptions,
+  prompt: string,
+  cwd?: string,
+): string[] {
+  if (opts.agent === "codex") {
+    const binary =
+      opts.binary?.trim() || process.env.AGENTD_CODEX_BIN || "codex";
+    const argv: string[] = [
+      binary,
+      "exec",
+      "--skip-git-repo-check",
+      "--dangerously-bypass-approvals-and-sandbox",
+    ];
+    if (opts.model && opts.model.trim()) {
+      argv.push("--model", opts.model.trim());
+    }
+    const effort = opts.effort ?? "medium";
+    const codexEffort = effort === "max" ? "xhigh" : effort;
+    argv.push("--config", `model_reasoning_effort="${codexEffort}"`);
+    if (cwd) argv.push("--cd", cwd);
+    argv.push(prompt);
+    return argv;
+  }
   const binary =
     opts.binary?.trim() || process.env.AGENTD_CLAUDE_BIN || "claude";
   const argv: string[] = [
@@ -53,6 +88,8 @@ function buildAiHelperArgv(opts: AiHelperOptions): string[] {
   if (opts.model && opts.model.trim()) {
     argv.push("--model", opts.model.trim());
   }
+  if (cwd) argv.push("--add-dir", cwd);
+  argv.push("-p", prompt);
   return argv;
 }
 
@@ -530,8 +567,7 @@ export async function generateCommitMessage(
     };
   }
   const prompt = buildCommitPrompt(diff, opts, opts.extraInstructions);
-  const argv = buildAiHelperArgv(opts.helper ?? {});
-  argv.push("-p", prompt);
+  const argv = buildAiHelperArgv(opts.helper ?? {}, prompt);
   try {
     const proc = Bun.spawn(
       argv,
@@ -593,8 +629,7 @@ export async function* streamCommitMessage(
     return { message: fallback, source: "fallback-no-changes" };
   }
   const prompt = buildCommitPrompt(diff, opts, opts.extraInstructions);
-  const argv = buildAiHelperArgv(opts.helper ?? {});
-  argv.push("-p", prompt);
+  const argv = buildAiHelperArgv(opts.helper ?? {}, prompt);
   let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
@@ -722,8 +757,7 @@ export async function* streamPrMessage(
     return { ...split, source: "fallback-no-changes" };
   }
   const prompt = buildPrPrompt(diff, opts, opts.extraInstructions);
-  const argv = buildAiHelperArgv(opts.helper ?? {});
-  argv.push("-p", prompt);
+  const argv = buildAiHelperArgv(opts.helper ?? {}, prompt);
   let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
@@ -793,13 +827,8 @@ export interface IdeationResult {
  * `cwd` is the project's repo path so the agent can `Read` real files.
  * `extraInstructions` is the operator's optional `agentInstructions`.
  */
-export async function runIdeation(
-  cwd: string,
-  prompt: string,
-  opts: { helper?: AiHelperOptions; max?: number } = {},
-): Promise<IdeationResult> {
-  const max = Math.max(2, Math.min(9, opts.max ?? 5));
-  const ask = [
+function buildIdeationPrompt(prompt: string, max: number): string {
+  return [
     `You are brainstorming actionable ideas for the operator's project.`,
     `Look at the repo (read files if needed) and return ${max} short, actionable options.`,
     `Output rules:`,
@@ -811,39 +840,45 @@ export async function runIdeation(
     `Operator's brief:`,
     prompt.slice(0, 2000),
   ].join("\n");
-  const argv = buildAiHelperArgv(opts.helper ?? {});
-  // Ideation needs to read the repo, so pass --add-dir for the cwd.
-  argv.push("--add-dir", cwd);
-  argv.push("-p", ask);
+}
+
+function cleanIdeationLine(raw: string): string {
+  return raw
+    .trim()
+    // Strip leading numbering ("1.", "1)", "- ", "* ").
+    .replace(/^(\d+[\.\)]|\-|\*)\s+/, "")
+    // Trim a possible single backtick fence opener.
+    .replace(/^```[a-z]*\s*$/i, "")
+    .replace(/^```\s*$/, "")
+    .trim();
+}
+
+/**
+ * Stream the brainstorm helper, yielding each option line as it's
+ * produced. Returns the complete set + source as the final value.
+ *
+ * The helper outputs one option per line; we read stdout in
+ * chunks, split on newline, dedup, and emit cleaned lines. This
+ * lets the UI tick options in one-by-one with a fade-in animation
+ * instead of waiting 10–30s for the whole batch.
+ */
+export async function* streamIdeation(
+  cwd: string,
+  prompt: string,
+  opts: { helper?: AiHelperOptions; max?: number } = {},
+): AsyncGenerator<string, IdeationResult, void> {
+  const max = Math.max(2, Math.min(9, opts.max ?? 5));
+  const ask = buildIdeationPrompt(prompt, max);
+  const argv = buildAiHelperArgv(opts.helper ?? {}, ask, cwd);
+  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
   try {
-    const proc = Bun.spawn({
+    proc = Bun.spawn({
       cmd: argv,
       cwd,
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
     });
-    const out = await new Response(proc.stdout).text();
-    await proc.exited;
-    const cleaned = out
-      .trim()
-      .replace(/^```[a-z]*\n?|```$/g, "")
-      .trim();
-    const lines = cleaned
-      .split("\n")
-      .map((l) =>
-        l
-          .trim()
-          // Strip leading numbering ("1.", "1)", "- ", "* ").
-          .replace(/^(\d+[\.\)]|\-|\*)\s+/, "")
-          .trim(),
-      )
-      .filter((l) => l.length > 0)
-      .slice(0, max);
-    if (lines.length === 0) {
-      return { options: [], source: "fallback-empty" };
-    }
-    return { options: lines, source: "claude" };
   } catch (e) {
     return {
       options: [],
@@ -851,6 +886,264 @@ export async function runIdeation(
       error: (e as Error).message,
     };
   }
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const collected: string[] = [];
+  const seen = new Set<string>();
+
+  const tryEmit = (raw: string): string | null => {
+    if (collected.length >= max) return null;
+    const line = cleanIdeationLine(raw);
+    if (!line) return null;
+    if (seen.has(line)) return null;
+    seen.add(line);
+    collected.push(line);
+    return line;
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) !== -1) {
+        const raw = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 1);
+        const emitted = tryEmit(raw);
+        if (emitted) yield emitted;
+      }
+      if (collected.length >= max) break;
+    }
+    // Flush whatever is in the trailing buffer (helper output without a
+    // final newline).
+    if (buffer.trim()) {
+      const emitted = tryEmit(buffer);
+      if (emitted) yield emitted;
+    }
+  } catch {
+    // stream aborted
+  }
+  await proc.exited;
+  if (collected.length === 0) {
+    return { options: [], source: "fallback-empty" };
+  }
+  return { options: collected, source: "claude" };
+}
+
+/**
+ * Synchronous wrapper kept for legacy callers (scheduled ideation
+ * templates, telegram CLI). Drains the stream and returns the
+ * final result.
+ */
+export async function runIdeation(
+  cwd: string,
+  prompt: string,
+  opts: { helper?: AiHelperOptions; max?: number } = {},
+): Promise<IdeationResult> {
+  const it = streamIdeation(cwd, prompt, opts);
+  while (true) {
+    const next = await it.next();
+    if (next.done) return next.value;
+  }
+}
+
+/* ── Suggestion → plan generator ───────────────────────────────────── */
+
+/**
+ * Stream a detailed plan for an idea the operator picked. Reads the
+ * project's repo so the plan can name real files, modules, and
+ * patterns. Output is a markdown-ish brief that the operator hands
+ * to whichever executor (claude / codex / a different model) they
+ * want — separating the "creative planning" model from the "build
+ * it" model lets the operator use a strong reasoner for spec work
+ * and a fast/cheap model for execution.
+ *
+ * Yields raw text chunks; returns a `{ plan, source }` final value.
+ */
+export interface PlanResult {
+  plan: string;
+  source: "claude" | "fallback-empty" | "fallback-error";
+  error?: string;
+}
+
+export async function* streamSuggestionPlan(
+  cwd: string,
+  brief: string,
+  opts: { helper?: AiHelperOptions; extraInstructions?: string } = {},
+): AsyncGenerator<string, PlanResult, void> {
+  const ask = [
+    `You are writing an implementation plan for the operator's idea.`,
+    `Read the repo (use Read / Glob / Grep) before writing — the plan should name real files, real symbols, and real patterns from this codebase.`,
+    "",
+    `Output a plain-text plan with these sections, each as a small markdown header:`,
+    `## Goal`,
+    `One short paragraph: what we're shipping and why.`,
+    `## Approach`,
+    `Bulleted strategy. Mention specific files, modules, and patterns from the repo.`,
+    `## Changes`,
+    `Concrete file-by-file edits with one-line intent each, in implementation order. Use \`path/to/file.ts\` syntax.`,
+    `## Edge cases`,
+    `Things that could break: backwards-compat, race conditions, invalid input, etc.`,
+    `## Acceptance`,
+    `Checklist of what "done" looks like — tests added, manual verification, type-check, build.`,
+    "",
+    `Style:`,
+    `- Be specific. Vague plans don't survive contact with the codebase.`,
+    `- 250–500 words total. No preamble.`,
+    `- No code blocks unless quoting an exact API shape — the executor model will write the code.`,
+    opts.extraInstructions ? `\nExtra guidance from the operator:\n${opts.extraInstructions}` : "",
+    "",
+    `The operator's idea:`,
+    brief.slice(0, 2000),
+  ].join("\n");
+
+  const argv = buildAiHelperArgv(opts.helper ?? {}, ask, cwd);
+
+  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn({
+      cmd: argv,
+      cwd,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+  } catch (e) {
+    return {
+      plan: "",
+      source: "fallback-error",
+      error: (e as Error).message,
+    };
+  }
+
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let raw = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      raw += chunk;
+      yield chunk;
+    }
+  } catch {
+    // stream cancelled
+  }
+  await proc.exited;
+  const cleaned = raw
+    .trim()
+    .replace(/^```[a-z]*\n?|```$/g, "")
+    .trim();
+  if (!cleaned) return { plan: "", source: "fallback-empty" };
+  return { plan: cleaned, source: "claude" };
+}
+
+/* ── Idea workshop conversation ────────────────────────────────────── */
+
+/**
+ * Stream the agent's reply to a refinement question about an idea.
+ * The agent reads the project repo, sees the idea + prior thread,
+ * and answers concisely. `mode: "challenge"` flips the directive
+ * so the agent self-critiques the idea + plan instead of answering
+ * a question — the operator's "talk it through with itself" tap.
+ */
+export interface IdeaChatTurn {
+  role: "user" | "agent" | "system";
+  content: string;
+}
+
+export interface IdeaChatResult {
+  reply: string;
+  source: "claude" | "fallback-empty" | "fallback-error";
+  error?: string;
+}
+
+export async function* streamIdeaConversation(
+  cwd: string,
+  args: {
+    title: string;
+    description?: string | null;
+    planDraft?: string | null;
+    history: IdeaChatTurn[];
+    userMessage?: string;
+    mode?: "chat" | "challenge";
+    helper?: AiHelperOptions;
+  },
+): AsyncGenerator<string, IdeaChatResult, void> {
+  const mode = args.mode ?? "chat";
+  const directive =
+    mode === "challenge"
+      ? `Challenge this idea. Question its assumptions, point out edge cases or risks, suggest where it might be the wrong scope, and propose 1-2 alternatives if you see better paths. Be candid and specific. Reference real files / patterns from the repo when relevant. Keep it under 250 words.`
+      : `Refine this idea with the operator. Be candid, concise, and specific — reference real files/patterns from the repo when relevant. Question assumptions when you spot them. Don't restate the operator; respond to them. Keep replies under 250 words.`;
+
+  const transcript = args.history
+    .filter((m) => m.role !== "system")
+    .map((m) =>
+      m.role === "user" ? `[operator] ${m.content}` : `[agent] ${m.content}`,
+    )
+    .join("\n\n");
+
+  const idea = [
+    `Title: ${args.title}`,
+    args.description ? `Description:\n${args.description}` : "",
+    args.planDraft ? `Plan draft so far:\n${args.planDraft}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const ask = [
+    `You are the operator's thinking partner for a project idea.`,
+    directive,
+    "",
+    `The idea:`,
+    idea,
+    "",
+    transcript ? `Conversation so far:\n${transcript}` : "",
+    args.userMessage ? `\nOperator's latest message:\n${args.userMessage}` : "",
+    "",
+    `Respond now (no "Agent:" prefix, no preamble).`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const argv = buildAiHelperArgv(args.helper ?? {}, ask, cwd);
+  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn({
+      cmd: argv,
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+  } catch (e) {
+    return { reply: "", source: "fallback-error", error: (e as Error).message };
+  }
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let raw = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      raw += chunk;
+      yield chunk;
+    }
+  } catch {
+    // stream cancelled
+  }
+  await proc.exited;
+  const cleaned = raw
+    .trim()
+    .replace(/^```[a-z]*\n?|```$/g, "")
+    .trim();
+  if (!cleaned) return { reply: "", source: "fallback-empty" };
+  return { reply: cleaned, source: "claude" };
 }
 
 /* ── Suggestion reply router ───────────────────────────────────────── */
@@ -1001,8 +1294,7 @@ export async function interpretSuggestionReply(args: {
     `JSON:`,
   ].join("\n");
 
-  const argv = buildAiHelperArgv(args.helper ?? {});
-  argv.push("-p", ask);
+  const argv = buildAiHelperArgv(args.helper ?? {}, ask);
   let raw = "";
   try {
     const proc = Bun.spawn({
@@ -1183,8 +1475,7 @@ export async function runJudge(
     "",
     sections,
   ].join("\n\n");
-  const argv = buildAiHelperArgv(opts.helper ?? {});
-  argv.push("-p", ask);
+  const argv = buildAiHelperArgv(opts.helper ?? {}, ask);
   try {
     const proc = Bun.spawn({
       cmd: argv,
@@ -1274,8 +1565,7 @@ export async function generateBranchName(
     `Output ONLY the slug (lowercase letters, digits, hyphens). 2-5 words, ` +
     `under 35 characters total. No prefix like "feature/". No quotes, no extra text.\n\n` +
     `Task: ${trimmed.slice(0, 800)}`;
-  const argv = buildAiHelperArgv(opts.helper ?? {});
-  argv.push("-p", ask);
+  const argv = buildAiHelperArgv(opts.helper ?? {}, ask);
   try {
     const proc = Bun.spawn({
       cmd: argv,

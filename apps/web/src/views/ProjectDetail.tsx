@@ -12,6 +12,7 @@ import {
   FileText,
   FolderGit2,
   Hash,
+  Lightbulb,
   Loader2,
   MessageCircle,
   Plus,
@@ -61,6 +62,7 @@ import {
   ChatConnectSheet,
   type ChatPlatform,
 } from "@/components/chat-connect-sheet";
+import { BrainstormHero } from "@/views/ProjectBrainstorm";
 import { useApp, useClient } from "@/AppContext";
 import { useStore } from "@/store";
 import {
@@ -260,11 +262,17 @@ export function ProjectDetail() {
       {/* Two-column body */}
       <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px]">
         <main className="overflow-y-auto px-5 py-5 space-y-5 min-w-0 border-r border-ink-900/[0.06] dark:border-ink-50/[0.06]">
-          <ProjectComposer project={project} />
+          <BrainstormHero
+            projectId={project.id}
+            projectSlug={project.slug}
+            projectName={project.name}
+          />
+          <QuickTaskRow project={project} />
 
           {tasksForProject.length === 0 ? (
-            <div className="rounded-md border border-dashed border-ink-900/15 px-6 py-12 text-center text-[12px] text-ink-500 dark:border-ink-50/15 dark:text-ink-400">
-              No tasks here yet — type a prompt above and hit ⌘↵.
+            <div className="rounded-md border border-dashed border-ink-900/15 px-6 py-10 text-center text-[12px] text-ink-500 dark:border-ink-50/15 dark:text-ink-400">
+              No tasks here yet. Brainstorm above to pick from real ideas, or
+              "+ Quick task" for a one-shot prompt.
             </div>
           ) : (
             <>
@@ -418,12 +426,26 @@ function StatCell({
   );
 }
 
+/* ── Quick-task affordance ──────────────────────────────────────── */
+
+/**
+ * "Spawn a task" surface for one-shot prompts that skip the
+ * brainstorm-and-plan flow. Brainstorm lives on its own page now,
+ * so this composer doesn't fight any other AI input on the project
+ * landing page — it's just the regular composer, inline.
+ */
+function QuickTaskRow({ project }: { project: Project }) {
+  return <ProjectComposer project={project} />;
+}
+
 /* ── Inline composer rooted at this project ────────────────────── */
 
 function ProjectComposer({
   project,
+  onSpawned,
 }: {
   project: { id: string; path: string; name: string };
+  onSpawned?: () => void;
 }) {
   const navigate = useNavigate();
   const create = useCreateTask();
@@ -496,6 +518,7 @@ function ProjectComposer({
         lastBase: base.trim() || "main",
       });
       setPrompt("");
+      onSpawned?.();
       navigate(`/tasks/${res.task.id}`);
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err), true);

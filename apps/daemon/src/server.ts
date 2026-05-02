@@ -21,7 +21,12 @@ import {
   ThinkingLevel,
   MirrorTarget,
   CreateCouncilRequest,
+  IdeaChatRequest,
+  IdeateRequest,
+  PlanSuggestionRequest,
   ResolveSuggestionRequest,
+  SaveIdeaRequest,
+  UpdateIdeaRequest,
   CreateTodoRequest,
   UpdateTodoRequest,
   type WsServerEvent,
@@ -54,6 +59,7 @@ import {
   generateBranchName,
   generateCommitMessage,
   streamCommitMessage,
+  streamSuggestionPlan,
   streamPrMessage,
   getPrState,
   setTaskDiscordThread,
@@ -63,9 +69,22 @@ import {
   createTodo,
   deleteTodo,
   getCouncil,
+  appendIdeaMessage,
+  createSavedIdea,
+  createSuggestion,
+  deleteSavedIdea,
+  getSavedIdea,
   getSuggestion,
   listCouncils,
+  listIdeaMessages,
+  listSavedIdeas,
   listSuggestions,
+  markSavedIdeaSpawned,
+  runIdeation,
+  streamIdeaConversation,
+  streamIdeation,
+  updateSavedIdea,
+  updateSavedIdeaPlan,
   listTodos,
   reopenTask,
   setCouncilWinner,
@@ -1558,8 +1577,18 @@ export function buildServer(opts: BuildServerOptions) {
     const valid = status === "pending" || status === "resolved" || status === "dismissed";
     const limitStr = c.req.query("limit");
     const limit = limitStr ? Math.max(1, Math.min(200, Number(limitStr))) : 50;
+    // Resolve `projectId` either by id or by slug — the project page
+    // and CLI both want to filter by what they have on hand.
+    const projectKey = c.req.query("projectId") ?? c.req.query("project");
+    let projectId: string | null = null;
+    if (projectKey) {
+      const p = getProjectById(db, projectKey) ?? getProjectBySlug(db, projectKey);
+      if (!p) return c.json({ suggestions: [] });
+      projectId = p.id;
+    }
     const list = listSuggestions(db, {
       ...(valid ? { status } : {}),
+      ...(projectId ? { projectId } : {}),
       limit,
     });
     return c.json({ suggestions: list });
@@ -1616,6 +1645,100 @@ export function buildServer(opts: BuildServerOptions) {
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
+  });
+
+  /**
+   * Plan a picked option — runs the planner helper against the
+   * project's repo and streams a markdown spec back. The operator
+   * edits it in the web UI then hands it to whichever executor agent
+   * + model they choose. Same streaming shape as commit/PR helpers:
+   * raw text chunks, then an `\x1e` separator + final JSON metadata.
+   */
+  api.post("/suggestions/:id/plan", async (c) => {
+    const id = c.req.param("id");
+    const sug = getSuggestion(db, id);
+    if (!sug) return c.json({ error: "not found" }, 404);
+    const body = await c.req.json().catch(() => null);
+    const parsed = PlanSuggestionRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid body", issues: parsed.error.issues },
+        400,
+      );
+    }
+    let brief: string;
+    if (typeof parsed.data.index === "number") {
+      const opt = sug.options[parsed.data.index];
+      if (!opt) return c.json({ error: "index out of range" }, 400);
+      brief = opt;
+    } else if (parsed.data.text && parsed.data.text.trim()) {
+      brief = parsed.data.text.trim();
+    } else {
+      return c.json({ error: "provide index or text" }, 400);
+    }
+    const project = sug.projectId
+      ? getProjectById(db, sug.projectId)
+      : null;
+    const repoPath = project?.path;
+    if (!repoPath) {
+      return c.json({ error: "suggestion has no project repo" }, 400);
+    }
+    const cfg = loadConfig(paths.root);
+    const helper = {
+      ...cfg.aiHelpers,
+      ...(parsed.data.agent ? { agent: parsed.data.agent } : {}),
+      ...(parsed.data.model ? { model: parsed.data.model } : {}),
+      ...(parsed.data.effort ? { effort: parsed.data.effort } : {}),
+    };
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const enc = new TextEncoder();
+        try {
+          const it = streamSuggestionPlan(repoPath, brief, {
+            helper,
+            ...(cfg.agentInstructions
+              ? { extraInstructions: cfg.agentInstructions }
+              : {}),
+          });
+          type Final = { plan: string; source: string; error?: string };
+          let result: Final | null = null;
+          while (true) {
+            const next = await it.next();
+            if (next.done) {
+              result = next.value as Final;
+              break;
+            }
+            controller.enqueue(enc.encode(next.value));
+          }
+          controller.enqueue(enc.encode("\x1e"));
+          controller.enqueue(
+            enc.encode(
+              JSON.stringify({
+                source: result?.source ?? "fallback-empty",
+                plan: result?.plan ?? "",
+              }),
+            ),
+          );
+        } catch (e) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              `\x1e${JSON.stringify({
+                source: "fallback-error",
+                error: (e as Error).message,
+              })}`,
+            ),
+          );
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-cache",
+      },
+    });
   });
 
   // ──────────────────────── templates ────────────────────────
@@ -2370,6 +2493,466 @@ export function buildServer(opts: BuildServerOptions) {
     deleteProject(db, project.id);
     pubProjectRemoved(project.id);
     return c.json({ ok: true });
+  });
+
+  /**
+   * Idea Factory — on-demand brainstorm. Runs the Claude ideation
+   * helper synchronously against the project's repo path, persists a
+   * project-scoped Suggestion, and broadcasts `suggestion_created`
+   * so every connected surface (web, telegram, discord) lights up.
+   *
+   * Long-running by nature (~10–30s for the helper to come back). The
+   * caller shows a spinner; the daemon's `idleTimeout` is generous
+   * enough that this fits comfortably.
+   */
+  api.post("/projects/:idOrSlug/ideate", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const body = await c.req.json().catch(() => null);
+    const parsed = IdeateRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid body", issues: parsed.error.issues },
+        400,
+      );
+    }
+    const cfg = loadConfig(paths.root);
+    const helper = {
+      ...cfg.aiHelpers,
+      ...(parsed.data.agent ? { agent: parsed.data.agent } : {}),
+      ...(parsed.data.model ? { model: parsed.data.model } : {}),
+      ...(parsed.data.effort ? { effort: parsed.data.effort } : {}),
+    };
+    const result = await runIdeation(project.path, parsed.data.prompt, {
+      helper,
+      max: parsed.data.max,
+    });
+    if (result.options.length === 0) {
+      return c.json(
+        {
+          ok: false,
+          source: result.source,
+          error:
+            result.error ??
+            "the helper returned no options — try a sharper brief",
+        },
+        200,
+      );
+    }
+    const title =
+      parsed.data.title?.trim() ||
+      parsed.data.prompt.replace(/\s+/g, " ").trim().slice(0, 60);
+    const sug = createSuggestion(db, {
+      templateId: null,
+      projectId: project.id,
+      title,
+      prompt: parsed.data.prompt,
+      options: result.options,
+    });
+    bus.publishSystem({ kind: "suggestion_created", suggestion: sug });
+    return c.json({ ok: true, suggestion: sug });
+  });
+
+  /**
+   * Streaming brainstorm — same helper as `/ideate` but yields each
+   * option line as it lands so the UI ticks them in one-by-one with
+   * a fade-in. Drives the agentic look on the project page.
+   *
+   * Wire shape: each option arrives as `\x1f<text>\n`, then a final
+   * `\x1e<JSON>` envelope contains the persisted suggestion.
+   */
+  api.post("/projects/:idOrSlug/ideate/stream", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const body = await c.req.json().catch(() => null);
+    const parsed = IdeateRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid body", issues: parsed.error.issues },
+        400,
+      );
+    }
+    const cfg = loadConfig(paths.root);
+    const helper = {
+      ...cfg.aiHelpers,
+      ...(parsed.data.agent ? { agent: parsed.data.agent } : {}),
+      ...(parsed.data.model ? { model: parsed.data.model } : {}),
+      ...(parsed.data.effort ? { effort: parsed.data.effort } : {}),
+    };
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const enc = new TextEncoder();
+        const collected: string[] = [];
+        try {
+          const it = streamIdeation(project.path, parsed.data.prompt, {
+            helper,
+            ...(parsed.data.max != null ? { max: parsed.data.max } : {}),
+          });
+          while (true) {
+            const next = await it.next();
+            if (next.done) {
+              const result = next.value;
+              if (collected.length === 0 && result.options.length === 0) {
+                controller.enqueue(
+                  enc.encode(
+                    `\x1e${JSON.stringify({
+                      ok: false,
+                      source: result.source,
+                      error: result.error ?? "the helper returned no options — try a sharper brief",
+                    })}`,
+                  ),
+                );
+              } else {
+                const title =
+                  parsed.data.title?.trim() ||
+                  parsed.data.prompt
+                    .replace(/\s+/g, " ")
+                    .trim()
+                    .slice(0, 60);
+                const sug = createSuggestion(db, {
+                  templateId: null,
+                  projectId: project.id,
+                  title,
+                  prompt: parsed.data.prompt,
+                  options: collected,
+                });
+                bus.publishSystem({
+                  kind: "suggestion_created",
+                  suggestion: sug,
+                });
+                controller.enqueue(
+                  enc.encode(
+                    `\x1e${JSON.stringify({
+                      ok: true,
+                      suggestion: sug,
+                      source: result.source,
+                    })}`,
+                  ),
+                );
+              }
+              break;
+            }
+            collected.push(next.value);
+            // \x1f (unit separator) prefixes each streamed option so the
+            // client can split cleanly. A bare newline could collide
+            // with newlines inside the option text in theory.
+            controller.enqueue(enc.encode(`\x1f${next.value}\n`));
+          }
+        } catch (e) {
+          controller.enqueue(
+            enc.encode(
+              `\x1e${JSON.stringify({
+                ok: false,
+                source: "fallback-error",
+                error: (e as Error).message,
+              })}`,
+            ),
+          );
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-cache",
+      },
+    });
+  });
+
+  /**
+   * Saved ideas — the per-project shortlist the operator curates from
+   * brainstorm options. Independent of suggestion lifecycle.
+   */
+  api.get("/projects/:idOrSlug/saved-ideas", (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const includeSpawned = c.req.query("includeSpawned") === "1";
+    const statusParam = c.req.query("status");
+    const statuses = statusParam
+      ? statusParam
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) =>
+            ["draft", "refining", "validated", "spawned", "archived"].includes(s),
+          )
+      : undefined;
+    const ideas = listSavedIdeas(db, {
+      projectId: project.id,
+      includeSpawned,
+      ...(statuses && statuses.length > 0
+        ? { statuses: statuses as import("@agentd/contracts").IdeaStatus[] }
+        : {}),
+    });
+    return c.json({ ideas });
+  });
+
+  api.post("/projects/:idOrSlug/saved-ideas", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const body = await c.req.json().catch(() => null);
+    const parsed = SaveIdeaRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid body", issues: parsed.error.issues },
+        400,
+      );
+    }
+    const idea = createSavedIdea(db, {
+      projectId: project.id,
+      text: parsed.data.text.trim(),
+      ...(parsed.data.description != null
+        ? { description: parsed.data.description }
+        : {}),
+      ...(parsed.data.status ? { status: parsed.data.status } : {}),
+      ...(parsed.data.tags ? { tags: parsed.data.tags } : {}),
+      ...(parsed.data.suggestionId
+        ? { suggestionId: parsed.data.suggestionId }
+        : {}),
+      ...(parsed.data.optionIndex != null
+        ? { optionIndex: parsed.data.optionIndex }
+        : {}),
+      ...(parsed.data.planDraft != null
+        ? { planDraft: parsed.data.planDraft }
+        : {}),
+    });
+    return c.json({ idea });
+  });
+
+  /**
+   * One idea + its full conversation thread. Used by the workshop
+   * panel when the operator opens an idea card.
+   */
+  api.get("/saved-ideas/:id", (c) => {
+    const id = c.req.param("id");
+    const idea = getSavedIdea(db, id);
+    if (!idea) return c.json({ error: "not found" }, 404);
+    const messages = listIdeaMessages(db, id);
+    return c.json({ idea, messages });
+  });
+
+  api.patch("/saved-ideas/:id", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => null);
+    const parsed = UpdateIdeaRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid body", issues: parsed.error.issues },
+        400,
+      );
+    }
+    const updated = updateSavedIdea(db, id, parsed.data);
+    if (!updated) return c.json({ error: "not found" }, 404);
+    return c.json({ idea: updated });
+  });
+
+  api.get("/saved-ideas/:id/messages", (c) => {
+    const id = c.req.param("id");
+    const idea = getSavedIdea(db, id);
+    if (!idea) return c.json({ error: "not found" }, 404);
+    return c.json({ messages: listIdeaMessages(db, id) });
+  });
+
+  /**
+   * Workshop chat — operator asks a question (or taps "challenge"
+   * for the agent to self-critique), the helper streams a reply
+   * that lands as an `agent` message at the end of the thread. The
+   * idea's status auto-advances from `draft` → `refining` on first
+   * message.
+   *
+   * Wire shape: raw text chunks, then `\x1e<JSON>` envelope with
+   * `{ ok, message, ideaStatus }`.
+   */
+  api.post("/saved-ideas/:id/chat/stream", async (c) => {
+    const id = c.req.param("id");
+    const idea = getSavedIdea(db, id);
+    if (!idea) return c.json({ error: "not found" }, 404);
+    const project = getProjectById(db, idea.projectId);
+    if (!project) return c.json({ error: "project gone" }, 400);
+    const body = await c.req.json().catch(() => null);
+    const parsed = IdeaChatRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid body", issues: parsed.error.issues },
+        400,
+      );
+    }
+    const mode = parsed.data.mode ?? "chat";
+    const userMessage = (parsed.data.text ?? "").trim();
+    if (mode === "chat" && !userMessage) {
+      return c.json({ error: "text required for chat mode" }, 400);
+    }
+    // Persist the operator's turn before spawning the helper so the
+    // thread always reflects truth even if the helper never responds.
+    if (mode === "chat" && userMessage) {
+      appendIdeaMessage(db, {
+        ideaId: id,
+        role: "user",
+        content: userMessage,
+      });
+    } else if (mode === "challenge") {
+      appendIdeaMessage(db, {
+        ideaId: id,
+        role: "system",
+        content: "Operator asked the agent to challenge the idea.",
+      });
+    }
+    const cfg = loadConfig(paths.root);
+    const helper = {
+      ...cfg.aiHelpers,
+      ...(parsed.data.agent ? { agent: parsed.data.agent } : {}),
+      ...(parsed.data.model ? { model: parsed.data.model } : {}),
+      ...(parsed.data.effort ? { effort: parsed.data.effort } : {}),
+    };
+    const history = listIdeaMessages(db, id).map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const enc = new TextEncoder();
+        let raw = "";
+        try {
+          const it = streamIdeaConversation(project.path, {
+            title: idea.text,
+            description: idea.description,
+            planDraft: idea.planDraft,
+            history,
+            ...(userMessage ? { userMessage } : {}),
+            mode,
+            helper,
+          });
+          while (true) {
+            const next = await it.next();
+            if (next.done) {
+              const result = next.value;
+              if (!result.reply) {
+                controller.enqueue(
+                  enc.encode(
+                    `\x1e${JSON.stringify({
+                      ok: false,
+                      source: result.source,
+                      error: result.error ?? "the helper returned nothing",
+                    })}`,
+                  ),
+                );
+              } else {
+                const persisted = appendIdeaMessage(db, {
+                  ideaId: id,
+                  role: "agent",
+                  content: result.reply,
+                });
+                // First conversation turn promotes draft → refining.
+                let nextStatus = idea.status;
+                if (idea.status === "draft") {
+                  const promoted = updateSavedIdea(db, id, {
+                    status: "refining",
+                  });
+                  if (promoted) nextStatus = promoted.status;
+                }
+                controller.enqueue(
+                  enc.encode(
+                    `\x1e${JSON.stringify({
+                      ok: true,
+                      message: persisted,
+                      ideaStatus: nextStatus,
+                    })}`,
+                  ),
+                );
+              }
+              break;
+            }
+            raw += next.value;
+            controller.enqueue(enc.encode(next.value));
+          }
+        } catch (e) {
+          controller.enqueue(
+            enc.encode(
+              `\x1e${JSON.stringify({
+                ok: false,
+                source: "fallback-error",
+                error: (e as Error).message,
+              })}`,
+            ),
+          );
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-cache",
+      },
+    });
+  });
+
+  api.delete("/saved-ideas/:id", (c) => {
+    const id = c.req.param("id");
+    const idea = getSavedIdea(db, id);
+    if (!idea) return c.json({ error: "not found" }, 404);
+    deleteSavedIdea(db, id);
+    return c.json({ ok: true });
+  });
+
+  api.put("/saved-ideas/:id/plan", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => null)) as {
+      planDraft?: string | null;
+    } | null;
+    const updated = updateSavedIdeaPlan(db, id, body?.planDraft ?? null);
+    if (!updated) return c.json({ error: "not found" }, 404);
+    return c.json({ idea: updated });
+  });
+
+  /**
+   * Spawn a real task from a saved idea. Same machinery as the
+   * suggestion resolve path — accepts the full executor knob set.
+   */
+  api.post("/saved-ideas/:id/spawn", async (c) => {
+    const id = c.req.param("id");
+    const idea = getSavedIdea(db, id);
+    if (!idea) return c.json({ error: "not found" }, 404);
+    const project = getProjectById(db, idea.projectId);
+    if (!project) return c.json({ error: "project gone" }, 400);
+    const body = (await c.req.json().catch(() => null)) as {
+      prompt?: string;
+      agent?: import("@agentd/contracts").AgentKind;
+      model?: string;
+      thinkingLevel?: import("@agentd/contracts").ThinkingLevel;
+      permissionMode?: import("@agentd/contracts").PermissionMode;
+      title?: string;
+    } | null;
+    const promptText = (body?.prompt?.trim() || idea.planDraft?.trim() || idea.text);
+    try {
+      const task = await tasks.create({
+        agent: body?.agent ?? "claude",
+        repoPath: project.path,
+        prompt: promptText,
+        title:
+          body?.title?.trim() || idea.text.split("\n")[0]!.slice(0, 80),
+        ...(body?.model ? { model: body.model } : {}),
+        ...(body?.thinkingLevel ? { thinkingLevel: body.thinkingLevel } : {}),
+        ...(body?.permissionMode
+          ? { permissionMode: body.permissionMode }
+          : {}),
+      });
+      const updated = markSavedIdeaSpawned(db, id, task.id) ?? idea;
+      pubTaskChanged(task.id);
+      return c.json({ idea: updated, task });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
   });
 
   // Branch list for the spawn picker. Local branches plus remote tracking

@@ -25,6 +25,11 @@ export const qk = {
   project: (idOrSlug: string) => ["project", idOrSlug] as const,
   bridgeSummary: () => ["bridge-summary"] as const,
   discordChannels: () => ["discord-channels"] as const,
+  projectSuggestions: (projectId: string) =>
+    ["project-suggestions", projectId] as const,
+  savedIdeas: (projectIdOrSlug: string) =>
+    ["saved-ideas", projectIdOrSlug] as const,
+  idea: (id: string) => ["idea", id] as const,
 };
 
 export function useProjects() {
@@ -532,6 +537,167 @@ export function useBridgeSummary(refetchInterval = 6000) {
     queryFn: () => client.getBridgeSummary(),
     staleTime: 5_000,
     refetchInterval,
+  });
+}
+
+/**
+ * Project-scoped suggestions list — feeds the Idea Factory inbox.
+ * The realtime bus invalidates this on `suggestion_created` /
+ * `suggestion_updated` so picks/dismisses from chat or CLI show up
+ * here without polling.
+ */
+export function useProjectSuggestions(projectId: string | null | undefined) {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.projectSuggestions(projectId ?? "_none"),
+    queryFn: () => client.listSuggestions({ projectId: projectId! }),
+    enabled: !!projectId,
+    staleTime: 30_000,
+  });
+}
+
+export function useIdeateForProject() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      idOrSlug,
+      ...body
+    }: {
+      idOrSlug: string;
+    } & Parameters<AgentdClient["ideateForProject"]>[1]) =>
+      client.ideateForProject(idOrSlug, body),
+    onSuccess: (_data, vars) => {
+      // The new suggestion lands via the realtime bus too, but we
+      // also invalidate so a slow WS doesn't leave the panel stale.
+      void qc.invalidateQueries({
+        queryKey: qk.projectSuggestions(vars.idOrSlug),
+      });
+    },
+  });
+}
+
+export function useResolveSuggestion() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      pick,
+    }: {
+      id: string;
+      pick: Parameters<AgentdClient["resolveSuggestion"]>[1];
+    }) => client.resolveSuggestion(id, pick),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["project-suggestions"] });
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+    },
+  });
+}
+
+export function useDismissSuggestion() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => client.dismissSuggestion(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["project-suggestions"] });
+    },
+  });
+}
+
+export function useSavedIdeas(
+  projectSlugOrId: string | null | undefined,
+  opts?: { statuses?: import("@agentd/contracts").IdeaStatus[] },
+) {
+  const client = useClient();
+  const statusKey = opts?.statuses ? opts.statuses.join(",") : "all";
+  return useQuery({
+    queryKey: [
+      ...qk.savedIdeas(projectSlugOrId ?? "_none"),
+      statusKey,
+    ] as const,
+    queryFn: () =>
+      client.listSavedIdeas(projectSlugOrId!, {
+        ...(opts?.statuses ? { statuses: opts.statuses } : {}),
+        includeSpawned: true,
+      }),
+    enabled: !!projectSlugOrId,
+    staleTime: 15_000,
+  });
+}
+
+export function useIdea(id: string | null | undefined) {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.idea(id ?? "_none"),
+    queryFn: () => client.getIdea(id!),
+    enabled: !!id,
+    staleTime: 5_000,
+  });
+}
+
+export function useUpdateIdea() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      ...patch
+    }: { id: string } & Parameters<AgentdClient["updateIdea"]>[1]) =>
+      client.updateIdea(id, patch),
+    onSuccess: (_data, vars) => {
+      void qc.invalidateQueries({ queryKey: qk.idea(vars.id) });
+      void qc.invalidateQueries({ queryKey: ["saved-ideas"] });
+    },
+  });
+}
+
+export function useSaveIdea() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      projectSlug,
+      ...body
+    }: {
+      projectSlug: string;
+    } & Parameters<AgentdClient["createSavedIdea"]>[1]) =>
+      client.createSavedIdea(projectSlug, body),
+    onSuccess: (_data, vars) => {
+      void qc.invalidateQueries({
+        queryKey: qk.savedIdeas(vars.projectSlug),
+      });
+    },
+  });
+}
+
+export function useDeleteSavedIdea() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => client.deleteSavedIdea(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["saved-ideas"] });
+    },
+  });
+}
+
+export function useSpawnFromSavedIdea() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      ...body
+    }: {
+      id: string;
+    } & Parameters<AgentdClient["spawnFromSavedIdea"]>[1]) =>
+      client.spawnFromSavedIdea(id, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["saved-ideas"] });
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+    },
   });
 }
 

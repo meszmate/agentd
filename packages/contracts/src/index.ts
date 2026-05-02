@@ -208,6 +208,14 @@ export const Task = z.object({
    * the parent channel, and it auto-archives when the task closes.
    */
   discordThreadId: z.string().nullable().optional(),
+  /**
+   * What this task is for. Default `work` — the agent edits files,
+   * commits, opens PRs. `ideation` — the agent runs read-only,
+   * brainstorms ideas for the parent project, and emits one
+   * `agentd-share` event per idea. The daemon auto-saves shared
+   * ideas into the project's Idea Library.
+   */
+  kind: z.enum(["work", "ideation"]).optional(),
 });
 export type Task = z.infer<typeof Task>;
 
@@ -442,6 +450,113 @@ export const SuggestionStatus = z.enum([
 ]);
 export type SuggestionStatus = z.infer<typeof SuggestionStatus>;
 
+/**
+ * Workflow status of an idea in the project library.
+ *   draft     — just brainstormed or hand-added; not yet refined.
+ *   refining  — operator/agent are conversing about it.
+ *   validated — operator decided this one's worth shipping.
+ *   spawned   — a real task fired from this idea.
+ *   archived  — rejected / superseded.
+ */
+export const IdeaStatus = z.enum([
+  "draft",
+  "refining",
+  "validated",
+  "spawned",
+  "archived",
+]);
+export type IdeaStatus = z.infer<typeof IdeaStatus>;
+
+/**
+ * First-class project-scoped idea. Has a workflow status, optional
+ * extended description, tags, optional plan draft, and an attached
+ * conversation thread (`IdeaMessage[]`) where the operator and the
+ * agent can refine the idea before it turns into a task.
+ *
+ * Brainstorm options become draft ideas via the Save action; the
+ * operator can also create freeform ideas by hand.
+ *
+ * The wire type was previously called `SavedIdea` — kept as an
+ * alias for backwards compatibility with older clients.
+ */
+export const Idea = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  suggestionId: z.string().nullable(),
+  /** Index in the parent Suggestion's options[] when applicable. */
+  optionIndex: z.number().int().nullable(),
+  /** One-line title — the searchable, sortable headline. */
+  text: z.string(),
+  /** Longer body. Falls back to `text` for the description preview. */
+  description: z.string().nullable(),
+  status: IdeaStatus,
+  /** Operator-attached tags. */
+  tags: z.array(z.string()),
+  /** Plan draft the operator stashed alongside the idea. */
+  planDraft: z.string().nullable(),
+  savedAt: z.number(),
+  updatedAt: z.number(),
+  spawnedTaskId: z.string().nullable(),
+  spawnedAt: z.number().nullable(),
+  /** Convenience count for list views — populated by the daemon. */
+  messageCount: z.number().int().optional(),
+  /** Wall-clock of the last message in this idea's thread. */
+  lastMessageAt: z.number().nullable().optional(),
+});
+export type Idea = z.infer<typeof Idea>;
+export const SavedIdea = Idea;
+export type SavedIdea = Idea;
+
+export const SaveIdeaRequest = z.object({
+  text: z.string().min(1),
+  description: z.string().optional(),
+  status: IdeaStatus.optional(),
+  tags: z.array(z.string()).optional(),
+  suggestionId: z.string().optional(),
+  optionIndex: z.number().int().min(0).optional(),
+  planDraft: z.string().optional(),
+});
+export type SaveIdeaRequest = z.infer<typeof SaveIdeaRequest>;
+
+export const UpdateIdeaRequest = z.object({
+  text: z.string().min(1).optional(),
+  description: z.string().nullable().optional(),
+  status: IdeaStatus.optional(),
+  tags: z.array(z.string()).optional(),
+  planDraft: z.string().nullable().optional(),
+});
+export type UpdateIdeaRequest = z.infer<typeof UpdateIdeaRequest>;
+
+/**
+ * One message in an idea's refinement conversation. The thread is
+ * append-only; both operator turns and agent turns are persisted so
+ * the conversation survives a reload. `system` messages capture
+ * inline events (status changes, plan stashed) for context.
+ */
+export const IdeaMessage = z.object({
+  id: z.string(),
+  ideaId: z.string(),
+  role: z.enum(["user", "agent", "system"]),
+  content: z.string(),
+  createdAt: z.number(),
+});
+export type IdeaMessage = z.infer<typeof IdeaMessage>;
+
+/**
+ * Body for `POST /api/ideas/:id/messages/stream`. The "challenge"
+ * mode prompts the agent to self-critique the current idea + plan
+ * instead of answering a question — gives operators a one-tap
+ * "talk it through with itself" affordance.
+ */
+export const IdeaChatRequest = z.object({
+  text: z.string().optional(),
+  mode: z.enum(["chat", "challenge"]).optional(),
+  agent: AgentKind.optional(),
+  model: z.string().optional(),
+  effort: ThinkingLevel.optional(),
+});
+export type IdeaChatRequest = z.infer<typeof IdeaChatRequest>;
+
 export const Suggestion = z.object({
   id: z.string(),
   templateId: z.string().nullable(),
@@ -512,8 +627,72 @@ export const ResolveSuggestionRequest = z.object({
   index: z.number().int().min(0).optional(),
   /** Free-form prompt that overrides the option list. */
   text: z.string().optional(),
+  /**
+   * Executor knobs — let the operator pick which model / agent
+   * actually runs the resulting task. Defaults to claude when omitted.
+   * Lets them brainstorm with one model and ship with another (e.g.
+   * "plan with opus, execute with codex").
+   */
+  agent: AgentKind.optional(),
+  model: z.string().optional(),
+  thinkingLevel: ThinkingLevel.optional(),
+  permissionMode: PermissionMode.optional(),
+  workspaceMode: WorkspaceMode.optional(),
+  branchMode: BranchMode.optional(),
+  branchName: z.string().optional(),
+  pullLatest: z.boolean().optional(),
+  /** Optional title override for the spawned task. */
+  title: z.string().optional(),
 });
 export type ResolveSuggestionRequest = z.infer<typeof ResolveSuggestionRequest>;
+
+/**
+ * Body for `POST /api/suggestions/:id/plan` — runs a Claude planner
+ * helper that turns the picked option (or custom direction) into a
+ * detailed implementation spec the operator can edit, then hands to
+ * the executor agent. Streamed text/plain like the commit/PR helpers.
+ */
+export const PlanSuggestionRequest = z.object({
+  index: z.number().int().min(0).optional(),
+  text: z.string().optional(),
+  /** Which CLI drafts the plan (claude or codex). Defaults to claude. */
+  agent: AgentKind.optional(),
+  /** Override which model drafts the plan. Empty = agent CLI default. */
+  model: z.string().optional(),
+  /** Override planner thinking effort. Empty = config default. */
+  effort: ThinkingLevel.optional(),
+});
+export type PlanSuggestionRequest = z.infer<typeof PlanSuggestionRequest>;
+
+/**
+ * Body for `POST /api/projects/:idOrSlug/ideate` — the on-demand
+ * "brainstorm" entry point on the project Idea Factory. Runs the
+ * Claude ideation helper against the project's repo and persists a
+ * Suggestion the operator can pick from.
+ */
+export const IdeateRequest = z.object({
+  /** What to brainstorm — e.g. "next high-value features" or "tests we're missing". */
+  prompt: z.string().min(3),
+  /** How many options to ask the AI for (clamped 2..9, default 5). */
+  max: z.number().int().min(2).max(9).optional(),
+  /** Optional title override; defaults to the first 60 chars of the prompt. */
+  title: z.string().optional(),
+  /**
+   * Which CLI to drive the brainstorm helper through. Defaults to
+   * `claude`. Lets the operator brainstorm with codex too.
+   */
+  agent: AgentKind.optional(),
+  /**
+   * Override which model the helper uses for brainstorming — picks
+   * from the chosen agent's registry (claude: opus / sonnet / haiku;
+   * codex: whatever `~/.codex/models_cache.json` reports). Empty =
+   * agent's CLI default. No version-pinned strings live here.
+   */
+  model: z.string().optional(),
+  /** Override the thinking effort for the helper. Empty = inherit. */
+  effort: ThinkingLevel.optional(),
+});
+export type IdeateRequest = z.infer<typeof IdeateRequest>;
 
 export const RunTemplateRequest = z.object({
   args: z.record(z.string(), z.string()).default({}),

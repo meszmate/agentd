@@ -299,6 +299,17 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           });
           return;
         }
+        if (
+          msg.type === "suggestion_created" ||
+          msg.type === "suggestion_updated"
+        ) {
+          // Refresh whichever project's idea factory just got new
+          // input. We use a broad invalidation since one project's
+          // panel might be open while a different surface (chat) is
+          // resolving an older suggestion at the same time.
+          void qc.invalidateQueries({ queryKey: ["project-suggestions"] });
+          return;
+        }
         if (msg.type === "plugin_delivery") {
           // Refresh the bridge summary so per-project counters tick up
           // live without polling. Cheap — single endpoint.

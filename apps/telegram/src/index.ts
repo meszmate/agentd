@@ -663,20 +663,51 @@ async function main() {
       ]
         .filter((s) => s.length > 0)
         .join("\n");
-      // Suggestions broadcast as DMs to every allowlisted user.
-      const targets = new Set<number>([...cfg.allowedUserIds]);
-      for (const chatId of targets) {
+
+      // If the suggestion is project-scoped and the project has its
+      // own Telegram bot configured, route it ONLY through that bot
+      // — operators chose to silo per-project notifications when
+      // they set those fields. Otherwise fall back to the global
+      // broadcast across allowlisted users.
+      let projectBot: Bot | null = null;
+      let projectChatId: number | null = null;
+      if (sug.projectId) {
         try {
-          const sent = await bot.api.sendMessage(chatId, body, {
+          const { project } = await client.getProject(sug.projectId);
+          if (project.telegramBotToken && project.telegramChatId) {
+            projectBot = getProjectBot(project.telegramBotToken);
+            const id = Number(project.telegramChatId);
+            if (Number.isFinite(id)) projectChatId = id;
+          }
+        } catch {
+          // project gone — fall through to global
+        }
+      }
+
+      const sendOne = async (
+        chatId: number,
+        sender: Bot,
+      ): Promise<void> => {
+        try {
+          const sent = await sender.api.sendMessage(chatId, body, {
             parse_mode: "MarkdownV2",
           });
           suggestionReplyMap.set(replyKey(chatId, sent.message_id), sug.id);
           lastSuggestionByChat.set(chatId, sug.id);
+          void client
+            .reportDelivery(sug.projectId ?? null, "telegram")
+            .catch(() => {});
         } catch (e) {
-          console.error(
-            "suggestion notify failed:",
-            (e as Error).message,
-          );
+          console.error("suggestion notify failed:", (e as Error).message);
+        }
+      };
+
+      if (projectBot && projectChatId != null) {
+        await sendOne(projectChatId, projectBot);
+      } else {
+        // Suggestions broadcast as DMs to every allowlisted user.
+        for (const chatId of cfg.allowedUserIds) {
+          await sendOne(chatId, bot);
         }
       }
       return;

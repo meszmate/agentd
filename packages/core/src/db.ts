@@ -57,6 +57,64 @@ export const tasks = sqliteTable("tasks", {
   discordThreadId: text("discord_thread_id"),
 });
 
+/**
+ * Project-scoped idea library. An idea is a first-class object with
+ * a lifecycle (draft → refining → validated → spawned/archived) and
+ * its own conversation thread (`ideaMessages` table) where the
+ * operator and the agent can question and refine the idea before it
+ * turns into a real task. Brainstorm options auto-create draft
+ * ideas; the operator can also create freeform ideas by hand.
+ *
+ * Table name is `saved_ideas` for migration compatibility — the
+ * column has been growing in place since v1.
+ */
+export const savedIdeas = sqliteTable("saved_ideas", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  /** Suggestion the idea was starred from, when applicable. */
+  suggestionId: text("suggestion_id"),
+  /** Index inside the parent suggestion's options[]. NULL when freeform. */
+  optionIndex: integer("option_index"),
+  /** One-line title — the searchable, sortable headline. */
+  text: text("text").notNull(),
+  /**
+   * Longer body the operator (or agent) refined. Optional. When
+   * empty, the workshop falls back to `text` as the description.
+   */
+  description: text("description"),
+  /**
+   * Workflow status. `draft` is the default for brand-new ideas,
+   * `refining` once a conversation has started, `validated` when the
+   * operator has decided to ship it, `spawned` after a task fires,
+   * and `archived` for rejected / superseded ideas.
+   */
+  status: text("status").notNull().default("draft"),
+  /** Comma-separated tag list — kept simple to avoid a join table. */
+  tagsCsv: text("tags_csv"),
+  /** Optional pre-generated plan blob the operator hand-edited and stashed. */
+  planDraft: text("plan_draft"),
+  savedAt: integer("saved_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  /** Filled when the operator finally spawned a task from this idea. */
+  spawnedTaskId: text("spawned_task_id"),
+  spawnedAt: integer("spawned_at"),
+});
+
+/**
+ * One message in an idea's conversation thread. Conversational
+ * refinement: the operator asks questions ("what's the risk here?",
+ * "compare this to X"), the agent answers (streamed, repo-aware),
+ * the agent can also self-critique on demand. Messages are append-
+ * only and ordered by createdAt.
+ */
+export const ideaMessages = sqliteTable("idea_messages", {
+  id: text("id").primaryKey(),
+  ideaId: text("idea_id").notNull(),
+  role: text("role").notNull(), // "user" | "agent" | "system"
+  content: text("content").notNull(),
+  createdAt: integer("created_at").notNull(),
+});
+
 export const todos = sqliteTable("todos", {
   id: text("id").primaryKey(),
   projectId: text("project_id"),
@@ -304,6 +362,30 @@ CREATE TABLE IF NOT EXISTS suggestions (
   spawned_task_id TEXT
 );
 
+CREATE TABLE IF NOT EXISTS saved_ideas (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  suggestion_id TEXT,
+  option_index INTEGER,
+  text TEXT NOT NULL,
+  description TEXT,
+  status TEXT NOT NULL DEFAULT 'draft',
+  tags_csv TEXT,
+  plan_draft TEXT,
+  saved_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  spawned_task_id TEXT,
+  spawned_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS idea_messages (
+  id TEXT PRIMARY KEY,
+  idea_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS templates (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
@@ -424,6 +506,10 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE projects ADD COLUMN discord_channel_id TEXT",
   "ALTER TABLE projects ADD COLUMN auto_task_thread INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE tasks ADD COLUMN discord_thread_id TEXT",
+  "ALTER TABLE saved_ideas ADD COLUMN description TEXT",
+  "ALTER TABLE saved_ideas ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'",
+  "ALTER TABLE saved_ideas ADD COLUMN tags_csv TEXT",
+  "ALTER TABLE saved_ideas ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
 ];
 
 function migrate(sqlite: Database): void {
