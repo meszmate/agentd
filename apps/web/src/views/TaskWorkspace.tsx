@@ -105,7 +105,7 @@ export function TaskWorkspace({
         </div>
 
         <TabsContent value="todos" className="flex-1 min-h-0 mt-0 overflow-hidden">
-          <TodosPanel taskId={task.id} compact />
+          <TodosPanel taskId={task.id} />
         </TabsContent>
         <TabsContent value="files" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskFiles taskId={task.id} onError={onError} />

@@ -286,6 +286,17 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         if (msg.event.kind === "todos_updated") {
           void qc.invalidateQueries({ queryKey: ["todos"] });
         }
+        // Clear / refresh the queue chips immediately on turn boundary
+        // events. Without this the chip lingers up to ~2s after the
+        // agent finishes, which makes the steer flow feel stale.
+        if (
+          msg.event.kind === "status" ||
+          msg.event.kind === "exit"
+        ) {
+          void qc.invalidateQueries({
+            queryKey: ["task-steer", msg.taskId],
+          });
+        }
       });
       ws.addEventListener("open", () => {
         console.log("[rt] WS open");

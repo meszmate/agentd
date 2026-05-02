@@ -388,6 +388,29 @@ export function buildServer(opts: BuildServerOptions) {
     return c.json({ queue });
   });
 
+  /**
+   * Fire a queued line — the per-row "Steer" action. Pulls the item
+   * from the queue, persists it as a user message, and feeds it to
+   * the runner (stdin for claude, SIGINT-respawn for codex). Body:
+   * { index }.
+   */
+  api.post("/tasks/:id/steer/fire", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => null)) as {
+      index?: number;
+    } | null;
+    const index = Number(body?.index);
+    if (!Number.isFinite(index)) {
+      return c.json({ error: "index required" }, 400);
+    }
+    try {
+      const queue = await tasks.fireQueued(id, index);
+      return c.json({ queue });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
   api.delete("/tasks/:id", async (c) => {
     const id = c.req.param("id");
     await tasks.remove(id);

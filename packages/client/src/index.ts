@@ -374,6 +374,21 @@ export class AgentdClient {
     });
   }
 
+  /**
+   * Fire a queued steer line — sends it to the agent now (stdin for
+   * claude long-lived, SIGINT-respawn for codex). The item is also
+   * persisted as a regular user message so it appears in the chat.
+   */
+  async fireQueuedSteer(
+    id: string,
+    index: number,
+  ): Promise<{ queue: string[] }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/steer/fire`, {
+      method: "POST",
+      body: JSON.stringify({ index }),
+    });
+  }
+
   async checkPrState(
     id: string,
     autoClose = false,

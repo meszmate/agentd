@@ -1,9 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Bot,
   Check,
-  ChevronDown,
-  Circle,
   Loader2,
   Plus,
   Trash2,
@@ -16,31 +14,29 @@ import {
   useTodos,
   useUpdateTodo,
 } from "@/queries";
-import { cn } from "@/lib/utils";
+import { cn, formatTs, formatTsAbsolute } from "@/lib/utils";
 
 /**
- * Reusable todos panel — works task- or project-scoped via the
- * `taskId` / `projectId` props. Visually sectioned by status so the
- * eye lands on what's *active* first; done/cancelled rows fold into
- * a collapsed history pane the operator can pop open.
+ * Todos rendered as a vertical timeline of work — completed entries
+ * at the top with their completion time, the current in-progress
+ * item highlighted in the middle, and pending items at the bottom in
+ * plan order. A continuous spine connects them so the eye reads the
+ * panel as a story: "this happened, this is happening, this is next."
  *
- * Agent-source rows (the agent's TodoWrite plan, mirrored via
- * `syncAgentPlan` server-side) wear a small bot glyph so the
- * operator can tell theirs apart from the agent's at a glance.
+ * Agent-source rows (mirrored from the runner's TodoWrite plan via
+ * `syncAgentPlan`) wear a small bot glyph so the operator can tell
+ * theirs apart from manual additions at a glance.
  */
 export function TodosPanel({
   projectId,
   taskId,
-  title = "Todos",
+  title = "Timeline",
   emptyHint,
-  compact = false,
 }: {
   projectId?: string;
   taskId?: string;
   title?: string;
   emptyHint?: string;
-  /** Tighter spacing — used for the right-side task sidebar. */
-  compact?: boolean;
 }) {
   const scope: { projectId?: string; taskId?: string } = {};
   if (projectId !== undefined) scope.projectId = projectId;
@@ -53,26 +49,37 @@ export function TodosPanel({
 
   const items = todosQ.data?.todos ?? [];
   const [draft, setDraft] = useState("");
-  const [showHistory, setShowHistory] = useState(false);
 
-  // Buckets in the order we render them — `in_progress` first because
-  // that's what the operator looks for when glancing at the panel.
-  const buckets = useMemo(() => {
-    const inProgress: Todo[] = [];
-    const pending: Todo[] = [];
-    const done: Todo[] = [];
-    const cancelled: Todo[] = [];
-    for (const t of items) {
-      if (t.status === "in_progress") inProgress.push(t);
-      else if (t.status === "pending") pending.push(t);
-      else if (t.status === "done") done.push(t);
-      else cancelled.push(t);
-    }
-    return { inProgress, pending, done, cancelled };
+  // Tick once a minute so relative timestamps stay fresh while the
+  // panel is open. Cheap — `formatTs` is pure, this just rerenders
+  // the rows so "5m ago" becomes "6m ago" without a refresh.
+  const [, force] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => force((n) => n + 1), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const ordered = useMemo(() => {
+    // Top: completed/cancelled, most-recent-first (when did this happen).
+    // Middle: in-progress, in plan order.
+    // Bottom: pending, in plan order (what's coming next).
+    const past = items
+      .filter((t) => t.status === "done" || t.status === "cancelled")
+      .sort(
+        (a, b) =>
+          (b.completedAt ?? b.updatedAt) - (a.completedAt ?? a.updatedAt),
+      );
+    const now = items
+      .filter((t) => t.status === "in_progress")
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+    const next = items
+      .filter((t) => t.status === "pending")
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+    return { past, now, next };
   }, [items]);
 
-  const openCount = buckets.inProgress.length + buckets.pending.length;
-  const historyCount = buckets.done.length + buckets.cancelled.length;
+  const total = items.length;
+  const doneCount = ordered.past.filter((t) => t.status === "done").length;
 
   const submit = async () => {
     const text = draft.trim();
@@ -90,8 +97,6 @@ export function TodosPanel({
     void update.mutateAsync({ id: todo.id, patch: { status: next } });
   };
 
-  const rowGap = compact ? "py-1" : "py-1.5";
-
   return (
     <section className="flex h-full min-h-0 flex-col">
       <header className="flex items-baseline justify-between border-b border-ink-900/[0.06] px-3 py-2 dark:border-ink-50/[0.06] shrink-0">
@@ -99,70 +104,51 @@ export function TodosPanel({
           {title}
         </h3>
         <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-          {openCount} open
-          {historyCount > 0 && ` · ${historyCount} done`}
+          {doneCount}/{total} done
         </span>
       </header>
 
       <div className="flex-1 min-h-0 overflow-y-auto">
-        {items.length === 0 ? (
-          <div className="px-3 py-6 text-center text-[11px] text-ink-500 dark:text-ink-400 italic">
-            {emptyHint ?? "no todos yet — type below to add one"}
+        {total === 0 ? (
+          <div className="px-3 py-8 text-center text-[11px] text-ink-500 dark:text-ink-400 italic">
+            {emptyHint ?? "no todos yet — add one below or wait for the agent to write a plan"}
           </div>
         ) : (
-          <div>
-            {buckets.inProgress.length > 0 && (
-              <Section label="in progress" tone="ember">
-                {buckets.inProgress.map((t) => (
-                  <TodoRow
-                    key={t.id}
-                    todo={t}
-                    rowClass={rowGap}
-                    onSetStatus={(s) => setStatus(t, s)}
-                    onDelete={() => void del.mutateAsync(t.id)}
-                  />
-                ))}
-              </Section>
+          <ol className="relative px-4 py-3 before:absolute before:left-[1.4rem] before:top-3 before:bottom-3 before:w-px before:bg-ink-900/10 dark:before:bg-ink-50/10">
+            {ordered.past.length > 0 && (
+              <SectionHeader label={`done · ${ordered.past.length}`} />
             )}
-            {buckets.pending.length > 0 && (
-              <Section
-                label="todo"
-                tone="ink"
-                noTopBorder={buckets.inProgress.length === 0}
-              >
-                {buckets.pending.map((t) => (
-                  <TodoRow
-                    key={t.id}
-                    todo={t}
-                    rowClass={rowGap}
-                    onSetStatus={(s) => setStatus(t, s)}
-                    onDelete={() => void del.mutateAsync(t.id)}
-                  />
-                ))}
-              </Section>
+            {ordered.past.map((t) => (
+              <TimelineItem
+                key={t.id}
+                todo={t}
+                onSetStatus={(s) => setStatus(t, s)}
+                onDelete={() => void del.mutateAsync(t.id)}
+              />
+            ))}
+            {ordered.now.length > 0 && (
+              <SectionHeader label="now" tone="ember" />
             )}
-            {historyCount > 0 && (
-              <Section
-                label={`history · ${historyCount}`}
-                tone="ink"
-                collapsible
-                collapsed={!showHistory}
-                onToggle={() => setShowHistory((v) => !v)}
-                noTopBorder={openCount === 0}
-              >
-                {showHistory &&
-                  [...buckets.done, ...buckets.cancelled].map((t) => (
-                    <TodoRow
-                      key={t.id}
-                      todo={t}
-                      rowClass={rowGap}
-                      onSetStatus={(s) => setStatus(t, s)}
-                      onDelete={() => void del.mutateAsync(t.id)}
-                    />
-                  ))}
-              </Section>
+            {ordered.now.map((t) => (
+              <TimelineItem
+                key={t.id}
+                todo={t}
+                onSetStatus={(s) => setStatus(t, s)}
+                onDelete={() => void del.mutateAsync(t.id)}
+              />
+            ))}
+            {ordered.next.length > 0 && (
+              <SectionHeader label={`next · ${ordered.next.length}`} />
             )}
-          </div>
+            {ordered.next.map((t) => (
+              <TimelineItem
+                key={t.id}
+                todo={t}
+                onSetStatus={(s) => setStatus(t, s)}
+                onDelete={() => void del.mutateAsync(t.id)}
+              />
+            ))}
+          </ol>
         )}
       </div>
 
@@ -196,61 +182,35 @@ export function TodosPanel({
   );
 }
 
-function Section({
+function SectionHeader({
   label,
-  tone,
-  collapsible = false,
-  collapsed = false,
-  onToggle,
-  noTopBorder = false,
-  children,
+  tone = "ink",
 }: {
   label: string;
-  tone: "ember" | "ink";
-  collapsible?: boolean;
-  collapsed?: boolean;
-  onToggle?: () => void;
-  noTopBorder?: boolean;
-  children: React.ReactNode;
+  tone?: "ink" | "ember";
 }) {
   return (
-    <div className={cn(!noTopBorder && "border-t border-ink-900/[0.04] dark:border-ink-50/[0.04]")}>
-      <button
-        type="button"
-        onClick={onToggle}
-        disabled={!collapsible}
+    <li className="relative -ml-[1px] mt-3 mb-1.5 first:mt-0 list-none">
+      <span
         className={cn(
-          "flex w-full items-center gap-1.5 px-3 py-1 font-mono text-[9px] uppercase tracking-[0.14em]",
+          "ml-8 font-mono text-[9px] uppercase tracking-[0.16em]",
           tone === "ember"
             ? "text-ember-700 dark:text-ember-300"
             : "text-ink-400 dark:text-ink-500",
-          collapsible && "hover:bg-ink-900/[0.03] dark:hover:bg-ink-50/[0.03] cursor-pointer",
-          !collapsible && "cursor-default",
         )}
       >
-        {collapsible && (
-          <ChevronDown
-            className={cn(
-              "h-2.5 w-2.5 transition-transform",
-              collapsed && "-rotate-90",
-            )}
-          />
-        )}
-        <span>{label}</span>
-      </button>
-      {!collapsed && children}
-    </div>
+        {label}
+      </span>
+    </li>
   );
 }
 
-function TodoRow({
+function TimelineItem({
   todo,
-  rowClass,
   onSetStatus,
   onDelete,
 }: {
   todo: Todo;
-  rowClass: string;
   onSetStatus: (s: TodoStatus) => void;
   onDelete: () => void;
 }) {
@@ -259,66 +219,131 @@ function TodoRow({
   const isInProgress = todo.status === "in_progress";
   const dim = isDone || isCancelled;
 
+  // Pick the timestamp that "describes" this row best:
+  //   completed/cancelled → completedAt (when it landed)
+  //   in_progress         → updatedAt   (when it became active)
+  //   pending             → createdAt   (when it was added)
+  const stampMs =
+    (isDone || isCancelled
+      ? todo.completedAt ?? todo.updatedAt
+      : isInProgress
+        ? todo.updatedAt
+        : todo.createdAt) ?? todo.createdAt;
+
   return (
-    <div
+    <li
       className={cn(
-        "group flex items-start gap-2 px-3 hover:bg-ink-900/[0.025] dark:hover:bg-ink-50/[0.025]",
-        rowClass,
-        dim && "opacity-55",
+        // animate-fade-in is defined in tailwind.config — fades the
+        // row in when it first mounts so adds + status changes feel
+        // alive instead of pop-in.
+        "group relative pl-8 py-1.5 list-none animate-fade-in",
       )}
     >
-      <StatusButton
-        status={todo.status}
-        onClick={() => onSetStatus(isDone ? "pending" : "done")}
-        onLong={() => onSetStatus(isInProgress ? "pending" : "in_progress")}
-      />
+      {/* Glyph sits on the spine. Pulse-ring around the in-progress
+          dot draws the eye to "what we're working on right now". */}
       <span
-        className={cn(
-          "flex-1 min-w-0 text-[12px] leading-snug break-words",
-          (isDone || isCancelled) && "line-through",
-          isCancelled && "text-ink-400 dark:text-ink-500",
-          isDone && "text-ink-500 dark:text-ink-400",
-        )}
+        className="absolute left-[0.85rem] top-2 z-10"
+        title={statusLabel(todo.status)}
       >
-        {todo.text}
+        {isInProgress && (
+          <span className="absolute inset-0 -m-1 rounded-full bg-ember-500/30 animate-ping" />
+        )}
+        <StatusButton
+          status={todo.status}
+          onClick={() => onSetStatus(isDone ? "pending" : "done")}
+          onLong={() => onSetStatus(isInProgress ? "pending" : "in_progress")}
+        />
       </span>
-      {todo.source === "agent" && (
-        <span
-          title="Written by the agent"
-          className="mt-0.5 inline-flex items-center gap-0.5 font-mono text-[9px] uppercase tracking-[0.08em] text-violet-700 dark:text-violet-300 shrink-0"
+
+      <div className="flex items-start gap-2">
+        <div
+          className={cn(
+            "flex-1 min-w-0 transition-all duration-300",
+            isInProgress && "rounded-md border border-ember-500/40 bg-ember-500/[0.08] px-2 py-1 -ml-2 -my-1 shadow-[0_0_0_1px_rgba(247,127,0,0.06)]",
+          )}
         >
-          <Bot className="h-2.5 w-2.5" />
-        </span>
-      )}
-      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-        {!isCancelled && !isDone && (
+          <div className="flex items-baseline gap-2">
+            <span
+              className={cn(
+                "flex-1 min-w-0 text-[12.5px] leading-snug break-words transition-all duration-300",
+                isDone && "line-through text-emerald-700/80 dark:text-emerald-300/80",
+                isCancelled && "line-through text-ink-400 dark:text-ink-500",
+                isInProgress && "text-ink-900 dark:text-ink-50 font-medium",
+                !dim && !isInProgress && "text-ink-700 dark:text-ink-200",
+              )}
+            >
+              {todo.text}
+            </span>
+            <span
+              title={formatTsAbsolute(stampMs)}
+              className={cn(
+                "font-mono text-[10px] tabular-nums shrink-0 transition-colors duration-300",
+                isInProgress
+                  ? "text-ember-700 dark:text-ember-300"
+                  : isDone
+                    ? "text-emerald-700/70 dark:text-emerald-300/70"
+                    : "text-ink-400 dark:text-ink-500",
+              )}
+            >
+              {isInProgress ? (
+                <span className="inline-flex items-center gap-1">
+                  <span className="size-1 rounded-full bg-ember-500 animate-blink" />
+                  now
+                </span>
+              ) : (
+                formatTs(stampMs)
+              )}
+            </span>
+          </div>
+          {/* Source/meta line — only when there's something extra worth
+              showing. Keep it sparse so the row stays one-line by default. */}
+          {(todo.source === "agent" || isCancelled) && (
+            <div className="mt-0.5 flex items-center gap-2 font-mono text-[9.5px] uppercase tracking-[0.08em] text-ink-400 dark:text-ink-500">
+              {todo.source === "agent" && (
+                <span className="inline-flex items-center gap-0.5 text-violet-700 dark:text-violet-300">
+                  <Bot className="h-2.5 w-2.5" /> agent
+                </span>
+              )}
+              {isCancelled && <span>cancelled</span>}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+          {!isCancelled && !isDone && (
+            <button
+              type="button"
+              onClick={() => onSetStatus("cancelled")}
+              title="Cancel"
+              className="rounded p-0.5 text-ink-400 hover:bg-ink-900/[0.06] hover:text-amber-700 dark:hover:bg-ink-50/[0.06] dark:hover:text-amber-300 transition-colors"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => onSetStatus("cancelled")}
-            title="Cancel"
-            className="rounded p-0.5 text-ink-400 hover:bg-ink-900/[0.06] hover:text-amber-700 dark:hover:bg-ink-50/[0.06] dark:hover:text-amber-300"
+            onClick={onDelete}
+            title="Delete"
+            className="rounded p-0.5 text-ink-400 hover:bg-ink-900/[0.06] hover:text-red-700 dark:hover:bg-ink-50/[0.06] dark:hover:text-red-300 transition-colors"
           >
-            <X className="h-3 w-3" />
+            <Trash2 className="h-3 w-3" />
           </button>
-        )}
-        <button
-          type="button"
-          onClick={onDelete}
-          title="Delete"
-          className="rounded p-0.5 text-ink-400 hover:bg-ink-900/[0.06] hover:text-red-700 dark:hover:bg-ink-50/[0.06] dark:hover:text-red-300"
-        >
-          <Trash2 className="h-3 w-3" />
-        </button>
+        </div>
       </div>
-    </div>
+    </li>
   );
 }
 
+function statusLabel(s: TodoStatus): string {
+  if (s === "done") return "Done — click to reopen, alt-click to mark active";
+  if (s === "in_progress") return "In progress — click to mark done";
+  if (s === "cancelled") return "Cancelled — click to reopen";
+  return "Pending — click to mark done, alt-click to mark active";
+}
+
 /**
- * Three-state checkbox-ish button. Click cycles done<->open. The
- * "long press" handler bumps to/from in-progress so the operator can
- * mark something active without leaving the keyboard. We treat alt-click
- * and right-click as the long-press action.
+ * Three-state status indicator. Click cycles done<->open. Alt-click
+ * (or right-click) bumps to/from in-progress so the operator can
+ * mark something active without opening a menu.
  */
 function StatusButton({
   status,
@@ -347,24 +372,20 @@ function StatusButton({
         e.preventDefault();
         onLong();
       }}
-      title={isDone ? "Click to reopen · alt-click to mark active" : "Click to mark done · alt-click to mark active"}
       className={cn(
-        "mt-0.5 grid place-items-center size-4 shrink-0 rounded-full border transition-colors",
+        "relative grid place-items-center size-4 shrink-0 rounded-full border bg-paper-50 dark:bg-ink-900 transition-all duration-200",
         isDone &&
-          "border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
-        isInProgress && "border-ember-500/60 bg-ember-500/20",
-        isCancelled && "border-ink-900/15 bg-ink-900/[0.05] dark:border-ink-50/15 dark:bg-ink-50/[0.05]",
-        !isDone && !isInProgress && !isCancelled && "border-ink-900/25 hover:border-ink-900/45 dark:border-ink-50/25 dark:hover:border-ink-50/45",
+          "border-emerald-500/70 bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 scale-105",
+        isInProgress && "border-ember-500/80 bg-ember-500/30",
+        isCancelled && "border-ink-900/15 dark:border-ink-50/15",
+        !isDone && !isInProgress && !isCancelled && "border-ink-900/25 hover:border-ember-500/60 hover:scale-110 dark:border-ink-50/25",
       )}
     >
-      {isDone && <Check className="h-2.5 w-2.5" />}
+      {isDone && <Check className="h-2.5 w-2.5 stroke-[3]" />}
       {isInProgress && (
         <span className="size-1.5 rounded-full bg-ember-500 animate-blink" />
       )}
       {isCancelled && <X className="h-2.5 w-2.5 text-ink-400" />}
-      {!isDone && !isInProgress && !isCancelled && (
-        <Circle className="h-1.5 w-1.5 opacity-0" />
-      )}
     </button>
   );
 }

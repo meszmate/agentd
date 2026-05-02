@@ -360,6 +360,8 @@ export class TaskManager {
       appendMessage(this.db, taskId, "user", text);
       try {
         await session.runner.sendInput(text);
+        // No queue chip on the regular send path — that's only for
+        // mid-turn steers the operator may want to fire later.
       } catch (e) {
         // Stdin write failed — runner died unexpectedly. Fall through
         // to a fresh spawn so the operator's message isn't lost.
@@ -414,11 +416,46 @@ export class TaskManager {
       await this.spawnRunner(task, text, true);
       return;
     }
-    // Live-input runner: write to stdin directly. Claude reads stdin
-    // between tool calls so the message lands at the next safe point
-    // mid-turn — true steer semantics, no respawn needed.
+    // For both live-input (claude) and spawn-per-turn (codex), submit
+    // while mid-turn just queues. No appendMessage, no sendInput. The
+    // operator confirms via the per-row Steer button (`fireQueued`)
+    // when they're ready to send the item to the agent. This matches
+    // claude-code / codex feel: type your thought now, fire it when
+    // it's the right moment.
+    this.queueInput(taskId, text);
+    if (mode === "interrupt") {
+      // Stop and let the exit handler drain.
+      await this.stop(taskId).catch(() => {});
+    }
+  }
+
+  /**
+   * Fire a single queued item — the operator's "send this now" action.
+   *   live-input runner (claude) running → pop + persist + write to
+   *     stdin. Claude picks it up at the next tool-call boundary.
+   *   no runner alive → pop + persist + spawn fresh with this text.
+   *   spawn-per-turn runner (codex) running → promote the fired item
+   *     to the front of the queue and SIGINT the runner so the
+   *     existing exit-time drain joins the queue as the next prompt
+   *     with the fired item leading.
+   * Returns the new queue snapshot so the caller can re-render.
+   */
+  async fireQueued(taskId: string, index: number): Promise<string[]> {
+    const task = getTask(this.db, taskId);
+    if (!task) throw new Error("task not found");
+    const cur = this.inputQueue.get(taskId);
+    if (!cur || index < 0 || index >= cur.length) {
+      return cur?.slice() ?? [];
+    }
+    const text = cur[index]!;
+
     const session = this.running.get(taskId);
+
     if (session?.runner.supportsLiveInput && session.runner.running) {
+      // Pop and stream to stdin.
+      cur.splice(index, 1);
+      if (cur.length === 0) this.inputQueue.delete(taskId);
+      else this.inputQueue.set(taskId, cur);
       appendMessage(this.db, taskId, "user", text);
       try {
         await session.runner.sendInput(text);
@@ -428,38 +465,57 @@ export class TaskManager {
           event: {
             kind: "raw",
             stream: "stderr",
-            text: `[steer write failed, queueing] ${(e as Error).message}`,
+            text: `[fire failed, respawning] ${(e as Error).message}`,
           },
           ts: Date.now(),
         });
-        this.queueInput(taskId, text);
+        this.running.delete(taskId);
+        await this.spawnRunner(task, text, true);
       }
-      return;
+      return cur.slice();
     }
-    this.queueInput(taskId, text);
-    if (mode === "interrupt") {
-      // Stop and let the exit handler drain.
-      await this.stop(taskId).catch(() => {});
+
+    if (!this.isRunning(taskId)) {
+      // No runner alive — pop, persist, spawn fresh.
+      cur.splice(index, 1);
+      if (cur.length === 0) this.inputQueue.delete(taskId);
+      else this.inputQueue.set(taskId, cur);
+      appendMessage(this.db, taskId, "user", text);
+      await this.spawnRunner(task, text, true);
+      return this.inputQueue.get(taskId)?.slice() ?? [];
     }
+
+    // Spawn-per-turn runner (codex) is running — promote fired item
+    // to the front and SIGINT so the drain takes everything in
+    // queue order with the fired one leading. The user message is
+    // persisted now so the timeline reflects the operator's intent.
+    cur.splice(index, 1);
+    cur.unshift(text);
+    this.inputQueue.set(taskId, cur);
+    appendMessage(this.db, taskId, "user", text);
+    await this.stop(taskId).catch(() => {});
+    return cur.slice();
   }
 
+  /**
+   * In-memory queue tracker — drives the chip strip in the web UI
+   * (polled via `GET /api/tasks/:id/steer`). Pure state, no DB write
+   * and no extra timeline text: the user's message itself is already
+   * persisted by the caller via `appendMessage("user", text)`, and
+   * the strip is the visual proof that it's pending.
+   *
+   * For codex (spawn-per-turn), the items get joined and fed as the
+   * next turn's prompt via `drainQueue`. For claude (long-lived
+   * stdin), the items have already been written to stdin — the chip
+   * is purely a "we sent this, claude hasn't acknowledged yet" hint
+   * cleared on `status:done`.
+   */
   private queueInput(taskId: string, text: string): void {
     const cur = this.inputQueue.get(taskId) ?? [];
     cur.push(text);
     this.inputQueue.set(taskId, cur);
-    // Surface the queued note in the timeline so the user can see it
-    // landed even before the agent picks it up.
-    appendMessage(this.db, taskId, "user", `[queued] ${text}`);
-    this.bus.publish({
-      taskId,
-      event: {
-        kind: "raw",
-        stream: "stdout",
-        text: `[queued] ${text}`,
-      },
-      ts: Date.now(),
-    });
   }
+
 
   private drainQueue(taskId: string): string | null {
     const q = this.inputQueue.get(taskId);
@@ -520,31 +576,21 @@ export class TaskManager {
       agentdRoot: this.paths.root,
       repoPath: task.repoPath,
     });
-    if (catalog.entries.length > 0) {
-      this.bus.publish({
-        taskId: task.id,
-        event: {
-          kind: "raw",
-          stream: "stdout",
-          text: `[skills] catalog: ${catalog.entries.map((e) => e.id).join(", ")}`,
-        },
-        ts: Date.now(),
-      });
-    }
     const repoCtx = renderRepoContext({ worktreePath: task.worktreePath });
+    // Skills + repo-ctx used to publish diagnostic notes to the timeline
+    // every spawn — pure noise for the operator. We log them once on
+    // the daemon's stdout instead so they're available in the daemon
+    // log without cluttering chat.
+    if (catalog.entries.length > 0) {
+      console.log(
+        `[task ${task.id}] skills=${catalog.entries.map((e) => e.id).join(",")}`,
+      );
+    }
     if (repoCtx.sections.length > 0) {
       const summary = repoCtx.sections
         .map((s) => `${s.key}=${s.entries.length}`)
         .join(" ");
-      this.bus.publish({
-        taskId: task.id,
-        event: {
-          kind: "raw",
-          stream: "stdout",
-          text: `[repo-ctx] ${summary}`,
-        },
-        ts: Date.now(),
-      });
+      console.log(`[task ${task.id}] repo-ctx ${summary}`);
     }
     const appendParts: string[] = [];
     if (cfg.agentInstructions) appendParts.push(cfg.agentInstructions);
@@ -657,6 +703,9 @@ export class TaskManager {
       }
     } else if (event.kind === "status") {
       updateTaskStatus(this.db, taskId, event.status);
+      // Don't auto-clear the queue on turn end — items live until
+      // the operator fires them (per-row Steer button) or removes
+      // them. That gives explicit "send when ready" semantics.
     } else if (event.kind === "usage") {
       addTaskUsage(this.db, taskId, {
         inputTokens: event.inputTokens,

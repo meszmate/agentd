@@ -277,6 +277,35 @@ export function useRemoveQueuedSteer(taskId: string) {
   });
 }
 
+/**
+ * Fire a single queued steer item via the per-row Steer button.
+ * The server pops it, persists as a user message, and writes to
+ * stdin (claude) or kicks off a respawn (codex). Updates the cache
+ * with the returned queue snapshot so the row vanishes on click.
+ */
+export function useFireQueuedSteer(taskId: string) {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (index: number) => client.fireQueuedSteer(taskId, index),
+    onSuccess: (data) => {
+      qc.setQueryData(["task-steer", taskId], (cur: unknown) => {
+        const prev = cur as
+          | { running: boolean; queue: string[] }
+          | undefined;
+        return {
+          running: prev?.running ?? true,
+          queue: data.queue,
+        };
+      });
+      // The fired item is now a user message in the DB. Refetching
+      // the task's messages would round-trip; the timeline view
+      // already does optimistic appendLocal at click time so we
+      // skip the invalidation and trust the WS stream.
+    },
+  });
+}
+
 export function useStopTask(taskId: string) {
   const client = useClient();
   const qc = useQueryClient();

@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   AlertTriangle,
+  ArrowRight,
   Check,
   ChevronDown,
   ChevronRight,
@@ -22,6 +23,7 @@ import { cn, formatTokens, formatTs } from "@/lib/utils";
 import { ToolLine } from "@/components/tool-line";
 import type { TaskPlanItem } from "@/views/TaskPlan";
 import {
+  useFireQueuedSteer,
   useRemoveQueuedSteer,
   useSendInput,
   useTaskSteer,
@@ -123,13 +125,17 @@ export function TaskTimeline({
   const removeQueued = useRemoveQueuedSteer(taskId);
   const queue = steerQ.data?.queue ?? [];
 
+  const fireQueued = useFireQueuedSteer(taskId);
+
   const submit = async () => {
     const msg = text.trim();
     if (!msg) return;
     setText("");
     if (disabled) {
-      // Mid-turn: queue. Always. Drains at the next turn boundary.
-      // The chip strip above the input shows what's piling up.
+      // Mid-turn: queue the message — it does NOT go to the agent
+      // until the operator clicks the per-row Steer button. This
+      // matches the deliberate "draft then fire" feel claude-code
+      // has: type your thoughts now, send when the moment is right.
       try {
         await client.steerTask(taskId, msg, "queue");
         await steerQ.refetch();
@@ -141,6 +147,17 @@ export function TaskTimeline({
     appendLocal("user", msg);
     try {
       await send.mutateAsync(msg);
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
+
+  const fireRow = async (index: number, line: string) => {
+    // Optimistic chat append so the bubble shows up the moment the
+    // operator hits Steer — before the server persists.
+    appendLocal("user", line);
+    try {
+      await fireQueued.mutateAsync(index);
     } catch (e) {
       onError((e as Error).message);
     }
@@ -278,31 +295,61 @@ export function TaskTimeline({
               completed into a count. Full history lives in the right
               sidebar's Todos tab. */}
           {plan && plan.length > 0 && <PlanStrip plan={plan} />}
-          {/* Queue strip — sits above the input so the operator always
-              sees what's piling up. Each chip is removable. Drains at
-              the next turn boundary on the daemon side. */}
+          {/* Steer queue — each pending message gets its own line so
+              long inputs stay readable. Items are written to claude's
+              stdin immediately and picked up at the next tool-call
+              boundary; the row clears when the agent acknowledges via
+              the next turn boundary. */}
           {queue.length > 0 && (
-            <div className="mb-2 flex flex-wrap items-center gap-1.5">
-              <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-violet-700 dark:text-violet-300 shrink-0">
-                queued · {queue.length}
-              </span>
-              {queue.map((line, i) => (
-                <span
-                  key={`${i}-${line.slice(0, 12)}`}
-                  className="group inline-flex items-center gap-1 max-w-full rounded-md border border-violet-500/30 bg-violet-500/[0.08] px-2 py-1 font-mono text-[11px] text-violet-700 dark:text-violet-300"
-                  title={line}
-                >
-                  <span className="truncate max-w-[42ch]">{line}</span>
-                  <button
-                    type="button"
-                    onClick={() => void removeQueued.mutateAsync(i)}
-                    title="Remove from queue"
-                    className="rounded p-0.5 opacity-50 hover:opacity-100 hover:bg-violet-500/20"
-                  >
-                    <X className="h-2.5 w-2.5" />
-                  </button>
+            <div className="mb-2 rounded-md border border-violet-500/25 bg-violet-500/[0.05] dark:bg-violet-500/[0.08]">
+              <div className="flex items-center justify-between px-2.5 py-1 border-b border-violet-500/15">
+                <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-violet-700 dark:text-violet-300">
+                  <span className="size-1.5 rounded-full bg-violet-500 animate-blink" />
+                  steer · {queue.length} {queue.length === 1 ? "line" : "lines"}
                 </span>
-              ))}
+                <span className="font-mono text-[9px] text-violet-700/70 dark:text-violet-300/70">
+                  fires after the next tool call
+                </span>
+              </div>
+              <ul className="divide-y divide-violet-500/10">
+                {queue.map((line, i) => (
+                  <li
+                    key={`${i}-${line.slice(0, 12)}`}
+                    className="group flex items-start gap-2 px-2.5 py-1.5"
+                  >
+                    <span className="mt-px font-mono text-[10px] tabular-nums text-violet-700/60 dark:text-violet-300/60 shrink-0 w-4 text-right">
+                      {i + 1}
+                    </span>
+                    <span className="flex-1 min-w-0 whitespace-pre-wrap break-words text-[12px] leading-snug text-violet-900 dark:text-violet-100">
+                      {line}
+                    </span>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => void fireRow(i, line)}
+                        disabled={fireQueued.isPending}
+                        title="Steer — fire this now (lands after the next tool call)"
+                        className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-violet-500/40 bg-violet-500/15 text-violet-700 dark:text-violet-300 hover:bg-violet-500/25 disabled:opacity-40 transition-colors"
+                      >
+                        {fireQueued.isPending ? (
+                          <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                        ) : (
+                          <ArrowRight className="h-2.5 w-2.5" />
+                        )}
+                        steer
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void removeQueued.mutateAsync(i)}
+                        title="Remove from queue"
+                        className="rounded p-0.5 text-violet-700/60 hover:bg-violet-500/20 hover:text-violet-700 dark:text-violet-300/60 dark:hover:text-violet-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
 
@@ -318,7 +365,7 @@ export function TaskTimeline({
               }}
               placeholder={
                 disabled
-                  ? "Append to queue — fires after the next turn…"
+                  ? "Type to queue — click Steer on a row to fire it…"
                   : "Send input to the agent…"
               }
               rows={3}

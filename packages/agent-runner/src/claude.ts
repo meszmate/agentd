@@ -174,6 +174,10 @@ export class ClaudeRunner implements AgentRunner {
     const stderrTask = (async () => {
       try {
         for await (const line of readLines(proc.stderr)) {
+          // Suppress the CLI's "no stdin data received in 3s" warning —
+          // it's harmless (we always feed stdin within milliseconds via
+          // sendInput) but pollutes the timeline. Real errors still flow.
+          if (line.includes("no stdin data received")) continue;
           this.emit({ kind: "raw", stream: "stderr", text: line });
         }
       } catch {
@@ -332,12 +336,13 @@ export class ClaudeRunner implements AgentRunner {
       return;
     }
     if (type === "system") {
-      // Surface system events as raw for debugging; not noisy in normal use.
-      this.emit({
-        kind: "raw",
-        stream: "stdout",
-        text: `[system] ${parsed.subtype ?? ""}`,
-      });
+      // Internal CLI bookkeeping (init, status pings). Not useful to
+      // the operator and floods the timeline — drop silently.
+      return;
+    }
+    if (type === "rate_limit_event") {
+      // Pure rate-limit telemetry from the CLI — no info the operator
+      // can act on. Suppress.
       return;
     }
     // Unknown event type — surface as raw for visibility.
