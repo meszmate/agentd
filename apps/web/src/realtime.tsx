@@ -226,6 +226,79 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           }
           return;
         }
+        if (msg.type === "task_removed") {
+          // Drop the task from any cached list so every connected
+          // surface (sidebar, project view) reflects the deletion
+          // without a polling round-trip.
+          const cur =
+            qc.getQueryData<{ tasks: Task[] }>(qk.tasks())?.tasks ?? [];
+          const removed = cur.find((t) => t.id === msg.taskId);
+          if (removed) {
+            qc.setQueryData(qk.tasks(), {
+              tasks: cur.filter((t) => t.id !== msg.taskId),
+            });
+          }
+          if (removed?.projectId) {
+            const cachedProjects = qc.getQueryData<{ projects: Project[] }>(
+              qk.projects(),
+            )?.projects;
+            if (cachedProjects) {
+              const remaining = cur.filter(
+                (t) => t.id !== msg.taskId,
+              );
+              let total = 0;
+              let active = 0;
+              for (const t of remaining) {
+                if (t.projectId !== removed.projectId) continue;
+                total += 1;
+                if (
+                  t.status === "running" ||
+                  t.status === "waiting_input" ||
+                  t.status === "waiting_perm" ||
+                  t.status === "pending"
+                ) {
+                  active += 1;
+                }
+              }
+              qc.setQueryData(qk.projects(), {
+                projects: cachedProjects.map((p) =>
+                  p.id === removed.projectId
+                    ? { ...p, taskCount: total, activeCount: active }
+                    : p,
+                ),
+              });
+            }
+          }
+          qc.removeQueries({ queryKey: qk.task(msg.taskId) });
+          return;
+        }
+        if (msg.type === "project_updated" || msg.type === "project_created") {
+          const cached =
+            qc.getQueryData<{ projects: Project[] }>(qk.projects())
+              ?.projects ?? [];
+          const found = cached.find((p) => p.id === msg.project.id);
+          if (found) {
+            qc.setQueryData(qk.projects(), {
+              projects: cached.map((p) =>
+                p.id === msg.project.id ? { ...p, ...msg.project } : p,
+              ),
+            });
+          } else {
+            qc.setQueryData(qk.projects(), {
+              projects: [msg.project, ...cached],
+            });
+          }
+          return;
+        }
+        if (msg.type === "project_removed") {
+          const cached =
+            qc.getQueryData<{ projects: Project[] }>(qk.projects())
+              ?.projects ?? [];
+          qc.setQueryData(qk.projects(), {
+            projects: cached.filter((p) => p.id !== msg.projectId),
+          });
+          return;
+        }
         if (msg.type === "terminal_sessions") {
           qc.setQueryData<{ sessions: TerminalSession[] }>(
             ["terminal", "sessions"],

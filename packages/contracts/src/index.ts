@@ -791,5 +791,32 @@ export const WsServerEvent = z.discriminatedUnion("type", [
     suggestion: Suggestion,
     ts: z.number(),
   }),
+  // Pushed when a task is removed (operator deleted, cleanup, etc).
+  // Lets every connected surface drop the row from its cache without
+  // a full /api/tasks round-trip.
+  z.object({
+    type: z.literal("task_removed"),
+    taskId: z.string(),
+    ts: z.number(),
+  }),
+  // Pushed when a project row changes — name, instructions, chat
+  // targets, color, etc. Web sidebar / project views patch their
+  // cache directly off this.
+  z.object({
+    type: z.literal("project_updated"),
+    project: Project,
+    ts: z.number(),
+  }),
+  // Pushed when a project is created or removed.
+  z.object({
+    type: z.literal("project_created"),
+    project: Project,
+    ts: z.number(),
+  }),
+  z.object({
+    type: z.literal("project_removed"),
+    projectId: z.string(),
+    ts: z.number(),
+  }),
 ]);
 export type WsServerEvent = z.infer<typeof WsServerEvent>;

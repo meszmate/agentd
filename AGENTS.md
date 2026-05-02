@@ -51,6 +51,20 @@ The daemon spawns plugin apps as subprocesses, never imports them.
   served by `GET/PATCH /api/prefs` and consumed via `usePrefs()` /
   `usePatchPrefs()` in the web app. Per-device-only state (auth token,
   theme, OS notification permission) stays in `localStorage`.
+- **Every state change is realtime.** When a row mutates (task,
+  project, todo, suggestion, terminal session, anything operators
+  see across surfaces), publish a system event through the
+  `EventBus` so the `/ws` fan-out reaches every connected web /
+  telegram / discord / CLI client. Adding a new mutation endpoint
+  means: pick the right `pubXxx*` helper at the top of
+  `apps/daemon/src/server.ts` (or add one), call it after the DB
+  write, extend `WsServerEvent` in `packages/contracts/src/index.ts`
+  if the kind is new, and patch the cache in
+  `apps/web/src/realtime.tsx` so React Query reflects the change
+  without a refetch. Operators routinely drive the same task from
+  several surfaces at once — one of them mutating a row and the
+  others not seeing it for 30s is a bug, not a UX detail. Don't
+  ever solve "the other surface didn't update" with polling.
 - **Never hardcode model versions.** The model registry in
   `packages/core/src/config.ts` ships with claude family aliases only
   (`opus` / `sonnet` / `haiku`) — claude's CLI resolves these to the

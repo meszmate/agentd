@@ -1,6 +1,8 @@
 import type {
   AgentEvent,
+  Project,
   Suggestion,
+  Task,
   TerminalSession,
   TerminalWindow,
 } from "@agentd/contracts";
@@ -41,7 +43,19 @@ export type SystemEvent =
       /** A suggestion got resolved or dismissed. UIs use this to dim/hide it. */
       kind: "suggestion_updated";
       suggestion: Suggestion;
-    };
+    }
+  /**
+   * Task / project mutations. Realtime principle: every state
+   * change visible across surfaces (web, telegram, discord, CLI)
+   * gets broadcast so connected clients update without polling.
+   * Whether the change came from a web button, a Telegram /new, a
+   * Discord reply, or an internal hook, it lands here.
+   */
+  | { kind: "task_changed"; task: Task }
+  | { kind: "task_removed"; taskId: string }
+  | { kind: "project_changed"; project: Project }
+  | { kind: "project_created"; project: Project }
+  | { kind: "project_removed"; projectId: string };
 
 export type SystemEventEnvelope = {
   event: SystemEvent;

@@ -160,6 +160,31 @@ export function buildServer(opts: BuildServerOptions) {
 
   app.use("*", cors());
 
+  /**
+   * Realtime broadcast helpers — every state change visible across
+   * surfaces (web, telegram, discord, CLI) flows through these so
+   * connected clients update without a polling round-trip. The
+   * principle: if a button in one surface mutates a row, every
+   * other connected surface sees the new row within a frame.
+   */
+  function pubTaskChanged(taskId: string): void {
+    const t = tasks.get(taskId);
+    if (t) bus.publishSystem({ kind: "task_changed", task: t });
+  }
+  function pubTaskRemoved(taskId: string): void {
+    bus.publishSystem({ kind: "task_removed", taskId });
+  }
+  function pubProjectChanged(projectId: string): void {
+    const p = getProjectById(db, projectId);
+    if (p) bus.publishSystem({ kind: "project_changed", project: p });
+  }
+  function pubProjectCreated(project: import("@agentd/contracts").Project): void {
+    bus.publishSystem({ kind: "project_created", project });
+  }
+  function pubProjectRemoved(projectId: string): void {
+    bus.publishSystem({ kind: "project_removed", projectId });
+  }
+
   app.get("/health", (c) =>
     c.json({ ok: true, version, time: Date.now() }),
   );
@@ -301,6 +326,7 @@ export function buildServer(opts: BuildServerOptions) {
       return c.json({ error: "taskIds[] required" }, 400);
     }
     reorderTasks(db, ids);
+    for (const id of ids) pubTaskChanged(id);
     return c.json({ ok: true, count: ids.length });
   });
 
@@ -340,6 +366,7 @@ export function buildServer(opts: BuildServerOptions) {
           : {}),
         ...(parsed.data.model ? { model: parsed.data.model } : {}),
       });
+      pubTaskChanged(task.id);
       return c.json({ task });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
@@ -450,6 +477,7 @@ export function buildServer(opts: BuildServerOptions) {
   api.delete("/tasks/:id", async (c) => {
     const id = c.req.param("id");
     await tasks.remove(id);
+    pubTaskRemoved(id);
     return c.json({ ok: true });
   });
 
@@ -804,6 +832,7 @@ export function buildServer(opts: BuildServerOptions) {
       });
       if (r.url) {
         setTaskPrUrl(db, task.id, r.url);
+        pubTaskChanged(task.id);
       }
       return c.json(r);
     } catch (e) {
@@ -829,6 +858,7 @@ export function buildServer(opts: BuildServerOptions) {
         event: { kind: "status", status: updated.status },
         ts: Date.now(),
       });
+      pubTaskChanged(id);
     }
     return c.json({ task: updated });
   });
@@ -838,6 +868,7 @@ export function buildServer(opts: BuildServerOptions) {
     const task = tasks.get(id);
     if (!task) return c.json({ error: "not found" }, 404);
     const updated = reopenTask(db, id);
+    if (updated) pubTaskChanged(id);
     return c.json({ task: updated });
   });
 
@@ -861,6 +892,7 @@ export function buildServer(opts: BuildServerOptions) {
       );
     }
     const updated = setTaskThinkingLevel(db, id, parsed.data);
+    if (updated) pubTaskChanged(id);
     return c.json({ task: updated });
   });
 
@@ -893,6 +925,7 @@ export function buildServer(opts: BuildServerOptions) {
       target = parsed.data;
     }
     const updated = setTaskMirrorTo(db, id, target);
+    if (updated) pubTaskChanged(id);
     return c.json({ task: updated });
   });
 
@@ -990,6 +1023,7 @@ export function buildServer(opts: BuildServerOptions) {
       return c.json({ error: "model must be a string" }, 400);
     }
     const updated = setTaskModel(db, id, body.model.trim());
+    if (updated) pubTaskChanged(id);
     return c.json({ task: updated });
   });
 
@@ -1192,6 +1226,7 @@ export function buildServer(opts: BuildServerOptions) {
       // the timeline at this ts so the operator can tell which
       // earlier messages are still in working memory.
       markTaskCompacted(db, id);
+      pubTaskChanged(id);
       return c.json({ ok: true, agent: task.agent, directive });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
@@ -1778,6 +1813,7 @@ export function buildServer(opts: BuildServerOptions) {
     }
     try {
       const project = createProject(db, parsed.data);
+      pubProjectCreated(project);
       return c.json({ project });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
@@ -1798,6 +1834,7 @@ export function buildServer(opts: BuildServerOptions) {
       );
     }
     const next = updateProject(db, project.id, parsed.data);
+    if (next) pubProjectChanged(next.id);
     return c.json({ project: next });
   });
 
@@ -1830,6 +1867,7 @@ export function buildServer(opts: BuildServerOptions) {
     const next = updateProject(db, task.projectId, {
       instructions: text || null,
     });
+    if (next) pubProjectChanged(next.id);
     return c.json({
       ok: true,
       instructions: next?.instructions ?? "",
@@ -1842,6 +1880,7 @@ export function buildServer(opts: BuildServerOptions) {
       getProjectById(db, key) ?? getProjectBySlug(db, key);
     if (!project) return c.json({ error: "not found" }, 404);
     deleteProject(db, project.id);
+    pubProjectRemoved(project.id);
     return c.json({ ok: true });
   });
 
@@ -2255,6 +2294,32 @@ export function buildServer(opts: BuildServerOptions) {
             send({
               type: "suggestion_updated",
               suggestion: env.event.suggestion,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "task_changed") {
+            send({ type: "task_updated", task: env.event.task });
+          } else if (env.event.kind === "task_removed") {
+            send({
+              type: "task_removed",
+              taskId: env.event.taskId,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "project_changed") {
+            send({
+              type: "project_updated",
+              project: env.event.project,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "project_created") {
+            send({
+              type: "project_created",
+              project: env.event.project,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "project_removed") {
+            send({
+              type: "project_removed",
+              projectId: env.event.projectId,
               ts: env.ts,
             });
           }
