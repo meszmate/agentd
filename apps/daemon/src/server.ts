@@ -464,6 +464,58 @@ export function buildServer(opts: BuildServerOptions) {
   // Git status with per-file +/- counts. Drives the workspace file tree's
   // git-style overlay. Compared against the task's base branch so the
   // tree shows the agent's work even after auto-commit.
+  /**
+   * Push-sync state — used by the ShipMenu to grey out "Push" when
+   * there's nothing to push, and surface "N ahead" when there is.
+   * Returns counts of commits ahead / behind origin/<branch>.
+   */
+  api.get("/tasks/:id/push-state", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    try {
+      const proc = Bun.spawn({
+        cmd: [
+          "git",
+          "rev-list",
+          "--left-right",
+          "--count",
+          `origin/${task.branch}...HEAD`,
+        ],
+        cwd: task.worktreePath,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const out = (await new Response(proc.stdout).text()).trim();
+      await proc.exited;
+      // git outputs `<behind> <ahead>` separated by whitespace. If
+      // the upstream doesn't exist (never pushed) git exits non-zero
+      // and we treat the whole branch as ahead.
+      const m = out.match(/^(\d+)\s+(\d+)/);
+      if (proc.exitCode !== 0 || !m) {
+        const headOnly = Bun.spawn({
+          cmd: ["git", "rev-list", "--count", "HEAD"],
+          cwd: task.worktreePath,
+          stdout: "pipe",
+        });
+        const headCount = (await new Response(headOnly.stdout).text()).trim();
+        await headOnly.exited;
+        return c.json({
+          ahead: parseInt(headCount, 10) || 0,
+          behind: 0,
+          hasUpstream: false,
+        });
+      }
+      return c.json({
+        behind: parseInt(m[1]!, 10),
+        ahead: parseInt(m[2]!, 10),
+        hasUpstream: true,
+      });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 500);
+    }
+  });
+
   api.get("/tasks/:id/git-status", async (c) => {
     const id = c.req.param("id");
     const task = tasks.get(id);

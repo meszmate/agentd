@@ -568,6 +568,13 @@ export class AgentdClient {
     });
   }
 
+  /** Branch sync state vs origin — used to grey out a "Push" button. */
+  async getPushState(
+    id: string,
+  ): Promise<{ ahead: number; behind: number; hasUpstream: boolean }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/push-state`);
+  }
+
   async openPrForTask(
     id: string,
     req: { title: string; body?: string; draft?: boolean },

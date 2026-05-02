@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  ArrowUpFromLine,
   ExternalLink,
   GitBranch,
   GitCommit,
@@ -10,6 +11,7 @@ import {
   Sparkles,
   Upload,
 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import type { Task } from "@agentd/contracts";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -55,6 +57,32 @@ type Prefix = (typeof COMMIT_PREFIXES)[number];
  */
 export function ShipMenu({ task }: { task: Task }) {
   const [open, setOpen] = useState<"commit" | "pr" | null>(null);
+  const client = useClient();
+  const { toast } = useApp();
+  // Polled push-sync state. Refetches on dropdown open and every 6s
+  // while the menu is mounted so "X ahead" stays current.
+  const pushQ = useQuery({
+    queryKey: ["push-state", task.id] as const,
+    queryFn: () => client.getPushState(task.id),
+    refetchInterval: 6_000,
+    enabled: !!task.id,
+  });
+  const ahead = pushQ.data?.ahead ?? 0;
+  const inSync = pushQ.data ? ahead === 0 : false;
+  const [pushing, setPushing] = useState(false);
+  const onPush = async () => {
+    if (inSync) return;
+    setPushing(true);
+    try {
+      const r = await client.pushTask(task.id);
+      toast(r.pushed ? "Pushed to origin" : "Nothing to push");
+      void pushQ.refetch();
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setPushing(false);
+    }
+  };
 
   return (
     <>
@@ -71,6 +99,25 @@ export function ShipMenu({ task }: { task: Task }) {
           <DropdownMenuItem onClick={() => setOpen("commit")}>
             <GitCommit className="h-3.5 w-3.5" />
             Commit changes
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={onPush}
+            disabled={inSync || pushing}
+            className={cn(inSync && "opacity-50")}
+          >
+            {pushing ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <ArrowUpFromLine className="h-3.5 w-3.5" />
+            )}
+            <span className="flex-1">
+              {inSync ? "Pushed (in sync)" : "Push changes"}
+            </span>
+            {!inSync && ahead > 0 && (
+              <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 tabular-nums">
+                {ahead} ahead
+              </span>
+            )}
           </DropdownMenuItem>
           <DropdownMenuItem onClick={() => setOpen("pr")}>
             <GitPullRequestCreate className="h-3.5 w-3.5" />
@@ -408,21 +455,18 @@ function PrDialog({
 }) {
   const client = useClient();
   const { toast } = useApp();
-  const [prefix, setPrefix] = useState<Prefix>("feat");
-  const [subject, setSubject] = useState("");
+  const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [draft, setDraft] = useState(false);
   const [pending, setPending] = useState<"push" | "pr" | null>(null);
   const [hint, setHint] = useState("");
   const [includeBullets, setIncludeBullets] = useState(true);
   const [generating, setGenerating] = useState(false);
-  const [source, setSource] = useState<string | null>(null);
 
   const regenerate = async () => {
     setGenerating(true);
-    setSubject("");
+    setTitle("");
     setBody("");
-    setSource(null);
     let buffer = "";
     try {
       const r = await client.streamPrMessage(
@@ -433,24 +477,19 @@ function PrDialog({
         },
         (chunk) => {
           buffer += chunk;
-          // Split on first blank line: subject above, body below.
+          // Split on first blank line: title above, body below. Both
+          // arrive whole from the AI, no client-side prefix splitting.
           const idx = buffer.indexOf("\n\n");
           if (idx < 0) {
-            setSubject(stripPrefix(buffer.trim()));
+            setTitle(buffer.trim());
           } else {
-            setSubject(stripPrefix(buffer.slice(0, idx).trim()));
+            setTitle(buffer.slice(0, idx).trim());
             setBody(buffer.slice(idx + 2));
           }
         },
       );
-      setSubject(stripPrefix(r.title));
+      setTitle(r.title);
       setBody(r.body);
-      setSource(r.source);
-      // If the model embedded a known prefix in the title, sync the chip.
-      const m = r.title.match(/^([a-z]+):/);
-      if (m && (COMMIT_PREFIXES as readonly string[]).includes(m[1]!)) {
-        setPrefix(m[1] as Prefix);
-      }
     } catch (e) {
       toast((e as Error).message, true);
     } finally {
@@ -460,23 +499,16 @@ function PrDialog({
 
   useEffect(() => {
     if (!open) {
-      setSource(null);
       setHint("");
       setIncludeBullets(true);
-      setSubject("");
+      setTitle("");
       setBody("");
       return;
     }
-    setPrefix("feat");
     setDraft(false);
-    // Seed deterministic content immediately, then kick off AI generation.
-    setSubject(deriveSubject(task.title));
-    setBody(deriveBody(task));
     void regenerate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, task]);
-
-  const title = `${prefix}: ${subject.trim()}`;
 
   const submit = async () => {
     setPending("push");
@@ -509,7 +541,7 @@ function PrDialog({
     }
   };
 
-  const valid = !!subject.trim();
+  const valid = !!title.trim();
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -526,32 +558,16 @@ function PrDialog({
             <Label className="font-mono text-[10px] uppercase tracking-[0.12em]">
               Title
             </Label>
-            <div className="mt-1 flex items-center gap-2">
-              <select
-                value={prefix}
-                onChange={(e) => setPrefix(e.target.value as Prefix)}
-                className="h-9 rounded-md border border-ink-900/15 bg-paper-50 px-2 font-mono text-[12px] text-ink-700 dark:border-ink-50/15 dark:bg-ink-800 dark:text-ink-200"
-              >
-                {COMMIT_PREFIXES.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-              <span className="font-mono text-[12px] text-ink-400 dark:text-ink-500">
-                :
-              </span>
-              <Input
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
-                placeholder="short description"
-                className="font-mono text-[12px]"
-                autoFocus
-              />
-            </div>
-            <div className="mt-1 font-mono text-[10px] text-ink-400 dark:text-ink-500 truncate">
-              {title}
-            </div>
+            <Input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder={generating ? "" : "feat: ..."}
+              className={cn(
+                "mt-1 font-mono text-[12px] transition",
+                generating && "ring-1 ring-ember-500/40",
+              )}
+              autoFocus
+            />
           </div>
 
           <div>
@@ -559,22 +575,12 @@ function PrDialog({
               <Label className="font-mono text-[10px] uppercase tracking-[0.12em]">
                 What changed
               </Label>
-              <span className="text-[10px] text-ink-400 dark:text-ink-500 inline-flex items-center gap-1">
-                {generating ? (
-                  <>
-                    <Loader2 className="h-2.5 w-2.5 text-ember-500 animate-spin" />
-                    <span className="text-ember-700 dark:text-ember-300">
-                      claude is writing
-                    </span>
-                  </>
-                ) : source === "claude" ? (
-                  "claude generated · edit freely"
-                ) : source ? (
-                  `fallback (${source.replace("fallback-", "")})`
-                ) : (
-                  "· bullets, no Test plan, no boilerplate"
-                )}
-              </span>
+              {generating && (
+                <span className="text-[10px] inline-flex items-center gap-1 text-ember-700 dark:text-ember-300">
+                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                  generating
+                </span>
+              )}
               <button
                 type="button"
                 onClick={regenerate}

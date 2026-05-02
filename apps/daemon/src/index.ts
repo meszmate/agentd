@@ -126,6 +126,12 @@ async function main() {
   const server = Bun.serve({
     hostname: cfg.host,
     port: cfg.port,
+    // AI helper streams (commit message gen, PR title/body gen, etc.)
+    // can take 20-60s on large diffs. Bun's default idleTimeout is
+    // 10s, which was killing long-running requests with a 500 before
+    // the helper finished. Bump to the max (255s) so streaming has
+    // room to complete.
+    idleTimeout: 255,
     fetch(req, server) {
       const upgraded = upgradeRequest(req, server);
       if (upgraded !== undefined) return upgraded;
