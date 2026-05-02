@@ -1,7 +1,10 @@
 import type {
   Council,
   CreateCouncilRequest,
+  CreateTodoRequest,
   Suggestion,
+  Todo,
+  UpdateTodoRequest,
   CreateProjectRequest,
   CreateScheduleRequest,
   CreateSkillRequest,
@@ -163,6 +166,39 @@ export class AgentdClient {
 
   async health(): Promise<{ ok: boolean; version: string; time: number }> {
     return this.req("/health");
+  }
+
+  // ── todos ──
+  async listTodos(opts: {
+    projectId?: string;
+    taskId?: string;
+  }): Promise<{ todos: Todo[] }> {
+    const qs: string[] = [];
+    if (opts.projectId !== undefined)
+      qs.push(`projectId=${encodeURIComponent(opts.projectId)}`);
+    if (opts.taskId !== undefined)
+      qs.push(`taskId=${encodeURIComponent(opts.taskId)}`);
+    return this.req(`/api/todos${qs.length ? "?" + qs.join("&") : ""}`);
+  }
+  async createTodo(req: CreateTodoRequest): Promise<{ todo: Todo }> {
+    return this.req("/api/todos", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+  async updateTodo(
+    id: string,
+    req: UpdateTodoRequest,
+  ): Promise<{ todo: Todo }> {
+    return this.req(`/api/todos/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(req),
+    });
+  }
+  async deleteTodo(id: string): Promise<{ ok: true }> {
+    return this.req(`/api/todos/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
   }
 
   // ── model registry ──

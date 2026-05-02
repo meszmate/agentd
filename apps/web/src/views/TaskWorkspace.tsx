@@ -11,12 +11,13 @@ import { TaskDiff } from "@/views/TaskDiff";
 import { TaskLog } from "@/views/TaskLog";
 import { TaskContext } from "@/views/TaskContext";
 import { TaskPlan, type TaskPlanItem } from "@/views/TaskPlan";
+import { TodosPanel } from "@/components/todos-panel";
 
 const Terminal = lazy(() =>
   import("./Terminal").then((m) => ({ default: m.Terminal })),
 );
 
-type Tab = "plan" | "files" | "diff" | "log" | "term" | "context";
+type Tab = "plan" | "todos" | "files" | "diff" | "log" | "term" | "context";
 
 export function TaskWorkspace({
   task,
@@ -68,6 +69,11 @@ export function TaskWorkspace({
                 )}
               </TabsTrigger>
             )}
+            <TabsTrigger value="todos" variant="stretch">
+              <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
+                Todos
+              </span>
+            </TabsTrigger>
             <TabsTrigger value="files" variant="stretch">
               <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
                 Files
@@ -101,6 +107,9 @@ export function TaskWorkspace({
 
         <TabsContent value="plan" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskPlan items={plan ?? []} updatedAt={planUpdatedAt ?? null} />
+        </TabsContent>
+        <TabsContent value="todos" className="flex-1 min-h-0 mt-0 overflow-auto p-3">
+          <TodosPanel taskId={task.id} />
         </TabsContent>
         <TabsContent value="files" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskFiles taskId={task.id} onError={onError} />

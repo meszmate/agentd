@@ -22,6 +22,8 @@ import {
   MirrorTarget,
   CreateCouncilRequest,
   ResolveSuggestionRequest,
+  CreateTodoRequest,
+  UpdateTodoRequest,
   type WsServerEvent,
 } from "@agentd/contracts";
 import { join, normalize, relative, resolve } from "node:path";
@@ -57,15 +59,19 @@ import {
   setTaskPrUrl,
   aggregateToolStats,
   closeTask,
+  createTodo,
+  deleteTodo,
   getCouncil,
   getSuggestion,
   listCouncils,
   listSuggestions,
+  listTodos,
   reopenTask,
   setCouncilWinner,
   setTaskThinkingLevel,
   setTaskModel,
   setTaskMirrorTo,
+  updateTodo,
   resolveSession,
   loadConfig,
   saveConfig,
@@ -1061,6 +1067,58 @@ export function buildServer(opts: BuildServerOptions) {
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
+  });
+
+  // ──────────────────────── todos ────────────────────────
+
+  /**
+   * List todos in a scope. Pass `projectId` for project-level todos,
+   * `taskId` for task-scoped, or both. Without filters returns nothing
+   * (we don't expose a global todo list).
+   */
+  api.get("/todos", (c) => {
+    const projectId = c.req.query("projectId");
+    const taskId = c.req.query("taskId");
+    if (!projectId && !taskId) return c.json({ todos: [] });
+    const list = listTodos(db, {
+      ...(projectId !== undefined ? { projectId } : {}),
+      ...(taskId !== undefined ? { taskId } : {}),
+    });
+    return c.json({ todos: list });
+  });
+
+  api.post("/todos", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = CreateTodoRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid request", issues: parsed.error.issues },
+        400,
+      );
+    }
+    const t = createTodo(db, parsed.data);
+    return c.json({ todo: t });
+  });
+
+  api.patch("/todos/:id", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => null);
+    const parsed = UpdateTodoRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid request", issues: parsed.error.issues },
+        400,
+      );
+    }
+    const t = updateTodo(db, id, parsed.data);
+    if (!t) return c.json({ error: "not found" }, 404);
+    return c.json({ todo: t });
+  });
+
+  api.delete("/todos/:id", (c) => {
+    const id = c.req.param("id");
+    deleteTodo(db, id);
+    return c.json({ ok: true });
   });
 
   // ──────────────────────── suggestions ────────────────────────

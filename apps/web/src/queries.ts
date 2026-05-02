@@ -433,6 +433,52 @@ export function usePatchSettings() {
   });
 }
 
+/* ── Todos ────────────────────────────────────────────────────────── */
+
+export function useTodos(opts: { projectId?: string; taskId?: string }) {
+  const client = useClient();
+  return useQuery({
+    queryKey: ["todos", opts] as const,
+    queryFn: () => client.listTodos(opts),
+    enabled: !!(opts.projectId || opts.taskId),
+    refetchInterval: 4_000,
+  });
+}
+
+export function useCreateTodo() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: Parameters<AgentdClient["createTodo"]>[0]) =>
+      client.createTodo(req),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["todos"] }),
+  });
+}
+
+export function useUpdateTodo() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      patch,
+    }: {
+      id: string;
+      patch: Parameters<AgentdClient["updateTodo"]>[1];
+    }) => client.updateTodo(id, patch),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["todos"] }),
+  });
+}
+
+export function useDeleteTodo() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => client.deleteTodo(id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["todos"] }),
+  });
+}
+
 /**
  * Model registry — single source of truth for the model lists the UI
  * shows in pickers. Backed by `cfg.models` server-side, overridable

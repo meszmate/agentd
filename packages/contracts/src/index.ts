@@ -429,6 +429,49 @@ export const Suggestion = z.object({
 });
 export type Suggestion = z.infer<typeof Suggestion>;
 
+/**
+ * First-class todo. Either project-scoped (taskId == null) or pinned to
+ * a specific task. The agent's `TodoWrite` / `update_plan` tool calls
+ * sync into the same table so the operator's manual todos and the
+ * agent's plan share one view.
+ */
+export const TodoStatus = z.enum(["pending", "in_progress", "done", "cancelled"]);
+export type TodoStatus = z.infer<typeof TodoStatus>;
+
+export const TodoSource = z.enum(["user", "agent"]);
+export type TodoSource = z.infer<typeof TodoSource>;
+
+export const Todo = z.object({
+  id: z.string(),
+  projectId: z.string().nullable(),
+  taskId: z.string().nullable(),
+  text: z.string(),
+  status: TodoStatus,
+  source: TodoSource,
+  /** Sort order within its scope (project or task). Lower = earlier. */
+  sortOrder: z.number(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  completedAt: z.number().nullable(),
+});
+export type Todo = z.infer<typeof Todo>;
+
+export const CreateTodoRequest = z.object({
+  projectId: z.string().optional(),
+  taskId: z.string().optional(),
+  text: z.string().min(1),
+  status: TodoStatus.optional(),
+  source: TodoSource.optional(),
+});
+export type CreateTodoRequest = z.infer<typeof CreateTodoRequest>;
+
+export const UpdateTodoRequest = z.object({
+  text: z.string().optional(),
+  status: TodoStatus.optional(),
+  sortOrder: z.number().optional(),
+});
+export type UpdateTodoRequest = z.infer<typeof UpdateTodoRequest>;
+
 export const ResolveSuggestionRequest = z.object({
   /** Pick an option by index (0..N-1). Required unless `text` is set. */
   index: z.number().int().min(0).optional(),

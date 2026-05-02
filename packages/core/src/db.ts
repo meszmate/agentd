@@ -39,6 +39,19 @@ export const tasks = sqliteTable("tasks", {
   closedReason: text("closed_reason"),
 });
 
+export const todos = sqliteTable("todos", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id"),
+  taskId: text("task_id"),
+  text: text("text").notNull(),
+  status: text("status").notNull().default("pending"),
+  source: text("source").notNull().default("user"),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  completedAt: integer("completed_at"),
+});
+
 export const suggestions = sqliteTable("suggestions", {
   id: text("id").primaryKey(),
   templateId: text("template_id"),
@@ -221,6 +234,21 @@ CREATE TABLE IF NOT EXISTS councils (
   winner_task_id TEXT,
   judge_explanation TEXT
 );
+
+CREATE TABLE IF NOT EXISTS todos (
+  id TEXT PRIMARY KEY,
+  project_id TEXT,
+  task_id TEXT,
+  text TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  source TEXT NOT NULL DEFAULT 'user',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  completed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS todos_project_idx ON todos(project_id);
+CREATE INDEX IF NOT EXISTS todos_task_idx ON todos(task_id);
 
 CREATE TABLE IF NOT EXISTS suggestions (
   id TEXT PRIMARY KEY,
