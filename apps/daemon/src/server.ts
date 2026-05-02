@@ -74,6 +74,7 @@ import {
   updateTodo,
   resolveSession,
   loadConfig,
+  loadCodexModelsFromCache,
   saveConfig,
   AiHelperConfig,
   TelegramPluginConfig,
@@ -194,7 +195,21 @@ export function buildServer(opts: BuildServerOptions) {
    */
   api.get("/models", (c) => {
     const cfg = loadConfig(paths.root);
-    return c.json({ models: cfg.models });
+    // Codex maintains its own up-to-date model list at
+    // ~/.codex/models_cache.json. Use it when present so new
+    // releases (gpt-5.4, gpt-5.5, etc.) appear in the dropdown
+    // without an agentd update. The user's config.json still wins
+    // if they explicitly customized cfg.models.codex.
+    const cachedCodex = loadCodexModelsFromCache();
+    const codex =
+      cachedCodex.length > 0 ? cachedCodex : cfg.models.codex;
+    return c.json({
+      models: { ...cfg.models, codex },
+      // Surface the configured defaults so the web's model chip can
+      // resolve "(default)" to the actual model id the runner will
+      // pass — claude-code / codex both show this in their UIs.
+      defaults: cfg.defaultModel,
+    });
   });
 
   /* ── Councils ─────────────────────────────────────────────────────── */

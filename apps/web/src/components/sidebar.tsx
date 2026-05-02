@@ -926,21 +926,15 @@ function SidebarTaskRow({
           {showLive && liveEvent && (
             <span
               key={liveEvent.id}
-              className={cn(
-                "mt-0.5 block truncate text-[10px] animate-fade-in",
-                liveEvent.kind === "tool_call"
-                  ? "text-sky-700 dark:text-sky-300"
-                  : liveEvent.kind === "progress"
-                    ? "text-violet-700 dark:text-violet-300"
-                    : liveEvent.kind === "share"
-                      ? "text-violet-700 dark:text-violet-300"
-                      : liveEvent.kind === "ask"
-                        ? "text-amber-700 dark:text-amber-300"
-                        : "text-ink-500 dark:text-ink-400",
-              )}
+              className="mt-0.5 block truncate text-[10px] animate-fade-in"
               title={liveEvent.text}
             >
-              {liveEvent.text}
+              <SidebarLiveText
+                kind={liveEvent.kind}
+                animate={t.status === "running"}
+              >
+                {liveEvent.text}
+              </SidebarLiveText>
             </span>
           )}
           <span className="mt-0.5 flex items-center gap-1.5 font-mono text-[9px]">
@@ -966,5 +960,70 @@ function SidebarTaskRow({
         </span>
       </NavLink>
     </li>
+  );
+}
+
+/**
+ * Live-activity text for a sidebar task row. When the task is
+ * actively running we apply the same gradient shimmer that the
+ * task-detail "agent is thinking" line uses — same alive feel.
+ * Static fall-through (idle / waiting) just colors the text.
+ */
+function SidebarLiveText({
+  kind,
+  animate,
+  children,
+}: {
+  kind: string;
+  animate: boolean;
+  children: React.ReactNode;
+}) {
+  // Per-event-kind tone tokens. Each is a light-mode + dark-mode
+  // pair of CSS color values used both for the static color and
+  // for the shimmer gradient stops.
+  const tokens =
+    kind === "tool_call"
+      ? {
+          flat: "text-sky-700 dark:text-sky-300",
+          gradLight:
+            "bg-[linear-gradient(90deg,rgba(3,105,161,0.4),rgba(3,105,161,1),rgba(3,105,161,0.4))]",
+          gradDark:
+            "dark:bg-[linear-gradient(90deg,rgba(125,211,252,0.4),rgba(125,211,252,1),rgba(125,211,252,0.4))]",
+        }
+      : kind === "progress" || kind === "share"
+        ? {
+            flat: "text-violet-700 dark:text-violet-300",
+            gradLight:
+              "bg-[linear-gradient(90deg,rgba(109,40,217,0.4),rgba(109,40,217,1),rgba(109,40,217,0.4))]",
+            gradDark:
+              "dark:bg-[linear-gradient(90deg,rgba(196,181,253,0.4),rgba(196,181,253,1),rgba(196,181,253,0.4))]",
+          }
+        : kind === "ask"
+          ? {
+              flat: "text-amber-700 dark:text-amber-300",
+              gradLight:
+                "bg-[linear-gradient(90deg,rgba(180,83,9,0.4),rgba(180,83,9,1),rgba(180,83,9,0.4))]",
+              gradDark:
+                "dark:bg-[linear-gradient(90deg,rgba(252,211,77,0.4),rgba(252,211,77,1),rgba(252,211,77,0.4))]",
+            }
+          : {
+              flat: "text-ink-500 dark:text-ink-400",
+              gradLight: "",
+              gradDark: "",
+            };
+
+  if (!animate || !tokens.gradLight) {
+    return <span className={tokens.flat}>{children}</span>;
+  }
+  return (
+    <span
+      className={cn(
+        "bg-clip-text text-transparent bg-[length:200%_100%] animate-shimmer",
+        tokens.gradLight,
+        tokens.gradDark,
+      )}
+    >
+      {children}
+    </span>
   );
 }

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { z } from "zod";
 
 export const TelegramPluginConfig = z.object({
@@ -56,7 +57,7 @@ export const DEFAULT_PR_INSTRUCTIONS = "";
  *
  *   id       — what gets passed to the CLI as `--model`. Must be exact.
  *   label    — short display name shown in pickers.
- *   aliases  — nicknames the AI router accepts ("opus", "opus 4.7").
+ *   aliases  — nicknames the AI router accepts ("opus", "claude-opus").
  *   tier     — optional UI grouping. The deepest tier is shown as the
  *              "max thinking" pair; fast tiers are flagged in the UI.
  */
@@ -82,42 +83,90 @@ export const ModelRegistry = z.object({
 });
 export type ModelRegistry = z.infer<typeof ModelRegistry>;
 
+/**
+ * Default model registry — nothing version-specific. Claude entries
+ * use family aliases (`opus` / `sonnet` / `haiku`) that the claude
+ * CLI resolves to the latest version on its end at request time.
+ * Codex starts empty and is populated dynamically from
+ * `~/.codex/models_cache.json` (which codex maintains itself) when
+ * `GET /api/models` is hit. Operators can override either side via
+ * `cfg.models` in `~/.agentd/config.json` for early access or
+ * private fine-tunes.
+ */
 export const DEFAULT_MODEL_REGISTRY: ModelRegistry = {
   claude: [
     {
-      id: "claude-opus-4-7",
-      label: "opus 4.7",
-      aliases: ["opus", "claude-opus", "opus 4.7", "opus4.7", "opus-4.7"],
+      id: "opus",
+      label: "opus (latest)",
+      aliases: ["claude-opus"],
       tier: "deep",
     },
     {
-      id: "claude-sonnet-4-6",
-      label: "sonnet 4.6",
-      aliases: ["sonnet", "claude-sonnet", "sonnet 4.6"],
+      id: "sonnet",
+      label: "sonnet (latest)",
+      aliases: ["claude-sonnet"],
       tier: "balanced",
     },
     {
-      id: "claude-haiku-4-5",
-      label: "haiku 4.5",
-      aliases: ["haiku", "claude-haiku", "haiku 4.5"],
+      id: "haiku",
+      label: "haiku (latest)",
+      aliases: ["claude-haiku"],
       tier: "fast",
     },
   ],
-  codex: [
-    {
-      id: "gpt-5-codex",
-      label: "gpt-5-codex",
-      aliases: ["codex", "gpt5-codex", "gpt-5 codex"],
-      tier: "balanced",
-    },
-    {
-      id: "gpt-5",
-      label: "gpt-5",
-      aliases: ["gpt5", "gpt5.0"],
-      tier: "fast",
-    },
-  ],
+  // Codex's list comes from `~/.codex/models_cache.json` at API
+  // time. Empty default so we don't ship stale version pins.
+  codex: [],
 };
+
+/**
+ * Auto-discover available codex models from the cache that the
+ * codex CLI itself maintains at `~/.codex/models_cache.json`. Codex
+ * refreshes this file on its own, so reading it gives us a list
+ * that's always current (no agentd registry edits when openai
+ * ships a new version). Returns the visible entries sorted by
+ * priority. Empty array on any error (missing file, bad JSON, etc.).
+ */
+export function loadCodexModelsFromCache(): ModelEntry[] {
+  const path = join(homedir(), ".codex", "models_cache.json");
+  if (!existsSync(path)) return [];
+  try {
+    interface CachedModel {
+      slug?: string;
+      display_name?: string;
+      visibility?: string;
+      priority?: number;
+    }
+    const data = JSON.parse(readFileSync(path, "utf8")) as {
+      models?: CachedModel[];
+    };
+    const models = data.models ?? [];
+    const visible = models
+      .filter(
+        (m) => typeof m.slug === "string" && (m.visibility === "list" || !m.visibility),
+      )
+      .sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
+    return visible.map((m): ModelEntry => {
+      const slug = m.slug!;
+      const lower = slug.toLowerCase();
+      // Best-effort tier guess from the slug. Operators can override
+      // via cfg.models.codex in config.json if they care.
+      const tier: "fast" | "balanced" | "deep" = lower.includes("mini")
+        ? "fast"
+        : lower.includes("codex")
+          ? "balanced"
+          : "deep";
+      return {
+        id: slug,
+        label: m.display_name ?? slug,
+        aliases: [lower],
+        tier,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Resolve a free-form model nickname (`"opus"`, `"gpt-5.5"`, the full
@@ -141,8 +190,8 @@ export function resolveModelInRegistry(
     if (m.id.toLowerCase() === lower) return m.id;
     if (m.aliases.some((a) => a.toLowerCase() === lower)) return m.id;
   }
-  // Substring match on aliases — last resort, helps "opus 4.7" land
-  // on "opus 4.7" entry even when whitespace is weird.
+  // Substring match on aliases — last resort, helps loose nicknames
+  // resolve even when whitespace or punctuation is weird.
   for (const m of list) {
     if (m.aliases.some((a) => a.toLowerCase().replace(/\s+/g, "") === lower.replace(/\s+/g, ""))) {
       return m.id;

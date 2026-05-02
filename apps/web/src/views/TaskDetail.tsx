@@ -634,10 +634,31 @@ function ModelChip({ task }: { task: Task }) {
   // Pulled from the server's `cfg.models` so adding a model only
   // means editing config.json once. Always include "(default)" up
   // front so clearing the override is one tap away.
-  const registryEntries =
-    modelsQ.data?.models[task.agent as "claude" | "codex"] ?? [];
+  const agent = task.agent as "claude" | "codex";
+  const registryEntries = modelsQ.data?.models[agent] ?? [];
+  const defaultId = modelsQ.data?.defaults?.[agent] ?? "";
+  // Resolve the visible label: explicit task.model wins; otherwise
+  // show the configured default; otherwise fall back to the agent's
+  // own default (which the runner picks if we pass nothing). Match
+  // against the registry to render the friendly label when known.
+  const resolvedId = current || defaultId;
+  const resolvedEntry = registryEntries.find(
+    (m) =>
+      m.id === resolvedId ||
+      m.aliases?.some(
+        (a) => a.toLowerCase() === resolvedId.toLowerCase(),
+      ),
+  );
+  const chipLabel =
+    resolvedEntry?.label || resolvedId || `${agent} default`;
+  const isInherited = !current && !!defaultId;
   const suggestions = [
-    { value: "", label: "(default)" },
+    {
+      value: "",
+      label: defaultId
+        ? `(default · ${defaultId})`
+        : "(default)",
+    },
     ...registryEntries.map((m) => ({ value: m.id, label: m.label || m.id })),
   ];
   const [draft, setDraft] = useState(current);
@@ -665,12 +686,19 @@ function ModelChip({ task }: { task: Task }) {
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          title="Change the model for the next turn"
-          className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] bg-sky-500/10 text-sky-700 dark:text-sky-300 border border-sky-500/20 hover:bg-sky-500/20 transition-colors shrink-0 max-w-[160px]"
+          title={
+            isInherited
+              ? `Using project default · ${resolvedId}`
+              : `Override active · ${resolvedId || "(agent default)"}`
+          }
+          className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] bg-sky-500/10 text-sky-700 dark:text-sky-300 border border-sky-500/20 hover:bg-sky-500/20 transition-colors shrink-0 max-w-[200px]"
         >
-          <span className="truncate">
-            model:{current || "default"}
-          </span>
+          <span className="truncate">model:{chipLabel}</span>
+          {isInherited && (
+            <span className="font-normal text-[9px] text-sky-700/60 dark:text-sky-300/60">
+              ·default
+            </span>
+          )}
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-64">

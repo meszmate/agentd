@@ -202,7 +202,10 @@ export class AgentdClient {
   }
 
   // ── model registry ──
-  async getModels(): Promise<{ models: AgentdModelRegistry }> {
+  async getModels(): Promise<{
+    models: AgentdModelRegistry;
+    defaults?: { claude?: string; codex?: string };
+  }> {
     return this.req("/api/models");
   }
 

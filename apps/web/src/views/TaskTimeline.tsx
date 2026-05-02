@@ -314,7 +314,7 @@ export function TaskTimeline({
               </div>
             </div>
           ) : (
-            <ol className="relative space-y-4 pl-9 before:absolute before:left-3 before:top-2 before:bottom-2 before:w-px before:bg-ink-900/10 dark:before:bg-ink-50/10">
+            <ol className="relative space-y-2 pl-9 before:absolute before:left-3 before:top-2 before:bottom-2 before:w-px before:bg-ink-900/10 dark:before:bg-ink-50/10">
               {messages.map((m, i) => {
                 // Insert a compact divider before the first message
                 // whose ts falls after the most recent /compact —
@@ -347,13 +347,13 @@ export function TaskTimeline({
                       <span className="font-mono text-[10px] text-ember-600 dark:text-ember-400 animate-blink">
                         ●
                       </span>
-                      <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+                      <ShimmerText className="font-mono text-[10px] uppercase tracking-[0.06em]">
                         streaming
-                      </span>
+                      </ShimmerText>
                     </div>
                     <div className="relative">
                       <Markdown text={text} />
-                      <span className="inline-block w-1.5 h-4 align-text-bottom bg-ember-500/60 ml-0.5 animate-blink" />
+                      <span className="inline-block w-1.5 h-4 align-text-bottom bg-ember-500/70 ml-0.5 animate-blink" />
                     </div>
                   </div>
                 </li>
@@ -364,9 +364,9 @@ export function TaskTimeline({
                     <span className="h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink" />
                   </span>
                   <div className="flex items-baseline gap-2 flex-wrap">
-                    <span className="text-[12px] text-ember-700 dark:text-ember-300 font-medium">
+                    <ShimmerText className="text-[12.5px] font-medium">
                       agent is thinking
-                    </span>
+                    </ShimmerText>
                     {turn?.startedAt && (
                       <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
                         {formatElapsed(elapsedMs)}
@@ -528,9 +528,35 @@ function TimelineItem({ message: m }: { message: Message }) {
     if (meta) return <StructuredItem ts={m.ts} {...meta} />;
   }
 
+  // Tool rows are dense: just a tiny spine dot + the ToolLine. No
+  // role label, no timestamp header, no chunky avatar circle. The
+  // tool's own icon and summary inside ToolLine carry the meaning.
+  if (m.role === "tool") {
+    return (
+      <li className="relative">
+        <span className="absolute -left-7 top-1.5 size-2 rounded-full bg-ink-900/20 dark:bg-ink-50/20" />
+        <ToolLine content={m.content} />
+      </li>
+    );
+  }
+
+  // Plain system rows (raw stderr, etc.) — also dense single-line
+  // form. They're rare after the noise filter; when they do show up
+  // they shouldn't claim a whole bubble.
+  if (m.role === "system") {
+    return (
+      <li className="relative">
+        <span className="absolute -left-7 top-1.5 size-2 rounded-full bg-ink-900/15 dark:bg-ink-50/15" />
+        <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-snug text-ink-500 dark:text-ink-400">
+          {m.content}
+        </pre>
+      </li>
+    );
+  }
+
+  // User + agent rows are the actual conversation — they breathe.
   return (
     <li className="relative">
-      {/* Glyph in gutter */}
       <span
         className={cn(
           "absolute -left-9 top-0 flex h-6 w-6 items-center justify-center rounded-full border",
@@ -538,26 +564,17 @@ function TimelineItem({ message: m }: { message: Message }) {
             "border-sky-500/30 bg-sky-500/15 text-sky-700 dark:text-sky-300",
           m.role === "agent" &&
             "border-ember-500/30 bg-ember-500/15 text-ember-700 dark:text-ember-300",
-          m.role === "tool" &&
-            "border-ink-900/15 bg-paper-100 text-ink-500 dark:border-ink-50/15 dark:bg-ink-700 dark:text-ink-400",
-          m.role === "system" &&
-            "border-ink-900/10 bg-paper-100 text-ink-400 dark:border-ink-50/10 dark:bg-ink-700 dark:text-ink-500",
         )}
       >
         {ROLE_GLYPH[m.role]}
       </span>
-
-      {/* Body */}
       <div>
         <div className="flex items-baseline gap-2 mb-1">
           <span
             className={cn(
               "font-mono text-2xs font-medium uppercase tracking-[0.08em]",
               m.role === "user" && "text-sky-700 dark:text-sky-300",
-              m.role === "agent" &&
-                "text-ember-700 dark:text-ember-300",
-              (m.role === "tool" || m.role === "system") &&
-                "text-ink-500 dark:text-ink-400",
+              m.role === "agent" && "text-ember-700 dark:text-ember-300",
             )}
           >
             {ROLE_LABEL[m.role]}
@@ -566,9 +583,7 @@ function TimelineItem({ message: m }: { message: Message }) {
             {formatTs(m.ts)}
           </span>
         </div>
-        {m.role === "tool" ? (
-          <ToolLine content={m.content} />
-        ) : m.role === "user" ? (
+        {m.role === "user" ? (
           <div className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-900 dark:text-ink-50">
             {m.content}
           </div>
@@ -676,41 +691,33 @@ function StructuredItem({
     <li className="relative">
       <span
         className={cn(
-          "absolute -left-9 top-0 grid h-6 w-6 place-items-center rounded-full border",
-          style.border,
-          style.bg,
+          "absolute -left-7 top-1.5 size-2 rounded-full",
+          style.dot,
+          style.dotPulse && "animate-blink",
         )}
-      >
-        <span
-          className={cn(
-            "size-1.5 rounded-full",
-            style.dot,
-            style.dotPulse && "animate-blink",
-          )}
-        />
-      </span>
+      />
       <div
         className={cn(
-          "rounded-md border px-3 py-2 transition-all",
+          "rounded-md border px-2.5 py-1 transition-all",
           style.border,
           style.bg,
         )}
       >
-        <div className="flex items-baseline gap-2 mb-0.5">
+        <div className="flex items-baseline gap-2 flex-wrap">
           <span
             className={cn(
-              "font-mono text-2xs font-semibold uppercase tracking-[0.1em]",
+              "font-mono text-2xs font-semibold uppercase tracking-[0.1em] shrink-0",
               style.tone,
             )}
           >
             {style.label}
           </span>
-          <span className="font-mono text-2xs text-ink-400 dark:text-ink-500">
+          <span className="whitespace-pre-wrap break-words text-[12.5px] leading-snug text-ink-800 dark:text-ink-100 flex-1 min-w-0">
+            {text}
+          </span>
+          <span className="font-mono text-2xs text-ink-400 dark:text-ink-500 shrink-0 ml-auto">
             {formatTs(ts)}
           </span>
-        </div>
-        <div className="whitespace-pre-wrap break-words text-[13px] leading-snug text-ink-800 dark:text-ink-100">
-          {text}
         </div>
       </div>
     </li>
@@ -1007,6 +1014,38 @@ function CompactDivider({ ts }: { ts: number }) {
       </span>
       <span className="h-px flex-1 bg-gradient-to-l from-transparent via-violet-500/30 to-violet-500/30" />
     </li>
+  );
+}
+
+/**
+ * "Thinking" text with a gradient wave that sweeps across — the
+ * same fading animation codex uses for its status line. The text
+ * stays readable (mid-tone ember) while a brighter highlight
+ * travels left-to-right and back, so the whole label feels alive
+ * without distracting from what's around it.
+ *
+ * Implementation: 200%-wide gradient clipped to text, animated via
+ * the `shimmer` keyframe (already defined in tailwind.config).
+ */
+function ShimmerText({
+  children,
+  className,
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <span
+      className={cn(
+        "bg-clip-text text-transparent",
+        "bg-[linear-gradient(90deg,rgba(194,65,12,0.45),rgba(194,65,12,1),rgba(194,65,12,0.45))]",
+        "dark:bg-[linear-gradient(90deg,rgba(252,165,107,0.4),rgba(252,165,107,1),rgba(252,165,107,0.4))]",
+        "bg-[length:200%_100%] animate-shimmer",
+        className,
+      )}
+    >
+      {children}
+    </span>
   );
 }
 

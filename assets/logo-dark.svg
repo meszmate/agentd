@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 580 140" width="580" height="140" role="img" aria-label="agentd">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 140" width="420" height="140" role="img" aria-label="agentd">
   <title>agentd</title>
-  <g transform="translate(40, 36)">
+  <g transform="translate(28, 36)">
     <rect x="0" y="32" width="42" height="34" rx="9" fill="#DC2626" />
     <rect x="42" y="12" width="14" height="54" rx="7" fill="#DC2626" />
   </g>
   <text
-    x="125"
+    x="112"
     y="70"
     dominant-baseline="central"
     font-family="Geist, 'Helvetica Neue', 'Arial Black', Arial, sans-serif"

@@ -111,16 +111,14 @@ export function updateProject(
 ): Project | null {
   const cur = getProjectById(db, id);
   if (!cur) return null;
-  db.update(projects)
-    .set({
-      ...(patch.name != null ? { name: patch.name } : {}),
-      ...(patch.color != null ? { color: patch.color } : {}),
-      ...(patch.instructions !== undefined
-        ? { instructions: patch.instructions }
-        : {}),
-    })
-    .where(eq(projects.id, id))
-    .run();
+  const next: Record<string, unknown> = {};
+  if (patch.name != null) next.name = patch.name;
+  if (patch.color != null) next.color = patch.color;
+  if (patch.instructions !== undefined) next.instructions = patch.instructions;
+  // Drizzle's .set() throws "No values to set" on an empty object —
+  // skip the UPDATE entirely when the patch had nothing meaningful.
+  if (Object.keys(next).length === 0) return cur;
+  db.update(projects).set(next).where(eq(projects.id, id)).run();
   return getProjectById(db, id);
 }
 

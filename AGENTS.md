@@ -51,6 +51,16 @@ The daemon spawns plugin apps as subprocesses, never imports them.
   served by `GET/PATCH /api/prefs` and consumed via `usePrefs()` /
   `usePatchPrefs()` in the web app. Per-device-only state (auth token,
   theme, OS notification permission) stays in `localStorage`.
+- **Never hardcode model versions.** The model registry in
+  `packages/core/src/config.ts` ships with claude family aliases only
+  (`opus` / `sonnet` / `haiku`) — claude's CLI resolves these to the
+  latest version at request time. Codex's list is auto-discovered
+  from `~/.codex/models_cache.json` (read in
+  `loadCodexModelsFromCache()` and surfaced via `GET /api/models`).
+  Don't add `claude-opus-4-7`, `gpt-5.4`, or any other version-pinned
+  string anywhere in code, tests, defaults, or UI placeholders. The
+  one exception is operator overrides in `~/.agentd/config.json`'s
+  `models.{claude,codex}` array — that's their call.
 
 ## Running the stack
 
