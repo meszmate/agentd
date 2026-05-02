@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useAutoAnimate } from "@formkit/auto-animate/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowRight,
   Check,
   ChevronDown,
@@ -100,13 +102,63 @@ export function TaskTimeline({
   };
 
   const streamEntries = streams ? Object.entries(streams) : [];
-  // Auto-scroll on new messages or growing streams.
+
+  /**
+   * Stick-to-bottom UX. Auto-scroll runs only when the operator is
+   * already at (or within ~80px of) the bottom. The moment they
+   * scroll up to read older context, we lift the lock so new content
+   * doesn't yank them back. Resume sticky as soon as they return to
+   * the bottom — manually or via the "↓ jump" pill.
+   */
+  const [stickToBottom, setStickToBottom] = useState(true);
+  const [hasNewBelow, setHasNewBelow] = useState(false);
+  const STICK_THRESHOLD = 80;
+
+  const isAtBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD;
+  }, []);
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior });
+    setStickToBottom(true);
+    setHasNewBelow(false);
+  }, []);
+
+  // Watch the user's scroll. Re-arm stickiness when they return to
+  // the bottom; lift it the moment they pull away.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTo({ top: el.scrollHeight });
+    const onScroll = () => {
+      const atBottom = isAtBottom();
+      setStickToBottom(atBottom);
+      if (atBottom) setHasNewBelow(false);
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [isAtBottom]);
+
+  // Apply auto-scroll on new content, gated on sticky state. If the
+  // user is scrolled up, surface the "↓ jump" pill instead.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (stickToBottom) {
+      el.scrollTo({ top: el.scrollHeight });
+      setHasNewBelow(false);
+    } else {
+      setHasNewBelow(true);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages.length, streamEntries.map(([, t]) => t.length).join("|")]);
+  }, [
+    messages.length,
+    streamEntries.map(([, t]) => t.length).join("|"),
+    stickToBottom,
+  ]);
 
   // Tick once a second while a turn is live so the elapsed display moves.
   // When the turn settles (`startedAt = null`) we stop ticking — the meter
@@ -126,6 +178,13 @@ export function TaskTimeline({
   const queue = steerQ.data?.queue ?? [];
 
   const fireQueued = useFireQueuedSteer(taskId);
+
+  // FLIP animator on the queue list — rows slide as they're fired or
+  // removed, matching the right-side todos timeline feel.
+  const [queueRef] = useAutoAnimate<HTMLUListElement>({
+    duration: 420,
+    easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+  });
 
   const submit = async () => {
     const msg = text.trim();
@@ -212,7 +271,19 @@ export function TaskTimeline({
           </Button>
         </div>
       )}
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
+      <div className="relative flex-1 min-h-0">
+        {!stickToBottom && hasNewBelow && (
+          <button
+            type="button"
+            onClick={() => scrollToBottom("smooth")}
+            title="Jump to latest"
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 inline-flex items-center gap-1.5 h-7 px-3 rounded-full bg-ember-500 text-white shadow-lg shadow-ember-900/20 hover:bg-ember-400 active:scale-[0.96] transition-all animate-fade-in font-mono text-[10.5px] uppercase tracking-[0.1em] font-semibold"
+          >
+            <ArrowDown className="h-3 w-3" />
+            new
+          </button>
+        )}
+        <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
         <div className="mx-auto max-w-3xl px-6 py-6 lg:py-8">
           {messages.length === 0 ? (
             <div className="flex h-full items-center justify-center py-16">
@@ -278,6 +349,7 @@ export function TaskTimeline({
             </ol>
           )}
         </div>
+        </div>
       </div>
 
       {/* Input */}
@@ -295,32 +367,41 @@ export function TaskTimeline({
               completed into a count. Full history lives in the right
               sidebar's Todos tab. */}
           {plan && plan.length > 0 && <PlanStrip plan={plan} />}
-          {/* Steer queue — each pending message gets its own line so
-              long inputs stay readable. Items are written to claude's
-              stdin immediately and picked up at the next tool-call
-              boundary; the row clears when the agent acknowledges via
-              the next turn boundary. */}
+          {/* Steer queue — each pending message gets its own row so
+              long inputs stay readable. Items live until the operator
+              clicks Steer to fire them (writes to stdin for claude,
+              SIGINT-respawn for codex). Once fired, the message lands
+              in the chat and the row vanishes. */}
           {queue.length > 0 && (
-            <div className="mb-2 rounded-md border border-violet-500/25 bg-violet-500/[0.05] dark:bg-violet-500/[0.08]">
-              <div className="flex items-center justify-between px-2.5 py-1 border-b border-violet-500/15">
-                <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-violet-700 dark:text-violet-300">
-                  <span className="size-1.5 rounded-full bg-violet-500 animate-blink" />
-                  steer · {queue.length} {queue.length === 1 ? "line" : "lines"}
+            <div className="mb-2.5 overflow-hidden rounded-lg border border-violet-500/30 bg-gradient-to-br from-violet-500/[0.07] via-violet-500/[0.04] to-transparent shadow-[0_1px_0_rgba(139,92,246,0.06),0_8px_24px_-12px_rgba(139,92,246,0.18)] dark:from-violet-500/[0.12] dark:via-violet-500/[0.07] animate-fade-in">
+              <header className="flex items-center justify-between gap-2 px-3 py-1.5 bg-gradient-to-r from-violet-500/[0.08] to-transparent border-b border-violet-500/15">
+                <span className="inline-flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-violet-700 dark:text-violet-300 font-semibold">
+                  <span className="relative flex h-2 w-2">
+                    <span className="absolute inset-0 rounded-full bg-violet-500/50 animate-pulse-ring" />
+                    <span className="relative h-2 w-2 rounded-full bg-violet-500" />
+                  </span>
+                  Queue
+                  <span className="rounded-full px-1.5 py-px bg-violet-500/20 text-[9px] font-bold tabular-nums">
+                    {queue.length}
+                  </span>
                 </span>
-                <span className="font-mono text-[9px] text-violet-700/70 dark:text-violet-300/70">
-                  fires after the next tool call
+                <span className="font-mono text-[9px] text-violet-700/60 dark:text-violet-300/60">
+                  click ↑ steer to fire after next tool call
                 </span>
-              </div>
-              <ul className="divide-y divide-violet-500/10">
+              </header>
+              <ul
+                ref={queueRef}
+                className="divide-y divide-violet-500/10"
+              >
                 {queue.map((line, i) => (
                   <li
                     key={`${i}-${line.slice(0, 12)}`}
-                    className="group flex items-start gap-2 px-2.5 py-1.5"
+                    className="group flex items-start gap-2.5 px-3 py-2 hover:bg-violet-500/[0.04] dark:hover:bg-violet-500/[0.06] transition-colors animate-slide-in"
                   >
-                    <span className="mt-px font-mono text-[10px] tabular-nums text-violet-700/60 dark:text-violet-300/60 shrink-0 w-4 text-right">
+                    <span className="mt-0.5 grid place-items-center size-5 rounded-full bg-violet-500/15 text-violet-700 dark:text-violet-300 font-mono text-[10px] tabular-nums font-semibold shrink-0">
                       {i + 1}
                     </span>
-                    <span className="flex-1 min-w-0 whitespace-pre-wrap break-words text-[12px] leading-snug text-violet-900 dark:text-violet-100">
+                    <span className="flex-1 min-w-0 whitespace-pre-wrap break-words text-[12.5px] leading-snug text-violet-900 dark:text-violet-100 pt-0.5">
                       {line}
                     </span>
                     <div className="flex items-center gap-1 shrink-0">
@@ -328,13 +409,13 @@ export function TaskTimeline({
                         type="button"
                         onClick={() => void fireRow(i, line)}
                         disabled={fireQueued.isPending}
-                        title="Steer — fire this now (lands after the next tool call)"
-                        className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-violet-500/40 bg-violet-500/15 text-violet-700 dark:text-violet-300 hover:bg-violet-500/25 disabled:opacity-40 transition-colors"
+                        title="Steer — send to the agent now (lands after the next tool call)"
+                        className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md font-mono text-[10px] uppercase tracking-[0.1em] font-semibold bg-gradient-to-b from-violet-500 to-violet-600 text-white shadow-sm shadow-violet-900/20 hover:from-violet-400 hover:to-violet-500 active:from-violet-600 active:to-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all hover:scale-[1.03] active:scale-[0.98]"
                       >
                         {fireQueued.isPending ? (
-                          <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                          <Loader2 className="h-3 w-3 animate-spin" />
                         ) : (
-                          <ArrowRight className="h-2.5 w-2.5" />
+                          <ArrowRight className="h-3 w-3" />
                         )}
                         steer
                       </button>
@@ -342,7 +423,7 @@ export function TaskTimeline({
                         type="button"
                         onClick={() => void removeQueued.mutateAsync(i)}
                         title="Remove from queue"
-                        className="rounded p-0.5 text-violet-700/60 hover:bg-violet-500/20 hover:text-violet-700 dark:text-violet-300/60 dark:hover:text-violet-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                        className="grid place-items-center size-7 rounded-md text-violet-700/50 hover:bg-violet-500/20 hover:text-violet-700 dark:text-violet-300/50 dark:hover:text-violet-300 opacity-0 group-hover:opacity-100 transition-all"
                       >
                         <X className="h-3 w-3" />
                       </button>
@@ -564,10 +645,14 @@ function Markdown({ text }: { text: string }) {
 }
 
 /**
- * Compact plan render that lives above the chat input. Shows the
- * in-progress item front-and-center plus the next pending steps; the
- * full list is one click away. Mirrors what claude-code shows in its
- * scratchpad above the prompt.
+ * Compact plan render that lives above the chat input. Highlights
+ * what the agent is working on right now in an ember band, fades
+ * completed steps with green strikethrough, lists what's next. Click
+ * the header to expand/collapse the full list.
+ *
+ * The colour language matches the right-side todos timeline so the
+ * operator's eye reads both the same way: emerald = done, ember =
+ * active, ink = pending.
  */
 function PlanStrip({ plan }: { plan: TaskPlanItem[] }) {
   const [expanded, setExpanded] = useState(false);
@@ -575,30 +660,43 @@ function PlanStrip({ plan }: { plan: TaskPlanItem[] }) {
   const pending = plan.filter((p) => p.status === "pending");
   const done = plan.filter((p) => p.status === "completed").length;
   const total = plan.length;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
-  // Show the in-progress item plus up to two upcoming when collapsed,
-  // everything when expanded. If nothing is in progress, the first
-  // pending takes the spotlight.
   const head = inProgress ?? pending[0];
   const restPending = inProgress ? pending : pending.slice(1);
   const collapsedRest = restPending.slice(0, 2);
   const overflow = restPending.length - collapsedRest.length;
 
+  // Same FLIP animator as the right timeline / queue so plan items
+  // glide into their new position when the agent updates the list.
+  const [planRef] = useAutoAnimate<HTMLUListElement>({
+    duration: 420,
+    easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+  });
+
   return (
-    <div className="mb-2 rounded-md border border-ink-900/[0.08] bg-paper-50/60 px-3 py-2 dark:border-ink-50/[0.08] dark:bg-ink-800/40">
+    <div className="mb-2.5 overflow-hidden rounded-lg border border-ink-900/[0.08] bg-gradient-to-br from-paper-100 to-paper-50 shadow-[0_1px_0_rgba(10,8,5,0.04)] dark:from-ink-800/60 dark:to-ink-800/30 dark:border-ink-50/[0.08]">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-2 text-left"
+        className="group flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-ink-900/[0.02] dark:hover:bg-ink-50/[0.02] transition-colors"
         title={expanded ? "Collapse plan" : "Expand plan"}
       >
         {expanded ? (
-          <ChevronDown className="h-3 w-3 text-ink-400 dark:text-ink-500 shrink-0" />
+          <ChevronDown className="h-3 w-3 text-ink-400 dark:text-ink-500 shrink-0 transition-transform" />
         ) : (
-          <ChevronRight className="h-3 w-3 text-ink-400 dark:text-ink-500 shrink-0" />
+          <ChevronRight className="h-3 w-3 text-ink-400 dark:text-ink-500 shrink-0 transition-transform" />
         )}
-        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-violet-700 dark:text-violet-300 shrink-0">
-          plan
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] font-semibold text-violet-700 dark:text-violet-300 shrink-0">
+          Plan
+        </span>
+        {/* Mini progress ribbon — fills emerald as the agent ticks
+            items off. */}
+        <span className="relative h-1 w-12 rounded-full bg-ink-900/[0.08] dark:bg-ink-50/[0.08] overflow-hidden shrink-0">
+          <span
+            className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-emerald-400 to-emerald-500 transition-all duration-500"
+            style={{ width: `${pct}%` }}
+          />
         </span>
         <span className="font-mono text-[10px] tabular-nums text-ink-500 dark:text-ink-400 shrink-0">
           {done}/{total}
@@ -606,24 +704,41 @@ function PlanStrip({ plan }: { plan: TaskPlanItem[] }) {
         {head && !expanded && (
           <span className="flex items-center gap-1.5 min-w-0 flex-1">
             <PlanGlyph status={head.status} />
-            <span className="truncate text-[12px] text-ink-700 dark:text-ink-200">
+            <span
+              className={cn(
+                "truncate text-[12.5px]",
+                head.status === "in_progress"
+                  ? "text-ink-900 dark:text-ink-50 font-medium"
+                  : "text-ink-700 dark:text-ink-200",
+              )}
+            >
               {head.activeForm ?? head.content}
             </span>
           </span>
         )}
       </button>
       {expanded ? (
-        <ul className="mt-1.5 space-y-0.5 pl-5">
+        <ul
+          ref={planRef}
+          className="px-3 pb-2 space-y-1 border-t border-ink-900/[0.04] dark:border-ink-50/[0.04] pt-1.5"
+        >
           {plan.map((item, i) => (
-            <li key={i} className="flex items-start gap-1.5">
-              <span className="mt-0.5">
+            <li
+              key={i}
+              className={cn(
+                "flex items-start gap-2 rounded-md px-1.5 py-0.5 transition-all animate-slide-in",
+                item.status === "in_progress" &&
+                  "bg-gradient-to-r from-ember-500/[0.08] to-transparent",
+              )}
+            >
+              <span className="mt-1">
                 <PlanGlyph status={item.status} />
               </span>
               <span
                 className={cn(
-                  "text-[12px] leading-snug",
+                  "flex-1 min-w-0 text-[12.5px] leading-snug transition-all duration-300",
                   item.status === "completed" &&
-                    "line-through text-ink-500 dark:text-ink-400",
+                    "line-through text-emerald-700/85 dark:text-emerald-300/85",
                   item.status === "in_progress" &&
                     "text-ink-900 dark:text-ink-50 font-medium",
                   item.status === "pending" && "text-ink-700 dark:text-ink-200",
@@ -638,17 +753,17 @@ function PlanStrip({ plan }: { plan: TaskPlanItem[] }) {
         </ul>
       ) : (
         collapsedRest.length > 0 && (
-          <ul className="mt-1 space-y-0.5 pl-5">
+          <ul className="px-3 pb-2 space-y-0.5 border-t border-ink-900/[0.04] dark:border-ink-50/[0.04] pt-1.5">
             {collapsedRest.map((item, i) => (
-              <li key={i} className="flex items-center gap-1.5">
+              <li key={i} className="flex items-center gap-2 pl-1">
                 <PlanGlyph status="pending" />
-                <span className="truncate text-[11px] text-ink-500 dark:text-ink-400">
+                <span className="truncate text-[11.5px] text-ink-500 dark:text-ink-400">
                   {item.content}
                 </span>
               </li>
             ))}
             {overflow > 0 && (
-              <li className="pl-4 font-mono text-[10px] text-ink-400 dark:text-ink-500">
+              <li className="pl-6 font-mono text-[10px] text-ink-400 dark:text-ink-500 italic">
                 +{overflow} more
               </li>
             )}
@@ -662,20 +777,21 @@ function PlanStrip({ plan }: { plan: TaskPlanItem[] }) {
 function PlanGlyph({ status }: { status: TaskPlanItem["status"] }) {
   if (status === "completed") {
     return (
-      <span className="inline-grid place-items-center size-3 rounded-full border border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 shrink-0">
-        <Check className="h-2 w-2" />
+      <span className="relative inline-grid place-items-center size-3.5 rounded-full border border-emerald-500/70 bg-gradient-to-br from-emerald-400 to-emerald-500 text-white shrink-0 shadow-[0_0_0_1px_rgba(16,185,129,0.15)]">
+        <Check className="h-2.5 w-2.5 stroke-[3] animate-check-pop" />
       </span>
     );
   }
   if (status === "in_progress") {
     return (
-      <span className="inline-grid place-items-center size-3 rounded-full border border-ember-500/60 bg-ember-500/20 shrink-0">
-        <span className="size-1 rounded-full bg-ember-500 animate-blink" />
+      <span className="relative inline-grid place-items-center size-3.5 rounded-full border border-ember-500/70 bg-ember-500/25 shrink-0 animate-active-glow">
+        <span className="absolute inset-0 rounded-full bg-ember-500/30 animate-pulse-ring" />
+        <span className="relative size-1.5 rounded-full bg-ember-500" />
       </span>
     );
   }
   return (
-    <span className="inline-block size-3 rounded-full border border-ink-900/25 dark:border-ink-50/25 shrink-0" />
+    <span className="inline-block size-3.5 rounded-full border-[1.5px] border-ink-900/25 dark:border-ink-50/25 shrink-0 transition-colors hover:border-ember-500/50" />
   );
 }
 

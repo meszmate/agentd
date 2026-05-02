@@ -137,6 +137,32 @@ const config: Config = {
           "0%": { opacity: "0", transform: "translateY(8px)" },
           "100%": { opacity: "1", transform: "translateY(0)" },
         },
+        // Soft green flash when a todo flips to done — settles in ~700ms.
+        "done-flash": {
+          "0%": { backgroundColor: "rgba(16, 185, 129, 0.18)" },
+          "100%": { backgroundColor: "rgba(16, 185, 129, 0)" },
+        },
+        // Pop the check mark in when status hits done.
+        "check-pop": {
+          "0%": { transform: "scale(0)", opacity: "0" },
+          "60%": { transform: "scale(1.25)", opacity: "1" },
+          "100%": { transform: "scale(1)", opacity: "1" },
+        },
+        // Draw the strikethrough across — paired with line-through on text.
+        "strike-in": {
+          "0%": { transform: "scaleX(0)", transformOrigin: "left" },
+          "100%": { transform: "scaleX(1)", transformOrigin: "left" },
+        },
+        // Slide-in for new queue/timeline rows.
+        "slide-in": {
+          "0%": { opacity: "0", transform: "translateX(-6px)" },
+          "100%": { opacity: "1", transform: "translateX(0)" },
+        },
+        // Soft glow on currently active row (ember pulse).
+        "active-glow": {
+          "0%, 100%": { boxShadow: "0 0 0 0 rgba(247, 127, 0, 0.25)" },
+          "50%": { boxShadow: "0 0 0 4px rgba(247, 127, 0, 0)" },
+        },
       },
       animation: {
         shimmer: "shimmer 2s linear infinite",
@@ -145,6 +171,11 @@ const config: Config = {
         blink: "blink 1.6s ease-in-out infinite",
         "pulse-ring": "pulse_ring 1.6s cubic-bezier(0.2, 0.7, 0.2, 1) infinite",
         "ticker-in": "ticker_in 0.4s ease-out both",
+        "done-flash": "done-flash 0.8s ease-out both",
+        "check-pop": "check-pop 0.4s cubic-bezier(0.2, 0.7, 0.2, 1) both",
+        "strike-in": "strike-in 0.35s cubic-bezier(0.4, 0, 0.2, 1) both",
+        "slide-in": "slide-in 0.25s ease-out both",
+        "active-glow": "active-glow 2.4s ease-in-out infinite",
       },
     },
   },

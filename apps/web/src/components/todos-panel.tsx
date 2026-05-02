@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useAutoAnimate } from "@formkit/auto-animate/react";
 import {
   Bot,
   Check,
@@ -23,9 +24,8 @@ import { cn, formatTs, formatTsAbsolute } from "@/lib/utils";
  * plan order. A continuous spine connects them so the eye reads the
  * panel as a story: "this happened, this is happening, this is next."
  *
- * Agent-source rows (mirrored from the runner's TodoWrite plan via
- * `syncAgentPlan`) wear a small bot glyph so the operator can tell
- * theirs apart from manual additions at a glance.
+ * Status language matches the inline plan strip: emerald = done,
+ * ember = active, ink = pending.
  */
 export function TodosPanel({
   projectId,
@@ -50,19 +50,18 @@ export function TodosPanel({
   const items = todosQ.data?.todos ?? [];
   const [draft, setDraft] = useState("");
 
-  // Tick once a minute so relative timestamps stay fresh while the
-  // panel is open. Cheap — `formatTs` is pure, this just rerenders
-  // the rows so "5m ago" becomes "6m ago" without a refresh.
+  // Tick once a minute so relative timestamps stay fresh.
   const [, force] = useState(0);
   useEffect(() => {
     const id = setInterval(() => force((n) => n + 1), 60_000);
     return () => clearInterval(id);
   }, []);
 
+  // Auto-animate handles the position animation when an item changes
+  // status (sliding from "now" → "done", etc). The CSS transitions on
+  // text color + strikethrough handle the visual mark itself.
+
   const ordered = useMemo(() => {
-    // Top: completed/cancelled, most-recent-first (when did this happen).
-    // Middle: in-progress, in plan order.
-    // Bottom: pending, in plan order (what's coming next).
     const past = items
       .filter((t) => t.status === "done" || t.status === "cancelled")
       .sort(
@@ -78,8 +77,58 @@ export function TodosPanel({
     return { past, now, next };
   }, [items]);
 
+  // Single flat list rendered in one <ol> so auto-animate can FLIP
+  // rows that cross section boundaries (e.g. an "in progress" item
+  // marked done glides up into the "done" group instead of teleporting).
+  type Row =
+    | { kind: "header"; id: string; label: string; tone: "ink" | "ember"; pulse: boolean }
+    | { kind: "todo"; id: string; todo: Todo };
+  const rows = useMemo<Row[]>(() => {
+    const out: Row[] = [];
+    if (ordered.past.length > 0) {
+      out.push({
+        kind: "header",
+        id: "h:done",
+        label: `done · ${ordered.past.length}`,
+        tone: "ink",
+        pulse: false,
+      });
+      for (const t of ordered.past) out.push({ kind: "todo", id: t.id, todo: t });
+    }
+    if (ordered.now.length > 0) {
+      out.push({
+        kind: "header",
+        id: "h:now",
+        label: "now",
+        tone: "ember",
+        pulse: true,
+      });
+      for (const t of ordered.now) out.push({ kind: "todo", id: t.id, todo: t });
+    }
+    if (ordered.next.length > 0) {
+      out.push({
+        kind: "header",
+        id: "h:next",
+        label: `next · ${ordered.next.length}`,
+        tone: "ink",
+        pulse: false,
+      });
+      for (const t of ordered.next) out.push({ kind: "todo", id: t.id, todo: t });
+    }
+    return out;
+  }, [ordered]);
+
+  // FLIP animator on the <ol>. Slightly longer duration + a softer
+  // out-quart easing so the slide feels deliberate and luxurious
+  // rather than rushed.
+  const [olRef] = useAutoAnimate<HTMLOListElement>({
+    duration: 420,
+    easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+  });
+
   const total = items.length;
   const doneCount = ordered.past.filter((t) => t.status === "done").length;
+  const pct = total > 0 ? Math.round((doneCount / total) * 100) : 0;
 
   const submit = async () => {
     const text = draft.trim();
@@ -99,61 +148,74 @@ export function TodosPanel({
 
   return (
     <section className="flex h-full min-h-0 flex-col">
-      <header className="flex items-baseline justify-between border-b border-ink-900/[0.06] px-3 py-2 dark:border-ink-50/[0.06] shrink-0">
-        <h3 className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
-          {title}
-        </h3>
-        <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-          {doneCount}/{total} done
-        </span>
+      <header className="flex items-center justify-between gap-2 border-b border-ink-900/[0.06] px-3 py-2.5 dark:border-ink-50/[0.06] shrink-0 bg-gradient-to-b from-paper-50 to-transparent dark:from-ink-800/40">
+        <div className="flex items-center gap-2">
+          <h3 className="font-mono text-[10px] uppercase tracking-[0.16em] font-semibold text-ink-700 dark:text-ink-200">
+            {title}
+          </h3>
+          {total > 0 && (
+            <>
+              <span className="relative h-1 w-16 rounded-full bg-ink-900/[0.08] dark:bg-ink-50/[0.08] overflow-hidden">
+                <span
+                  className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-emerald-400 to-emerald-500 transition-all duration-500"
+                  style={{ width: `${pct}%` }}
+                />
+              </span>
+              <span className="font-mono text-[10px] tabular-nums text-ink-500 dark:text-ink-400">
+                {doneCount}/{total}
+              </span>
+            </>
+          )}
+        </div>
+        {ordered.now.length > 0 && (
+          <span className="inline-flex items-center gap-1 font-mono text-[9px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
+            <span className="size-1 rounded-full bg-ember-500 animate-blink" />
+            active
+          </span>
+        )}
       </header>
 
       <div className="flex-1 min-h-0 overflow-y-auto">
         {total === 0 ? (
-          <div className="px-3 py-8 text-center text-[11px] text-ink-500 dark:text-ink-400 italic">
-            {emptyHint ?? "no todos yet — add one below or wait for the agent to write a plan"}
+          <div className="px-4 py-12 text-center">
+            <div className="mx-auto mb-3 grid place-items-center size-10 rounded-full bg-ink-900/[0.04] dark:bg-ink-50/[0.04]">
+              <Plus className="h-4 w-4 text-ink-400 dark:text-ink-500" />
+            </div>
+            <p className="text-[11.5px] text-ink-500 dark:text-ink-400">
+              {emptyHint ?? "no todos yet"}
+            </p>
+            <p className="mt-1 text-[10px] text-ink-400 dark:text-ink-500">
+              type below or wait for the agent's plan
+            </p>
           </div>
         ) : (
-          <ol className="relative px-4 py-3 before:absolute before:left-[1.4rem] before:top-3 before:bottom-3 before:w-px before:bg-ink-900/10 dark:before:bg-ink-50/10">
-            {ordered.past.length > 0 && (
-              <SectionHeader label={`done · ${ordered.past.length}`} />
+          <ol
+            ref={olRef}
+            className="relative px-4 py-3 before:absolute before:left-[1.4rem] before:top-3 before:bottom-3 before:w-px before:bg-gradient-to-b before:from-ink-900/15 before:via-ink-900/10 before:to-ink-900/5 dark:before:from-ink-50/15 dark:before:via-ink-50/10 dark:before:to-ink-50/5"
+          >
+            {rows.map((row) =>
+              row.kind === "header" ? (
+                <SectionHeader
+                  key={row.id}
+                  label={row.label}
+                  tone={row.tone}
+                  pulse={row.pulse}
+                />
+              ) : (
+                <TimelineItem
+                  key={row.id}
+                  todo={row.todo}
+                  onSetStatus={(s) => setStatus(row.todo, s)}
+                  onDelete={() => void del.mutateAsync(row.id)}
+                />
+              ),
             )}
-            {ordered.past.map((t) => (
-              <TimelineItem
-                key={t.id}
-                todo={t}
-                onSetStatus={(s) => setStatus(t, s)}
-                onDelete={() => void del.mutateAsync(t.id)}
-              />
-            ))}
-            {ordered.now.length > 0 && (
-              <SectionHeader label="now" tone="ember" />
-            )}
-            {ordered.now.map((t) => (
-              <TimelineItem
-                key={t.id}
-                todo={t}
-                onSetStatus={(s) => setStatus(t, s)}
-                onDelete={() => void del.mutateAsync(t.id)}
-              />
-            ))}
-            {ordered.next.length > 0 && (
-              <SectionHeader label={`next · ${ordered.next.length}`} />
-            )}
-            {ordered.next.map((t) => (
-              <TimelineItem
-                key={t.id}
-                todo={t}
-                onSetStatus={(s) => setStatus(t, s)}
-                onDelete={() => void del.mutateAsync(t.id)}
-              />
-            ))}
           </ol>
         )}
       </div>
 
       <form
-        className="flex items-center gap-1 border-t border-ink-900/[0.06] px-2 py-2 dark:border-ink-50/[0.06] shrink-0"
+        className="flex items-center gap-1 border-t border-ink-900/[0.06] px-2 py-2 dark:border-ink-50/[0.06] shrink-0 bg-gradient-to-t from-paper-50/50 dark:from-ink-800/30"
         onSubmit={(e) => {
           e.preventDefault();
           void submit();
@@ -163,18 +225,19 @@ export function TodosPanel({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           placeholder="add todo…"
-          className="flex-1 h-7 bg-transparent border-0 outline-none focus:ring-0 text-[12px] text-ink-900 dark:text-ink-50 placeholder:text-ink-400"
+          className="flex-1 h-7 px-1 bg-transparent border-0 outline-none focus:ring-0 text-[12px] text-ink-900 dark:text-ink-50 placeholder:text-ink-400"
           spellCheck={false}
         />
         <button
           type="submit"
           disabled={!draft.trim() || create.isPending}
-          className="h-7 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300 disabled:opacity-40"
+          className="grid place-items-center h-7 w-7 rounded-md bg-gradient-to-b from-ember-500 to-ember-600 text-white shadow-sm hover:from-ember-400 hover:to-ember-500 active:scale-[0.96] disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+          title="Add todo"
         >
           {create.isPending ? (
             <Loader2 className="h-3 w-3 animate-spin" />
           ) : (
-            <Plus className="h-3 w-3" />
+            <Plus className="h-3.5 w-3.5" />
           )}
         </button>
       </form>
@@ -185,20 +248,25 @@ export function TodosPanel({
 function SectionHeader({
   label,
   tone = "ink",
+  pulse = false,
 }: {
   label: string;
   tone?: "ink" | "ember";
+  pulse?: boolean;
 }) {
   return (
-    <li className="relative -ml-[1px] mt-3 mb-1.5 first:mt-0 list-none">
+    <li className="relative mt-3 mb-1.5 first:mt-0 list-none animate-fade-in">
       <span
         className={cn(
-          "ml-8 font-mono text-[9px] uppercase tracking-[0.16em]",
+          "ml-8 inline-flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-[0.16em] font-semibold",
           tone === "ember"
             ? "text-ember-700 dark:text-ember-300"
             : "text-ink-400 dark:text-ink-500",
         )}
       >
+        {pulse && (
+          <span className="size-1 rounded-full bg-ember-500 animate-blink" />
+        )}
         {label}
       </span>
     </li>
@@ -217,12 +285,7 @@ function TimelineItem({
   const isDone = todo.status === "done";
   const isCancelled = todo.status === "cancelled";
   const isInProgress = todo.status === "in_progress";
-  const dim = isDone || isCancelled;
 
-  // Pick the timestamp that "describes" this row best:
-  //   completed/cancelled → completedAt (when it landed)
-  //   in_progress         → updatedAt   (when it became active)
-  //   pending             → createdAt   (when it was added)
   const stampMs =
     (isDone || isCancelled
       ? todo.completedAt ?? todo.updatedAt
@@ -233,20 +296,15 @@ function TimelineItem({
   return (
     <li
       className={cn(
-        // animate-fade-in is defined in tailwind.config — fades the
-        // row in when it first mounts so adds + status changes feel
-        // alive instead of pop-in.
-        "group relative pl-8 py-1.5 list-none animate-fade-in",
+        "group relative pl-8 py-1.5 list-none rounded-md",
       )}
     >
-      {/* Glyph sits on the spine. Pulse-ring around the in-progress
-          dot draws the eye to "what we're working on right now". */}
       <span
         className="absolute left-[0.85rem] top-2 z-10"
         title={statusLabel(todo.status)}
       >
         {isInProgress && (
-          <span className="absolute inset-0 -m-1 rounded-full bg-ember-500/30 animate-ping" />
+          <span className="absolute inset-0 -m-1 rounded-full bg-ember-500/30 animate-pulse-ring" />
         )}
         <StatusButton
           status={todo.status}
@@ -259,17 +317,21 @@ function TimelineItem({
         <div
           className={cn(
             "flex-1 min-w-0 transition-all duration-300",
-            isInProgress && "rounded-md border border-ember-500/40 bg-ember-500/[0.08] px-2 py-1 -ml-2 -my-1 shadow-[0_0_0_1px_rgba(247,127,0,0.06)]",
+            isInProgress &&
+              "rounded-md border border-ember-500/40 bg-gradient-to-r from-ember-500/[0.10] via-ember-500/[0.05] to-transparent px-2 py-1 -ml-2 -my-1 shadow-[0_0_0_1px_rgba(247,127,0,0.06)] animate-active-glow",
           )}
         >
           <div className="flex items-baseline gap-2">
             <span
               className={cn(
-                "flex-1 min-w-0 text-[12.5px] leading-snug break-words transition-all duration-300",
-                isDone && "line-through text-emerald-700/80 dark:text-emerald-300/80",
-                isCancelled && "line-through text-ink-400 dark:text-ink-500",
+                "relative flex-1 min-w-0 text-[12.5px] leading-snug break-words transition-colors duration-300",
+                isDone &&
+                  "line-through decoration-emerald-500/70 decoration-[1.5px] text-emerald-700/90 dark:text-emerald-300/90",
+                isCancelled &&
+                  "line-through text-ink-400 dark:text-ink-500",
                 isInProgress && "text-ink-900 dark:text-ink-50 font-medium",
-                !dim && !isInProgress && "text-ink-700 dark:text-ink-200",
+                !isDone && !isCancelled && !isInProgress &&
+                  "text-ink-700 dark:text-ink-200",
               )}
             >
               {todo.text}
@@ -279,7 +341,7 @@ function TimelineItem({
               className={cn(
                 "font-mono text-[10px] tabular-nums shrink-0 transition-colors duration-300",
                 isInProgress
-                  ? "text-ember-700 dark:text-ember-300"
+                  ? "text-ember-700 dark:text-ember-300 font-semibold"
                   : isDone
                     ? "text-emerald-700/70 dark:text-emerald-300/70"
                     : "text-ink-400 dark:text-ink-500",
@@ -295,8 +357,6 @@ function TimelineItem({
               )}
             </span>
           </div>
-          {/* Source/meta line — only when there's something extra worth
-              showing. Keep it sparse so the row stays one-line by default. */}
           {(todo.source === "agent" || isCancelled) && (
             <div className="mt-0.5 flex items-center gap-2 font-mono text-[9.5px] uppercase tracking-[0.08em] text-ink-400 dark:text-ink-500">
               {todo.source === "agent" && (
@@ -373,15 +433,18 @@ function StatusButton({
         onLong();
       }}
       className={cn(
-        "relative grid place-items-center size-4 shrink-0 rounded-full border bg-paper-50 dark:bg-ink-900 transition-all duration-200",
+        "relative grid place-items-center size-4 shrink-0 rounded-full border-[1.5px] transition-all duration-200",
         isDone &&
-          "border-emerald-500/70 bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 scale-105",
-        isInProgress && "border-ember-500/80 bg-ember-500/30",
-        isCancelled && "border-ink-900/15 dark:border-ink-50/15",
-        !isDone && !isInProgress && !isCancelled && "border-ink-900/25 hover:border-ember-500/60 hover:scale-110 dark:border-ink-50/25",
+          "border-emerald-500/80 bg-gradient-to-br from-emerald-400 to-emerald-500 text-white shadow-[0_0_0_1px_rgba(16,185,129,0.18)]",
+        isInProgress &&
+          "border-ember-500/80 bg-gradient-to-br from-ember-400/40 to-ember-500/30",
+        isCancelled &&
+          "border-ink-900/15 bg-paper-50 dark:border-ink-50/15 dark:bg-ink-900",
+        !isDone && !isInProgress && !isCancelled &&
+          "border-ink-900/25 bg-paper-50 hover:border-ember-500/60 hover:scale-110 dark:border-ink-50/25 dark:bg-ink-900",
       )}
     >
-      {isDone && <Check className="h-2.5 w-2.5 stroke-[3]" />}
+      {isDone && <Check className="h-2.5 w-2.5 stroke-[3] animate-check-pop" />}
       {isInProgress && (
         <span className="size-1.5 rounded-full bg-ember-500 animate-blink" />
       )}
