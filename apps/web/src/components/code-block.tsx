@@ -57,39 +57,21 @@ export function CodeBlock({
 
   const label = filename ?? (lang || "text");
 
-  // Modern, low-contrast surface palette. Light mode uses a soft warm
-  // off-white (closer to a notebook than to a stark IDE panel) with
-  // a hairline border; dark mode keeps the IDE feel but with a
-  // subtler border. Header is integrated, not chunky.
-  const surface = isDark
-    ? "bg-[#1a1b22] border-ink-50/[0.08]"
-    : "bg-[#fafaf7] border-ink-900/[0.08]";
-  const headerBg = isDark
-    ? "bg-[#13141a] border-ink-50/[0.06]"
-    : "bg-[#f3f3ee] border-ink-900/[0.05]";
-  const headerLabel = isDark ? "text-ink-50/55" : "text-ink-500";
+  // No box. The "code block" is just a small filename caption (mono,
+  // low-contrast) followed by syntax-highlighted lines flush with the
+  // surrounding text — terminal feel, not IDE-panel feel.
+  const headerLabel = isDark ? "text-ink-50/45" : "text-ink-500";
   const copyButton = isDark
     ? "text-ink-50/55 hover:bg-ink-50/10 hover:text-ink-50"
     : "text-ink-500 hover:bg-ink-900/[0.06] hover:text-ink-900";
   const lineNumber = isDark ? "text-ink-50/25" : "text-ink-400/70";
 
   return (
-    <div
-      className={cn(
-        "group relative my-1 overflow-hidden rounded border",
-        surface,
-        className,
-      )}
-    >
-      <div
-        className={cn(
-          "flex items-center justify-between px-2 h-5 border-b",
-          headerBg,
-        )}
-      >
+    <div className={cn("group relative my-1.5", className)}>
+      <div className="flex items-center justify-between mb-0.5">
         <span
           className={cn(
-            "font-mono text-[9px] uppercase tracking-[0.1em] truncate",
+            "font-mono text-[10px] tabular-nums truncate",
             headerLabel,
           )}
         >
@@ -120,10 +102,11 @@ export function CodeBlock({
           <pre
             className={cn(
               cls,
-              "overflow-auto py-1 font-mono text-[11px] leading-[1.4] m-0",
+              "overflow-auto font-mono text-[11.5px] leading-[1.5] m-0",
             )}
             style={{
               ...style,
+              background: "transparent",
               ...(maxHeight ? { maxHeight } : {}),
             }}
           >
