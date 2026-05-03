@@ -219,6 +219,32 @@ export function buildServer(opts: BuildServerOptions) {
   function pubProjectRemoved(projectId: string): void {
     bus.publishSystem({ kind: "project_removed", projectId });
   }
+  /**
+   * Cross-device sync for the saved-idea library + active draft
+   * conversations. Fires on create, update (status / messages /
+   * plan-draft / etc.), and delete. The web invalidates its
+   * `["saved-ideas", slug]` + per-idea queries; other surfaces
+   * (telegram / discord) ignore for now but can subscribe later.
+   */
+  function pubSavedIdeaChanged(ideaId: string): void {
+    const idea = getSavedIdea(db, ideaId);
+    if (!idea) return;
+    bus.publishSystem({
+      kind: "saved_idea_changed",
+      ideaId,
+      projectId: idea.projectId ?? null,
+    });
+  }
+  function pubSavedIdeaRemoved(
+    ideaId: string,
+    projectId: string | null,
+  ): void {
+    bus.publishSystem({
+      kind: "saved_idea_removed",
+      ideaId,
+      projectId,
+    });
+  }
 
   /**
    * File-watching for the model registry. Two sources can change
@@ -3185,6 +3211,7 @@ export function buildServer(opts: BuildServerOptions) {
         ? { planDraft: parsed.data.planDraft }
         : {}),
     });
+    pubSavedIdeaChanged(idea.id);
     return c.json({ idea });
   });
 
@@ -3374,6 +3401,7 @@ export function buildServer(opts: BuildServerOptions) {
     }
     const updated = updateSavedIdea(db, id, parsed.data);
     if (!updated) return c.json({ error: "not found" }, 404);
+    pubSavedIdeaChanged(id);
     return c.json({ idea: updated });
   });
 
@@ -3415,18 +3443,20 @@ export function buildServer(opts: BuildServerOptions) {
     }
     // Persist the operator's turn before spawning the helper so the
     // thread always reflects truth even if the helper never responds.
-    if (mode === "chat" && userMessage) {
+    if ((mode === "chat" || mode === "validate") && userMessage) {
       appendIdeaMessage(db, {
         ideaId: id,
         role: "user",
         content: userMessage,
       });
+      pubSavedIdeaChanged(id);
     } else if (mode === "challenge") {
       appendIdeaMessage(db, {
         ideaId: id,
         role: "system",
         content: "Operator asked the agent to challenge the idea.",
       });
+      pubSavedIdeaChanged(id);
     } else if (mode === "plan") {
       appendIdeaMessage(db, {
         ideaId: id,
@@ -3437,6 +3467,7 @@ export function buildServer(opts: BuildServerOptions) {
             ? "Operator asked the agent to refine the plan."
             : "Operator asked the agent to draft a plan.",
       });
+      pubSavedIdeaChanged(id);
     }
     const cfg = loadConfig(paths.root);
     const helper = {
@@ -3484,9 +3515,14 @@ export function buildServer(opts: BuildServerOptions) {
                   ),
                 );
               } else {
-                // First conversation turn promotes draft → refining.
+                // First conversation turn promotes draft → refining,
+                // EXCEPT in validate mode — those drafts stay as
+                // "draft" until the operator explicitly hits Save in
+                // the brainstorm view (which sets status to refining
+                // via PATCH). Keeps the brainstorm idea-mode pile
+                // distinct from the workshop's library.
                 let nextStatus = idea.status;
-                if (idea.status === "draft") {
+                if (idea.status === "draft" && mode !== "validate") {
                   const promoted = updateSavedIdea(db, id, {
                     status: "refining",
                   });
@@ -3560,9 +3596,15 @@ export function buildServer(opts: BuildServerOptions) {
                       message: persisted,
                       ideaStatus: nextStatus,
                       planDraft: nextPlanDraft,
+                      ...(result.suggestedTitle
+                        ? { suggestedTitle: result.suggestedTitle }
+                        : {}),
                     })}`,
                   ),
                 );
+                // Cross-device sync — every other connected client
+                // refreshes the idea + its messages list.
+                pubSavedIdeaChanged(id);
               }
               break;
             }
@@ -3604,6 +3646,7 @@ export function buildServer(opts: BuildServerOptions) {
     const idea = getSavedIdea(db, id);
     if (!idea) return c.json({ error: "not found" }, 404);
     deleteSavedIdea(db, id);
+    pubSavedIdeaRemoved(id, idea.projectId ?? null);
     return c.json({ ok: true });
   });
 
@@ -3614,6 +3657,7 @@ export function buildServer(opts: BuildServerOptions) {
     } | null;
     const updated = updateSavedIdeaPlan(db, id, body?.planDraft ?? null);
     if (!updated) return c.json({ error: "not found" }, 404);
+    pubSavedIdeaChanged(id);
     return c.json({ idea: updated });
   });
 
@@ -4295,6 +4339,20 @@ export function buildServer(opts: BuildServerOptions) {
           } else if (env.event.kind === "models_changed") {
             send({
               type: "models_changed",
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "saved_idea_changed") {
+            send({
+              type: "saved_idea_changed",
+              ideaId: env.event.ideaId,
+              projectId: env.event.projectId,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "saved_idea_removed") {
+            send({
+              type: "saved_idea_removed",
+              ideaId: env.event.ideaId,
+              projectId: env.event.projectId,
               ts: env.ts,
             });
           }

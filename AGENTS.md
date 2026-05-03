@@ -47,10 +47,19 @@ The daemon spawns plugin apps as subprocesses, never imports them.
   field is a non-breaking change for old `config.json`s; adding a
   field is non-breaking the other direction. Don't ever require a
   field that older builds wouldn't have written.
-- **Cross-device state goes in `cfg.prefs`** (the `UserPrefs` block),
-  served by `GET/PATCH /api/prefs` and consumed via `usePrefs()` /
-  `usePatchPrefs()` in the web app. Per-device-only state (auth token,
-  theme, OS notification permission) stays in `localStorage`.
+- **Cross-device state goes on the server.** Anything operators
+  expect to see across devices — task chat, ideas, conversations,
+  drafts, settings, history, anything that survives a reload —
+  lives in the daemon DB and syncs via `/ws`. Never reach for
+  `localStorage` or `sessionStorage` for content state. Operator
+  preferences (last-used model / agent / permission mode / etc.)
+  go in `cfg.prefs` (the `UserPrefs` block), served by `GET/PATCH
+  /api/prefs` and consumed via `usePrefs()` / `usePatchPrefs()` in
+  the web app. The ONLY things that may stay in `localStorage` are
+  strict per-device concerns the server can't know: the auth token,
+  theme, OS notification permission. Everything else: server +
+  WebSocket. If you find yourself caching a conversation, draft,
+  or list locally to "survive reload", stop and add a table.
 - **Every state change is realtime.** When a row mutates (task,
   project, todo, suggestion, terminal session, anything operators
   see across surfaces), publish a system event through the

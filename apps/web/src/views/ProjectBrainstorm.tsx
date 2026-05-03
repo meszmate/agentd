@@ -69,6 +69,7 @@ import {
   qk,
   useClearProjectBrainstorm,
   useDeleteSavedIdea,
+  useIdea,
   useIdeateForProject,
   useModels,
   useInvalidateSuggestions,
@@ -282,242 +283,132 @@ export function ProjectBrainstorm() {
     }
   };
 
-  // "I have an idea" — full agentic conversation. Each idea-mode
-  // submission appends to a multi-turn conversation. Renders inline
-  // in the brainstorm thread as `›`/`λ` rows (no boxes), with live
-  // tool activity above each agent reply. Nothing is persisted until
-  // the operator explicitly hits Save.
-  interface IdeaConvoTurn {
-    role: "user" | "agent";
-    text: string;
-    /** Tool events — only set on agent turns. */
-    events?: IdeaChatEvent[];
-    finished?: boolean;
-    error?: string | null;
-    ts: number;
-  }
-  interface IdeaConvo {
-    id: string;
-    turns: IdeaConvoTurn[];
+  // "I have an idea" — server-driven multi-turn conversation. Each
+  // draft is a real SavedIdea (status="draft") on the daemon, with
+  // its turns living in `idea_messages`. WS events keep every device
+  // in sync. The originating client also keeps an in-memory map of
+  // the in-flight stream (events + partial text) keyed by idea id;
+  // it clears the moment the daemon persists the turn.
+  interface IdeaStreamState {
+    events: IdeaChatEvent[];
+    partialText: string;
     suggestedTitle: string;
-    savedIdeaId: string | null;
-    saving: boolean;
-    ts: number;
+    error: string | null;
   }
-  const ideaStorageKey = `agentd-idea-convos:${project.id}`;
-  const [localIdeas, setLocalIdeas] = useState<IdeaConvo[]>(() => {
-    if (typeof window === "undefined") return [];
-    try {
-      const raw = window.localStorage.getItem(ideaStorageKey);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw) as IdeaConvo[];
-      // Drop any convos whose last turn was mid-stream — those got
-      // orphaned by the reload (the daemon doesn't know about the
-      // client's stream so we can't resume). Save-state survives.
-      return parsed
-        .map((c) => ({
-          ...c,
-          saving: false,
-          turns: c.turns.filter(
-            (t, i, arr) =>
-              !(t.role === "agent" && !t.finished && i === arr.length - 1),
-          ),
-        }))
-        .filter((c) => c.turns.length > 0);
-    } catch {
-      return [];
-    }
-  });
-  // Persist on every change so refreshing the page keeps the
-  // user's idea conversations + saved-state intact.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(ideaStorageKey, JSON.stringify(localIdeas));
-    } catch {
-      // storage full / disabled — silent
-    }
-  }, [localIdeas, ideaStorageKey]);
+  const [ideaStreams, setIdeaStreams] = useState<Map<string, IdeaStreamState>>(
+    () => new Map(),
+  );
   const [savingIdea, setSavingIdea] = useState(false);
   const ideaAbortRefs = useRef(new Map<string, AbortController>());
 
-  const removeLocalIdea = (convoId: string) => {
-    const ctrl = ideaAbortRefs.current.get(convoId);
-    if (ctrl) {
-      ctrl.abort();
-      ideaAbortRefs.current.delete(convoId);
-    }
-    setLocalIdeas((cur) => cur.filter((p) => p.id !== convoId));
-  };
+  // Active drafts come from the saved-ideas list, filtered to this
+  // project + status="draft". The brainstorm thread renders one
+  // <DraftIdeaConvo> per draft; messages flow through the per-idea
+  // query, which auto-invalidates on `saved_idea_changed` WS events.
+  const draftIdeas = useMemo(
+    () =>
+      (savedQ.data?.ideas ?? [])
+        .filter(
+          (i) => i.projectId === project.id && i.status === "draft",
+        )
+        .sort((a, b) => a.updatedAt - b.updatedAt),
+    [savedQ.data, project.id],
+  );
 
-  const cancelIdea = (convoId: string) => {
-    const ctrl = ideaAbortRefs.current.get(convoId);
+  const cancelIdea = (ideaId: string) => {
+    const ctrl = ideaAbortRefs.current.get(ideaId);
     if (ctrl) ctrl.abort();
   };
 
-  const saveLocalIdea = async (convoId: string, title: string) => {
-    const convo = localIdeas.find((p) => p.id === convoId);
-    if (!convo) return;
-    setLocalIdeas((cur) =>
-      cur.map((p) => (p.id === convoId ? { ...p, saving: true } : p)),
-    );
+  const dismissDraft = async (ideaId: string) => {
+    cancelIdea(ideaId);
     try {
-      const lastAgent = [...convo.turns]
-        .reverse()
-        .find((t) => t.role === "agent");
-      const firstUser = convo.turns.find((t) => t.role === "user");
-      const description =
-        lastAgent?.text || firstUser?.text || convo.suggestedTitle;
-      const r = await save.mutateAsync({
-        projectSlug: project.slug,
-        text:
-          title.trim() ||
-          convo.suggestedTitle ||
-          firstUser?.text.slice(0, 60) ||
-          "idea",
-        description,
-      });
-      setLocalIdeas((cur) =>
-        cur.map((p) =>
-          p.id === convoId
-            ? { ...p, saving: false, savedIdeaId: r.idea.id }
-            : p,
-        ),
-      );
-      void qc.invalidateQueries({ queryKey: qk.savedIdeas(project.slug) });
-      toast("idea saved");
+      await unsave.mutateAsync(ideaId);
     } catch (e) {
-      setLocalIdeas((cur) =>
-        cur.map((p) => (p.id === convoId ? { ...p, saving: false } : p)),
-      );
       toast((e as Error).message, true);
     }
   };
 
-  /** Run the validate-idea stream against an existing convo (or create
-   *  a new one). Appends a user + agent turn pair, streams agent output
-   *  into the agent turn, updates the suggestedTitle on completion. */
-  const runIdeaTurn = async (
-    convoId: string | null,
-    text: string,
-  ): Promise<void> => {
-    const id = convoId ?? `idea-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const ctrl = new AbortController();
-    ideaAbortRefs.current.set(id, ctrl);
-
-    const userTurn: IdeaConvoTurn = {
-      role: "user",
-      text,
-      ts: Date.now(),
-    };
-    const agentTurn: IdeaConvoTurn = {
-      role: "agent",
-      text: "",
-      events: [],
-      finished: false,
-      ts: Date.now(),
-    };
-
-    let history: Array<{ role: "user" | "agent"; content: string }> = [];
-
-    setLocalIdeas((cur) => {
-      const existing = cur.find((p) => p.id === id);
-      if (existing) {
-        history = existing.turns.map((t) => ({ role: t.role, content: t.text }));
-        return cur.map((p) =>
-          p.id === id
-            ? { ...p, turns: [...p.turns, userTurn, agentTurn] }
-            : p,
-        );
-      }
-      return [
-        ...cur,
-        {
-          id,
-          turns: [userTurn, agentTurn],
-          suggestedTitle: "",
-          savedIdeaId: null,
-          saving: false,
-          ts: Date.now(),
-        },
-      ];
-    });
-
-    setSavingIdea(true);
+  const saveDraft = async (ideaId: string, title: string) => {
     try {
-      const r = await client.streamValidateIdea(
-        project.id,
-        { text, history },
+      await client.updateIdea(ideaId, {
+        text: title.trim() || "idea",
+        status: "refining",
+      });
+      // The WS handler will invalidate caches; toast for explicit feedback.
+      toast("saved to library");
+    } catch (e) {
+      toast((e as Error).message, true);
+    }
+  };
+
+  /** Run a validate-mode chat-stream turn against an existing draft.
+   *  Server persists the user message + agent reply via the existing
+   *  `/saved-ideas/:id/chat/stream` endpoint, so reload + cross-device
+   *  sync are automatic. We only track ephemeral stream state for
+   *  the originating client's progress visualization. */
+  const runIdeaTurn = async (ideaId: string, text: string): Promise<void> => {
+    const ctrl = new AbortController();
+    ideaAbortRefs.current.set(ideaId, ctrl);
+    setIdeaStreams((cur) => {
+      const next = new Map(cur);
+      next.set(ideaId, {
+        events: [],
+        partialText: "",
+        suggestedTitle: "",
+        error: null,
+      });
+      return next;
+    });
+    try {
+      const r = await client.streamIdeaChat(
+        ideaId,
+        { mode: "validate", text },
         (event) => {
-          setLocalIdeas((cur) =>
-            cur.map((p) => {
-              if (p.id !== id) return p;
-              const last = p.turns[p.turns.length - 1];
-              if (!last || last.role !== "agent") return p;
-              const updated = { ...last };
-              if (event.kind === "text") {
-                updated.text = (updated.text ?? "") + event.delta;
-              } else if (event.kind === "tool_use" || event.kind === "tool_result") {
-                updated.events = [...(updated.events ?? []), event];
-              } else {
-                return p;
-              }
-              return {
-                ...p,
-                turns: [...p.turns.slice(0, -1), updated],
-              };
-            }),
-          );
+          setIdeaStreams((cur) => {
+            const next = new Map(cur);
+            const s = next.get(ideaId);
+            if (!s) return cur;
+            if (event.kind === "text") {
+              next.set(ideaId, { ...s, partialText: s.partialText + event.delta });
+            } else if (
+              event.kind === "tool_use" ||
+              event.kind === "tool_result"
+            ) {
+              next.set(ideaId, { ...s, events: [...s.events, event] });
+            }
+            return next;
+          });
         },
         ctrl.signal,
       );
-      setLocalIdeas((cur) =>
-        cur.map((p) => {
-          if (p.id !== id) return p;
-          const last = p.turns[p.turns.length - 1];
-          if (!last || last.role !== "agent") return p;
-          if (r.ok === false) {
-            return {
-              ...p,
-              turns: [
-                ...p.turns.slice(0, -1),
-                { ...last, finished: true, error: r.error || "no response" },
-              ],
-            };
-          }
-          return {
-            ...p,
-            suggestedTitle: r.suggestedTitle || p.suggestedTitle,
-            turns: [
-              ...p.turns.slice(0, -1),
-              { ...last, finished: true, text: r.critique || last.text },
-            ],
-          };
-        }),
-      );
+      // On successful completion the daemon has persisted both the
+      // user message and the agent reply — the per-idea query will
+      // re-fetch via the WS handler. Drop our ephemeral stream
+      // state so the cached server data takes over.
+      setIdeaStreams((cur) => {
+        const next = new Map(cur);
+        next.delete(ideaId);
+        return next;
+      });
+      if (r.ok === false) {
+        toast(`agent: ${r.error}`, true);
+      }
     } catch (e) {
       const aborted = (e as { name?: string }).name === "AbortError";
-      setLocalIdeas((cur) =>
-        cur.map((p) => {
-          if (p.id !== id) return p;
-          const last = p.turns[p.turns.length - 1];
-          if (!last || last.role !== "agent") return p;
-          return {
-            ...p,
-            turns: [
-              ...p.turns.slice(0, -1),
-              {
-                ...last,
-                finished: true,
-                error: aborted ? "stopped" : (e as Error).message,
-              },
-            ],
-          };
-        }),
-      );
+      setIdeaStreams((cur) => {
+        const next = new Map(cur);
+        const s = next.get(ideaId);
+        if (s) {
+          next.set(ideaId, {
+            ...s,
+            error: aborted ? "stopped" : (e as Error).message,
+          });
+        }
+        return next;
+      });
     } finally {
-      setSavingIdea(false);
-      ideaAbortRefs.current.delete(id);
+      ideaAbortRefs.current.delete(ideaId);
     }
   };
 
@@ -527,13 +418,31 @@ export function ProjectBrainstorm() {
       toast("type your idea first", true);
       return;
     }
-    setBrief("");
-    await runIdeaTurn(null, text);
+    if (savingIdea) return;
+    setSavingIdea(true);
+    try {
+      // Create the SavedIdea (status="draft") server-side first so
+      // the conversation lives across reloads + syncs to other
+      // devices. Then kick off the validate chat-stream against it.
+      const r = await save.mutateAsync({
+        projectSlug: project.slug,
+        text,
+        status: "draft",
+      });
+      setBrief("");
+      // Fire & forget — the stream populates ideaStreams; the draft
+      // appears in `draftIdeas` via the WS-invalidated query.
+      void runIdeaTurn(r.idea.id, text);
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setSavingIdea(false);
+    }
   };
 
-  const sendIdeaFollowup = async (convoId: string, text: string) => {
+  const sendIdeaFollowup = async (ideaId: string, text: string) => {
     if (!text.trim()) return;
-    await runIdeaTurn(convoId, text.trim());
+    await runIdeaTurn(ideaId, text.trim());
   };
 
   /**
@@ -662,7 +571,7 @@ export function ProjectBrainstorm() {
   const isEmpty = sessions.length === 0 && !streaming;
 
   const onResetChat = async () => {
-    const totalConvos = sessions.length + localIdeas.length;
+    const totalConvos = sessions.length + draftIdeas.length;
     if (totalConvos === 0) {
       toast("nothing to clear");
       return;
@@ -674,10 +583,17 @@ export function ProjectBrainstorm() {
     )
       return;
     try {
-      // Cancel any in-flight idea conversations + drop local state.
+      // Cancel any in-flight idea streams + drop the matching server
+      // drafts. Brainstorm sessions get wiped via the existing
+      // suggestion-clear endpoint.
       for (const ctrl of ideaAbortRefs.current.values()) ctrl.abort();
       ideaAbortRefs.current.clear();
-      setLocalIdeas([]);
+      setIdeaStreams(new Map());
+      await Promise.all(
+        draftIdeas.map((d) =>
+          unsave.mutateAsync(d.id).catch(() => undefined),
+        ),
+      );
       if (sessions.length > 0) {
         await clear.mutateAsync(project.slug);
       }
@@ -692,7 +608,7 @@ export function ProjectBrainstorm() {
       <div className="flex-1 min-h-0 relative">
         <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
           <div className="px-5 lg:px-7 py-6 space-y-7">
-            {isEmpty && localIdeas.length === 0 ? (
+            {isEmpty && draftIdeas.length === 0 ? (
               <EmptyChat
                 projectName={project.name}
                 onPickPreset={setBrief}
@@ -717,15 +633,18 @@ export function ProjectBrainstorm() {
                     streaming={streaming}
                   />
                 ))}
-                {localIdeas.map((p) => (
-                  <IdeaConvoBlock
-                    key={p.id}
-                    convo={p}
+                {draftIdeas.map((d) => (
+                  <DraftIdeaConvo
+                    key={d.id}
+                    ideaId={d.id}
+                    seedText={d.text}
+                    seedTs={d.updatedAt}
+                    streamState={ideaStreams.get(d.id) ?? null}
                     projectSlug={project.slug}
-                    onCancel={() => cancelIdea(p.id)}
-                    onFollowup={(t) => void sendIdeaFollowup(p.id, t)}
-                    onSave={(title) => void saveLocalIdea(p.id, title)}
-                    onDismiss={() => removeLocalIdea(p.id)}
+                    onCancel={() => cancelIdea(d.id)}
+                    onFollowup={(t) => void sendIdeaFollowup(d.id, t)}
+                    onSave={(title) => void saveDraft(d.id, title)}
+                    onDismiss={() => void dismissDraft(d.id)}
                     onOpenIdea={openIdea}
                   />
                 ))}
@@ -1738,41 +1657,38 @@ function StatusBadgeSm({ status }: { status: IdeaStatus }) {
   );
 }
 
-/* ── Idea conversation block ─────────────────────────────────────── */
+/* ── Server-driven idea conversation block ───────────────────────── */
 
 /**
  * Renders a multi-turn "I have an idea" conversation inline in the
- * brainstorm thread. No outer box — turns flow as TimelineItem-style
- * `›` (you) / `λ` (agent) rows so it reads like the regular chat.
- * Live tool activity shows above each agent reply; markdown body
- * streams in. Operator can keep replying via the inline composer at
- * the bottom; once they're happy they hit Save (label is the
- * agent-suggested title, editable).
+ * brainstorm thread. Sourced from the daemon — the SavedIdea +
+ * its idea_messages are the source of truth, hydrated via
+ * `useIdea(ideaId)` and kept fresh by `saved_idea_changed` WS
+ * events. Cross-device sync is automatic. The originating client
+ * can also pass an in-memory `streamState` for the in-flight
+ * agent turn (partial text + tool events not yet persisted).
  */
-function IdeaConvoBlock({
-  convo,
+function DraftIdeaConvo({
+  ideaId,
+  seedText,
+  seedTs,
+  streamState,
   projectSlug,
   onCancel,
   onFollowup,
   onSave,
   onDismiss,
-  onOpenIdea,
+  onOpenIdea: _onOpenIdea,
 }: {
-  convo: {
-    id: string;
-    turns: Array<{
-      role: "user" | "agent";
-      text: string;
-      events?: IdeaChatEvent[];
-      finished?: boolean;
-      error?: string | null;
-      ts: number;
-    }>;
+  ideaId: string;
+  seedText: string;
+  seedTs: number;
+  streamState: {
+    events: IdeaChatEvent[];
+    partialText: string;
     suggestedTitle: string;
-    savedIdeaId: string | null;
-    saving: boolean;
-    ts: number;
-  };
+    error: string | null;
+  } | null;
   projectSlug: string;
   onCancel: () => void;
   onFollowup: (text: string) => void;
@@ -1780,98 +1696,110 @@ function IdeaConvoBlock({
   onDismiss: () => void;
   onOpenIdea: (id: string) => void;
 }) {
-  const unsave = useDeleteSavedIdea();
-  const { toast } = useApp();
-  const lastTurn = convo.turns[convo.turns.length - 1];
-  const streaming = !!(lastTurn?.role === "agent" && !lastTurn.finished);
-  const hasFinishedAgentReply = convo.turns.some(
-    (t) => t.role === "agent" && t.finished && !t.error,
+  const ideaQ = useIdea(ideaId);
+  const messages = ideaQ.data?.messages ?? [];
+
+  // Build the convo turns from server messages + any in-flight
+  // agent turn. The `seedText` is the first user message — for a
+  // brand-new draft it may not be persisted yet (the daemon writes
+  // it at the end of the chat-stream turn), so we render it
+  // directly from the SavedIdea.text until the persisted user
+  // message catches up.
+  const persistedHasUserSeed = messages.some(
+    (m) => m.role === "user" && m.content.trim() === seedText.trim(),
   );
+
+  type Turn = {
+    role: "user" | "agent" | "system";
+    text: string;
+    events?: IdeaChatEvent[];
+    finished: boolean;
+    error?: string | null;
+    ts: number;
+  };
+
+  const turns: Turn[] = [];
+  if (!persistedHasUserSeed && messages.length === 0) {
+    // First turn: the user message hasn't persisted yet (the daemon
+    // writes it once the chat-stream turn lands). Render the seed
+    // immediately so the operator sees their own input.
+    turns.push({
+      role: "user",
+      text: seedText,
+      finished: true,
+      ts: seedTs,
+    });
+  }
+  for (const m of messages) {
+    turns.push({
+      role: m.role as Turn["role"],
+      text: m.content,
+      events: (m.events ?? []) as unknown as IdeaChatEvent[],
+      finished: true,
+      ts: m.createdAt,
+    });
+  }
+  if (streamState) {
+    // In-flight agent turn — appears at the bottom while the chat-
+    // stream is running, replaced by the persisted message once
+    // the daemon writes it + WS invalidates the cache.
+    turns.push({
+      role: "agent",
+      text: streamState.partialText,
+      events: streamState.events,
+      finished: false,
+      error: streamState.error ?? null,
+      ts: Date.now(),
+    });
+  }
+
+  const streaming = !!streamState;
+  const lastAgent = [...messages].reverse().find((m) => m.role === "agent");
+  // Suggested title — pulled from either the in-flight stream or
+  // the latest persisted agent message's trailing TITLE: line.
+  const persistedTitle = lastAgent?.content.match(
+    /(^|\n)\s*TITLE:\s*([^\n]+?)\s*$/i,
+  )?.[2];
+  const suggestedTitle =
+    streamState?.suggestedTitle ||
+    (persistedTitle ?? "").trim() ||
+    seedText.split(/\s+/).slice(0, 6).join(" ");
+  const hasFinishedAgentReply = !!lastAgent;
 
   const [titleDraft, setTitleDraft] = useState("");
   useEffect(() => {
-    if (convo.suggestedTitle && !titleDraft) {
-      setTitleDraft(convo.suggestedTitle);
-    }
-  }, [convo.suggestedTitle, titleDraft]);
-
+    if (suggestedTitle && !titleDraft) setTitleDraft(suggestedTitle);
+  }, [suggestedTitle, titleDraft]);
   const [reply, setReply] = useState("");
-
-  const removeSaved = async () => {
-    if (!convo.savedIdeaId) {
-      onDismiss();
-      return;
-    }
-    try {
-      await unsave.mutateAsync(convo.savedIdeaId);
-      onDismiss();
-    } catch (e) {
-      toast((e as Error).message, true);
-    }
-  };
-
-  // Inline title-edit popover — hidden by default, opens when the
-  // user clicks the save chip. Keeps the convo footer clean (one
-  // small chip instead of a full title input bar).
   const [titleEditing, setTitleEditing] = useState(false);
 
   return (
     <div className="space-y-5">
-      {convo.turns.map((turn, i) => (
+      {turns.map((turn, i) => (
         <IdeaTurnRow
-          key={i}
-          turn={turn}
-          streaming={streaming && i === convo.turns.length - 1}
+          key={`${ideaId}-${i}`}
+          turn={turn as IdeaTurnRowInput}
+          streaming={streaming && i === turns.length - 1}
           onStop={onCancel}
         />
       ))}
 
-      {/* Footer toolbar — one row, all the convo-level actions live
-          here. Save stays compact: a chip showing the suggested
-          title; click → expands inline title input. Reply composer
-          shares the same row. */}
+      {/* Footer toolbar — one row. Save chip is compact; click to
+          edit the title + save. Discard at the right end. While the
+          agent is still streaming the first reply we hide the row
+          entirely so the chip doesn't flicker into existence
+          mid-thought. */}
       {hasFinishedAgentReply && (
         <div className="ml-5 pl-0.5 flex flex-wrap items-center gap-2">
-          {convo.savedIdeaId ? (
-            <>
-              <span className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.08em] text-emerald-700 dark:text-emerald-300">
-                <CheckCircle2 className="h-2.5 w-2.5" />
-                saved
-              </span>
-              <Link
-                to={`/projects/${encodeURIComponent(projectSlug)}/ideas/${convo.savedIdeaId}`}
-                className="inline-flex items-center gap-1 font-mono text-[10.5px] uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300 hover:underline"
-                onClick={() =>
-                  convo.savedIdeaId && onOpenIdea(convo.savedIdeaId)
-                }
-              >
-                <ArrowUpRight className="h-2.5 w-2.5" />
-                open in workshop
-              </Link>
-              <button
-                type="button"
-                onClick={() => void removeSaved()}
-                disabled={unsave.isPending}
-                className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
-              >
-                {unsave.isPending ? (
-                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                ) : (
-                  <Trash2 className="h-2.5 w-2.5" />
-                )}
-                remove
-              </button>
-            </>
-          ) : titleEditing ? (
-            // Expanded inline title input with save/cancel.
+          {titleEditing ? (
             <>
               <Lightbulb className="h-3 w-3 text-amber-500 shrink-0" />
               <Input
                 autoFocus
                 value={titleDraft}
                 onChange={(e) => setTitleDraft(e.target.value)}
-                placeholder={convo.suggestedTitle || "title for this idea"}
-                disabled={convo.saving || streaming}
+                placeholder={suggestedTitle || "title for this idea"}
+                disabled={streaming}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
@@ -1890,14 +1818,10 @@ function IdeaConvoBlock({
                   onSave(titleDraft);
                   setTitleEditing(false);
                 }}
-                disabled={convo.saving || streaming}
+                disabled={streaming}
                 className="shrink-0 inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 disabled:opacity-40"
               >
-                {convo.saving ? (
-                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                ) : (
-                  <BookmarkCheck className="h-2.5 w-2.5" />
-                )}
+                <BookmarkCheck className="h-2.5 w-2.5" />
                 save
               </button>
               <button
@@ -1909,25 +1833,24 @@ function IdeaConvoBlock({
               </button>
             </>
           ) : (
-            // Compact chip — shows suggested title, click to edit + save.
             <button
               type="button"
               onClick={() => setTitleEditing(true)}
-              disabled={streaming || convo.saving}
+              disabled={streaming}
               className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10.5px] border border-amber-500/40 bg-amber-500/[0.06] text-amber-700 dark:text-amber-300 hover:bg-amber-500/[0.12] disabled:opacity-40 transition-colors max-w-md"
               title="save this idea to your library"
             >
               <BookmarkCheck className="h-3 w-3 shrink-0" />
               <span className="truncate">
-                save as · {convo.suggestedTitle || "this idea"}
+                save as · {suggestedTitle || "this idea"}
               </span>
             </button>
           )}
-          {!convo.savedIdeaId && !titleEditing && (
+          {!titleEditing && (
             <button
               type="button"
               onClick={onDismiss}
-              disabled={convo.saving || streaming}
+              disabled={streaming}
               className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
               title="discard this conversation"
             >
@@ -1939,9 +1862,8 @@ function IdeaConvoBlock({
       )}
 
       {/* Inline follow-up composer — only between turns, never while
-          streaming. Lives below the action row so the convo reads
-          chronologically: agent reply → save chip → my next turn. */}
-      {!streaming && !convo.savedIdeaId && hasFinishedAgentReply && (
+          streaming. */}
+      {!streaming && hasFinishedAgentReply && (
         <div className="flex items-start gap-2.5">
           <span className="shrink-0 mt-1.5 font-mono text-[14px] font-semibold leading-none text-sky-700 dark:text-sky-300 select-none">
             ›
@@ -1989,13 +1911,22 @@ function IdeaConvoBlock({
  *  shows the same ShimmerText + rotating label + elapsed timer
  *  the brainstorm and task surfaces use, so the thinking state
  *  feels consistent. */
+interface IdeaTurnRowInput {
+  role: "user" | "agent" | "system";
+  text: string;
+  events?: IdeaChatEvent[];
+  finished?: boolean;
+  error?: string | null;
+  ts: number;
+}
+
 function IdeaTurnRow({
   turn,
   streaming,
   onStop,
 }: {
   turn: {
-    role: "user" | "agent";
+    role: "user" | "agent" | "system";
     text: string;
     events?: IdeaChatEvent[];
     finished?: boolean;
@@ -2006,7 +1937,22 @@ function IdeaTurnRow({
   onStop: () => void;
 }) {
   const isUser = turn.role === "user";
+  const isSystem = turn.role === "system";
   const tools = pairToolEvents(turn.events ?? []);
+  // System markers (e.g. "Operator asked the agent to challenge…")
+  // render as a minimal line so they don't dominate the convo.
+  if (isSystem) {
+    return (
+      <div className="flex items-baseline gap-2 ml-5 pl-0.5">
+        <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
+          {formatTs(turn.ts)}
+        </span>
+        <span className="font-mono text-[10.5px] text-ink-500 dark:text-ink-400 italic">
+          {turn.text}
+        </span>
+      </div>
+    );
+  }
   const elapsedMs = useElapsedMs(streaming);
   // Rotating phase label — if the agent has tools running, frame
   // it as scouting; once it starts replying, "chatting".
@@ -2092,7 +2038,15 @@ function IdeaTurnRow({
           </p>
         ) : turn.text ? (
           <>
-            <Markdown text={turn.text} />
+            {/* Strip the trailing `TITLE: …` line agents emit in
+                validate mode — it powers the save chip but isn't
+                meant to show up in the prose. */}
+            <Markdown
+              text={turn.text.replace(
+                /(^|\n)\s*TITLE:\s*([^\n]+?)\s*$/i,
+                "",
+              )}
+            />
             {streaming && (
               <span className="inline-block w-1.5 h-3 bg-ember-500/70 animate-pulse ml-0.5 align-baseline" />
             )}

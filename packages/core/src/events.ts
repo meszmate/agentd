@@ -94,7 +94,19 @@ export type SystemEvent =
    * cached model registry so the next picker open shows the new
    * roster automatically. No polling.
    */
-  | { kind: "models_changed" };
+  | { kind: "models_changed" }
+  /**
+   * Saved idea created, mutated (status / message / planDraft / etc.),
+   * or removed. Web invalidates its cached saved-ideas list +
+   * per-idea queries so every device picks up new drafts and
+   * conversation messages without polling.
+   */
+  | { kind: "saved_idea_changed"; ideaId: string; projectId: string | null }
+  | {
+      kind: "saved_idea_removed";
+      ideaId: string;
+      projectId: string | null;
+    };
 
 export type SystemEventEnvelope = {
   event: SystemEvent;

@@ -1778,6 +1778,12 @@ export interface IdeaChatResult {
    * UI shows it in the right panel. Null when no block was emitted.
    */
   planContent?: string | null;
+  /**
+   * For mode="validate" — the trailing `TITLE: <…>` line the agent
+   * emits at the end of every reply, parsed off the body. The
+   * brainstorm UI uses this to keep its save-button label fresh.
+   */
+  suggestedTitle?: string | null;
 }
 
 export async function* streamIdeaConversation(
@@ -1788,13 +1794,19 @@ export async function* streamIdeaConversation(
     planDraft?: string | null;
     history: IdeaChatTurn[];
     userMessage?: string;
-    mode?: "chat" | "challenge" | "plan";
+    mode?: "chat" | "challenge" | "plan" | "validate";
     helper?: AiHelperOptions;
   },
 ): AsyncGenerator<HelperStreamEvent, IdeaChatResult, void> {
   const mode = args.mode ?? "chat";
+  const isFirstValidate =
+    mode === "validate" && args.history.length === 0;
   const directive =
-    mode === "challenge"
+    mode === "validate"
+      ? isFirstValidate
+        ? `The operator has an idea for this project. Use Read/Glob/Grep/Bash to ground yourself in the actual code when it'd sharpen your reply. Respond directly: how would this look here? what's the real shape of it? what's worth flagging? Cite specific files when you do. Keep it tight — under 200 words. No mandatory headings, no preamble. End with EXACTLY this trailing line: TITLE: <3-6 word title for this idea>`
+        : `Continue the conversation. Reply directly. Use tools when grounding helps. Keep it short — under 150 words. No headings. End with EXACTLY this trailing line: TITLE: <3-6 word title that reflects the latest direction>`
+      : mode === "challenge"
       ? `Challenge this idea. Question its assumptions, point out edge cases or risks, suggest where it might be the wrong scope, and propose 1-2 alternatives if you see better paths. Be candid and specific. Reference real files / patterns from the repo when relevant. Keep it under 250 words.`
       : mode === "plan"
         ? [
@@ -1927,10 +1939,22 @@ export async function* streamIdeaConversation(
     }
   }
   const cleaned = cleanAssistantText(body);
+  // Validate mode appends `TITLE: <suggested>` on the agent's trailing
+  // line. Surface it on the result for the brainstorm UI's save
+  // button — but DO NOT strip it from the persisted body. Keeping
+  // the line in the message means the UI can re-parse + re-strip it
+  // on every render after a reload (server-side state is the
+  // source of truth; we don't need a separate column).
+  let suggestedTitle: string | null = null;
+  if (mode === "validate") {
+    const tm = cleaned.match(/(^|\n)\s*TITLE:\s*([^\n]+?)\s*$/i);
+    if (tm) suggestedTitle = (tm[2] ?? "").trim() || null;
+  }
   return {
     reply: cleaned,
     source: "claude",
     ...(planContent ? { planContent } : {}),
+    ...(suggestedTitle ? { suggestedTitle } : {}),
   };
 }
 

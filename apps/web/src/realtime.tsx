@@ -374,6 +374,22 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           void qc.invalidateQueries({ queryKey: qk.bridgeSummary() });
           return;
         }
+        if (
+          msg.type === "saved_idea_changed" ||
+          msg.type === "saved_idea_removed"
+        ) {
+          // Cross-device sync — every connected client refreshes the
+          // saved-ideas list (project-scoped) + the per-idea query
+          // (idea + messages). The brainstorm view's idea-mode
+          // convos hydrate from this so every device sees the same
+          // active drafts and conversation history.
+          void qc.invalidateQueries({ queryKey: ["saved-ideas"] });
+          void qc.invalidateQueries({ queryKey: qk.idea(msg.ideaId) });
+          if (msg.type === "saved_idea_removed") {
+            qc.removeQueries({ queryKey: qk.idea(msg.ideaId) });
+          }
+          return;
+        }
         if (msg.type === "models_changed") {
           // Codex's cache file or the operator's config.json was
           // rewritten. Drop the registry cache so the next picker

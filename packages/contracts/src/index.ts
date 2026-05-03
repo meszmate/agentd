@@ -590,7 +590,7 @@ export type IdeaMessage = z.infer<typeof IdeaMessage>;
  */
 export const IdeaChatRequest = z.object({
   text: z.string().optional(),
-  mode: z.enum(["chat", "challenge", "plan"]).optional(),
+  mode: z.enum(["chat", "challenge", "plan", "validate"]).optional(),
   agent: AgentKind.optional(),
   model: z.string().optional(),
   effort: ThinkingLevel.optional(),
@@ -1202,6 +1202,22 @@ export const WsServerEvent = z.discriminatedUnion("type", [
   // list. Watcher sits in the daemon; no polling on either side.
   z.object({
     type: z.literal("models_changed"),
+    ts: z.number(),
+  }),
+  // Pushed when a saved idea is created, updated (status / messages /
+  // plan / etc.), or removed. Web invalidates `["saved-ideas", slug]`
+  // and the per-idea query so every connected device picks up new
+  // drafts + conversation messages without polling.
+  z.object({
+    type: z.literal("saved_idea_changed"),
+    ideaId: z.string(),
+    projectId: z.string().nullable(),
+    ts: z.number(),
+  }),
+  z.object({
+    type: z.literal("saved_idea_removed"),
+    ideaId: z.string(),
+    projectId: z.string().nullable(),
     ts: z.number(),
   }),
 ]);

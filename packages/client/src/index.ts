@@ -509,7 +509,7 @@ export class AgentdClient {
     id: string,
     body: {
       text?: string;
-      mode?: "chat" | "challenge" | "plan";
+      mode?: "chat" | "challenge" | "plan" | "validate";
       agent?: "claude" | "codex";
       model?: string;
       effort?: ThinkingLevel;
