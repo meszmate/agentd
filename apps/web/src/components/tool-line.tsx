@@ -239,7 +239,7 @@ function HighlightedPre({
     <Highlight
       code={code}
       language={normalizeLanguage(language)}
-      theme={isDark ? themes.vsDark : themes.github}
+      theme={isDark ? themes.oneDark : themes.oneLight}
     >
       {({ className, style, tokens, getLineProps, getTokenProps }) => (
         <pre

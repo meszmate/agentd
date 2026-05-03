@@ -96,7 +96,7 @@ export function CodeBlock({
       <Highlight
         code={code.replace(/\n+$/, "")}
         language={prismLang}
-        theme={isDark ? themes.vsDark : themes.github}
+        theme={isDark ? themes.oneDark : themes.oneLight}
       >
         {({ className: cls, style, tokens, getLineProps, getTokenProps }) => (
           <pre
