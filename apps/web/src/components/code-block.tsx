@@ -74,20 +74,20 @@ export function CodeBlock({
   return (
     <div
       className={cn(
-        "group relative my-2 overflow-hidden rounded-md border",
+        "group relative my-1 overflow-hidden rounded border",
         surface,
         className,
       )}
     >
       <div
         className={cn(
-          "flex items-center justify-between px-3 py-1 border-b",
+          "flex items-center justify-between px-2 h-5 border-b",
           headerBg,
         )}
       >
         <span
           className={cn(
-            "font-mono text-[10px] uppercase tracking-[0.12em] truncate font-semibold",
+            "font-mono text-[9px] uppercase tracking-[0.1em] truncate",
             headerLabel,
           )}
         >
@@ -98,14 +98,14 @@ export function CodeBlock({
           onClick={copy}
           title="Copy"
           className={cn(
-            "grid place-items-center size-5 rounded transition-colors opacity-0 group-hover:opacity-100",
+            "grid place-items-center size-4 rounded transition-colors opacity-0 group-hover:opacity-100",
             copyButton,
           )}
         >
           {copied ? (
-            <Check className="h-3 w-3 text-emerald-500" />
+            <Check className="h-2.5 w-2.5 text-emerald-500" />
           ) : (
-            <Copy className="h-3 w-3" />
+            <Copy className="h-2.5 w-2.5" />
           )}
         </button>
       </div>
@@ -118,7 +118,7 @@ export function CodeBlock({
           <pre
             className={cn(
               cls,
-              "overflow-auto py-2 font-mono text-[12px] leading-[1.55] m-0",
+              "overflow-auto py-1 font-mono text-[11px] leading-[1.4] m-0",
             )}
             style={{
               ...style,
@@ -147,8 +147,6 @@ export function CodeBlock({
                   : diffMark === "-"
                     ? "bg-red-500/[0.14]"
                     : "";
-              // Diffs skip the regular line-number column — the +/-
-              // gutter is enough visual gutter (claude-code style).
               const isDiffMode = !!diffMarks || isRawDiff;
               const showNum = showLineNumbers && !isDiffMode;
               return (
@@ -164,7 +162,7 @@ export function CodeBlock({
                   {showNum && (
                     <span
                       className={cn(
-                        "shrink-0 pl-2 pr-1.5 text-right select-none text-[10.5px] tabular-nums w-7",
+                        "shrink-0 pl-1.5 pr-1 text-right select-none text-[9.5px] tabular-nums w-6",
                         lineNumber,
                       )}
                     >
@@ -174,7 +172,7 @@ export function CodeBlock({
                   {isDiffMode && (
                     <span
                       className={cn(
-                        "shrink-0 pl-2 pr-1.5 text-center select-none text-[12px] font-bold w-6",
+                        "shrink-0 pl-1.5 pr-1 text-center select-none text-[10.5px] font-bold w-5",
                         diffMark === "+"
                           ? "text-emerald-400"
                           : diffMark === "-"
@@ -187,8 +185,8 @@ export function CodeBlock({
                   )}
                   <span
                     className={cn(
-                      "whitespace-pre flex-1 pr-3",
-                      !showNum && !isDiffMode && "pl-3",
+                      "whitespace-pre flex-1 pr-2",
+                      !showNum && !isDiffMode && "pl-2",
                     )}
                   >
                     {line.map((token, j) => (

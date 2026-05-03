@@ -51,16 +51,16 @@ export function ToolLine({
   return (
     <div
       className={cn(
-        "group font-mono text-[11px] text-ink-600 dark:text-ink-400 leading-snug",
+        "group font-mono text-[10.5px] text-ink-600 dark:text-ink-400 leading-tight",
         className,
       )}
     >
-      <div className="flex items-start gap-2">
-        <span className="grid place-items-center size-4 mt-px shrink-0 text-ink-400 dark:text-ink-500">
+      <div className="flex items-start gap-1.5">
+        <span className="grid place-items-center size-3.5 mt-px shrink-0 text-ink-400 dark:text-ink-500">
           {running ? (
-            <Loader2 className="h-3 w-3 animate-spin text-ember-500" />
+            <Loader2 className="h-2.5 w-2.5 animate-spin text-ember-500" />
           ) : (
-            <Icon className="h-3 w-3" />
+            <Icon className="h-2.5 w-2.5" />
           )}
         </span>
         <span className="font-semibold text-ink-700 dark:text-ink-200 shrink-0">
@@ -82,15 +82,15 @@ export function ToolLine({
             title={openText ? "Hide details" : "Show details"}
           >
             {openText ? (
-              <ChevronDown className="h-3 w-3" />
+              <ChevronDown className="h-2.5 w-2.5" />
             ) : (
-              <ChevronRight className="h-3 w-3" />
+              <ChevronRight className="h-2.5 w-2.5" />
             )}
           </button>
         )}
       </div>
       {showInlineCode && (
-        <div className="mt-1.5">
+        <div className="mt-1 ml-5">
           <CodeBlock
             code={parsed.detail!}
             language={parsed.detailLanguage}
@@ -101,7 +101,7 @@ export function ToolLine({
         </div>
       )}
       {showTextToggle && openText && parsed.detail && (
-        <pre className="mt-1 ml-6 whitespace-pre-wrap break-words rounded border border-ink-900/[0.06] bg-ink-900/[0.03] px-2 py-1 text-[10.5px] text-ink-500 dark:border-ink-50/[0.06] dark:bg-ink-50/[0.03] dark:text-ink-400">
+        <pre className="mt-1 ml-5 whitespace-pre-wrap break-words rounded border border-ink-900/[0.06] bg-ink-900/[0.03] px-1.5 py-0.5 text-[10px] text-ink-500 dark:border-ink-50/[0.06] dark:bg-ink-50/[0.03] dark:text-ink-400">
           {parsed.detail}
         </pre>
       )}

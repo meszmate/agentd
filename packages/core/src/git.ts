@@ -1306,8 +1306,12 @@ function buildValidateIdeasPrompt(brief: string, ideas: string[]): string {
   return [
     `You are evaluating brainstorm ideas for a project. The operator wants a second opinion on each idea's value-vs-effort.`,
     "",
-    `RECON STEP (mandatory, do this BEFORE scoring):`,
-    `Use your tools to glob the layout and read the README + manifest (package.json / Cargo.toml / etc) so your scoring is grounded in what the project actually is. Don't score from the brief alone.`,
+    `RECON STEP (mandatory, do this BEFORE scoring — you have shell + file tools, USE them):`,
+    `  1. Glob or list the top-level layout to see the shape of the project.`,
+    `  2. Read the README (or equivalent — README.md, README, docs/index.md).`,
+    `  3. Read the project's manifest (package.json / Cargo.toml / pyproject.toml / go.mod) so you know the language, deps, and stated purpose.`,
+    `  4. Skim 1-2 key source dirs only if you still need to understand the domain.`,
+    `Don't score from the brief alone. If you skip this step your scores will be wrong and the operator will throw them out.`,
     "",
     `Then for each numbered idea below, give a single integer 0-100 where:`,
     `  90+  ship-now obvious win`,
@@ -1316,8 +1320,10 @@ function buildValidateIdeasPrompt(brief: string, ideas: string[]): string {
     `  <50  niche / risky / off-strategy`,
     `Calibrate honestly. Spread the scores; don't bunch everything in 80-90.`,
     "",
-    `Output format: ONE LINE only — exactly ${ideas.length} space-separated integers in the same order as the ideas. NO preamble, NO commentary, NO numbering, NO markdown. Just the numbers.`,
-    `Example for 3 ideas: "82 64 41"`,
+    `Output format — STRICT:`,
+    `Your final reply MUST end with exactly one line that starts with the literal token "SCORES:" followed by ${ideas.length} space-separated integers in the same order as the ideas. Anything before that line is ignored. The SCORES line must be the LAST line of your reply.`,
+    `Example for 3 ideas:`,
+    `  SCORES: 82 64 41`,
     "",
     `Operator's original brief:`,
     brief,
@@ -1400,22 +1406,36 @@ function parseScores(
   // "1. 82\n2. 64" style instead of a single line. We then pick
   // either the longest space-separated run, OR concatenate the leading
   // integers in order until we have N (one per idea).
-  const stripAnsi = (s: string) => s.replace(/\[[0-9;]*[mGKHF]/g, "");
-  const cleaned = stripAnsi(out);
-  // Try the strict "N1 N2 N3 ..." line first.
-  const runs = cleaned.match(/\b\d{1,3}(?:\s+\d{1,3}){1,}\b/g) ?? [];
+  const cleaned = out.replace(/\[[0-9;]*[mGKHF]/g, "");
   let parsed: number[] = [];
-  if (runs.length > 0) {
-    parsed = runs
-      .sort((a, b) => b.length - a.length)[0]!
-      .split(/\s+/)
+  // Tier 1 (most reliable): the prompt mandates a "SCORES: N1 N2 …"
+  // line as the LAST thing in the reply. Take the latest match so
+  // earlier example numbers in the prompt don't poison parsing.
+  const scoresMatches = [
+    ...cleaned.matchAll(/SCORES?\s*[:=]\s*([\d\s,]+)/gi),
+  ];
+  if (scoresMatches.length > 0) {
+    const tail = scoresMatches[scoresMatches.length - 1]![1]!;
+    parsed = tail
+      .split(/[\s,]+/)
       .map((s) => parseInt(s, 10))
       .filter((n) => Number.isFinite(n) && n >= 0 && n <= 100);
   }
-  // Fallback: scrape every "<int>" in document order. Skip numbers
-  // that obviously aren't scores (option indexes 1..N when printed
-  // as "1." or "1)" — strip them so we don't count `1` as a score
-  // for option 1).
+  // Tier 2: longest run of "<int> <int> …" — codex sometimes drops
+  // the SCORES tag despite the prompt.
+  if (parsed.length < expectedLen) {
+    const runs = cleaned.match(/\b\d{1,3}(?:\s+\d{1,3}){1,}\b/g) ?? [];
+    if (runs.length > 0) {
+      const longest = runs
+        .sort((a, b) => b.length - a.length)[0]!
+        .split(/\s+/)
+        .map((s) => parseInt(s, 10))
+        .filter((n) => Number.isFinite(n) && n >= 0 && n <= 100);
+      if (longest.length > parsed.length) parsed = longest;
+    }
+  }
+  // Tier 3: scrape every "<int>" in document order. Strip option
+  // numbers ("1.", "1)") so they don't get counted as scores.
   if (parsed.length < expectedLen) {
     const ints = (cleaned.replace(/\b\d+[\.\)]\s+/g, "").match(/\b\d{1,3}\b/g) ?? [])
       .map((s) => parseInt(s, 10))
