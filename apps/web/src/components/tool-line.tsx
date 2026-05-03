@@ -65,16 +65,16 @@ export function ToolLine({
   return (
     <div
       className={cn(
-        "group font-mono text-[10.5px] text-ink-600 dark:text-ink-400 leading-tight",
+        "group font-mono text-[11.5px] text-ink-600 dark:text-ink-400 leading-snug",
         className,
       )}
     >
-      <div className="flex items-start gap-1.5">
-        <span className="grid place-items-center size-3.5 mt-px shrink-0 text-ink-400 dark:text-ink-500">
+      <div className="flex items-start gap-2">
+        <span className="grid place-items-center size-4 mt-px shrink-0 text-ink-400 dark:text-ink-500">
           {running ? (
-            <Loader2 className="h-2.5 w-2.5 animate-spin text-ember-500" />
+            <Loader2 className="h-3 w-3 animate-spin text-ember-500" />
           ) : (
-            <Icon className="h-2.5 w-2.5" />
+            <Icon className="h-3 w-3" />
           )}
         </span>
         <span className="font-semibold text-ink-700 dark:text-ink-200 shrink-0">
@@ -166,7 +166,7 @@ function ToolOutput({
   const overflow = allLines.length - previewLineCount;
   const visible = expanded ? allLines : allLines.slice(0, previewLineCount);
   return (
-    <div className="mt-0.5 flex items-stretch text-[10.5px] font-mono leading-tight">
+    <div className="mt-1 flex items-stretch text-[11px] font-mono leading-snug">
       <span
         className={cn(
           "shrink-0 w-0.5 self-stretch rounded-full mr-2",

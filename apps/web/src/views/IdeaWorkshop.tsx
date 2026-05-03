@@ -731,7 +731,7 @@ function TimelineItem({
     return (
       <li className="my-2">
         {sysToolPairs.length > 0 && (
-          <ul className="mb-2 space-y-1.5">
+          <ul className="mb-3 space-y-2.5 pl-3 border-l border-ink-900/[0.06] dark:border-ink-50/[0.08]">
             {sysToolPairs.map((p, i) => (
               <li key={i}>
                 <ToolLine
@@ -807,7 +807,7 @@ function TimelineItem({
             )}
           </div>
           {!isUser && toolPairs.length > 0 && (
-            <ul className="mb-3 space-y-1.5">
+            <ul className="mb-4 space-y-2.5 pl-3 border-l border-ink-900/[0.06] dark:border-ink-50/[0.08]">
               {toolPairs.map((p, i) => (
                 <li key={i}>
                   <ToolLine
@@ -901,7 +901,7 @@ function ThinkingItem({
             )}
           </div>
           {toolPairs.length > 0 && (
-            <ul className="space-y-1.5">
+            <ul className="space-y-2.5 pl-3 border-l border-ember-500/30">
               {toolPairs.map((p, i) => (
                 <li key={i}>
                   <ToolLine

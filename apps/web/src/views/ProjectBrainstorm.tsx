@@ -722,7 +722,7 @@ function PersistedActivity({
   const pairs = pairToolEvents(events);
   if (pairs.length === 0) return null;
   return (
-    <ul className="mb-2 space-y-0.5">
+    <ul className="mb-3 space-y-2.5 pl-3 border-l border-ink-900/[0.06] dark:border-ink-50/[0.08]">
       {pairs.map((p, i) => (
         <li key={i}>
           <ToolLine
@@ -772,7 +772,7 @@ function ValidatingFeed({
         </span>
       </div>
       {pairs.length > 0 && (
-        <ul className="space-y-0.5 pl-2 border-l border-ember-500/30">
+        <ul className="space-y-2 pl-3 border-l border-ember-500/30">
           {pairs.map((p, i) => (
             <li key={i} className="animate-fade-in">
               <ToolLine
@@ -1474,7 +1474,7 @@ function LiveTurn({
             (3 lines + N more) renders under each row so the operator
             sees Bash output / Read content / Grep hits inline. */}
         {pairs.length > 0 && (
-          <ul className="mb-3 space-y-1.5">
+          <ul className="mb-4 space-y-2.5 pl-3 border-l border-ember-500/30">
             {pairs.map((p, i) => (
               <li key={i} className="animate-fade-in">
                 <ToolLine
