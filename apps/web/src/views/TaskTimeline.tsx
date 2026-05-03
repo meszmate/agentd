@@ -417,10 +417,7 @@ export function TaskTimeline({
             <div className="mb-2.5 overflow-hidden rounded-lg border border-violet-500/30 bg-gradient-to-br from-violet-500/[0.07] via-violet-500/[0.04] to-transparent shadow-[0_1px_0_rgba(139,92,246,0.06),0_8px_24px_-12px_rgba(139,92,246,0.18)] dark:from-violet-500/[0.12] dark:via-violet-500/[0.07] animate-fade-in">
               <header className="flex items-center justify-between gap-2 px-3 py-1.5 bg-gradient-to-r from-violet-500/[0.08] to-transparent border-b border-violet-500/15">
                 <span className="inline-flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-violet-700 dark:text-violet-300 font-semibold">
-                  <span className="relative flex h-2 w-2">
-                    <span className="absolute inset-0 rounded-full bg-violet-500/50 animate-pulse-ring" />
-                    <span className="relative h-2 w-2 rounded-full bg-violet-500" />
-                  </span>
+                  <span className="h-2 w-2 rounded-full bg-violet-500" />
                   Queue
                   <span className="rounded-full px-1.5 py-px bg-violet-500/20 text-[9px] font-bold tabular-nums">
                     {queue.length}
@@ -1096,9 +1093,8 @@ function PlanGlyph({ status }: { status: TaskPlanItem["status"] }) {
   }
   if (status === "in_progress") {
     return (
-      <span className="relative inline-grid place-items-center size-3.5 rounded-full border border-ember-500/70 bg-ember-500/25 shrink-0 animate-active-glow">
-        <span className="absolute inset-0 rounded-full bg-ember-500/30 animate-pulse-ring" />
-        <span className="relative size-1.5 rounded-full bg-ember-500" />
+      <span className="inline-grid place-items-center size-3.5 rounded-full border border-ember-500/70 bg-ember-500/20 shrink-0">
+        <span className="size-1.5 rounded-full bg-ember-500" />
       </span>
     );
   }

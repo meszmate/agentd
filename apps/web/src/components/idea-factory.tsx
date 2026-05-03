@@ -225,7 +225,7 @@ export function IdeaFactory({
           <span
             className={cn(
               "grid place-items-center h-6 w-6 rounded-md text-ember-600 dark:text-ember-300",
-              streaming ? "bg-ember-500/20 animate-active-glow" : "bg-ember-500/15",
+              streaming ? "bg-ember-500/20" : "bg-ember-500/15",
             )}
           >
             <Lightbulb className="h-3.5 w-3.5" />
@@ -264,7 +264,7 @@ export function IdeaFactory({
               className={cn(
                 "grid place-items-center h-7 w-7 rounded-md text-ember-600 dark:text-ember-300",
                 streaming
-                  ? "bg-ember-500/20 animate-active-glow"
+                  ? "bg-ember-500/20"
                   : "bg-ember-500/15",
               )}
             >

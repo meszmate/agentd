@@ -303,9 +303,6 @@ function TimelineItem({
         className="absolute left-[0.85rem] top-2 z-10"
         title={statusLabel(todo.status)}
       >
-        {isInProgress && (
-          <span className="absolute inset-0 -m-1 rounded-full bg-ember-500/30 animate-pulse-ring" />
-        )}
         <StatusButton
           status={todo.status}
           onClick={() => onSetStatus(isDone ? "pending" : "done")}
@@ -318,7 +315,7 @@ function TimelineItem({
           className={cn(
             "flex-1 min-w-0 transition-all duration-300",
             isInProgress &&
-              "rounded-md border border-ember-500/40 bg-gradient-to-r from-ember-500/[0.10] via-ember-500/[0.05] to-transparent px-2 py-1 -ml-2 -my-1 shadow-[0_0_0_1px_rgba(247,127,0,0.06)] animate-active-glow",
+              "rounded-md border border-ember-500/30 bg-ember-500/[0.04] px-2 py-1 -ml-2 -my-1",
           )}
         >
           <div className="flex items-baseline gap-2">
