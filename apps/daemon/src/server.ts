@@ -3188,6 +3188,79 @@ export function buildServer(opts: BuildServerOptions) {
   });
 
   /**
+   * "I have an idea, help me plan it" — synchronous wrapper around
+   * the plan-mode helper. Creates a SavedIdea from the prompt,
+   * drains streamIdeaConversation in plan mode against the project's
+   * worktree (the agent reads the repo before producing the spec),
+   * persists the resulting plan onto the saved idea, and returns
+   * both. Plugins (telegram /plan, discord /plan) and the project
+   * page's "Plan an idea" entry both call this.
+   */
+  api.post("/projects/:idOrSlug/plan-idea", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project = getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => null)) as {
+      text?: string;
+      title?: string;
+    } | null;
+    const text = (body?.text ?? "").trim();
+    if (!text) return c.json({ error: "text required" }, 400);
+    const titleSeed = (body?.title?.trim() || text)
+      .replace(/\s+/g, " ")
+      .slice(0, 80);
+
+    const cfg = loadConfig(paths.root);
+    // Stash the idea immediately so the operator can see it in the
+    // library even if the plan generator times out.
+    const idea = createSavedIdea(db, {
+      projectId: project.id,
+      text: titleSeed,
+      description: text,
+      status: "refining",
+    });
+
+    try {
+      const it = streamIdeaConversation(project.path, {
+        title: titleSeed,
+        description: text,
+        history: [],
+        userMessage: text,
+        mode: "plan",
+        helper: cfg.aiHelpers,
+      });
+      let plan = "";
+      while (true) {
+        const next = await it.next();
+        if (next.done) {
+          plan = (next.value.reply || "").trim();
+          break;
+        }
+        // Drop streaming events here — this endpoint is synchronous;
+        // the web's streaming variant handles live UI separately.
+      }
+      if (!plan) {
+        return c.json(
+          {
+            ok: false,
+            idea,
+            error:
+              "the helper returned an empty plan — try a sharper brief or the workshop's chat",
+          },
+          200,
+        );
+      }
+      const updated = updateSavedIdeaPlan(db, idea.id, plan) ?? idea;
+      return c.json({ ok: true, idea: updated, plan });
+    } catch (e) {
+      return c.json(
+        { ok: false, idea, error: (e as Error).message },
+        200,
+      );
+    }
+  });
+
+  /**
    * One idea + its full conversation thread. Used by the workshop
    * panel when the operator opens an idea card.
    */

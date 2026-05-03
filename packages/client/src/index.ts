@@ -340,6 +340,28 @@ export class AgentdClient {
     );
   }
   /**
+   * "I have an idea, help me plan it" — synchronous wrapper around
+   * the plan-mode helper. Creates a SavedIdea, drains the plan
+   * stream against the project, persists the result, and returns
+   * the idea + plan markdown. Used by plugins (telegram /plan,
+   * discord /plan) and the project page's quick plan entry.
+   */
+  async planIdea(
+    idOrSlug: string,
+    body: { text: string; title?: string },
+  ): Promise<
+    | { ok: true; idea: SavedIdea; plan: string }
+    | { ok: false; idea?: SavedIdea; error: string }
+  > {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/plan-idea`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    );
+  }
+  /**
    * Streams brainstorm events as they arrive — `option` lines and
    * the agent's `tool_use` / `tool_result` activity (so the UI can
    * show what the agent's actually doing in the repo while drafting,

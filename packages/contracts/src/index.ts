@@ -905,6 +905,15 @@ export const Project = z.object({
    */
   instructionsEnabled: z.boolean().optional(),
   /**
+   * Brainstorm suggestion notifications to telegram/discord are OFF
+   * by default — set to `true` to opt in. When false (or absent),
+   * suggestions only appear in the web UI; the plugin chats stay
+   * quiet unless the user explicitly invokes a command like
+   * `/brainstorm`. Operators turn this on when they want sweep
+   * digests pushed to their phone.
+   */
+  notifySuggestions: z.boolean().optional(),
+  /**
    * Per-project Telegram bot token. When set, this project's task
    * events go to a dedicated bot (operator chats with each project
    * in its own DM). Falls back to `cfg.plugins.telegram` global bot
@@ -947,6 +956,7 @@ export const UpdateProjectRequest = z.object({
   color: z.string().optional(),
   instructions: z.string().nullable().optional(),
   instructionsEnabled: z.boolean().optional(),
+  notifySuggestions: z.boolean().optional(),
   telegramBotToken: z.string().nullable().optional(),
   telegramChatId: z.string().nullable().optional(),
   discordChannelId: z.string().nullable().optional(),

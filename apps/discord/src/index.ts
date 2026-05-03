@@ -100,8 +100,12 @@ async function main() {
   // channelId → focused taskId
   const focus = new Map<string, string>();
 
-  // Pending /new prompts waiting on a project button. key → prompt + chan + ts.
+  // Pending project-picker prompts (covers !new, !brainstorm, !plan).
+  // The verb travels with the entry so the shared button handler
+  // dispatches without needing one route per command.
+  type PendingKind = "new" | "brainstorm" | "plan";
   interface PendingNew {
+    kind: PendingKind;
     prompt: string;
     channelId: string;
     expiresAt: number;
@@ -209,6 +213,7 @@ async function main() {
       }
       const id = newPendingId();
       pending.set(id, {
+        kind: "new",
         prompt,
         channelId,
         expiresAt: Date.now() + 10 * 60 * 1000,
@@ -222,7 +227,7 @@ async function main() {
         const label = `${p.name}${live}`.slice(0, 80);
         row.addComponents(
           new ButtonBuilder()
-            .setCustomId(`new:${id}:${p.id}`)
+            .setCustomId(`pp:${id}:${p.id}`)
             .setLabel(label)
             .setStyle(ButtonStyle.Secondary),
         );
@@ -237,7 +242,7 @@ async function main() {
       rows.push(
         new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder()
-            .setCustomId(`new:${id}:cancel`)
+            .setCustomId(`pp:${id}:cancel`)
             .setLabel("Cancel")
             .setStyle(ButtonStyle.Danger),
         ),
@@ -408,11 +413,12 @@ async function main() {
     }
   });
 
-  // Project-picker button handler.
+  // Project-picker button handler — shared by !new, !brainstorm, !plan.
+  // Dispatches on the kind stashed when the picker was opened.
   bot.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isButton()) return;
     const btn = interaction as ButtonInteraction;
-    const m = /^new:([^:]+):(.+)$/.exec(btn.customId);
+    const m = /^pp:([^:]+):(.+)$/.exec(btn.customId);
     if (!m) return;
     const pendId = m[1] ?? "";
     const projectId = m[2] ?? "";
@@ -443,27 +449,106 @@ async function main() {
       return;
     }
     pending.delete(pendId);
-    try {
-      const { task } = await client.createTask({
-        agent: "claude",
-        repoPath: project.path,
-        baseBranch: "main",
-        prompt: p.prompt,
-      });
-      focus.set(p.channelId, task.id);
+
+    const channelForPost = bot.channels.cache.get(p.channelId);
+    const postBack = async (text: string): Promise<void> => {
+      if (channelForPost && "send" in channelForPost) {
+        try {
+          await (channelForPost as TextBasedChannel & {
+            send: (s: string) => Promise<unknown>;
+          }).send(text.slice(0, 1900));
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    if (p.kind === "new") {
+      try {
+        const { task } = await client.createTask({
+          agent: "claude",
+          repoPath: project.path,
+          baseBranch: "main",
+          prompt: p.prompt,
+        });
+        focus.set(p.channelId, task.id);
+        await btn
+          .update({
+            content: `spawned in **${project.name}** → \`${task.id.slice(-8)}\` on \`${task.branch}\` _(focused)_`,
+            components: [],
+          })
+          .catch(() => {});
+      } catch (e) {
+        await btn
+          .update({
+            content: `new failed: ${(e as Error).message}`,
+            components: [],
+          })
+          .catch(() => {});
+      }
+      return;
+    }
+
+    if (p.kind === "brainstorm") {
       await btn
         .update({
-          content: `spawned in **${project.name}** → \`${task.id.slice(-8)}\` on \`${task.branch}\` _(focused)_`,
+          content: `brainstorming on **${project.name}** — agent is reading the repo…`,
           components: [],
         })
         .catch(() => {});
-    } catch (e) {
+      try {
+        const r = await client.ideateForProject(project.id, {
+          prompt: p.prompt,
+          max: 5,
+        });
+        if (r.ok === false) {
+          await postBack(`brainstorm failed (${r.source}): ${r.error}`);
+          return;
+        }
+        const opts = r.suggestion.options
+          .map((o, i) => `**${i + 1}.** ${o}`)
+          .join("\n");
+        await postBack(
+          [
+            `💡 **${r.suggestion.title}** · ${project.name}`,
+            "",
+            opts,
+            "",
+            `_Reply with a number or your own direction — picking spawns a task._`,
+          ].join("\n"),
+        );
+      } catch (e) {
+        await postBack(`brainstorm failed: ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    if (p.kind === "plan") {
       await btn
         .update({
-          content: `new failed: ${(e as Error).message}`,
+          content: `planning on **${project.name}** — agent is reading the repo…`,
           components: [],
         })
         .catch(() => {});
+      try {
+        const r = await client.planIdea(project.id, { text: p.prompt });
+        if (!r.ok) {
+          await postBack(`plan failed: ${(r as { error: string }).error}`);
+          return;
+        }
+        const link = `${client.baseUrl}/projects/${project.slug}/ideas/${r.idea.id}`;
+        await postBack(
+          `📐 **plan ready** · ${project.name}\n_${p.prompt.slice(0, 200)}_\n${link}`,
+        );
+        // Discord caps single message at 2000 chars; chunk if longer.
+        const body = r.plan;
+        for (let i = 0; i < body.length; i += 1900) {
+          await postBack("```\n" + body.slice(i, i + 1900) + "\n```");
+        }
+      } catch (e) {
+        await postBack(`plan failed: ${(e as Error).message}`);
+      }
+      return;
     }
   });
 
@@ -536,6 +621,9 @@ async function main() {
       let channelId: string | null = null;
       try {
         const { project } = await client.getProject(sug.projectId);
+        // Channel target presence IS the opt-in. If the project
+        // has discordChannelId set, brainstorm mirrors there; if
+        // not, we stay silent. No separate notification flag.
         channelId = project.discordChannelId ?? null;
       } catch {
         return;

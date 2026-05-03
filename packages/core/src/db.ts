@@ -218,6 +218,14 @@ export const projects = sqliteTable("projects", {
    * off for a while without losing the draft. Defaults to 1.
    */
   instructionsEnabled: integer("instructions_enabled").notNull().default(1),
+  /**
+   * 1 = brainstorm suggestions get pushed to the chat plugins
+   * (telegram / discord) for this project. Default 0: chats stay
+   * quiet unless the operator explicitly opts in. Plugin commands
+   * (`/brainstorm`, `/plan`, …) work regardless of this flag —
+   * those are user-initiated, not auto-pushes.
+   */
+  notifySuggestions: integer("notify_suggestions").notNull().default(0),
   /** Per-project Telegram bot — separate DM channel per project. */
   telegramBotToken: text("telegram_bot_token"),
   telegramChatId: text("telegram_chat_id"),
@@ -369,6 +377,7 @@ CREATE TABLE IF NOT EXISTS projects (
   last_active_at INTEGER NOT NULL,
   instructions TEXT,
   instructions_enabled INTEGER NOT NULL DEFAULT 1,
+  notify_suggestions INTEGER NOT NULL DEFAULT 0,
   telegram_bot_token TEXT,
   telegram_chat_id TEXT,
   discord_channel_id TEXT
@@ -576,6 +585,7 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE tasks ADD COLUMN auto_commit INTEGER NOT NULL DEFAULT 1",
   "ALTER TABLE projects ADD COLUMN instructions_enabled INTEGER NOT NULL DEFAULT 1",
   "ALTER TABLE tasks ADD COLUMN codex_thread_id TEXT",
+  "ALTER TABLE projects ADD COLUMN notify_suggestions INTEGER NOT NULL DEFAULT 0",
 ];
 
 function migrate(sqlite: Database): void {

@@ -43,6 +43,7 @@ function rowToProject(row: typeof projects.$inferSelect): Project {
     lastActiveAt: row.lastActiveAt,
     instructions: row.instructions ?? null,
     instructionsEnabled: row.instructionsEnabled !== 0,
+    notifySuggestions: row.notifySuggestions === 1,
     telegramBotToken: row.telegramBotToken ?? null,
     telegramChatId: row.telegramChatId ?? null,
     discordChannelId: row.discordChannelId ?? null,
@@ -121,6 +122,7 @@ export interface UpdateProjectInput {
   color?: string;
   instructions?: string | null;
   instructionsEnabled?: boolean;
+  notifySuggestions?: boolean;
   telegramBotToken?: string | null;
   telegramChatId?: string | null;
   discordChannelId?: string | null;
@@ -141,6 +143,8 @@ export function updateProject(
   if (patch.instructions !== undefined) next.instructions = patch.instructions;
   if (patch.instructionsEnabled !== undefined)
     next.instructionsEnabled = patch.instructionsEnabled ? 1 : 0;
+  if (patch.notifySuggestions !== undefined)
+    next.notifySuggestions = patch.notifySuggestions ? 1 : 0;
   if (patch.telegramBotToken !== undefined)
     next.telegramBotToken = patch.telegramBotToken;
   if (patch.telegramChatId !== undefined)

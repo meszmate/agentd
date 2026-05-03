@@ -79,8 +79,13 @@ async function main() {
   // Per-chat current task focus, so user can `/in <text>` without an id.
   const focus = new Map<number, string>();
 
-  // Pending /new prompts waiting for a project tap. Cleared on tap or after 10m.
+  // Pending project-picker prompts (one map covers /new, /brainstorm,
+  // /plan — they all share the "type something, then tap a project"
+  // shape). Each entry carries the original verb so the callback
+  // dispatch knows which path to take. Cleared on tap or after 10m.
+  type PendingKind = "new" | "brainstorm" | "plan";
   interface PendingNew {
+    kind: PendingKind;
     prompt: string;
     chatId: number;
     expiresAt: number;
@@ -122,13 +127,13 @@ async function main() {
     return next();
   });
 
-  bot.command("start", async (ctx) => {
+  bot.command(["start", "help"], async (ctx) => {
     await ctx.reply(
       [
         "agentd telegram bridge",
         "",
         "Tasks:",
-        "/new <prompt> — spawn a task (you'll be asked which project)",
+        "/new <prompt> — spawn a task (asks which project)",
         "/ls — list tasks",
         "/show <id?> — show task (or focused)",
         "/in <text> — send input to focused task",
@@ -137,12 +142,73 @@ async function main() {
         "/diff — show diff for focused task",
         "/log — show commits for focused task",
         "",
+        "Brainstorm + plan:",
+        "/brainstorm <brief> — agent reads the repo and proposes 5 angles",
+        "/plan <idea> — agent drafts a full implementation plan and saves it",
+        "/mirrors — list which projects mirror brainstorm here",
+        "",
+        "Mirror works both ways: when a project's chat-target is this",
+        "chat, brainstorm suggestions land here AND your replies feed",
+        "back into the same conversation. Reply with a number to pick,",
+        "or with free text to refine.",
+        "",
         "Templates / schedules:",
         "/tpl — list templates",
         "/run <template> [k=v ...] — fire a template",
         "/sched — list schedules",
       ].join("\n"),
     );
+  });
+
+  /**
+   * /brainstorm — quick "agent, what should I build next?" entry. Same
+   * project picker as /new; once the operator taps a project, runs
+   * `ideateForProject` and posts the suggestion options as a single
+   * message that doubles as a reply target (any reply routes through
+   * the conversational suggestion router, same as the auto-pushes).
+   */
+  bot.command("brainstorm", async (ctx) => {
+    const prompt = (ctx.match || "").toString().trim();
+    if (!prompt) return ctx.reply("usage: /brainstorm <one-line brief>");
+    await askForProject(ctx, "brainstorm", prompt, "brainstorm");
+  });
+
+  /**
+   * /plan — "I have an idea, help me plan it". Same project picker;
+   * runs `planIdea` which creates a SavedIdea + drains the plan-mode
+   * helper synchronously, then posts the plan back. The full plan
+   * also lives at the deep link so they can read it on the dashboard.
+   */
+  bot.command("plan", async (ctx) => {
+    const prompt = (ctx.match || "").toString().trim();
+    if (!prompt) return ctx.reply("usage: /plan <one-line idea>");
+    await askForProject(ctx, "plan", prompt, "plan");
+  });
+
+  /**
+   * /mirrors — list which projects' brainstorm currently mirrors to
+   * a chat (i.e. has a Telegram chatId configured). Configure these
+   * via the project's chat-connect sheet in the dashboard.
+   */
+  bot.command("mirrors", async (ctx) => {
+    try {
+      const { projects } = await client.listProjects();
+      const mirrored = projects.filter((p) => !!p.telegramChatId);
+      if (mirrored.length === 0) {
+        await ctx.reply(
+          "no projects mirror brainstorm to telegram yet. open a project's chat-connect sheet in the web UI to attach this chat.",
+        );
+        return;
+      }
+      const lines = mirrored
+        .map((p) => `• ${p.name} → \`${p.telegramChatId}\``)
+        .join("\n");
+      await ctx.reply(`brainstorm mirroring active for:\n${lines}`, {
+        parse_mode: "MarkdownV2",
+      });
+    } catch (e) {
+      await ctx.reply((e as Error).message);
+    }
   });
 
   bot.command("ls", async (ctx) => {
@@ -180,6 +246,7 @@ async function main() {
 
     const id = newPendingId();
     pending.set(id, {
+      kind: "new",
       prompt,
       chatId: ctx.chat!.id,
       expiresAt: Date.now() + 10 * 60 * 1000,
@@ -188,9 +255,9 @@ async function main() {
     const kb = new InlineKeyboard();
     for (const p of projects.slice(0, 24)) {
       const live = (p.activeCount ?? 0) > 0 ? ` · ${p.activeCount} live` : "";
-      kb.text(`${p.name}${live}`, `new:${id}:${p.id}`).row();
+      kb.text(`${p.name}${live}`, `pp:${id}:${p.id}`).row();
     }
-    kb.text("Cancel", `new:${id}:cancel`);
+    kb.text("Cancel", `pp:${id}:cancel`);
 
     await ctx.reply(
       `Pick a project for: \`${escape(prompt.slice(0, 200))}\``,
@@ -198,14 +265,55 @@ async function main() {
     );
   });
 
-  // Callback router for the /new project picker.
-  bot.callbackQuery(/^new:([^:]+):(.+)$/, async (ctx) => {
+  /**
+   * Helper used by the project-picker commands (/new, /brainstorm,
+   * /plan). Stashes the verb + prompt, lists projects as inline
+   * buttons, and lets the shared `pp:` callback below dispatch on
+   * tap. Cuts the boilerplate from each command.
+   */
+  async function askForProject(
+    ctx: { chat?: { id: number }; reply: (m: string, o?: object) => Promise<unknown> },
+    kind: PendingKind,
+    prompt: string,
+    promptLabel: string,
+  ): Promise<void> {
+    let projects: Awaited<ReturnType<typeof client.listProjects>>["projects"];
+    try {
+      projects = (await client.listProjects()).projects;
+    } catch (e) {
+      await ctx.reply(`failed to list projects: ${(e as Error).message}`);
+      return;
+    }
+    if (projects.length === 0) {
+      await ctx.reply("no projects yet — add one in the web UI first.");
+      return;
+    }
+    const id = newPendingId();
+    pending.set(id, {
+      kind,
+      prompt,
+      chatId: ctx.chat!.id,
+      expiresAt: Date.now() + 10 * 60 * 1000,
+    });
+    const kb = new InlineKeyboard();
+    for (const p of projects.slice(0, 24)) {
+      kb.text(p.name, `pp:${id}:${p.id}`).row();
+    }
+    kb.text("Cancel", `pp:${id}:cancel`);
+    await ctx.reply(`Pick a project to ${promptLabel} \`${escape(prompt.slice(0, 160))}\``, {
+      parse_mode: "MarkdownV2",
+      reply_markup: kb,
+    });
+  }
+
+  // Callback router for every project-picker (new / brainstorm / plan).
+  bot.callbackQuery(/^pp:([^:]+):(.+)$/, async (ctx) => {
     const m = ctx.match;
     const pendId = m[1] ?? "";
     const projectId = m[2] ?? "";
     const p = pending.get(pendId);
     if (!p) {
-      await ctx.answerCallbackQuery({ text: "expired — re-run /new" });
+      await ctx.answerCallbackQuery({ text: "expired — re-run the command" });
       try { await ctx.editMessageText("(expired)"); } catch {}
       return;
     }
@@ -226,29 +334,110 @@ async function main() {
       return;
     }
     pending.delete(pendId);
-    await ctx.answerCallbackQuery({ text: `spawning in ${project.name}` });
-    try {
-      const { task } = await client.createTask({
-        agent: "claude",
-        repoPath: project.path,
-        baseBranch: "main",
-        prompt: p.prompt,
-      });
-      focus.set(p.chatId, task.id);
+
+    if (p.kind === "new") {
+      await ctx.answerCallbackQuery({ text: `spawning in ${project.name}` });
+      try {
+        const { task } = await client.createTask({
+          agent: "claude",
+          repoPath: project.path,
+          baseBranch: "main",
+          prompt: p.prompt,
+        });
+        focus.set(p.chatId, task.id);
+        try {
+          await ctx.editMessageText(
+            `spawned in *${escape(project.name)}*\nid: \`${escape(task.id.slice(-8))}\`\nbranch: \`${escape(task.branch)}\`\n_focused — your next plain message goes to this task._`,
+            { parse_mode: "MarkdownV2" },
+          );
+        } catch {
+          await bot.api.sendMessage(p.chatId, `spawned ${task.id} in ${project.name}`);
+        }
+      } catch (e) {
+        try {
+          await ctx.editMessageText(`new failed: ${(e as Error).message}`);
+        } catch {
+          await bot.api.sendMessage(p.chatId, `new failed: ${(e as Error).message}`);
+        }
+      }
+      return;
+    }
+
+    if (p.kind === "brainstorm") {
+      await ctx.answerCallbackQuery({ text: `brainstorming on ${project.name}…` });
       try {
         await ctx.editMessageText(
-          `spawned in *${escape(project.name)}*\nid: \`${escape(task.id.slice(-8))}\`\nbranch: \`${escape(task.branch)}\`\n_focused — your next plain message goes to this task._`,
+          `brainstorming on *${escape(project.name)}* — agent is reading the repo…`,
           { parse_mode: "MarkdownV2" },
         );
-      } catch {
-        await bot.api.sendMessage(p.chatId, `spawned ${task.id} in ${project.name}`);
-      }
-    } catch (e) {
+      } catch {}
       try {
-        await ctx.editMessageText(`new failed: ${(e as Error).message}`);
-      } catch {
-        await bot.api.sendMessage(p.chatId, `new failed: ${(e as Error).message}`);
+        const r = await client.ideateForProject(project.id, {
+          prompt: p.prompt,
+          max: 5,
+        });
+        if (r.ok === false) {
+          await bot.api.sendMessage(
+            p.chatId,
+            `brainstorm failed (${r.source}): ${r.error}`,
+          );
+          return;
+        }
+        const opts = r.suggestion.options
+          .map((o, i) => `*${i + 1}\\.* ${escape(o)}`)
+          .join("\n");
+        const body = [
+          `💡 *${escape(r.suggestion.title)}* · ${escape(project.name)}`,
+          "",
+          opts,
+          "",
+          `_Reply with a number, "skip", or your own direction\\._`,
+        ].join("\n");
+        const sent = await bot.api.sendMessage(p.chatId, body, {
+          parse_mode: "MarkdownV2",
+        });
+        suggestionReplyMap.set(replyKey(p.chatId, sent.message_id), r.suggestion.id);
+        lastSuggestionByChat.set(p.chatId, r.suggestion.id);
+      } catch (e) {
+        await bot.api.sendMessage(p.chatId, `brainstorm failed: ${(e as Error).message}`);
       }
+      return;
+    }
+
+    if (p.kind === "plan") {
+      await ctx.answerCallbackQuery({ text: `planning on ${project.name}…` });
+      try {
+        await ctx.editMessageText(
+          `planning *${escape(p.prompt.slice(0, 80))}* on *${escape(project.name)}* — agent is reading the repo…`,
+          { parse_mode: "MarkdownV2" },
+        );
+      } catch {}
+      try {
+        const r = await client.planIdea(project.id, { text: p.prompt });
+        if (!r.ok) {
+          await bot.api.sendMessage(
+            p.chatId,
+            `plan failed: ${(r as { error: string }).error}`,
+          );
+          return;
+        }
+        // Telegram cap: 4096 chars per message. Send a tight summary
+        // up top + chunk the full plan body if it's longer than the
+        // remaining budget. The full plan also lives at the deep link
+        // so they can read it on the dashboard.
+        const link = `${client.baseUrl}/projects/${project.slug}/ideas/${r.idea.id}`;
+        const header = `📐 *plan ready* · ${escape(project.name)}\n_${escape(p.prompt.slice(0, 200))}_\n${escape(link)}`;
+        await bot.api.sendMessage(p.chatId, header, { parse_mode: "MarkdownV2" });
+        const body = r.plan;
+        for (let i = 0; i < body.length; i += 3800) {
+          const chunk = body.slice(i, i + 3800);
+          // Send as plain text — markdown escaping a 4kb plan is brittle.
+          await bot.api.sendMessage(p.chatId, chunk);
+        }
+      } catch (e) {
+        await bot.api.sendMessage(p.chatId, `plan failed: ${(e as Error).message}`);
+      }
+      return;
     }
   });
 
@@ -668,11 +857,13 @@ async function main() {
         .filter((s) => s.length > 0)
         .join("\n");
 
-      // If the suggestion is project-scoped and the project has its
-      // own Telegram bot configured, route it ONLY through that bot
-      // — operators chose to silo per-project notifications when
-      // they set those fields. Otherwise fall back to the global
-      // broadcast across allowlisted users.
+      // Brainstorm in agentd is a continuous mirror, not a notification
+      // stream. The chat target IS the opt-in: configure a project's
+      // telegramChatId (via the chat-connect sheet or `/brainstorm`
+      // here) and brainstorm events flow into that chat — same shape as
+      // the web brainstorm thread. Replies route back through the
+      // suggestion router below, so it's fully bidirectional. Projects
+      // without a configured chat target stay silent (no broadcast).
       let projectBot: Bot | null = null;
       let projectChatId: number | null = null;
       if (sug.projectId) {
@@ -682,9 +873,17 @@ async function main() {
             projectBot = getProjectBot(project.telegramBotToken);
             const id = Number(project.telegramChatId);
             if (Number.isFinite(id)) projectChatId = id;
+          } else if (project.telegramChatId) {
+            // chat target set, no per-project bot → use the global bot
+            const id = Number(project.telegramChatId);
+            if (Number.isFinite(id)) projectChatId = id;
+          } else {
+            // project has no chat target → don't fan out anywhere.
+            return;
           }
         } catch {
-          // project gone — fall through to global
+          // project gone — drop silently
+          return;
         }
       }
 
@@ -736,10 +935,16 @@ async function main() {
         }
       };
 
-      if (projectBot && projectChatId != null) {
-        await sendOne(projectChatId, projectBot);
-      } else {
-        // Suggestions broadcast as DMs to every allowlisted user.
+      // Project chat target = mirror destination. Use the per-project
+      // bot when one's configured, otherwise fall back to the global
+      // bot pointing at the same chatId. No global DM broadcast: the
+      // chat target presence IS the opt-in.
+      if (projectChatId != null) {
+        await sendOne(projectChatId, projectBot ?? bot);
+      } else if (!sug.projectId) {
+        // Ad-hoc suggestion (no project). Keep the legacy broadcast
+        // for these so direct CLI invocations still surface — they
+        // aren't part of the project mirror surface.
         for (const chatId of cfg.allowedUserIds) {
           await sendOne(chatId, bot);
         }
