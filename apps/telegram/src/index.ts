@@ -1093,7 +1093,46 @@ async function main() {
   console.log(
     `telegram bot ready · server=${cfg.server} · ${cfg.allowedUserIds.size} allowed user(s)`,
   );
-  await bot.start();
+  await startWithConflictRetry(bot);
+}
+
+/**
+ * Wraps `bot.start()` so a 409 ("terminated by other getUpdates request")
+ * doesn't crash the subprocess. Telegram's long-poll TTL is ~30s, so a
+ * stale previous poll always releases within that window — we just have
+ * to outwait it. Crashing instead burns the daemon's per-hour restart
+ * budget (8 tries) before any natural recovery can happen.
+ *
+ * Only 409 is retried in-process; any other error still propagates so
+ * fatal config issues (bad token, network down) surface promptly.
+ */
+async function startWithConflictRetry(bot: Bot): Promise<void> {
+  let consecutiveConflicts = 0;
+  while (true) {
+    try {
+      await bot.start();
+      return;
+    } catch (e) {
+      if (e instanceof GrammyError && e.error_code === 409) {
+        consecutiveConflicts += 1;
+        const waitMs = 35_000;
+        console.error(
+          `telegram: 409 conflict (another getUpdates poller holds the slot). ` +
+            `Waiting ${waitMs / 1000}s for it to release. ` +
+            `If this repeats, another agentd / bot instance is running with the same TELEGRAM_BOT_TOKEN. ` +
+            `(consecutive=${consecutiveConflicts})`,
+        );
+        if (consecutiveConflicts >= 6) {
+          throw new Error(
+            "telegram: 409 conflict persisted across 6 retries (~3.5min) — another bot instance is using this token. Stop it or rotate the token.",
+          );
+        }
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
+      }
+      throw e;
+    }
+  }
 }
 
 main().catch((e) => {
