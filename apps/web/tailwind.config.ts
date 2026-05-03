@@ -202,6 +202,28 @@ const config: Config = {
           "50%": { backgroundPosition: "100% 50%" },
           "100%": { backgroundPosition: "0% 50%" },
         },
+        // Indeterminate progress sweep — used as a 1px ember bar
+        // along the bottom of an actively-running tool row to convey
+        // "the agent is working on this NOW". Sweeps left to right
+        // beyond the container so the leading edge is always moving.
+        "progress-sweep": {
+          "0%": { transform: "translateX(-100%)" },
+          "100%": { transform: "translateX(400%)" },
+        },
+        // Soft ember background pulse for a running tool row — the
+        // row gently breathes in/out so it reads as "alive" without
+        // being distracting.
+        "running-bg": {
+          "0%, 100%": { backgroundColor: "rgba(247, 127, 0, 0.04)" },
+          "50%": { backgroundColor: "rgba(247, 127, 0, 0.11)" },
+        },
+        // Three-dot loading cycle. Each dot animates with the same
+        // keyframe but staggered via `animation-delay` so the dots
+        // light up in sequence: . .. ...
+        "dot-cycle": {
+          "0%, 80%, 100%": { opacity: "0.25", transform: "translateY(0)" },
+          "40%": { opacity: "1", transform: "translateY(-1px)" },
+        },
         // Idea card lands with a small lift + ember-tinted flash that
         // fades in under a second. Pairs with `fade-in` for the row.
         "idea-pop": {
@@ -238,6 +260,9 @@ const config: Config = {
         "active-glow": "active-glow 2.4s ease-in-out infinite",
         "aurora-sweep": "aurora-sweep 6s ease-in-out infinite",
         "idea-pop": "idea-pop 0.85s cubic-bezier(0.2, 0.7, 0.2, 1) both",
+        "progress-sweep": "progress-sweep 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite",
+        "running-bg": "running-bg 2.4s ease-in-out infinite",
+        "dot-cycle": "dot-cycle 1.4s ease-in-out infinite",
       },
     },
   },

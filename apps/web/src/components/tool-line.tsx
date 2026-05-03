@@ -66,7 +66,10 @@ export function ToolLine({
   // dot. Color carries semantics: ember = running, emerald = ok,
   // red = failed, neutral when no result yet (shouldn't render).
   const statusGlyph = running ? (
-    <Loader2 className="h-3 w-3 animate-spin text-ember-500" />
+    <span className="relative grid place-items-center size-4">
+      <span className="absolute inset-0 rounded-full border border-ember-500/40 animate-pulse-ring" />
+      <Loader2 className="h-3 w-3 animate-spin text-ember-500" />
+    </span>
   ) : outputOk === false ? (
     <span className="size-1.5 rounded-full bg-red-500 inline-block" />
   ) : output ? (
@@ -77,7 +80,13 @@ export function ToolLine({
   return (
     <div
       className={cn(
-        "group font-mono text-[11.5px] text-ink-600 dark:text-ink-400 leading-snug",
+        "relative group font-mono text-[11.5px] leading-snug transition-colors animate-slide-in",
+        // Same alive treatment as ToolRow when this line is mid-run:
+        // ember tint, breathing background, ember left-border accent,
+        // and the indeterminate progress sweep along the bottom edge.
+        running
+          ? "rounded border-l-2 border-ember-500/50 bg-ember-500/[0.05] animate-running-bg px-1 py-0.5 overflow-hidden text-ember-700 dark:text-ember-300"
+          : "text-ink-600 dark:text-ink-400",
         className,
       )}
     >
@@ -85,14 +94,36 @@ export function ToolLine({
         <span className="grid place-items-center size-4 mt-px shrink-0">
           {statusGlyph}
         </span>
-        <span className="grid place-items-center size-4 mt-px shrink-0 text-ink-500 dark:text-ink-400">
+        <span
+          className={cn(
+            "grid place-items-center size-4 mt-px shrink-0 transition-colors",
+            running
+              ? "text-ember-600 dark:text-ember-300"
+              : "text-ink-500 dark:text-ink-400",
+          )}
+        >
           <Icon className="h-3 w-3" />
         </span>
-        <span className="font-semibold text-ink-800 dark:text-ink-100 shrink-0">
+        <span
+          className={cn(
+            "font-semibold shrink-0 transition-colors",
+            running
+              ? "text-ember-700 dark:text-ember-300"
+              : "text-ink-800 dark:text-ink-100",
+          )}
+        >
           {parsed.name}
         </span>
+        {running && <RunningDots />}
         {parsed.summary && (
-          <span className="truncate min-w-0 flex-1 text-ink-500 dark:text-ink-400">
+          <span
+            className={cn(
+              "truncate min-w-0 flex-1 transition-colors",
+              running
+                ? "text-ember-700/80 dark:text-ember-300/80"
+                : "text-ink-500 dark:text-ink-400",
+            )}
+          >
             {parsed.summary}
           </span>
         )}
@@ -125,6 +156,11 @@ export function ToolLine({
           </button>
         )}
       </div>
+      {running && (
+        <span className="pointer-events-none absolute inset-x-0 bottom-0 h-px overflow-hidden">
+          <span className="block h-full w-1/3 bg-gradient-to-r from-transparent via-ember-500 to-transparent animate-progress-sweep" />
+        </span>
+      )}
       {showInlineCode && (
         <div className="mt-1">
           <CodeBlock
@@ -347,13 +383,35 @@ export function WorkCard({
   return (
     <div
       className={cn(
-        "rounded-lg border border-ink-900/[0.08] bg-ink-900/[0.015] dark:border-ink-50/[0.08] dark:bg-ink-50/[0.02] px-2 py-1.5",
+        "relative rounded-lg border px-2 py-1.5 transition-colors",
+        // Live (a tool is mid-run) ⇒ ember accent + soft glow that
+        // pulses, plus a shimmer line riding the top edge so the
+        // card itself looks "in progress" at a glance, not just
+        // its trailing row.
+        liveTrailing
+          ? "border-ember-500/40 bg-ember-500/[0.04] dark:bg-ember-500/[0.06] shadow-[0_0_0_1px_rgba(247,127,0,0.10)] animate-active-glow overflow-hidden"
+          : "border-ink-900/[0.08] bg-ink-900/[0.015] dark:border-ink-50/[0.08] dark:bg-ink-50/[0.02]",
         className,
       )}
     >
+      {liveTrailing && (
+        <span className="pointer-events-none absolute inset-x-0 top-0 h-px overflow-hidden">
+          <span className="block h-full w-1/3 bg-gradient-to-r from-transparent via-ember-500 to-transparent animate-progress-sweep" />
+        </span>
+      )}
       <div className="flex items-center justify-between mb-1 px-0.5">
-        <span className="font-mono text-[9.5px] uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500">
+        <span
+          className={cn(
+            "font-mono text-[9.5px] uppercase tracking-[0.14em] inline-flex items-center gap-1.5 transition-colors",
+            liveTrailing
+              ? "text-ember-700 dark:text-ember-300"
+              : "text-ink-400 dark:text-ink-500",
+          )}
+        >
           tool calls ({pairs.length})
+          {liveTrailing && (
+            <span className="size-1.5 rounded-full bg-ember-500 animate-blink" />
+          )}
         </span>
         {overflow > 0 && (
           <button
@@ -409,7 +467,18 @@ export function ToolRow({
     parsed.detail != null && parsed.detailLanguage != null;
   const expandable = hasOutput || hasInlineDetail;
   return (
-    <div className="group rounded px-1 py-0.5 transition-colors hover:bg-ink-900/[0.025] dark:hover:bg-ink-50/[0.03]">
+    <div
+      className={cn(
+        "relative group rounded transition-colors animate-slide-in",
+        // When the tool is mid-run: ember-tinted background that
+        // breathes, ember-accent left border, and the bottom-edge
+        // progress bar (added below) — together it reads as "this
+        // tool is doing something RIGHT NOW".
+        running
+          ? "px-1 py-0.5 border-l-2 border-ember-500/50 bg-ember-500/[0.05] animate-running-bg overflow-hidden"
+          : "px-1 py-0.5 hover:bg-ink-900/[0.025] dark:hover:bg-ink-50/[0.03]",
+      )}
+    >
       <button
         type="button"
         disabled={!expandable}
@@ -419,9 +488,13 @@ export function ToolRow({
           expandable ? "cursor-pointer" : "cursor-default",
         )}
       >
-        <span className="grid place-items-center size-4 shrink-0">
+        <span className="grid place-items-center size-4 shrink-0 relative">
           {running ? (
-            <Loader2 className="h-2.5 w-2.5 animate-spin text-ember-500" />
+            <>
+              {/* expanding ring around the spinner — adds presence */}
+              <span className="absolute inset-0 rounded-full border border-ember-500/40 animate-pulse-ring" />
+              <Loader2 className="h-3 w-3 animate-spin text-ember-500" />
+            </>
           ) : outputOk === false ? (
             <span className="size-1.5 rounded-full bg-red-500 inline-block" />
           ) : hasOutput ? (
@@ -430,14 +503,36 @@ export function ToolRow({
             <span className="size-1.5 rounded-full bg-ink-900/30 dark:bg-ink-50/30 inline-block" />
           )}
         </span>
-        <span className="grid place-items-center size-4 shrink-0 text-ink-500 dark:text-ink-400">
+        <span
+          className={cn(
+            "grid place-items-center size-4 shrink-0 transition-colors",
+            running
+              ? "text-ember-600 dark:text-ember-300"
+              : "text-ink-500 dark:text-ink-400",
+          )}
+        >
           <Icon className="h-3 w-3" />
         </span>
-        <span className="font-mono text-[11.5px] font-semibold text-ink-800 dark:text-ink-100 shrink-0">
+        <span
+          className={cn(
+            "font-mono text-[11.5px] font-semibold shrink-0 transition-colors",
+            running
+              ? "text-ember-700 dark:text-ember-300"
+              : "text-ink-800 dark:text-ink-100",
+          )}
+        >
           {parsed.name}
         </span>
+        {running && <RunningDots />}
         {parsed.summary && (
-          <span className="font-mono text-[11.5px] text-ink-500 dark:text-ink-400 truncate min-w-0 flex-1">
+          <span
+            className={cn(
+              "font-mono text-[11.5px] truncate min-w-0 flex-1 transition-colors",
+              running
+                ? "text-ember-700/80 dark:text-ember-300/80"
+                : "text-ink-500 dark:text-ink-400",
+            )}
+          >
             {parsed.summary}
           </span>
         )}
@@ -465,6 +560,14 @@ export function ToolRow({
           </span>
         )}
       </button>
+      {/* Indeterminate progress bar along the bottom edge — only
+          when the row is mid-run. Sweeps continuously so the eye
+          always has motion to lock onto. */}
+      {running && (
+        <span className="pointer-events-none absolute inset-x-0 bottom-0 h-px overflow-hidden">
+          <span className="block h-full w-1/3 bg-gradient-to-r from-transparent via-ember-500 to-transparent animate-progress-sweep" />
+        </span>
+      )}
       {open && hasInlineDetail && (
         <div className="mt-1 ml-6">
           <CodeBlock
@@ -488,6 +591,33 @@ export function ToolRow({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Three ember dots that light up in sequence: . .. ... — the
+ * universal "still processing" cue. Used after the tool name in
+ * a running ToolRow / ToolLine.
+ */
+function RunningDots() {
+  return (
+    <span
+      aria-hidden
+      className="inline-flex items-end gap-0.5 ml-0.5 mr-0.5 shrink-0"
+    >
+      <span
+        className="size-1 rounded-full bg-ember-500 animate-dot-cycle"
+        style={{ animationDelay: "0ms" }}
+      />
+      <span
+        className="size-1 rounded-full bg-ember-500 animate-dot-cycle"
+        style={{ animationDelay: "180ms" }}
+      />
+      <span
+        className="size-1 rounded-full bg-ember-500 animate-dot-cycle"
+        style={{ animationDelay: "360ms" }}
+      />
+    </span>
   );
 }
 
