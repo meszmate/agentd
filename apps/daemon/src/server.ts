@@ -98,6 +98,7 @@ import {
   reopenTask,
   setCouncilWinner,
   setTaskThinkingLevel,
+  setTaskAutoFlags,
   setTaskModel,
   setTaskMirrorTo,
   updateTodo,
@@ -1255,6 +1256,38 @@ export function buildServer(opts: BuildServerOptions) {
       );
     }
     const updated = setTaskThinkingLevel(db, id, parsed.data);
+    if (updated) pubTaskChanged(id);
+    return c.json({ task: updated });
+  });
+
+  /**
+   * Toggle the task's auto-push / auto-PR flags mid-flight. The
+   * post-turn hook reads these on every agent exit so flipping them
+   * changes the behavior of the NEXT completed turn (not the one
+   * already in flight). Either flag is optional — pass only the
+   * one you're toggling.
+   */
+  api.patch("/tasks/:id/auto-flags", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => null)) as {
+      autoPush?: boolean;
+      autoPr?: boolean;
+    } | null;
+    if (
+      !body ||
+      (body.autoPush === undefined && body.autoPr === undefined)
+    ) {
+      return c.json(
+        { error: "at least one of autoPush / autoPr required" },
+        400,
+      );
+    }
+    const updated = setTaskAutoFlags(db, id, {
+      ...(body.autoPush !== undefined ? { autoPush: body.autoPush } : {}),
+      ...(body.autoPr !== undefined ? { autoPr: body.autoPr } : {}),
+    });
     if (updated) pubTaskChanged(id);
     return c.json({ task: updated });
   });

@@ -232,6 +232,26 @@ export function setTaskThinkingLevel(
 }
 
 /**
+ * Toggle the task's auto-push / auto-PR flags mid-flight. The
+ * post-turn hook reads these on every agent exit, so flipping them
+ * mid-task changes whether the next completed turn pushes / opens
+ * a PR. Operator-driven only — there's no UI to flip them off
+ * silently from the agent.
+ */
+export function setTaskAutoFlags(
+  db: Db,
+  id: string,
+  patch: { autoPush?: boolean; autoPr?: boolean },
+): Task | null {
+  const next: Record<string, unknown> = { updatedAt: Date.now() };
+  if (patch.autoPush !== undefined) next.autoPush = patch.autoPush ? 1 : 0;
+  if (patch.autoPr !== undefined) next.autoPr = patch.autoPr ? 1 : 0;
+  if (Object.keys(next).length === 1) return getTask(db, id);
+  db.update(tasks).set(next).where(eq(tasks.id, id)).run();
+  return getTask(db, id);
+}
+
+/**
  * Update the task's per-task model override. Empty string clears it (the
  * task then inherits the configured default for its agent kind). Applied
  * on the next runner spawn — current turn keeps its model.

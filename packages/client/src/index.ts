@@ -835,6 +835,20 @@ export class AgentdClient {
   }
 
   /**
+   * Toggle the task's auto-push / auto-PR flags mid-flight. Either
+   * field is optional — pass only the one you're flipping.
+   */
+  async setTaskAutoFlags(
+    id: string,
+    patch: { autoPush?: boolean; autoPr?: boolean },
+  ): Promise<{ task: Task | null }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/auto-flags`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  }
+
+  /**
    * Queue a message while the agent is mid-turn, or interrupt-and-fire it
    * immediately. Idle tasks behave like `sendTaskInput`.
    */
