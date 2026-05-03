@@ -288,6 +288,13 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
               projects: [msg.project, ...cached],
             });
           }
+          // Also patch the per-project detail cache so views opened on
+          // /projects/<slug> pick up the change without a refetch. The
+          // detail page is keyed by slug, but callers sometimes mutate
+          // by id — write both to be safe.
+          const detailPayload = { project: msg.project };
+          qc.setQueryData(qk.project(msg.project.slug), detailPayload);
+          qc.setQueryData(qk.project(msg.project.id), detailPayload);
           return;
         }
         if (msg.type === "project_removed") {
