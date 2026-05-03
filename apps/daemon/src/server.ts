@@ -27,6 +27,7 @@ import {
   ResolveSuggestionRequest,
   SaveIdeaRequest,
   SpawnMultiRequest,
+  SpawnTasksMultiRequest,
   UpdateIdeaRequest,
   CreateTodoRequest,
   UpdateTodoRequest,
@@ -3798,6 +3799,40 @@ export function buildServer(opts: BuildServerOptions) {
       const updated = markSavedIdeaSpawned(db, id, firstTask.id) ?? idea;
       for (const t of created) pubTaskChanged(t.id);
       return c.json({ idea: updated, tasks: created });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  /**
+   * Saved-idea-free fan-out. Same `createBatch` mechanics as
+   * `/saved-ideas/:id/spawn-multi` but takes a `repoPath` directly so
+   * the spawn sheet's "phase this" toggle can split a plan across
+   * agents without first stashing it as an idea.
+   */
+  api.post("/tasks/spawn-multi", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = SpawnTasksMultiRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid body", issues: parsed.error.issues },
+        400,
+      );
+    }
+    try {
+      const created = await tasks.createBatch({
+        repoPath: parsed.data.repoPath,
+        slices: parsed.data.slices,
+        ...(parsed.data.shareWorktree != null
+          ? { shareWorktree: parsed.data.shareWorktree }
+          : {}),
+        ...(parsed.data.branchName ? { branchName: parsed.data.branchName } : {}),
+        ...(parsed.data.baseBranch ? { baseBranch: parsed.data.baseBranch } : {}),
+        ...(parsed.data.title ? { titlePrefix: parsed.data.title } : {}),
+        ...(parsed.data.autoPush != null ? { autoPush: parsed.data.autoPush } : {}),
+      });
+      for (const t of created) pubTaskChanged(t.id);
+      return c.json({ tasks: created });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }

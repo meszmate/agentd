@@ -652,6 +652,22 @@ export const SpawnMultiRequest = z.object({
 export type SpawnMultiRequest = z.infer<typeof SpawnMultiRequest>;
 
 /**
+ * Body for `POST /api/tasks/spawn-multi` — same fan-out shape as the
+ * saved-idea variant, but takes a `repoPath` directly so the spawn
+ * sheet can phase a plan without first stashing it as an idea.
+ */
+export const SpawnTasksMultiRequest = z.object({
+  repoPath: z.string().min(1),
+  slices: z.array(PlanSlice).min(1),
+  shareWorktree: z.boolean().optional(),
+  branchName: z.string().optional(),
+  baseBranch: z.string().optional(),
+  title: z.string().optional(),
+  autoPush: z.boolean().optional(),
+});
+export type SpawnTasksMultiRequest = z.infer<typeof SpawnTasksMultiRequest>;
+
+/**
  * Tool-call activity captured during the agent's turn — persisted
  * with the agent message so the workshop can replay the exploration
  * timeline after reload, matching how task pages show their history.

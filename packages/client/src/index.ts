@@ -806,6 +806,27 @@ export class AgentdClient {
       body: JSON.stringify(body),
     });
   }
+  /**
+   * Fan a freeform plan (no saved idea) into N sibling tasks. Same
+   * mechanics as `spawnMultiFromSavedIdea` — shared worktree by default,
+   * sequential `dependsOnTaskId` chain — but takes the repo path
+   * directly so the spawn sheet can phase a plan without persisting it
+   * as an idea first.
+   */
+  async spawnTasksMulti(body: {
+    repoPath: string;
+    slices: PlanSlice[];
+    shareWorktree?: boolean;
+    branchName?: string;
+    baseBranch?: string;
+    title?: string;
+    autoPush?: boolean;
+  }): Promise<{ tasks: Task[] }> {
+    return this.req(`/api/tasks/spawn-multi`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
   async getSuggestion(id: string): Promise<{ suggestion: Suggestion }> {
     return this.req(`/api/suggestions/${encodeURIComponent(id)}`);
   }

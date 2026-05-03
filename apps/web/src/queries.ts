@@ -742,6 +742,18 @@ export function useSpawnMultiFromSavedIdea() {
   });
 }
 
+export function useSpawnTasksMulti() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Parameters<AgentdClient["spawnTasksMulti"]>[0]) =>
+      client.spawnTasksMulti(body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+    },
+  });
+}
+
 export function useUpdateSavedIdeaSlices() {
   const client = useClient();
   const qc = useQueryClient();
