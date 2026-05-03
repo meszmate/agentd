@@ -48,6 +48,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { InstructionsWorkshopDialog } from "@/components/instructions-workshop";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -938,6 +939,8 @@ function ProjectInstructionsPanel({ project }: { project: Project }) {
     project.instructions ?? "",
   );
   const [editing, setEditing] = useState(false);
+  // Agentic workshop modal — full two-pane editor with codebase access.
+  const [workshopOpen, setWorkshopOpen] = useState(false);
   // AI draft / improve panel state. `aiOpen` toggles the inline form;
   // `aiBusy` reflects the streaming generation.
   const [aiOpen, setAiOpen] = useState(false);
@@ -1118,11 +1121,20 @@ function ProjectInstructionsPanel({ project }: { project: Project }) {
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => setAiOpen(true)}
+              onClick={() => setWorkshopOpen(true)}
               className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded text-[11px] font-medium border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300 hover:bg-ember-500/15 transition-colors"
+              title="agent reads your repo and chats with you to craft the rules"
             >
               <Sparkles className="h-3 w-3" />
-              Draft with AI
+              Open workshop
+            </button>
+            <button
+              type="button"
+              onClick={() => setAiOpen(true)}
+              className="font-mono text-[10.5px] text-ink-500 hover:text-ember-700 dark:hover:text-ember-300 underline-offset-2 hover:underline"
+              title="single-prompt draft, no chat"
+            >
+              quick draft
             </button>
             <button
               type="button"
@@ -1278,6 +1290,15 @@ function ProjectInstructionsPanel({ project }: { project: Project }) {
           <div className="flex items-center gap-2">
             <button
               type="button"
+              onClick={() => setWorkshopOpen(true)}
+              className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300 hover:bg-ember-500/15 transition-colors"
+              title="Open the agentic workshop — two-pane chat with codebase access"
+            >
+              <Sparkles className="h-2.5 w-2.5" />
+              workshop
+            </button>
+            <button
+              type="button"
               onClick={() => setEditing(true)}
               className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-ink-900/10 dark:border-ink-50/10 hover:border-ember-500/40 hover:text-ember-700 dark:hover:text-ember-300 transition-colors"
             >
@@ -1288,10 +1309,11 @@ function ProjectInstructionsPanel({ project }: { project: Project }) {
               type="button"
               onClick={() => setAiOpen(true)}
               disabled={aiBusy}
-              className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ember-700 dark:text-ember-300 border border-ember-500/30 hover:bg-ember-500/10 disabled:opacity-40 transition-colors"
+              className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-ember-700 dark:hover:text-ember-300 hover:underline disabled:opacity-40 transition-colors"
+              title="quick draft — single prompt, no chat"
             >
               <Sparkles className="h-2.5 w-2.5" />
-              improve
+              quick
             </button>
             <span className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] text-emerald-700 dark:text-emerald-300">
               <CheckCircle2 className="h-2.5 w-2.5" />
@@ -1300,6 +1322,11 @@ function ProjectInstructionsPanel({ project }: { project: Project }) {
           </div>
         </div>
       )}
+      <InstructionsWorkshopDialog
+        open={workshopOpen}
+        onClose={() => setWorkshopOpen(false)}
+        project={project}
+      />
     </div>
   );
 }

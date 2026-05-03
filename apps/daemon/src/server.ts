@@ -68,6 +68,7 @@ import {
   streamSuggestionPlan,
   streamPrMessage,
   streamProjectInstructionsDraft,
+  streamInstructionsConversation,
   getPrState,
   setTaskDiscordThread,
   setTaskPrUrl,
@@ -2767,6 +2768,95 @@ export function buildServer(opts: BuildServerOptions) {
       headers: {
         "content-type": "text/plain; charset=utf-8",
         "cache-control": "no-store",
+      },
+    });
+  });
+
+  /**
+   * Agentic conversational editor for project instructions. The agent
+   * gets full codebase access (Read/Glob/Grep/Bash via the helper)
+   * so it can actually look at the project before suggesting rules.
+   * Wire format mirrors the saved-idea chat stream:
+   *   - per-event:  `\x1f<HelperStreamEvent json>\n`   (text/tool/instructions deltas)
+   *   - terminator: `\x1e<{ ok, reply, instructions, source } json>`
+   * The web client consumes events live to render tool activity on
+   * the left and a live preview on the right, then reads the
+   * envelope to capture the final reply text + revised draft.
+   */
+  api.post("/projects/:idOrSlug/instructions-chat/stream", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project = getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      message?: string;
+      currentDraft?: string;
+      history?: Array<{ role?: string; content?: string }>;
+    };
+    const message = (body.message ?? "").trim();
+    if (!message) return c.json({ error: "message required" }, 400);
+    const cfg = loadConfig(paths.root);
+    const history = (body.history ?? [])
+      .map((m) => ({
+        role: m.role === "user" ? ("user" as const) : ("agent" as const),
+        content: String(m.content ?? "").slice(0, 4000),
+      }))
+      .filter((m) => m.content.trim().length > 0)
+      .slice(-12);
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const enc = new TextEncoder();
+        try {
+          const it = streamInstructionsConversation(project.path, {
+            projectName: project.name,
+            currentDraft: body.currentDraft ?? project.instructions ?? "",
+            history,
+            userMessage: message,
+            helper: cfg.aiHelpers,
+          });
+          let final: {
+            reply: string;
+            source: string;
+            instructions?: string | null;
+            error?: string;
+          } | null = null;
+          while (true) {
+            const next = await it.next();
+            if (next.done) {
+              final = next.value;
+              break;
+            }
+            controller.enqueue(enc.encode(`\x1f${JSON.stringify(next.value)}\n`));
+          }
+          controller.enqueue(
+            enc.encode(
+              `\x1e${JSON.stringify({
+                ok: true,
+                reply: final?.reply ?? "",
+                source: final?.source ?? "fallback-empty",
+                ...(final?.instructions ? { instructions: final.instructions } : {}),
+                ...(final?.error ? { error: final.error } : {}),
+              })}`,
+            ),
+          );
+        } catch (e) {
+          controller.enqueue(
+            enc.encode(
+              `\x1e${JSON.stringify({
+                ok: false,
+                source: "fallback-error",
+                error: (e as Error).message,
+              })}`,
+            ),
+          );
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-cache",
       },
     });
   });

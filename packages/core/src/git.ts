@@ -69,6 +69,12 @@ export type HelperStreamEvent =
    */
   | { kind: "plan_delta"; delta: string }
   /**
+   * A chunk of instruction content the agent is currently writing
+   * into an `<instructions>…</instructions>` block. Routed to the
+   * right-side preview in the project-instructions workshop modal.
+   */
+  | { kind: "instructions_delta"; delta: string }
+  /**
    * Cumulative token + cost usage emitted as the helper progresses
    * (and once more on the final `result` envelope). The UI reads
    * these to render a live "N tok in / M tok out" counter beside
@@ -1929,28 +1935,152 @@ export async function* streamIdeaConversation(
 }
 
 /**
- * Streaming-safe splitter for `<plan-update>…</plan-update>` blocks.
- * Feeds in text deltas and yields a sequence of `text` and
- * `plan_delta` events with the tags themselves stripped. Tolerates
- * tag boundaries that span multiple deltas — buffers up to N-1
- * trailing chars where N is the longest tag length so it can match
- * a partial tag once more chars arrive.
+ * Conversational turn for the project-instructions workshop. The
+ * agent has full codebase access (Read/Glob/Grep/Bash) so it can
+ * actually look at the project before suggesting rules. Each reply
+ * may include an `<instructions>FULL UPDATED TEXT</instructions>`
+ * block when the agent wants to revise the draft; the splitter
+ * routes those chunks to a separate event stream so the workshop
+ * can update its right-side preview live without polluting the chat.
  */
-function makePlanSplitter() {
-  const START = "<plan-update>";
-  const END = "</plan-update>";
-  const KEEP = Math.max(START.length, END.length) - 1;
+export interface InstructionsChatTurn {
+  role: "user" | "agent";
+  content: string;
+}
+
+export interface InstructionsChatResult {
+  reply: string;
+  source: "claude" | "codex" | "fallback-empty" | "fallback-error";
+  instructions?: string | null;
+  error?: string;
+}
+
+export async function* streamInstructionsConversation(
+  cwd: string,
+  args: {
+    projectName: string;
+    currentDraft: string;
+    history: InstructionsChatTurn[];
+    userMessage: string;
+    helper?: AiHelperOptions;
+  },
+): AsyncGenerator<HelperStreamEvent, InstructionsChatResult, void> {
+  const transcript = args.history
+    .map((m) =>
+      m.role === "user" ? `[operator] ${m.content}` : `[agent] ${m.content}`,
+    )
+    .join("\n\n");
+
+  const draftBlock = args.currentDraft.trim()
+    ? `Current instructions draft:\n${args.currentDraft.trim()}`
+    : `Current instructions draft: (empty — operator hasn't written anything yet)`;
+
+  const ask = [
+    `You are helping the operator craft "project instructions" — a short`,
+    `agent-facing rules block that gets prepended to every coding-agent`,
+    `task spawned in this project. Think tight AGENTS.md / CLAUDE.md.`,
+    ``,
+    `Use your tools (Read, Glob, Grep, Bash) to actually look at the`,
+    `project before suggesting rules. Cite real files, real conventions,`,
+    `real tooling. Do NOT make rules up from generic advice.`,
+    ``,
+    `Project name: ${args.projectName}`,
+    `Project path (cwd): ${cwd}`,
+    ``,
+    draftBlock,
+    ``,
+    `Format of every reply:`,
+    `- Conversational chat first — explain what you found, what you're`,
+    `  proposing to add/remove, what trade-offs you see. Brief and direct.`,
+    `- THEN, if (and only if) this turn should change the draft, emit`,
+    `  the FULL revised instructions inside <instructions>…</instructions>`,
+    `  tags. NOT a diff — the whole replacement, ready to save as-is.`,
+    `- Inside the tags, format as bullet lines starting with "- ", each`,
+    `  rule one imperative sentence under 110 chars. 4-12 lines total.`,
+    `- Don't emit the tags for purely conversational turns ("ok will look",`,
+    `  questions to the operator, etc.).`,
+    `- NEVER prefix your reply with "Agent:", "Assistant:", "[agent]" —`,
+    `  the UI handles attribution.`,
+    ``,
+    transcript ? `Conversation so far:\n${transcript}` : "",
+    `\nOperator's latest message:\n${args.userMessage}`,
+    ``,
+    `Respond now.`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const it = runHelperWithEvents(cwd, ask, args.helper ?? {});
+  let final: { text: string; source: string; error?: string } | null = null;
+
+  const splitter = makeInstructionsSplitter();
+
+  try {
+    while (true) {
+      const next = await it.next();
+      if (next.done) {
+        final = next.value;
+        break;
+      }
+      const ev = next.value;
+      if (ev.kind === "text") {
+        for (const out of splitter.feed(ev.delta)) yield out;
+      } else {
+        yield ev;
+      }
+    }
+    for (const out of splitter.flush()) yield out;
+  } catch {
+    // stream cancelled
+  }
+
+  if (!final || !final.text.trim()) {
+    return {
+      reply: "",
+      source: (final?.source as InstructionsChatResult["source"]) ?? "fallback-empty",
+      ...(final?.error ? { error: final.error } : {}),
+    };
+  }
+
+  let instructions: string | null = null;
+  let body = final.text;
+  const m = body.match(/<instructions>([\s\S]*?)<\/instructions>/);
+  if (m) {
+    instructions = m[1]!.trim() || null;
+    body = body.replace(/<instructions>[\s\S]*?<\/instructions>/g, "").trim();
+  }
+  const cleaned = cleanAssistantText(body);
+  return {
+    reply: cleaned,
+    source: "claude",
+    ...(instructions ? { instructions } : {}),
+  };
+}
+
+/**
+ * Streaming-safe tag splitter. Feeds in text deltas and yields a
+ * sequence of `text` events plus a chosen `kind` for content found
+ * inside the tag. Tolerates tag boundaries that span multiple
+ * deltas — buffers up to N-1 trailing chars where N is the longest
+ * tag length so it can match a partial tag once more chars arrive.
+ */
+function makeTagSplitter(
+  startTag: string,
+  endTag: string,
+  insideKind: "plan_delta" | "instructions_delta",
+) {
+  const KEEP = Math.max(startTag.length, endTag.length) - 1;
   let buf = "";
-  let inPlan = false;
+  let inside = false;
 
   function* drain(): Generator<HelperStreamEvent> {
     while (true) {
-      if (!inPlan) {
-        const i = buf.indexOf(START);
+      if (!inside) {
+        const i = buf.indexOf(startTag);
         if (i >= 0) {
           if (i > 0) yield { kind: "text", delta: buf.slice(0, i) };
-          buf = buf.slice(i + START.length);
-          inPlan = true;
+          buf = buf.slice(i + startTag.length);
+          inside = true;
           continue;
         }
         const safe = Math.max(0, buf.length - KEEP);
@@ -1960,16 +2090,16 @@ function makePlanSplitter() {
         }
         return;
       }
-      const j = buf.indexOf(END);
+      const j = buf.indexOf(endTag);
       if (j >= 0) {
-        if (j > 0) yield { kind: "plan_delta", delta: buf.slice(0, j) };
-        buf = buf.slice(j + END.length);
-        inPlan = false;
+        if (j > 0) yield { kind: insideKind, delta: buf.slice(0, j) };
+        buf = buf.slice(j + endTag.length);
+        inside = false;
         continue;
       }
       const safe = Math.max(0, buf.length - KEEP);
       if (safe > 0) {
-        yield { kind: "plan_delta", delta: buf.slice(0, safe) };
+        yield { kind: insideKind, delta: buf.slice(0, safe) };
         buf = buf.slice(safe);
       }
       return;
@@ -1982,11 +2112,12 @@ function makePlanSplitter() {
       yield* drain();
     },
     *flush(): Generator<HelperStreamEvent> {
-      // Drain whatever's left. If we're still in-plan with no closing
-      // tag, treat the remainder as plan content (safer than dropping).
+      // Drain whatever's left. If we're still inside the tag with no
+      // closing match, treat the remainder as inside content (safer
+      // than dropping).
       if (buf.length > 0) {
-        if (inPlan) {
-          yield { kind: "plan_delta", delta: buf };
+        if (inside) {
+          yield { kind: insideKind, delta: buf };
         } else {
           yield { kind: "text", delta: buf };
         }
@@ -1994,6 +2125,18 @@ function makePlanSplitter() {
       }
     },
   };
+}
+
+function makePlanSplitter() {
+  return makeTagSplitter("<plan-update>", "</plan-update>", "plan_delta");
+}
+
+function makeInstructionsSplitter() {
+  return makeTagSplitter(
+    "<instructions>",
+    "</instructions>",
+    "instructions_delta",
+  );
 }
 
 /* ── Suggestion reply router ───────────────────────────────────────── */

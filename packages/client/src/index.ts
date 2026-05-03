@@ -119,6 +119,28 @@ export type IdeaChatEvent =
   | { kind: "raw"; text: string };
 
 /**
+ * Stream event for the project-instructions workshop chat. Same
+ * shape as IdeaChatEvent except plan_delta is swapped for
+ * instructions_delta — content the agent emitted inside an
+ * `<instructions>…</instructions>` block, routed to the right-side
+ * preview pane in the workshop modal.
+ */
+export type InstructionsChatEvent =
+  | { kind: "tool_use"; name: string; input: unknown }
+  | { kind: "tool_result"; ok: boolean; preview?: string }
+  | { kind: "text"; delta: string }
+  | { kind: "instructions_delta"; delta: string }
+  | {
+      kind: "usage";
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+      costUsd?: number;
+    }
+  | { kind: "raw"; text: string };
+
+/**
  * Brainstorm streaming event. `option` arrives once per extracted
  * idea line; `tool_use` / `tool_result` mirror the agent's repo
  * exploration so the UI can render activity rows beside the options.
@@ -542,6 +564,90 @@ export class AgentdClient {
     return this.req(`/api/saved-ideas/${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
+  }
+
+  /**
+   * Conversational editor for project instructions. Uses the same
+   * `\x1f<event>\n` + `\x1e<envelope>` wire format as `streamIdeaChat`.
+   * The agent has codebase access; events arrive as `InstructionsChatEvent`s
+   * (text deltas, tool calls, instructions deltas) for live UI rendering;
+   * the envelope carries the final reply text + revised instructions
+   * if the agent emitted any inside `<instructions>…</instructions>`.
+   */
+  async streamInstructionsChat(
+    idOrSlug: string,
+    body: {
+      message: string;
+      currentDraft?: string;
+      history?: Array<{ role: "user" | "agent"; content: string }>;
+    },
+    onEvent: (event: InstructionsChatEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<
+    | {
+        ok: true;
+        reply: string;
+        source: string;
+        instructions?: string;
+      }
+    | { ok: false; source: string; error: string }
+  > {
+    const r = await fetch(
+      `${this.server}/api/projects/${encodeURIComponent(idOrSlug)}/instructions-chat/stream`,
+      {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(body),
+        signal,
+      },
+    );
+    if (!r.ok || !r.body) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`instructions chat failed: ${r.status} ${text}`);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let envelope = "";
+    let sawSentinel = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      while (!sawSentinel) {
+        const sIdx = buffer.indexOf("\x1e");
+        const oIdx = buffer.indexOf("\x1f");
+        if (sIdx >= 0 && (oIdx < 0 || sIdx < oIdx)) {
+          envelope += buffer.slice(sIdx + 1);
+          buffer = "";
+          sawSentinel = true;
+          break;
+        }
+        if (oIdx < 0) break;
+        const eol = buffer.indexOf("\n", oIdx + 1);
+        if (eol < 0) break;
+        const json = buffer.slice(oIdx + 1, eol);
+        buffer = buffer.slice(eol + 1);
+        try {
+          onEvent(JSON.parse(json));
+        } catch {
+          // bad event — skip
+        }
+      }
+      if (sawSentinel && buffer) {
+        envelope += buffer;
+        buffer = "";
+      }
+    }
+    try {
+      return JSON.parse(envelope || "{}");
+    } catch {
+      return {
+        ok: false,
+        source: "fallback-error",
+        error: envelope || "empty stream",
+      };
+    }
   }
   async updateSavedIdeaPlan(
     id: string,
