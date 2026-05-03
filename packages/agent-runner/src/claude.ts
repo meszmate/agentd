@@ -140,9 +140,12 @@ export class ClaudeRunner implements AgentRunner {
     }
     // Reasoning effort. Claude's CLI takes --effort directly; we just clamp
     // to its accepted set. Default to `high` so casual single-line prompts
-    // still get real thinking time.
-    const effort = opts.thinkingLevel ?? "high";
-    args.push("--effort", effort);
+    // still get real thinking time. Codex's `minimal` tier doesn't exist on
+    // claude — we map it to `low`, the closest equivalent. The other levels
+    // are 1:1 with claude's flag values.
+    const requested = opts.thinkingLevel ?? "high";
+    const claudeEffort = requested === "minimal" ? "low" : requested;
+    args.push("--effort", claudeEffort);
     if (opts.appendSystemPrompt && opts.appendSystemPrompt.trim().length > 0) {
       args.push("--append-system-prompt", opts.appendSystemPrompt);
     }

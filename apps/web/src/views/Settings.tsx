@@ -38,19 +38,33 @@ const SECTIONS: RailItem[] = [
   { id: "browser", glyph: "▢", label: "Browser" },
 ];
 
-type ThinkingLevel = "low" | "medium" | "high" | "max" | "xhigh";
+type ThinkingLevel =
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 
-const THINKING_LEVELS: {
-  value: ThinkingLevel;
-  label: string;
-  hint: string;
-}[] = [
-  { value: "low", label: "low", hint: "fastest, minimal reasoning" },
-  { value: "medium", label: "medium", hint: "balanced" },
-  { value: "high", label: "high", hint: "solid for multi-step engineering" },
-  { value: "max", label: "max", hint: "Claude's deepest tier" },
-  { value: "xhigh", label: "xhigh", hint: "Claude default · Codex's deepest tier" },
-];
+const THINKING_LEVEL_META: Record<
+  ThinkingLevel,
+  { label: string; hint: string }
+> = {
+  minimal: { label: "minimal", hint: "codex-only — lightest reasoning" },
+  low: { label: "low", hint: "fastest, minimal reasoning" },
+  medium: { label: "medium", hint: "balanced" },
+  high: { label: "high", hint: "solid for multi-step engineering" },
+  xhigh: { label: "xhigh", hint: "Claude default · Codex's deepest tier" },
+  max: { label: "max", hint: "claude-only — deepest tier" },
+};
+
+const THINKING_LEVELS_BY_AGENT: Record<
+  "claude" | "codex",
+  ReadonlyArray<ThinkingLevel>
+> = {
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  codex: ["minimal", "low", "medium", "high", "xhigh"],
+};
 
 export function Settings() {
   const { toast } = useApp();
@@ -403,7 +417,11 @@ export function Settings() {
               }
               top
             >
-              <ThinkingPicker value={defaultClaude} onChange={setDefaultClaude} />
+              <ThinkingPicker
+                value={defaultClaude}
+                onChange={setDefaultClaude}
+                agent="claude"
+              />
             </InfoRow>
             <InfoRow
               label="Codex default"
@@ -421,7 +439,11 @@ export function Settings() {
                 </>
               }
             >
-              <ThinkingPicker value={defaultCodex} onChange={setDefaultCodex} />
+              <ThinkingPicker
+                value={defaultCodex}
+                onChange={setDefaultCodex}
+                agent="codex"
+              />
             </InfoRow>
           </div>
 
@@ -651,20 +673,30 @@ function registryPlaceholder(
 function ThinkingPicker({
   value,
   onChange,
+  agent,
 }: {
   value: ThinkingLevel;
   onChange: (next: ThinkingLevel) => void;
+  /**
+   * Constrain the picker to one agent's accepted levels. Omit for the
+   * helper-effort picker, which is agent-agnostic (the runner clamps).
+   */
+  agent?: "claude" | "codex";
 }) {
+  const levels = agent
+    ? THINKING_LEVELS_BY_AGENT[agent]
+    : (Object.keys(THINKING_LEVEL_META) as ThinkingLevel[]);
   return (
     <div className="flex flex-wrap gap-1.5">
-      {THINKING_LEVELS.map((m) => {
-        const on = value === m.value;
+      {levels.map((v) => {
+        const meta = THINKING_LEVEL_META[v];
+        const on = value === v;
         return (
           <button
-            key={m.value}
+            key={v}
             type="button"
-            onClick={() => onChange(m.value)}
-            title={m.hint}
+            onClick={() => onChange(v)}
+            title={meta.hint}
             className={cn(
               "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border text-[11px] transition-colors",
               on
@@ -672,7 +704,7 @@ function ThinkingPicker({
                 : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
             )}
           >
-            <span className="font-mono">{m.label}</span>
+            <span className="font-mono">{meta.label}</span>
           </button>
         );
       })}

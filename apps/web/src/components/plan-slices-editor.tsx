@@ -1,5 +1,10 @@
 import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
-import type { AgentKind, PlanSlice } from "@agentd/contracts";
+import {
+  THINKING_LEVELS_BY_AGENT,
+  type AgentKind,
+  type PlanSlice,
+  type ThinkingLevel,
+} from "@agentd/contracts";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -186,21 +191,24 @@ function SliceRow({
           label={`think · ${slice.thinkingLevel ?? "inherit"}`}
           options={[
             { value: "", label: "inherit" },
-            { value: "low", label: "low" },
-            { value: "medium", label: "medium" },
-            { value: "high", label: "high" },
-            { value: "max", label: "max" },
-            { value: "xhigh", label: "xhigh" },
+            // Filter by this slice's agent (defaults to claude when
+            // unset). Avoids offering `max` to a codex slice or
+            // `minimal` to a claude slice.
+            ...THINKING_LEVELS_BY_AGENT[slice.agent ?? "claude"].map((v) => ({
+              value: v,
+              label: v,
+            })),
           ]}
           onSelect={(v) =>
             onUpdate({
               thinkingLevel:
+                v === "minimal" ||
                 v === "low" ||
                 v === "medium" ||
                 v === "high" ||
-                v === "max" ||
-                v === "xhigh"
-                  ? v
+                v === "xhigh" ||
+                v === "max"
+                  ? (v as ThinkingLevel)
                   : undefined,
             })
           }

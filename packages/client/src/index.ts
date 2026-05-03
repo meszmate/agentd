@@ -74,7 +74,7 @@ export interface AgentdUserPrefs {
   lastAutoPush: boolean;
   lastAutoPr: boolean;
   lastPermissionMode: "bypassPermissions" | "acceptEdits" | "plan";
-  lastThinkingLevel: "low" | "medium" | "high" | "max" | "xhigh";
+  lastThinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   lastModelClaude: string;
   lastModelCodex: string;
   workspaceMode: "worktree" | "in_place";

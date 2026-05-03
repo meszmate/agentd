@@ -47,16 +47,56 @@ export type BranchMode = z.infer<typeof BranchMode>;
 /**
  * Reasoning / thinking effort. Mirrors Claude CLI's `--effort` enum so
  * Claude tasks can pass it through verbatim. Codex maps these to its
- * `model_reasoning_effort` config (`max` → `xhigh`, the rest are 1:1).
+/**
+ * Thinking-effort levels accepted by the union of supported agents.
+ * Not every agent supports every value:
  *
- *   low     — minimal reasoning; fastest and cheapest.
- *   medium  — balanced.
- *   high    — default. Solid for multi-step engineering work.
- *   max     — extended thinking budget; slower, deeper.
- *   xhigh   — Claude's deepest tier (alias of `max` on Codex).
+ *   minimal — Codex only (lightest reasoning tier).
+ *   low     — both.
+ *   medium  — both.
+ *   high    — both. Default for everyday work.
+ *   xhigh   — both. Codex's deepest tier.
+ *   max     — Claude only (extended thinking budget).
+ *
+ * The runners clamp gracefully: Claude treats `minimal` as `low`, and
+ * Codex maps `max` → `xhigh`. The UI hides values that aren't valid
+ * for the currently selected agent (see THINKING_LEVELS_BY_AGENT
+ * exported below).
  */
-export const ThinkingLevel = z.enum(["low", "medium", "high", "max", "xhigh"]);
+export const ThinkingLevel = z.enum([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
 export type ThinkingLevel = z.infer<typeof ThinkingLevel>;
+
+/** Which thinking levels each agent accepts, in display order. */
+export const THINKING_LEVELS_BY_AGENT: Record<
+  "claude" | "codex",
+  ReadonlyArray<ThinkingLevel>
+> = {
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  codex: ["minimal", "low", "medium", "high", "xhigh"],
+};
+
+/**
+ * Clamp a thinking level to the nearest legal value for the given
+ * agent. Used when the operator switches agents in the UI so an
+ * inapplicable level (e.g. `max` on codex) doesn't silently get sent
+ * to the wrong CLI flag.
+ */
+export function clampThinkingLevel(
+  agent: "claude" | "codex",
+  level: ThinkingLevel,
+): ThinkingLevel {
+  if (THINKING_LEVELS_BY_AGENT[agent].includes(level)) return level;
+  if (agent === "claude" && level === "minimal") return "low";
+  if (agent === "codex" && level === "max") return "xhigh";
+  return "high";
+}
 
 /**
  * One candidate agent in a council. Each member runs the same prompt in

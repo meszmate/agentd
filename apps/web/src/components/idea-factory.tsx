@@ -14,14 +14,25 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import type {
-  AgentKind,
-  PermissionMode,
-  PlanSlice,
-  SavedIdea,
-  Suggestion,
-  ThinkingLevel,
+import {
+  THINKING_LEVELS_BY_AGENT,
+  clampThinkingLevel,
+  type AgentKind,
+  type PermissionMode,
+  type PlanSlice,
+  type SavedIdea,
+  type Suggestion,
+  type ThinkingLevel,
 } from "@agentd/contracts";
+
+const THINK_HINT: Record<ThinkingLevel, string> = {
+  minimal: "minimal · codex-only",
+  low: "low · fastest",
+  medium: "medium · balanced",
+  high: "high · default",
+  xhigh: "xhigh · deepest",
+  max: "max · claude-only",
+};
 import { PlanSlicesEditor } from "@/components/plan-slices-editor";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -846,6 +857,13 @@ function PlanAndSpawnSheet({
     "bypassPermissions",
   );
 
+  // Clamp the thinking level whenever the operator picks a different
+  // agent so an inapplicable choice (e.g. `max` on codex, `minimal`
+  // on claude) doesn't get sent to the runner.
+  useEffect(() => {
+    setThinking((cur) => clampThinkingLevel(agent, cur));
+  }, [agent]);
+
   const generatePlan = useMemo(
     () => async () => {
       if (!suggestion) return; // saved-idea path: nothing to stream
@@ -1136,13 +1154,10 @@ function PlanAndSpawnSheet({
               <ToolbarPick
                 label={`think · ${thinking}`}
                 width="auto"
-                options={[
-                  { value: "low", label: "low · fastest" },
-                  { value: "medium", label: "medium · balanced" },
-                  { value: "high", label: "high · default" },
-                  { value: "max", label: "max · deepest" },
-                  { value: "xhigh", label: "xhigh · claude tier" },
-                ]}
+                options={THINKING_LEVELS_BY_AGENT[agent].map((v) => ({
+                  value: v,
+                  label: THINK_HINT[v],
+                }))}
                 onSelect={(v) => setThinking(v as ThinkingLevel)}
               />
               <ToolbarPick

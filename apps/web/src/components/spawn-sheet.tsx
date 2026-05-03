@@ -40,15 +40,57 @@ import { BookText } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type PermissionMode = "bypassPermissions" | "acceptEdits" | "plan";
-type ThinkingLevel = "low" | "medium" | "high" | "max" | "xhigh";
+type ThinkingLevel =
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 
-const THINKING_LEVELS: { value: ThinkingLevel; label: string; hint: string }[] = [
-  { value: "low", label: "low", hint: "fastest, minimal reasoning — quick edits" },
-  { value: "medium", label: "medium", hint: "balanced — most everyday tasks" },
-  { value: "high", label: "high", hint: "default — solid for multi-step engineering" },
-  { value: "max", label: "max", hint: "extended thinking budget — slower, deeper" },
-  { value: "xhigh", label: "xhigh", hint: "deepest tier — gnarly debugging / architecture" },
-];
+// Per-agent thinking-level choices. Claude's CLI takes `--effort` and
+// accepts low|medium|high|xhigh|max (no `minimal`). Codex's CLI takes
+// `-c model_reasoning_effort=` and accepts minimal|low|medium|high|xhigh
+// (no `max`). The UI hides values that aren't valid for the selected
+// agent so the operator doesn't pick something the runner has to clamp.
+const THINKING_LEVEL_META: Record<
+  ThinkingLevel,
+  { label: string; hint: string }
+> = {
+  minimal: {
+    label: "minimal",
+    hint: "codex-only — lightest reasoning tier; near-zero think time",
+  },
+  low: { label: "low", hint: "fastest — quick edits / small refactors" },
+  medium: { label: "medium", hint: "balanced — most everyday tasks" },
+  high: { label: "high", hint: "default — solid for multi-step engineering" },
+  xhigh: {
+    label: "xhigh",
+    hint: "deepest tier — gnarly debugging / architecture",
+  },
+  max: {
+    label: "max",
+    hint: "claude-only — extended thinking budget; slower, deeper",
+  },
+};
+
+const THINKING_LEVELS_BY_AGENT: Record<
+  "claude" | "codex",
+  ReadonlyArray<ThinkingLevel>
+> = {
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  codex: ["minimal", "low", "medium", "high", "xhigh"],
+};
+
+function clampThinkingLevel(
+  agent: "claude" | "codex",
+  level: ThinkingLevel,
+): ThinkingLevel {
+  if (THINKING_LEVELS_BY_AGENT[agent].includes(level)) return level;
+  if (agent === "claude" && level === "minimal") return "low";
+  if (agent === "codex" && level === "max") return "xhigh";
+  return "high";
+}
 
 const PERMISSION_MODES: { value: PermissionMode; label: string; hint: string }[] = [
   {
@@ -120,7 +162,7 @@ export function SpawnSheet({
     setAgent(p.lastAgent);
     setAutoPush(p.lastAutoPush);
     setPermissionMode(p.lastPermissionMode);
-    setThinkingLevel(p.lastThinkingLevel);
+    setThinkingLevel(clampThinkingLevel(p.lastAgent, p.lastThinkingLevel));
     setModel(
       p.lastAgent === "claude" ? p.lastModelClaude : p.lastModelCodex,
     );
@@ -144,6 +186,13 @@ export function SpawnSheet({
         : prefsQ.data.prefs.lastModelCodex,
     );
   }, [agent, hydrated, prefsQ.data]);
+
+  // Clamp the thinking level whenever the operator switches agents so
+  // an inapplicable choice (e.g. `max` on codex, `minimal` on claude)
+  // doesn't get persisted or sent to the runner.
+  useEffect(() => {
+    setThinkingLevel((cur) => clampThinkingLevel(agent, cur));
+  }, [agent]);
 
   const skillsQ = useSkills(repoPath || undefined);
   const availableSkills = skillsQ.data?.skills ?? [];
@@ -470,14 +519,15 @@ export function SpawnSheet({
             <Field>
               <Label>Thinking</Label>
               <div className="flex flex-wrap gap-1.5">
-                {THINKING_LEVELS.map((m) => {
-                  const on = thinkingLevel === m.value;
+                {THINKING_LEVELS_BY_AGENT[agent].map((value) => {
+                  const meta = THINKING_LEVEL_META[value];
+                  const on = thinkingLevel === value;
                   return (
                     <button
-                      key={m.value}
+                      key={value}
                       type="button"
-                      onClick={() => setThinkingLevel(m.value)}
-                      title={m.hint}
+                      onClick={() => setThinkingLevel(value)}
+                      title={meta.hint}
                       className={cn(
                         "inline-flex items-center gap-1.5 h-6 px-2 rounded-md border text-[11px] transition-colors",
                         on
@@ -485,13 +535,13 @@ export function SpawnSheet({
                           : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
                       )}
                     >
-                      <span className="font-mono">{m.label}</span>
+                      <span className="font-mono">{meta.label}</span>
                     </button>
                   );
                 })}
               </div>
               <p className="text-2xs text-muted-foreground mt-1">
-                {THINKING_LEVELS.find((m) => m.value === thinkingLevel)?.hint}
+                {THINKING_LEVEL_META[thinkingLevel].hint}
               </p>
             </Field>
 

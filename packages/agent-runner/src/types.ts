@@ -6,7 +6,13 @@ export type PermissionMode =
   | "bypassPermissions"
   | "plan";
 
-export type ThinkingLevel = "low" | "medium" | "high" | "max" | "xhigh";
+export type ThinkingLevel =
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 
 export interface RunnerStartOptions {
   prompt: string;

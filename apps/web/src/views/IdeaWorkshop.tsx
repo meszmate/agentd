@@ -1413,6 +1413,19 @@ function SpawnDialog({
     );
   }, [agent, agentModels?.length]);
 
+  // Snap the thinking level off `max` (claude-only) or `minimal`
+  // (codex-only) when the operator switches agents — leave the empty
+  // sentinel ("") alone so the dialog still lets the server default
+  // win.
+  useEffect(() => {
+    setThinkingLevel((cur) => {
+      if (cur === "") return cur;
+      if (agent === "claude" && cur === "minimal") return "low";
+      if (agent === "codex" && cur === "max") return "xhigh";
+      return cur;
+    });
+  }, [agent]);
+
   const promptPreview =
     idea.planDraft?.trim() || idea.description?.trim() || idea.text.trim();
 
@@ -1559,11 +1572,16 @@ function SpawnDialog({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="default">use server default</SelectItem>
+                {agent === "codex" && (
+                  <SelectItem value="minimal">minimal (codex-only)</SelectItem>
+                )}
                 <SelectItem value="low">low</SelectItem>
                 <SelectItem value="medium">medium</SelectItem>
                 <SelectItem value="high">high</SelectItem>
-                <SelectItem value="max">max</SelectItem>
                 <SelectItem value="xhigh">xhigh</SelectItem>
+                {agent === "claude" && (
+                  <SelectItem value="max">max (claude-only)</SelectItem>
+                )}
               </SelectContent>
             </Select>
           </div>

@@ -2358,15 +2358,27 @@ export function buildServer(opts: BuildServerOptions) {
       if (!dt || typeof dt !== "object") {
         return c.json({ error: "defaultThinking must be an object" }, 400);
       }
-      const allowed = ["low", "medium", "high", "max", "xhigh"] as const;
+      // Per-agent allowed sets — claude rejects `minimal`, codex rejects `max`.
+      const allowedClaude = ["low", "medium", "high", "xhigh", "max"] as const;
+      const allowedCodex = ["minimal", "low", "medium", "high", "xhigh"] as const;
       const cur = { ...cfg.defaultThinking };
-      for (const k of ["claude", "codex"] as const) {
-        const v = dt[k];
-        if (v == null) continue;
-        if (!allowed.includes(v as (typeof allowed)[number])) {
-          return c.json({ error: `defaultThinking.${k} must be one of ${allowed.join("|")}` }, 400);
+      if (dt.claude != null) {
+        if (!allowedClaude.includes(dt.claude as (typeof allowedClaude)[number])) {
+          return c.json(
+            { error: `defaultThinking.claude must be one of ${allowedClaude.join("|")}` },
+            400,
+          );
         }
-        cur[k] = v as (typeof allowed)[number];
+        cur.claude = dt.claude as (typeof allowedClaude)[number];
+      }
+      if (dt.codex != null) {
+        if (!allowedCodex.includes(dt.codex as (typeof allowedCodex)[number])) {
+          return c.json(
+            { error: `defaultThinking.codex must be one of ${allowedCodex.join("|")}` },
+            400,
+          );
+        }
+        cur.codex = dt.codex as (typeof allowedCodex)[number];
       }
       next.defaultThinking = cur;
       changed = true;

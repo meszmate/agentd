@@ -596,26 +596,44 @@ export function TaskDetail({ task }: { task: Task }) {
   );
 }
 
-const THINKING_LEVELS = [
-  { value: "low", label: "low", hint: "fastest, minimal reasoning" },
-  { value: "medium", label: "medium", hint: "balanced" },
-  { value: "high", label: "high", hint: "default" },
-  { value: "max", label: "max", hint: "extended thinking budget" },
-  { value: "xhigh", label: "xhigh", hint: "deepest tier" },
-] as const;
+const THINKING_LEVEL_HINTS: Record<
+  "minimal" | "low" | "medium" | "high" | "xhigh" | "max",
+  string
+> = {
+  minimal: "codex-only — lightest reasoning",
+  low: "fastest, minimal reasoning",
+  medium: "balanced",
+  high: "default",
+  xhigh: "deepest tier",
+  max: "claude-only — extended thinking",
+};
 
-type ThinkingLevelValue = (typeof THINKING_LEVELS)[number]["value"];
+const THINKING_LEVELS_BY_AGENT_TASK = {
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  codex: ["minimal", "low", "medium", "high", "xhigh"],
+} as const;
+
+type ThinkingLevelValue =
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 
 /**
  * Inline thinking-level dropdown on the task header. Mutating it does NOT
  * interrupt the in-flight turn — the new level applies to the next runner
- * spawn (next user message or steered queue drain).
+ * spawn (next user message or steered queue drain). The visible options
+ * track the task's agent so codex tasks don't see `max` (claude-only) and
+ * claude tasks don't see `minimal` (codex-only).
  */
 function ThinkingLevelChip({ task }: { task: Task }) {
   const client = useClient();
   const qc = useQueryClient();
   const { toast } = useApp();
   const current = (task.thinkingLevel ?? "high") as ThinkingLevelValue;
+  const levels = THINKING_LEVELS_BY_AGENT_TASK[task.agent];
   const set = async (level: ThinkingLevelValue) => {
     if (level === current) return;
     try {
@@ -644,18 +662,18 @@ function ThinkingLevelChip({ task }: { task: Task }) {
           Thinking · next turn
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {THINKING_LEVELS.map((m) => (
+        {levels.map((value) => (
           <DropdownMenuItem
-            key={m.value}
-            onClick={() => void set(m.value)}
+            key={value}
+            onClick={() => void set(value)}
             className={cn(
               "flex items-baseline justify-between gap-2",
-              m.value === current && "text-ember-700 dark:text-ember-300",
+              value === current && "text-ember-700 dark:text-ember-300",
             )}
           >
-            <span className="font-mono">{m.label}</span>
+            <span className="font-mono">{value}</span>
             <span className="text-[10px] text-ink-400 dark:text-ink-500">
-              {m.hint}
+              {THINKING_LEVEL_HINTS[value]}
             </span>
           </DropdownMenuItem>
         ))}

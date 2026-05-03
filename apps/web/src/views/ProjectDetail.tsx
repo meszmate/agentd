@@ -29,12 +29,14 @@ import {
   Trash2,
   XCircle,
 } from "lucide-react";
-import type {
-  PermissionMode,
-  Project,
-  Task,
-  TaskStatus,
-  ThinkingLevel,
+import {
+  THINKING_LEVELS_BY_AGENT,
+  clampThinkingLevel,
+  type PermissionMode,
+  type Project,
+  type Task,
+  type TaskStatus,
+  type ThinkingLevel,
 } from "@agentd/contracts";
 import {
   Kicker,
@@ -610,6 +612,12 @@ function ProjectComposer({
     );
   }, [agent, hydrated, prefsQ.data]);
 
+  // Clamp the thinking level whenever the agent changes so the runner
+  // never receives a value the chosen CLI rejects.
+  useEffect(() => {
+    setThinkingLevel((cur) => clampThinkingLevel(agent, cur));
+  }, [agent]);
+
   const submit = async () => {
     const p = prompt.trim();
     if (!p) {
@@ -698,13 +706,10 @@ function ProjectComposer({
         />
         <ToolbarPick
           label={`think:${thinkingLevel}`}
-          options={[
-            { value: "low", label: "low · fastest" },
-            { value: "medium", label: "medium · balanced" },
-            { value: "high", label: "high · solid default" },
-            { value: "max", label: "max · deepest tier" },
-            { value: "xhigh", label: "xhigh · Claude default" },
-          ]}
+          options={THINKING_LEVELS_BY_AGENT[agent].map((v) => ({
+            value: v,
+            label: v,
+          }))}
           onSelect={(v) => setThinkingLevel(v as ThinkingLevel)}
         />
         <ToolbarPick

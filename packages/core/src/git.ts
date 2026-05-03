@@ -38,7 +38,7 @@ export interface AiHelperOptions {
   agent?: "claude" | "codex";
   binary?: string;
   model?: string;
-  effort?: "low" | "medium" | "high" | "max" | "xhigh";
+  effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 /**
@@ -1684,7 +1684,7 @@ export interface ParsedPlan {
     prompt: string;
     agent?: "claude" | "codex";
     model?: string;
-    thinkingLevel?: "low" | "medium" | "high" | "max" | "xhigh";
+    thinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
     permissionMode?: "bypassPermissions" | "acceptEdits" | "plan";
   }>;
 }
@@ -1713,7 +1713,7 @@ const SLICE_BLOCK_INSTRUCTION = [
   ``,
   `Each slice's \`prompt\` is the full standalone instruction that slice's runner will receive. Make it self-contained — it should make sense without seeing sibling slices, but can reference "the previous slice's commits on this branch" since they all share the worktree.`,
   ``,
-  `Field rules: \`agent\` is "claude" or "codex". \`model\` is a free-form id the operator's model registry recognizes (e.g. "opus", "sonnet", "haiku", "gpt-5-codex"). \`thinkingLevel\` is "low" | "medium" | "high" | "max" | "xhigh". \`permissionMode\` is "bypassPermissions" | "acceptEdits" | "plan".`,
+  `Field rules: \`agent\` is "claude" or "codex". \`model\` is a free-form id the operator's model registry recognizes (e.g. "opus", "sonnet", "haiku", "gpt-5-codex"). \`thinkingLevel\` is "minimal" (codex-only) | "low" | "medium" | "high" | "xhigh" | "max" (claude-only); the runner clamps mismatches automatically. \`permissionMode\` is "bypassPermissions" | "acceptEdits" | "plan".`,
   ``,
   `Skip the block ONLY for genuinely single-phase, single-boundary work — and even then, an explicit single-slice block is fine and lets the operator tweak the spawn before launching. Don't fabricate slices to pad the plan, but don't under-slice a phased plan either.`,
   ``,
@@ -1749,11 +1749,12 @@ export function parseSlicesFromPlan(text: string): ParsedPlan {
     if (e.agent === "claude" || e.agent === "codex") slice.agent = e.agent;
     if (typeof e.model === "string" && e.model.trim()) slice.model = e.model.trim();
     if (
+      e.thinkingLevel === "minimal" ||
       e.thinkingLevel === "low" ||
       e.thinkingLevel === "medium" ||
       e.thinkingLevel === "high" ||
-      e.thinkingLevel === "max" ||
-      e.thinkingLevel === "xhigh"
+      e.thinkingLevel === "xhigh" ||
+      e.thinkingLevel === "max"
     ) {
       slice.thinkingLevel = e.thinkingLevel;
     }
@@ -2446,14 +2447,14 @@ export type SuggestionAction =
       index: number;
       agent?: "claude" | "codex";
       model?: string;
-      thinkingLevel?: "low" | "medium" | "high" | "max" | "xhigh";
+      thinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
     }
   | {
       action: "custom";
       prompt: string;
       agent?: "claude" | "codex";
       model?: string;
-      thinkingLevel?: "low" | "medium" | "high" | "max" | "xhigh";
+      thinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
     }
   | { action: "clarify"; question: string }
   | { action: "dismiss" };
