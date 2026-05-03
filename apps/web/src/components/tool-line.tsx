@@ -62,6 +62,18 @@ export function ToolLine({
   const showTextToggle = parsed.detail != null && parsed.detailLanguage == null;
   const [outputExpanded, setOutputExpanded] = useState(false);
 
+  // Status glyph at the start of the row — claude-code uses a ●
+  // dot. Color carries semantics: ember = running, emerald = ok,
+  // red = failed, neutral when no result yet (shouldn't render).
+  const statusGlyph = running ? (
+    <Loader2 className="h-3 w-3 animate-spin text-ember-500" />
+  ) : outputOk === false ? (
+    <span className="size-1.5 rounded-full bg-red-500 inline-block" />
+  ) : output ? (
+    <span className="size-1.5 rounded-full bg-emerald-500/70 inline-block" />
+  ) : (
+    <span className="size-1.5 rounded-full bg-ink-900/30 dark:bg-ink-50/30 inline-block" />
+  );
   return (
     <div
       className={cn(
@@ -70,23 +82,33 @@ export function ToolLine({
       )}
     >
       <div className="flex items-start gap-2">
-        <span className="grid place-items-center size-4 mt-px shrink-0 text-ink-400 dark:text-ink-500">
-          {running ? (
-            <Loader2 className="h-3 w-3 animate-spin text-ember-500" />
-          ) : (
-            <Icon className="h-3 w-3" />
-          )}
+        <span className="grid place-items-center size-4 mt-px shrink-0">
+          {statusGlyph}
         </span>
-        <span className="font-semibold text-ink-700 dark:text-ink-200 shrink-0">
+        <span className="grid place-items-center size-4 mt-px shrink-0 text-ink-500 dark:text-ink-400">
+          <Icon className="h-3 w-3" />
+        </span>
+        <span className="font-semibold text-ink-800 dark:text-ink-100 shrink-0">
           {parsed.name}
         </span>
         {parsed.summary && (
-          <>
-            <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
-            <span className="truncate min-w-0 flex-1 text-ink-500 dark:text-ink-400">
-              {parsed.summary}
-            </span>
-          </>
+          <span className="truncate min-w-0 flex-1 text-ink-500 dark:text-ink-400">
+            {parsed.summary}
+          </span>
+        )}
+        {(parsed.linesAdded != null || parsed.linesRemoved != null) && (
+          <span className="shrink-0 inline-flex items-center gap-1.5 font-mono text-[10.5px] tabular-nums">
+            {parsed.linesAdded != null && parsed.linesAdded > 0 && (
+              <span className="text-emerald-700 dark:text-emerald-400">
+                +{parsed.linesAdded}
+              </span>
+            )}
+            {parsed.linesRemoved != null && parsed.linesRemoved > 0 && (
+              <span className="text-red-700 dark:text-red-400">
+                −{parsed.linesRemoved}
+              </span>
+            )}
+          </span>
         )}
         {showTextToggle && (
           <button
@@ -385,6 +407,13 @@ interface ParsedTool {
    * language still colors the code itself (no plain-blue diff).
    */
   detailDiffMarks?: Array<"+" | "-" | " " | null>;
+  /**
+   * Lines this call added/removed (Edit/MultiEdit/Write). Surface
+   * separately so the UI can render colored `+5 -2` pills next to
+   * the file name — same shape claude-code shows in its terminal.
+   */
+  linesAdded?: number;
+  linesRemoved?: number;
 }
 
 /**
@@ -434,10 +463,12 @@ function parseToolCall(content: string): ParsedTool {
       return {
         name,
         kind,
-        summary: `${shortPath(path)}${lines ? ` (${lines} lines)` : ""}`,
+        summary: shortPath(path),
         detail: content ?? null,
         detailLanguage: content ? langFromPath(path) : undefined,
         detailFilename: shortPath(path),
+        // Write creates the whole file → all lines count as added.
+        linesAdded: lines || undefined,
       };
     }
     case "Edit":
@@ -464,15 +495,13 @@ function parseToolCall(content: string): ParsedTool {
       return {
         name,
         kind,
-        summary: `${shortPath(path)}${replaceAll}${
-          oldLines.length || newLines.length
-            ? ` +${newLines.length} -${oldLines.length}`
-            : ""
-        }`,
+        summary: `${shortPath(path)}${replaceAll}`,
         detail,
         detailLanguage: detail ? langFromPath(path) : undefined,
         detailFilename: shortPath(path),
         detailDiffMarks,
+        linesAdded: newLines.length || undefined,
+        linesRemoved: oldLines.length || undefined,
       };
     }
     case "Bash": {
