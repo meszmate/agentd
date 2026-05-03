@@ -1,4 +1,12 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import {
+  Fragment,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useAutoAnimate } from "@formkit/auto-animate/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -110,8 +118,6 @@ export function TaskTimeline({
     }
   };
 
-  const streamEntries = streams ? Object.entries(streams) : [];
-
   /**
    * Stick-to-bottom UX. Auto-scroll runs only when the operator is
    * already at (or within ~120px of) the bottom. The moment they
@@ -181,17 +187,6 @@ export function TaskTimeline({
     ro.observe(inner);
     return () => ro.disconnect();
   }, []);
-
-  // Tick once a second while a turn is live so the elapsed display moves.
-  // When the turn settles (`startedAt = null`) we stop ticking — the meter
-  // freezes on the final value until the next turn starts.
-  const [, force] = useState(0);
-  useEffect(() => {
-    if (!turn?.startedAt) return;
-    const id = setInterval(() => force((n) => n + 1), 1000);
-    return () => clearInterval(id);
-  }, [turn?.startedAt]);
-  const elapsedMs = turn?.startedAt ? Date.now() - turn.startedAt : 0;
 
   // Live queue snapshot — server-side state, polled. Renders as the
   // strip above the input so the operator can see what's pending.
@@ -307,104 +302,14 @@ export function TaskTimeline({
         )}
         <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
         <div ref={innerRef} className="mx-auto max-w-3xl px-6 py-6 lg:py-8">
-          {messages.length === 0 ? (
-            <div className="flex h-full items-center justify-center py-16">
-              <div className="text-center text-sm text-ink-500 dark:text-ink-400">
-                Waiting for the agent to wake up…
-              </div>
-            </div>
-          ) : (
-            <ol className="space-y-5">
-              {(() => {
-                const groups = groupTaskMessages(messages);
-                // Index of the final tools group — only THAT card's
-                // last pair is allowed to spin, and only while the
-                // task is mid-turn. Older tool groups are settled.
-                let lastToolsIdx = -1;
-                for (let i = groups.length - 1; i >= 0; i--) {
-                  if (groups[i]!.kind === "tools") {
-                    lastToolsIdx = i;
-                    break;
-                  }
-                }
-                return groups.map((g, gi) => {
-                  // /compact divider sits above the first message in
-                  // the group whose ts falls after the watermark.
-                  const firstTs = g.firstTs;
-                  const prevGroup = groups[gi - 1];
-                  const showDivider =
-                    compactedAt != null &&
-                    firstTs >= compactedAt &&
-                    (!prevGroup || prevGroup.firstTs < compactedAt);
-                  return (
-                    <Fragment key={g.key}>
-                      {showDivider && <CompactDivider ts={compactedAt!} />}
-                      {g.kind === "tools" ? (
-                        <li>
-                          <WorkCard
-                            pairs={g.pairs}
-                            liveTrailing={disabled && gi === lastToolsIdx}
-                          />
-                        </li>
-                      ) : (
-                        <TimelineItem message={g.message} />
-                      )}
-                    </Fragment>
-                  );
-                });
-              })()}
-              {/* In-flight streaming bubbles — same prefix style as
-                  the persisted agent rows, with a blinking λ. */}
-              {streamEntries.map(([streamId, text]) => (
-                <li key={`stream:${streamId}`}>
-                  <div className="flex items-start gap-2.5">
-                    <span className="shrink-0 mt-0.5 font-mono text-[14px] font-semibold leading-none text-ember-500 animate-blink select-none">
-                      λ
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-baseline gap-2 mb-1.5">
-                        <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-ember-700 dark:text-ember-300">
-                          agent
-                        </span>
-                        <ShimmerText className="font-mono text-[10px] uppercase tracking-[0.06em]">
-                          streaming
-                        </ShimmerText>
-                      </div>
-                      <div className="relative">
-                        <Markdown text={text} />
-                        <span className="inline-block w-1.5 h-4 align-text-bottom bg-ember-500/70 ml-0.5 animate-blink" />
-                      </div>
-                    </div>
-                  </div>
-                </li>
-              ))}
-              {disabled && streamEntries.length === 0 && (
-                <li>
-                  <div className="flex items-start gap-2.5">
-                    <span className="shrink-0 mt-0.5 font-mono text-[14px] font-semibold leading-none text-ember-500 animate-blink select-none">
-                      λ
-                    </span>
-                    <div className="flex items-baseline gap-2 flex-wrap">
-                      <ShimmerText className="text-[12.5px] font-medium">
-                        agent is thinking
-                      </ShimmerText>
-                      {turn?.startedAt && (
-                        <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
-                          {formatElapsed(elapsedMs)}
-                          {turn.tokens > 0
-                            ? ` · ${formatTokens(turn.tokens)} tok`
-                            : ""}
-                        </span>
-                      )}
-                      <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate">
-                        {lastToolHint ?? "…"}
-                      </span>
-                    </div>
-                  </div>
-                </li>
-              )}
-            </ol>
-          )}
+          <TimelineMessages
+            messages={messages}
+            disabled={disabled}
+            streams={streams}
+            turn={turn}
+            lastToolHint={lastToolHint}
+            compactedAt={compactedAt}
+          />
         </div>
         </div>
       </div>
@@ -547,6 +452,131 @@ export function TaskTimeline({
   );
 }
 
+const TimelineMessages = memo(function TimelineMessages({
+  messages,
+  disabled,
+  streams,
+  turn,
+  lastToolHint,
+  compactedAt,
+}: {
+  messages: Message[];
+  disabled: boolean;
+  streams?: Record<string, string>;
+  turn?: { startedAt: number | null; tokens: number };
+  lastToolHint?: string | null;
+  compactedAt?: number | null;
+}) {
+  const groups = useMemo(() => groupTaskMessages(messages), [messages]);
+  const lastToolsIdx = useMemo(() => {
+    for (let i = groups.length - 1; i >= 0; i--) {
+      if (groups[i]!.kind === "tools") return i;
+    }
+    return -1;
+  }, [groups]);
+  const streamEntries = useMemo(
+    () => (streams ? Object.entries(streams) : []),
+    [streams],
+  );
+
+  // Tick once a second while a turn is live so only the timeline status
+  // row refreshes; typing in the composer stays isolated from history.
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!turn?.startedAt) return;
+    const id = setInterval(() => force((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [turn?.startedAt]);
+  const elapsedMs = turn?.startedAt ? Date.now() - turn.startedAt : 0;
+
+  if (messages.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center py-16">
+        <div className="text-center text-sm text-ink-500 dark:text-ink-400">
+          Waiting for the agent to wake up…
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <ol className="space-y-5">
+      {groups.map((g, gi) => {
+        // /compact divider sits above the first message in the group
+        // whose ts falls after the watermark.
+        const prevGroup = groups[gi - 1];
+        const showDivider =
+          compactedAt != null &&
+          g.firstTs >= compactedAt &&
+          (!prevGroup || prevGroup.firstTs < compactedAt);
+        return (
+          <Fragment key={g.key}>
+            {showDivider && <CompactDivider ts={compactedAt!} />}
+            {g.kind === "tools" ? (
+              <li>
+                <WorkCard
+                  pairs={g.pairs}
+                  liveTrailing={disabled && gi === lastToolsIdx}
+                />
+              </li>
+            ) : (
+              <TimelineItem message={g.message} />
+            )}
+          </Fragment>
+        );
+      })}
+      {/* In-flight streaming bubbles — same prefix style as the
+          persisted agent rows, with a blinking lambda. */}
+      {streamEntries.map(([streamId, text]) => (
+        <li key={`stream:${streamId}`}>
+          <div className="flex items-start gap-2.5">
+            <span className="shrink-0 mt-0.5 font-mono text-[14px] font-semibold leading-none text-ember-500 animate-blink select-none">
+              λ
+            </span>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-baseline gap-2 mb-1.5">
+                <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-ember-700 dark:text-ember-300">
+                  agent
+                </span>
+                <ShimmerText className="font-mono text-[10px] uppercase tracking-[0.06em]">
+                  streaming
+                </ShimmerText>
+              </div>
+              <div className="relative">
+                <Markdown text={text} />
+                <span className="inline-block w-1.5 h-4 align-text-bottom bg-ember-500/70 ml-0.5 animate-blink" />
+              </div>
+            </div>
+          </div>
+        </li>
+      ))}
+      {disabled && streamEntries.length === 0 && (
+        <li>
+          <div className="flex items-start gap-2.5">
+            <span className="shrink-0 mt-0.5 font-mono text-[14px] font-semibold leading-none text-ember-500 animate-blink select-none">
+              λ
+            </span>
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <ShimmerText className="text-[12.5px] font-medium">
+                agent is thinking
+              </ShimmerText>
+              {turn?.startedAt && (
+                <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
+                  {formatElapsed(elapsedMs)}
+                  {turn.tokens > 0 ? ` · ${formatTokens(turn.tokens)} tok` : ""}
+                </span>
+              )}
+              <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate">
+                {lastToolHint ?? "…"}
+              </span>
+            </div>
+          </div>
+        </li>
+      )}
+    </ol>
+  );
+});
+
 /**
  * Parse a `[result <tool> ok|err] <output>` message into its parts.
  * Returns null when the message isn't a tool result (so the caller
@@ -645,7 +675,7 @@ function groupTaskMessages(messages: Message[]): TaskGroup[] {
   return out;
 }
 
-function TimelineItem({ message: m }: { message: Message }) {
+const TimelineItem = memo(function TimelineItem({ message: m }: { message: Message }) {
   // Structured system messages (`agentd-progress`, `agentd-share`,
   // `agentd-ask`) keep their styled-chip render — they carry
   // semantic meaning the operator scans for.
@@ -718,7 +748,7 @@ function TimelineItem({ message: m }: { message: Message }) {
       </div>
     </li>
   );
-}
+});
 
 type StructuredKind = "progress" | "progress-done" | "share" | "ask";
 
@@ -854,7 +884,7 @@ function StructuredItem({
  * streaming bubble. Renders GitHub-flavored markdown — code fences, lists,
  * tables, links — with our color tokens and a monospace block for code.
  */
-function Markdown({ text }: { text: string }) {
+const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
     <div className="prose prose-sm max-w-none dark:prose-invert text-sm leading-relaxed text-ink-900 dark:text-ink-50 break-words">
       <ReactMarkdown
@@ -959,7 +989,7 @@ function Markdown({ text }: { text: string }) {
       </ReactMarkdown>
     </div>
   );
-}
+});
 
 /**
  * Compact plan render that lives above the chat input. Highlights
@@ -971,7 +1001,7 @@ function Markdown({ text }: { text: string }) {
  * operator's eye reads both the same way: emerald = done, ember =
  * active, ink = pending.
  */
-function PlanStrip({ plan }: { plan: TaskPlanItem[] }) {
+const PlanStrip = memo(function PlanStrip({ plan }: { plan: TaskPlanItem[] }) {
   const [expanded, setExpanded] = useState(false);
   const inProgress = plan.find((p) => p.status === "in_progress");
   const pending = plan.filter((p) => p.status === "pending");
@@ -1097,7 +1127,7 @@ function PlanStrip({ plan }: { plan: TaskPlanItem[] }) {
       )}
     </div>
   );
-}
+});
 
 function PlanGlyph({ status }: { status: TaskPlanItem["status"] }) {
   if (status === "completed") {
