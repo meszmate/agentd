@@ -39,13 +39,22 @@ import type { Project } from "@agentd/contracts";
 
 export interface RtEntry {
   id: string;
+  /**
+   * Task this event belongs to. Empty string for project-scoped
+   * events that aren't attached to any task — brainstorm
+   * suggestions, plan-it results, etc. Renderers should fall back
+   * to `projectId` / `projectSlug` for those.
+   */
   taskId: string;
   taskTitle: string;
   taskAgent: string;
   text: string;
-  kind: AgentEvent["kind"];
+  kind: AgentEvent["kind"] | "suggestion";
   status?: TaskStatus;
   ts: number;
+  /** Set on project-scoped entries (brainstorm, plan-it). */
+  projectId?: string;
+  projectSlug?: string;
 }
 
 export type RtStatus = "connecting" | "live" | "reconnecting";
@@ -311,10 +320,47 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           msg.type === "suggestion_updated"
         ) {
           // Refresh whichever project's idea factory just got new
-          // input. We use a broad invalidation since one project's
-          // panel might be open while a different surface (chat) is
+          // input. Broad invalidation since one project's panel
+          // might be open while a different surface (chat) is
           // resolving an older suggestion at the same time.
           void qc.invalidateQueries({ queryKey: ["project-suggestions"] });
+          // Surface brainstorm activity in the same channels that
+          // task events use — recent ticker at the bottom of the
+          // sidebar AND the per-project pulse + unread counter.
+          // Project gets a synthetic RtEntry whose taskId is empty
+          // and `projectId/projectSlug` carry the link target.
+          const sug = msg.suggestion;
+          if (sug.projectId) {
+            const cachedProjects = qc.getQueryData<{ projects: Project[] }>(
+              qk.projects(),
+            )?.projects;
+            const project = cachedProjects?.find((p) => p.id === sug.projectId);
+            const slug = project?.slug ?? sug.projectId;
+            const isCreate = msg.type === "suggestion_created";
+            const ts = msg.ts ?? Date.now();
+            const text = isCreate
+              ? `💡 brainstormed · ${sug.title}`
+              : `↳ ${sug.title}`;
+            const entry: RtEntry = {
+              id: `sug-${sug.id}-${ts}`,
+              taskId: "",
+              taskTitle: project?.name ?? "Brainstorm",
+              taskAgent: "claude",
+              text,
+              kind: "suggestion",
+              ts,
+              projectId: sug.projectId,
+              projectSlug: slug,
+            };
+            setRecent((r) => [entry, ...r].slice(0, RECENT_CAP));
+            setPulses((p) => ({
+              ...p,
+              [`proj:${sug.projectId}`]: ts,
+            }));
+            if (isCreate) {
+              useStore.getState().bumpUnread(sug.projectId);
+            }
+          }
           return;
         }
         if (msg.type === "plugin_delivery") {
@@ -535,6 +581,19 @@ export function useRealtime(): RtContext {
     };
   }
   return v;
+}
+
+/**
+ * Returns true if `projectId` had a brainstorm/plan event in the
+ * last `windowMs` ms. Mirrors `useRecentPulse` but keyed under the
+ * `proj:` namespace so the sidebar can blink the project row in
+ * the same way it does for tasks.
+ */
+export function useProjectPulse(
+  projectId: string | null | undefined,
+  windowMs = 1800,
+): boolean {
+  return useRecentPulse(projectId ? `proj:${projectId}` : "", windowMs);
 }
 
 /** Returns true if `taskId` had any event in the last `windowMs` ms. */

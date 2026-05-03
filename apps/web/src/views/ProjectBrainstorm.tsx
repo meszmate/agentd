@@ -264,6 +264,43 @@ export function ProjectBrainstorm() {
     await runBrainstorm(text, { clearComposer: true });
   };
 
+  // "I have an existing idea — plan it." Same composer, different
+  // intent: the agent reads the repo, drafts a structured spec,
+  // saves the result as a SavedIdea, then opens the workshop. The
+  // saved-ideas list refreshes immediately so the new card appears
+  // in the right rail too.
+  const [planning, setPlanning] = useState(false);
+  const submitPlan = async () => {
+    const text = brief.trim();
+    if (!text) {
+      toast("describe your idea first", true);
+      return;
+    }
+    if (planning) return;
+    setPlanning(true);
+    try {
+      const r = await client.planIdea(project.id, { text });
+      if (!r.ok) {
+        toast(
+          (r as { error: string }).error ||
+            "the helper returned an empty plan — try a sharper brief",
+          true,
+        );
+        return;
+      }
+      setBrief("");
+      // Refresh the saved-ideas list so the right rail shows the new
+      // card straight away.
+      void qc.invalidateQueries({ queryKey: qk.savedIdeas(project.slug) });
+      toast("plan ready — opening workshop");
+      navigate(`/projects/${encodeURIComponent(project.slug)}/ideas/${r.idea.id}`);
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setPlanning(false);
+    }
+  };
+
   /**
    * Shared brainstorm runner. Used by the composer's Send and the
    * per-session "More" button. When a `nudge` is passed (from the
@@ -477,7 +514,9 @@ export function ProjectBrainstorm() {
               placeholder={
                 streaming
                   ? "agent is thinking…"
-                  : `brainstorm something for ${project.name}`
+                  : planning
+                    ? "agent is reading the repo and drafting your plan…"
+                    : `brainstorm a brief, or type an existing idea and tap "Plan it"`
               }
               rows={2}
               disabled={streaming}
@@ -488,10 +527,30 @@ export function ProjectBrainstorm() {
                 <Kbd>⌘</Kbd>
                 <Kbd>↵</Kbd>
               </span>
+              {/* "I have an existing idea — plan it" entry. Same input,
+                  different intent: drafts a structured spec and saves
+                  it to the library so the user can refine in the
+                  workshop or spawn it as a normal idea card. */}
+              <button
+                type="button"
+                onClick={() => void submitPlan()}
+                disabled={streaming || planning || !brief.trim()}
+                title="Plan this — agent reads the repo and drafts a full spec"
+                className={cn(
+                  "inline-flex items-center gap-1 h-7 px-2 rounded text-[11px] font-medium border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300 hover:bg-ember-500/15 disabled:opacity-40 disabled:cursor-not-allowed transition-colors",
+                )}
+              >
+                {planning ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Sparkles className="h-3 w-3" />
+                )}
+                Plan it
+              </button>
               <Button
                 size="sm"
                 onClick={() => void submit()}
-                disabled={streaming || !brief.trim()}
+                disabled={streaming || planning || !brief.trim()}
               >
                 {streaming ? (
                   <Loader2 className="h-3 w-3 animate-spin" />

@@ -31,7 +31,7 @@ import {
   useTasks,
 } from "@/queries";
 import { usePluginsStatus, useReorderTasks } from "@/queries";
-import { useRealtime } from "@/realtime";
+import { useProjectPulse, useRealtime } from "@/realtime";
 import { useAutoAnimate } from "@formkit/auto-animate/react";
 import {
   DndContext,
@@ -271,7 +271,9 @@ function LivePanel() {
         </span>
       </div>
 
-      {/* Latest event ticker */}
+      {/* Latest event ticker — task-scoped events link to /tasks/<id>;
+          project-scoped events (brainstorm, plan-it) link to the
+          project view instead. */}
       <div className="px-4 pb-1.5 h-6 flex items-center">
         {latest ? (
           <div
@@ -282,7 +284,11 @@ function LivePanel() {
               {formatTs(latest.ts)}
             </span>
             <Link
-              to={`/tasks/${latest.taskId}`}
+              to={
+                latest.projectSlug
+                  ? `/projects/${latest.projectSlug}`
+                  : `/tasks/${latest.taskId}`
+              }
               className="text-[11px] text-ink-700 dark:text-ink-200 truncate hover:text-ember-600 dark:hover:text-ember-400 transition-colors min-w-0"
               title={`${latest.taskTitle} · ${latest.text}`}
             >
@@ -612,6 +618,9 @@ function ProjectGroupRow({
   const name = project?.name ?? "Untracked";
   const total = group.total;
   const liveTasks = active.length;
+  // Brainstorm / plan-it events flash the same ember dot used for
+  // live tasks — single visual cue covers both kinds of activity.
+  const brainstormHot = useProjectPulse(project?.id);
   // Always populate so the collapse animation has content to shrink.
   // The wrapper grid track + opacity drives visibility.
   const visible = active.length + recent.length;
@@ -635,8 +644,20 @@ function ProjectGroupRow({
         style={{ background: color }}
       />
       <span className={cn("flex-1 truncate", !project && "italic")}>{name}</span>
-      {liveTasks > 0 && (
-        <span className="h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink shrink-0" />
+      {(liveTasks > 0 || brainstormHot) && (
+        <span
+          className={cn(
+            "h-1.5 w-1.5 rounded-full shrink-0",
+            brainstormHot && liveTasks === 0
+              ? "bg-amber-500 animate-blink"
+              : "bg-ember-500 animate-blink",
+          )}
+          title={
+            liveTasks > 0
+              ? `${liveTasks} live task${liveTasks === 1 ? "" : "s"}`
+              : "brainstorm activity"
+          }
+        />
       )}
       {unread > 0 && (
         <span className="font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300 shrink-0">
