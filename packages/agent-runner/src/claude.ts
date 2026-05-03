@@ -42,16 +42,6 @@ interface ClaudeStreamMessage {
     content_block?: { type?: string; index?: number };
     [key: string]: unknown;
   };
-  // `--include-hook-events` payload (only present when subtype starts
-  // with `hook_`). Carries the hook's name + event label + outcome.
-  hook_event?: string;
-  hook_name?: string;
-  hook_id?: string;
-  exit_code?: number;
-  outcome?: string;
-  stdout?: string;
-  stderr?: string;
-  output?: string;
   [key: string]: unknown;
 }
 
@@ -115,11 +105,6 @@ export class ClaudeRunner implements AgentRunner {
       "--output-format",
       "stream-json",
       "--include-partial-messages",
-      // Surface PreToolUse / PostToolUse / SessionStart / etc. hook
-      // lifecycle events on the stream so the operator can SEE when
-      // their configured hooks fire. Hooks still execute regardless;
-      // this just makes their firings visible in the agentd timeline.
-      "--include-hook-events",
       "--verbose",
     ];
     // Resume the prior session when respawning after a daemon restart
@@ -358,41 +343,8 @@ export class ClaudeRunner implements AgentRunner {
       return;
     }
     if (type === "system") {
-      // Hook lifecycle events (`--include-hook-events`) ride on the
-      // `system` channel with `subtype: "hook_started" | "hook_progress"
-      // | "hook_response"`. Surface them as system messages so the
-      // operator can see their PreToolUse / PostToolUse / SessionStart
-      // hooks fire in the timeline. Other system subtypes (init,
-      // status pings) stay suppressed — pure CLI bookkeeping.
-      const sub = parsed.subtype;
-      if (
-        sub === "hook_started" ||
-        sub === "hook_progress" ||
-        sub === "hook_response"
-      ) {
-        const hookEvent =
-          typeof parsed.hook_event === "string" ? parsed.hook_event : "?";
-        const hookName =
-          typeof parsed.hook_name === "string" ? parsed.hook_name : "(hook)";
-        let label = `[hook ${hookEvent}] ${hookName}`;
-        if (sub === "hook_started") {
-          label += " · started";
-        } else if (sub === "hook_response") {
-          const exit =
-            typeof parsed.exit_code === "number" ? parsed.exit_code : null;
-          const outcome =
-            typeof parsed.outcome === "string" ? parsed.outcome : null;
-          if (outcome) label += ` · ${outcome}`;
-          if (exit != null) label += ` · exit=${exit}`;
-        } else if (sub === "hook_progress") {
-          const out =
-            typeof parsed.stdout === "string" && parsed.stdout.trim()
-              ? parsed.stdout.trim().slice(0, 200)
-              : null;
-          if (out) label += ` · ${out}`;
-        }
-        this.emit({ kind: "message", role: "system", text: label });
-      }
+      // CLI bookkeeping (init, status pings, hook lifecycle, etc.) — the
+      // operator can't act on any of it, so it stays off the timeline.
       return;
     }
     if (type === "rate_limit_event") {

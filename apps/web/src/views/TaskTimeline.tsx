@@ -315,28 +315,44 @@ export function TaskTimeline({
             </div>
           ) : (
             <ol className="space-y-5">
-              {groupTaskMessages(messages).map((g, gi) => {
-                // /compact divider sits above the first message in
-                // the group whose ts falls after the watermark.
-                const firstTs = g.firstTs;
-                const prevGroup = groupTaskMessages(messages)[gi - 1];
-                const showDivider =
-                  compactedAt != null &&
-                  firstTs >= compactedAt &&
-                  (!prevGroup || prevGroup.firstTs < compactedAt);
-                return (
-                  <Fragment key={g.key}>
-                    {showDivider && <CompactDivider ts={compactedAt!} />}
-                    {g.kind === "tools" ? (
-                      <li>
-                        <WorkCard pairs={g.pairs} />
-                      </li>
-                    ) : (
-                      <TimelineItem message={g.message} />
-                    )}
-                  </Fragment>
-                );
-              })}
+              {(() => {
+                const groups = groupTaskMessages(messages);
+                // Index of the final tools group — only THAT card's
+                // last pair is allowed to spin, and only while the
+                // task is mid-turn. Older tool groups are settled.
+                let lastToolsIdx = -1;
+                for (let i = groups.length - 1; i >= 0; i--) {
+                  if (groups[i]!.kind === "tools") {
+                    lastToolsIdx = i;
+                    break;
+                  }
+                }
+                return groups.map((g, gi) => {
+                  // /compact divider sits above the first message in
+                  // the group whose ts falls after the watermark.
+                  const firstTs = g.firstTs;
+                  const prevGroup = groups[gi - 1];
+                  const showDivider =
+                    compactedAt != null &&
+                    firstTs >= compactedAt &&
+                    (!prevGroup || prevGroup.firstTs < compactedAt);
+                  return (
+                    <Fragment key={g.key}>
+                      {showDivider && <CompactDivider ts={compactedAt!} />}
+                      {g.kind === "tools" ? (
+                        <li>
+                          <WorkCard
+                            pairs={g.pairs}
+                            liveTrailing={disabled && gi === lastToolsIdx}
+                          />
+                        </li>
+                      ) : (
+                        <TimelineItem message={g.message} />
+                      )}
+                    </Fragment>
+                  );
+                });
+              })()}
               {/* In-flight streaming bubbles — same prefix style as
                   the persisted agent rows, with a blinking λ. */}
               {streamEntries.map(([streamId, text]) => (
