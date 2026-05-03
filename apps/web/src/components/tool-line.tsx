@@ -32,10 +32,21 @@ export function ToolLine({
   content,
   running = false,
   className,
+  output,
+  outputOk,
 }: {
   content: string;
   running?: boolean;
   className?: string;
+  /**
+   * The tool's response — typically `tool_result.preview` from the
+   * helper stream. Rendered claude-code style: first 3 lines in a
+   * compact monospace strip, with `+N more lines` if there's more
+   * (clickable to toggle the rest).
+   */
+  output?: string | null;
+  /** false ⇒ red dot (tool failed). true / undefined ⇒ neutral. */
+  outputOk?: boolean;
 }) {
   const parsed = parseToolCall(content);
   const Icon = ICONS[parsed.kind] ?? Wrench;
@@ -47,6 +58,7 @@ export function ToolLine({
   // collapsible so it doesn't dominate.
   const [openText, setOpenText] = useState(false);
   const showTextToggle = parsed.detail != null && parsed.detailLanguage == null;
+  const [outputExpanded, setOutputExpanded] = useState(false);
 
   return (
     <div
@@ -105,8 +117,142 @@ export function ToolLine({
           {parsed.detail}
         </pre>
       )}
+      {output && (
+        <ToolOutput
+          text={output}
+          ok={outputOk !== false}
+          expanded={outputExpanded}
+          onToggle={() => setOutputExpanded((v) => !v)}
+        />
+      )}
     </div>
   );
+}
+
+/**
+ * Claude-code-style output preview. Three lines visible by default
+ * with a "+N lines" pill the operator can click to expand. Rendered
+ * inline beneath the tool row, indented to match the icon column.
+ *
+ * Failed tools get a red dot + the same body so the operator can
+ * eyeball errors without expanding.
+ */
+function ToolOutput({
+  text,
+  ok,
+  expanded,
+  onToggle,
+}: {
+  text: string;
+  ok: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  // Strip control chars + ANSI so the preview is readable. Trim any
+  // trailing whitespace so blank tail-lines don't pad the preview.
+  const cleaned = text
+    .replace(/\x1b\[\??[0-9;]*[a-zA-Z]/g, "")
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "")
+    .replace(/\s+$/, "");
+  if (!cleaned) return null;
+  const allLines = cleaned.split("\n");
+  const previewLineCount = 3;
+  const overflow = allLines.length - previewLineCount;
+  const visible = expanded ? allLines : allLines.slice(0, previewLineCount);
+  return (
+    <div className="mt-0.5 ml-5 flex items-stretch text-[10.5px] font-mono leading-tight">
+      <span
+        className={cn(
+          "shrink-0 w-0.5 self-stretch rounded-full mr-2",
+          ok
+            ? "bg-ink-900/[0.08] dark:bg-ink-50/[0.08]"
+            : "bg-red-500/60",
+        )}
+      />
+      <div className="flex-1 min-w-0">
+        <pre
+          className={cn(
+            "whitespace-pre-wrap break-words m-0",
+            ok
+              ? "text-ink-500 dark:text-ink-400"
+              : "text-red-700 dark:text-red-300",
+          )}
+        >
+          {visible.join("\n")}
+        </pre>
+        {overflow > 0 && (
+          <button
+            type="button"
+            onClick={onToggle}
+            className="mt-0.5 inline-flex items-center gap-1 text-[9.5px] uppercase tracking-[0.06em] text-ink-400 hover:text-ink-700 dark:text-ink-500 dark:hover:text-ink-200 transition-colors"
+          >
+            {expanded ? (
+              <>
+                <ChevronDown className="h-2.5 w-2.5" />
+                hide {overflow} {overflow === 1 ? "line" : "lines"}
+              </>
+            ) : (
+              <>
+                <ChevronRight className="h-2.5 w-2.5" />
+                +{overflow} {overflow === 1 ? "line" : "lines"}
+              </>
+            )}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Pair each `tool_use` event with the immediately-following
+ * `tool_result` (if any). Mirrors how the helper protocol always
+ * emits them in lockstep — each call followed by its response.
+ *
+ * Returns objects shaped for direct `<ToolLine>` use:
+ *   `{ name, input, output, ok, running }`
+ *
+ * Pass `running=true` for the final pair when the agent is still
+ * working so its row spins. Stable across `IdeaChatEvent` and
+ * `IdeationEvent` since both have the same kind discriminators.
+ */
+export function pairToolEvents(
+  events: ReadonlyArray<{
+    kind: string;
+    name?: string;
+    input?: unknown;
+    ok?: boolean;
+    preview?: string;
+  }>,
+): Array<{
+  name: string;
+  input: unknown;
+  output: string | null;
+  ok: boolean;
+  running: boolean;
+}> {
+  const out: Array<{
+    name: string;
+    input: unknown;
+    output: string | null;
+    ok: boolean;
+    running: boolean;
+  }> = [];
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i]!;
+    if (ev.kind !== "tool_use" || typeof ev.name !== "string") continue;
+    const next = events[i + 1];
+    const matched = next && next.kind === "tool_result" ? next : null;
+    out.push({
+      name: ev.name,
+      input: ev.input,
+      output: matched?.preview ?? null,
+      ok: matched?.ok !== false,
+      // The most recent tool_use without a paired result is "running".
+      running: !matched && i === events.length - 1,
+    });
+  }
+  return out;
 }
 
 type ToolKind =

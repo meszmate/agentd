@@ -56,7 +56,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { CodeBlock } from "@/components/code-block";
-import { ToolLine } from "@/components/tool-line";
+import { ToolLine, pairToolEvents } from "@/components/tool-line";
 import {
   ShimmerText,
   TransitioningText,
@@ -727,17 +727,17 @@ function TimelineItem({
     // ABOVE the marker so the operator can scroll back through what
     // the agent did during a plan draft / refine even after it ends.
     const sysEvents = (message.events ?? []) as IdeaChatEvent[];
-    const sysToolUses = sysEvents.filter((e) => e.kind === "tool_use") as Array<
-      Extract<IdeaChatEvent, { kind: "tool_use" }>
-    >;
+    const sysToolPairs = pairToolEvents(sysEvents);
     return (
       <li className="relative my-3">
-        {sysToolUses.length > 0 && (
+        {sysToolPairs.length > 0 && (
           <ul className="mb-2 space-y-1.5">
-            {sysToolUses.map((ev, i) => (
+            {sysToolPairs.map((p, i) => (
               <li key={i}>
                 <ToolLine
-                  content={`[call ${ev.name}] ${JSON.stringify(ev.input ?? {})}`}
+                  content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
+                  output={p.output}
+                  outputOk={p.ok}
                 />
               </li>
             ))}
@@ -765,11 +765,9 @@ function TimelineItem({
         .trim();
 
   // Agent's tool calls during this turn — replays the activity exactly
-  // like the task timeline (flat ToolLine rows, no border, no toggle).
+  // like the task timeline (flat ToolLine rows with output preview).
   const events = (message.events ?? []) as IdeaChatEvent[];
-  const toolUses = events.filter((e) => e.kind === "tool_use") as Array<
-    Extract<IdeaChatEvent, { kind: "tool_use" }>
-  >;
+  const toolPairs = pairToolEvents(events);
 
   return (
     <li className="relative">
@@ -809,12 +807,14 @@ function TimelineItem({
             </span>
           )}
         </div>
-        {!isUser && toolUses.length > 0 && (
+        {!isUser && toolPairs.length > 0 && (
           <ul className="mb-2 space-y-1.5">
-            {toolUses.map((ev, i) => (
+            {toolPairs.map((p, i) => (
               <li key={i}>
                 <ToolLine
-                  content={`[call ${ev.name}] ${JSON.stringify(ev.input ?? {})}`}
+                  content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
+                  output={p.output}
+                  outputOk={p.ok}
                 />
               </li>
             ))}
@@ -854,9 +854,7 @@ function ThinkingItem({
   elapsedMs: number;
   hasPlan: boolean;
 }) {
-  const toolUses = events.filter((e) => e.kind === "tool_use") as Array<
-    Extract<IdeaChatEvent, { kind: "tool_use" }>
-  >;
+  const toolPairs = pairToolEvents(events);
 
   // Once the agent starts streaming text, the live message bubble
   // already renders the tool rows above its body (via TimelineItem).
@@ -866,7 +864,7 @@ function ThinkingItem({
   // Pick the rotating-label phase based on what the agent's actually
   // doing right now, not just the operator's button choice.
   const phase: ThinkingPhase =
-    toolUses.length === 0
+    toolPairs.length === 0
       ? "scouting"
       : mode === "plan"
         ? hasPlan
@@ -890,24 +888,26 @@ function ThinkingItem({
           <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
             {formatElapsed(elapsedMs)}
           </span>
-          {toolUses.length > 0 && (
+          {toolPairs.length > 0 && (
             <>
               <span className="text-ink-300 dark:text-ink-600 font-mono text-[10px]">
                 ·
               </span>
               <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
-                {toolUses.length} step{toolUses.length === 1 ? "" : "s"}
+                {toolPairs.length} step{toolPairs.length === 1 ? "" : "s"}
               </span>
             </>
           )}
         </div>
-        {toolUses.length > 0 && (
+        {toolPairs.length > 0 && (
           <ul className="space-y-1.5">
-            {toolUses.map((ev, i) => (
+            {toolPairs.map((p, i) => (
               <li key={i}>
                 <ToolLine
-                  content={`[call ${ev.name}] ${JSON.stringify(ev.input ?? {})}`}
-                  running={i === toolUses.length - 1 && !showReply}
+                  content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
+                  running={p.running && !showReply}
+                  output={p.output}
+                  outputOk={p.ok}
                 />
               </li>
             ))}

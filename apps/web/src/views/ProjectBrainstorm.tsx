@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import type { IdeationEvent } from "@agentd/client";
 import type { Idea, IdeaStatus, Suggestion } from "@agentd/contracts";
-import { ToolLine } from "@/components/tool-line";
+import { ToolLine, pairToolEvents } from "@/components/tool-line";
 import {
   Count,
   Kicker,
@@ -697,21 +697,31 @@ function splitIdea(raw: string): {
 function PersistedActivity({
   events,
 }: {
-  events: Array<{ kind: "tool_use"; name: string; input?: unknown }>;
+  events: ReadonlyArray<{
+    kind: string;
+    name?: string;
+    input?: unknown;
+    ok?: boolean;
+    preview?: string;
+  }>;
 }) {
+  const pairs = pairToolEvents(events);
+  if (pairs.length === 0) return null;
   return (
     <div className="mb-2">
       <div className="flex items-center gap-1.5 mb-1 font-mono text-[9.5px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
         <span>
-          {events.length} {events.length === 1 ? "step" : "steps"} · what the
+          {pairs.length} {pairs.length === 1 ? "step" : "steps"} · what the
           agent did
         </span>
       </div>
       <ul className="space-y-0.5">
-        {events.map((ev, i) => (
+        {pairs.map((p, i) => (
           <li key={i}>
             <ToolLine
-              content={`[call ${ev.name}] ${JSON.stringify(ev.input ?? {})}`}
+              content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
+              output={p.output}
+              outputOk={p.ok}
             />
           </li>
         ))}
@@ -734,9 +744,7 @@ function ValidatingFeed({
   label: string;
   tools: IdeationEvent[];
 }) {
-  const toolUses = tools.filter((t) => t.kind === "tool_use") as Array<
-    Extract<IdeationEvent, { kind: "tool_use" }>
-  >;
+  const pairs = pairToolEvents(tools);
   const elapsedMs = useElapsedMs(true);
   return (
     <div className="mb-2 -mx-1 px-2 py-1.5 rounded border border-ember-500/20 bg-ember-500/[0.04] dark:bg-ember-500/[0.06]">
@@ -747,23 +755,25 @@ function ValidatingFeed({
         </span>
         <ShimmerText className="text-[11px] font-medium">
           <TransitioningText>
-            {toolUses.length === 0
+            {pairs.length === 0
               ? `${label} reading the repo`
               : `${label} scoring`}
           </TransitioningText>
         </ShimmerText>
         <span className="ml-auto font-mono text-[9.5px] tabular-nums text-ember-700/70 dark:text-ember-300/70">
           {formatElapsed(elapsedMs)}
-          {toolUses.length > 0 && ` · ${toolUses.length}`}
+          {pairs.length > 0 && ` · ${pairs.length}`}
         </span>
       </div>
-      {toolUses.length > 0 && (
+      {pairs.length > 0 && (
         <ul className="space-y-0.5 pl-2 border-l border-ember-500/30">
-          {toolUses.map((ev, i) => (
+          {pairs.map((p, i) => (
             <li key={i} className="animate-fade-in">
               <ToolLine
-                content={`[call ${ev.name}] ${JSON.stringify(ev.input ?? {})}`}
-                running={i === toolUses.length - 1}
+                content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
+                running={p.running}
+                output={p.output}
+                outputOk={p.ok}
               />
             </li>
           ))}
@@ -1007,9 +1017,15 @@ function AgentCluster({
   const topScore = hasScores
     ? Math.max(...decorated.map((d) => d.parsed.score ?? 0))
     : null;
-  const events = (suggestion.events ?? []).filter(
-    (e) => e.kind === "tool_use",
-  ) as Array<Extract<NonNullable<Suggestion["events"]>[number], { kind: "tool_use" }>>;
+  // Pass the full events array (use + result interleaved) so
+  // PersistedActivity can pair them and show output previews.
+  const events = (suggestion.events ?? []) as ReadonlyArray<{
+    kind: string;
+    name?: string;
+    input?: unknown;
+    ok?: boolean;
+    preview?: string;
+  }>;
   const validations = suggestion.validations ?? [];
   return (
     <section>
@@ -1407,9 +1423,7 @@ function LiveTurn({
       </article>
     );
   }
-  const toolUses = tools.filter((t) => t.kind === "tool_use") as Array<
-    Extract<IdeationEvent, { kind: "tool_use" }>
-  >;
+  const pairs = pairToolEvents(tools);
   return (
     <article className="relative">
       <PromptHeading text={brief} ts={Date.now()} />
@@ -1427,7 +1441,7 @@ function LiveTurn({
           <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
             {formatElapsed(elapsedMs)}
           </span>
-          {(options.length > 0 || toolUses.length > 0) && (
+          {(options.length > 0 || pairs.length > 0) && (
             <>
               <span className="text-ink-300 dark:text-ink-600 font-mono text-[10px]">
                 ·
@@ -1435,7 +1449,7 @@ function LiveTurn({
               <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
                 {options.length > 0
                   ? `${options.length} ${options.length === 1 ? "idea" : "ideas"}`
-                  : `${toolUses.length} ${toolUses.length === 1 ? "step" : "steps"}`}
+                  : `${pairs.length} ${pairs.length === 1 ? "step" : "steps"}`}
               </span>
             </>
           )}
@@ -1448,22 +1462,24 @@ function LiveTurn({
           </button>
         </div>
         {/* Live tool activity — claude-code style, same `<ToolLine>`
-            rows the workshop and task timeline use. Renders inline
-            below the rotating label so the operator sees Read /
-            Glob / Grep / Bash calls as the agent pokes around. */}
-        {toolUses.length > 0 && (
+            rows the workshop and task timeline use. Output preview
+            (3 lines + N more) renders under each row so the operator
+            sees Bash output / Read content / Grep hits inline. */}
+        {pairs.length > 0 && (
           <ul className="mb-3 space-y-1.5">
-            {toolUses.map((ev, i) => (
+            {pairs.map((p, i) => (
               <li key={i} className="animate-fade-in">
                 <ToolLine
-                  content={`[call ${ev.name}] ${JSON.stringify(ev.input ?? {})}`}
-                  running={i === toolUses.length - 1 && options.length === 0}
+                  content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
+                  running={p.running && options.length === 0}
+                  output={p.output}
+                  outputOk={p.ok}
                 />
               </li>
             ))}
           </ul>
         )}
-        {options.length === 0 && toolUses.length === 0 && (
+        {options.length === 0 && pairs.length === 0 && (
           <p className="text-[12px] italic text-ink-500 dark:text-ink-400">
             first option usually lands within ~10 seconds…
           </p>
