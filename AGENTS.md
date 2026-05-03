@@ -125,8 +125,11 @@ curl -s http://127.0.0.1:3773/health
   daemon-side `maybeAutoCommit` post-hook is a safety net and
   becomes a no-op when the agent already committed.
 - Auto-PR is opt-in (`task.autoPr`). Don't open PRs without it.
-- Branches are named `feature/<ai-suggested-slug>` (no task-id suffix).
-  Override at spawn time via the workspace setup's branch field.
+- Branches are named `<prefix>/<ai-suggested-slug>` (no task-id suffix),
+  where the prefix is one of `feature`, `fix`, `refactor`, `chore` —
+  the AI helper picks it from the prompt's intent (a "fix the X bug"
+  prompt becomes `fix/...` rather than `feature/...`). Override at
+  spawn time via the workspace setup's branch field.
 - Per-task `model` and `thinkingLevel` columns let the user override
   defaults from `cfg.defaultModel` and `cfg.defaultThinking`. Pass
   through the runner's `--model` / `--effort` flags.
