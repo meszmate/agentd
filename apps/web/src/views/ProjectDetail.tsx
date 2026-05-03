@@ -331,7 +331,12 @@ function RepoStatusChip({ slug }: { slug: string }) {
 
   const synced =
     s.hasUpstream && s.ahead === 0 && s.behind === 0 && s.dirty === 0;
-  const canPull = s.hasUpstream && s.behind > 0 && s.dirty === 0;
+  // Show the pull affordance whenever origin has commits we don't.
+  // Dirty trees can't fast-forward — keep the button visible but
+  // disable it with an explanation so the operator knows what's
+  // blocking.
+  const showPull = s.hasUpstream && s.behind > 0;
+  const pullBlocked = s.dirty > 0;
 
   return (
     <span className="inline-flex items-center gap-2 font-mono text-[10px] shrink-0">
@@ -379,22 +384,33 @@ function RepoStatusChip({ slug }: { slug: string }) {
           )}
         </span>
       )}
-      {canPull && (
+      {showPull && (
         <button
           type="button"
-          disabled={pull.isPending}
+          disabled={pull.isPending || pullBlocked}
+          title={
+            pullBlocked
+              ? `commit or stash ${s.dirty} dirty file(s) before pulling`
+              : `git pull --ff-only origin ${s.branch}`
+          }
           onClick={async () => {
             try {
               const r = await pull.mutateAsync(slug);
               if (r.error) toast(r.error, true);
+              else if (r.ok) toast(`pulled ${s.behind} commit(s)`);
               else if (r.message) toast(r.message);
             } catch (e) {
               toast((e as Error).message, true);
             }
           }}
-          className="text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-ink-900 dark:hover:text-ink-50 underline-offset-2 hover:underline disabled:opacity-50"
+          className="inline-flex items-center gap-1 px-1.5 h-4 rounded text-[10px] uppercase tracking-[0.08em] text-sky-700 dark:text-sky-300 bg-sky-500/10 hover:bg-sky-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
-          {pull.isPending ? "pulling…" : "pull"}
+          {pull.isPending ? (
+            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+          ) : (
+            <ArrowDown className="h-2.5 w-2.5" />
+          )}
+          {pull.isPending ? "pulling" : "pull"}
         </button>
       )}
     </span>
