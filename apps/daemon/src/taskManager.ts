@@ -653,16 +653,29 @@ export class TaskManager {
       "  - `agentd-ask \"<question>\" \"opt1\" \"opt2\" ...`  — blocking decision. Use this at real forks (architectural choice, library to pick, ambiguous naming, \"should I also do X?\"). Stops you until the operator picks. The chosen option text comes back on stdout — capture it: `answer=$(agentd-ask \"Which approach?\" \"rewrite\" \"refactor\" \"add a flag\")`. Don't fabricate a default when you genuinely don't know — ASK.",
       "  - `agentd-instructions read` / `agentd-instructions write \"<text>\"` — read or update the project's persistent guidance (like AGENTS.md but stored in the daemon, not the repo). Use it to persist hard-won knowledge that should survive into future runs of the same project: conventions, gotchas, where things live, what NOT to do. Read at the start when in doubt; write after you've discovered something a future agent should know.",
       "When you believe the entire task is finished, run `agentd-progress \"<final summary>\" --done` and then stop.",
-      "When your work is complete, stage everything and commit it inside this worktree BEFORE the final `--done` progress call.",
-      "Use a single conventional-commit subject line (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `style:`, `test:`, `perf:`, `ci:`, `build:`) under 70 characters, lowercase, imperative mood, with no scope unless one is obvious.",
-      "Do NOT add `Co-Authored-By`, `Generated with`, or any AI attribution to commit messages.",
     ];
+    if (task.autoCommit !== false) {
+      finishParts.push(
+        // Auto-commit ON — repeated until heard. The agent's natural
+        // instinct is to ask "want me to commit?" and that's exactly
+        // what the operator wants to NEVER see when this flag is on.
+        "Auto-commit is ON. NEVER ask the operator if you should commit. NEVER write 'Want me to commit it?', 'Should I commit?', 'Ready to commit?', or any variant. Just commit. Stage everything and `git commit` whenever you reach a meaningful checkpoint — after a successful change, after fixing a bug, after a working feature step. Multiple small commits across a turn are fine; one big commit at the end is fine; either way, JUST COMMIT, don't ask. The operator turned this flag on because they want commits to flow without permission prompts.",
+        "Use a single conventional-commit subject line (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `style:`, `test:`, `perf:`, `ci:`, `build:`) under 70 characters, lowercase, imperative mood, with no scope unless one is obvious.",
+        "Do NOT add `Co-Authored-By`, `Generated with`, or any AI attribution to commit messages.",
+      );
+    } else {
+      finishParts.push(
+        // Auto-commit OFF — explicit hands-off. Operator wants to
+        // craft the commit themselves.
+        "Auto-commit is OFF. Do NOT run `git commit` and do NOT push. Leave the worktree dirty so the operator can review the diff and craft the commit themselves. Even if you finish the task cleanly: do not commit.",
+      );
+    }
     if (cfg.commitInstructions?.trim()) {
       finishParts.push(`Commit style notes:\n${cfg.commitInstructions.trim()}`);
     }
-    if (task.autoPush) {
+    if (task.autoPush && task.autoCommit !== false) {
       finishParts.push(
-        "After committing, push the branch to origin with `git push -u origin HEAD`. Don't open a pull request — that step is manual.",
+        "Auto-push is ON. After committing, push the branch to origin with `git push -u origin HEAD` without asking. Don't open a pull request — that step is manual.",
       );
     } else {
       finishParts.push(
