@@ -10,8 +10,12 @@ import {
   Check,
   ChevronRight,
   Filter,
+  Flame,
   HelpCircle,
   Lightbulb,
+  Plus,
+  Repeat,
+  Shuffle,
   Loader2,
   MessageSquare,
   PanelRight,
@@ -257,17 +261,33 @@ export function ProjectBrainstorm() {
       toast("type a brief first", true);
       return;
     }
+    await runBrainstorm(text, { clearComposer: true });
+  };
+
+  /**
+   * Shared brainstorm runner. Used by the composer's Send and the
+   * per-session "More" button (which fires the same brief again so
+   * the agent — already deduped against the prior options via the
+   * server-side context block — has to produce different angles).
+   */
+  const runBrainstorm = async (
+    briefText: string,
+    opts: { clearComposer?: boolean; nudge?: string } = {},
+  ) => {
+    const finalBrief = opts.nudge
+      ? `${briefText}\n\n${opts.nudge}`
+      : briefText;
     setStreaming(true);
     setLiveOptions([]);
     setLiveTools([]);
-    setLiveBrief(text);
+    setLiveBrief(briefText);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     try {
       const r = await client.streamIdeateForProject(
         project.slug,
         {
-          prompt: text,
+          prompt: finalBrief,
           ...(choice.agent ? { agent: choice.agent } : {}),
           ...(choice.model ? { model: choice.model } : {}),
         },
@@ -283,7 +303,7 @@ export function ProjectBrainstorm() {
       if (r.ok === false) {
         toast(r.error || "the helper returned no options", true);
       } else {
-        setBrief("");
+        if (opts.clearComposer) setBrief("");
         void qc.invalidateQueries({
           queryKey: qk.projectSuggestions(project.id),
         });
@@ -404,9 +424,13 @@ export function ProjectBrainstorm() {
                   onTogglePin={togglePinned}
                   onOpenIdea={openIdea}
                   onValidate={runValidate}
+                  onMore={(nudge) =>
+                    void runBrainstorm(s.prompt, { nudge })
+                  }
                   validating={validatingId}
                   validateLabel={validateLabel}
                   validateTools={validateTools}
+                  streaming={streaming}
                 />
               ))
             )}
@@ -564,9 +588,11 @@ function ChatTurn({
   onTogglePin,
   onOpenIdea,
   onValidate,
+  onMore,
   validating,
   validateLabel,
   validateTools,
+  streaming,
   index,
 }: {
   suggestion: Suggestion;
@@ -574,9 +600,11 @@ function ChatTurn({
   onTogglePin: (sid: string, i: number, text: string) => void;
   onOpenIdea: (id: string) => void;
   onValidate: (sid: string, agent: "claude" | "codex", model: string) => void;
+  onMore: (nudge: string) => void;
   validating: string | null;
   validateLabel: string;
   validateTools: IdeationEvent[];
+  streaming: boolean;
   index: number;
 }) {
   const isValidating = validating === suggestion.id;
@@ -597,6 +625,8 @@ function ChatTurn({
         onTogglePin={onTogglePin}
         onOpenIdea={onOpenIdea}
         onValidate={onValidate}
+        onMore={onMore}
+        streaming={streaming}
         validating={isValidating}
         validateLabel={isValidating ? validateLabel : ""}
         validateTools={isValidating ? validateTools : []}
@@ -770,6 +800,73 @@ function ValidatingFeed({
 }
 
 /**
+ * "More" dropdown — re-runs the same brief in a fresh suggestion
+ * with one of three nudges. The dedup context (saved + past
+ * options) is already wired server-side, so any of these will
+ * naturally avoid restating the existing ideas.
+ *
+ *   more like these       same direction, different angles
+ *   completely different  hard pivot, opposite end of the design space
+ *   go wild               weird, opinionated, "no careful PM" mode
+ */
+function MorePicker({
+  onMore,
+  disabled,
+}: {
+  onMore: (nudge: string) => void;
+  disabled: boolean;
+}) {
+  const choices: { label: string; icon: React.ReactNode; nudge: string }[] = [
+    {
+      label: "more like these",
+      icon: <Repeat className="h-3 w-3" />,
+      nudge:
+        "Generate fresh ideas in the same direction as the brief above. Don't restate ideas the dedup list already covers — find adjacent angles, sharper variants, or things in the same neighborhood that haven't been raised yet.",
+    },
+    {
+      label: "completely different",
+      icon: <Shuffle className="h-3 w-3" />,
+      nudge:
+        "IMPORTANT: pivot. The previous round already covered the obvious directions for this brief. Now propose ideas from a DIFFERENT angle entirely — orthogonal directions, contrarian takes, things that re-frame the brief instead of answering it directly. Avoid anything that overlaps with the dedup list.",
+    },
+    {
+      label: "go wild",
+      icon: <Flame className="h-3 w-3" />,
+      nudge:
+        "Forget the safe roadmap. Propose ideas that would make this project weird, opinionated, or memorable — directions a careful PM would never green-light. Lean into the strange ones. Don't sandbag with safety. The operator wants to see the edges of the design space, not the median path.",
+    },
+  ];
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          disabled={disabled}
+          title="Generate more ideas off this brief"
+          className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.06em] border border-ink-900/10 bg-paper-50 text-ink-600 hover:bg-paper-100 hover:border-ink-900/20 transition-colors dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-300 dark:hover:bg-ink-700 disabled:opacity-50 disabled:cursor-wait"
+        >
+          <Plus className="h-3 w-3" />
+          more
+          <ChevronDown className="h-3 w-3 opacity-60" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-[14rem]">
+        {choices.map((c) => (
+          <DropdownMenuItem
+            key={c.label}
+            onClick={() => onMore(c.nudge)}
+            className="gap-2"
+          >
+            {c.icon}
+            <span className="font-mono text-[11.5px]">{c.label}</span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
  * "Validate with…" dropdown — picks an agent + model to re-score the
  * suggestion's options. Lets the operator triangulate across raters
  * (e.g. claude opus generated, codex 5.5 validates) before deciding
@@ -891,6 +988,8 @@ function AgentCluster({
   onTogglePin,
   onOpenIdea,
   onValidate,
+  onMore,
+  streaming,
   validating,
   validateLabel,
   validateTools,
@@ -900,6 +999,8 @@ function AgentCluster({
   onTogglePin: (sid: string, i: number, text: string) => void;
   onOpenIdea: (id: string) => void;
   onValidate: (sid: string, agent: "claude" | "codex", model: string) => void;
+  onMore: (nudge: string) => void;
+  streaming: boolean;
   validating: boolean;
   validateLabel: string;
   validateTools: IdeationEvent[];
@@ -976,7 +1077,7 @@ function AgentCluster({
             </span>
           </>
         )}
-        <span className="ml-auto inline-flex items-center gap-2">
+        <span className="ml-auto inline-flex items-center gap-1.5">
           {hasScores && (
             <span className="font-mono text-[9px] uppercase tracking-[0.1em] text-ink-400 dark:text-ink-500">
               {validations.length > 0
@@ -984,6 +1085,10 @@ function AgentCluster({
                 : "sorted by score"}
             </span>
           )}
+          <MorePicker
+            onMore={onMore}
+            disabled={streaming || validating}
+          />
           <ValidatePicker
             suggestion={suggestion}
             onValidate={onValidate}
