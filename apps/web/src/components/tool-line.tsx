@@ -317,6 +317,181 @@ function inferOutputLanguage(parsed: ParsedTool): string | undefined {
 }
 
 /**
+ * `<WorkCard>` — bundles all tool calls from one agent turn into a
+ * single rounded card with a tiny header (`tool calls (N)`) and a
+ * "show N more" toggle for overflow. Inside, each call renders as
+ * a single-line `<ToolRow>` that expands its output preview on
+ * click. The shape is borrowed from t3code's WorkGroupSection but
+ * tuned for our prefix language + theme tokens.
+ */
+export function WorkCard({
+  pairs,
+  className,
+  defaultLimit = 8,
+  liveTrailing,
+}: {
+  pairs: ReturnType<typeof pairToolEvents>;
+  className?: string;
+  /** Rows shown collapsed before "show more" appears. */
+  defaultLimit?: number;
+  /** When true, the last row shows a spinner instead of a result dot
+   *  (matches the live-streaming case where the latest call hasn't
+   *  resolved yet). */
+  liveTrailing?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  if (pairs.length === 0) return null;
+  const overflow = pairs.length - defaultLimit;
+  const visible = expanded || overflow <= 0 ? pairs : pairs.slice(-defaultLimit);
+  const hidden = pairs.length - visible.length;
+  return (
+    <div
+      className={cn(
+        "rounded-lg border border-ink-900/[0.08] bg-ink-900/[0.015] dark:border-ink-50/[0.08] dark:bg-ink-50/[0.02] px-2 py-1.5",
+        className,
+      )}
+    >
+      <div className="flex items-center justify-between mb-1 px-0.5">
+        <span className="font-mono text-[9.5px] uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500">
+          tool calls ({pairs.length})
+        </span>
+        {overflow > 0 && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="font-mono text-[9.5px] uppercase tracking-[0.12em] text-ink-400 hover:text-ink-700 dark:text-ink-500 dark:hover:text-ink-200 transition-colors"
+          >
+            {expanded ? "show less" : `show ${hidden} more`}
+          </button>
+        )}
+      </div>
+      <ul className="space-y-0.5">
+        {visible.map((p, i) => {
+          const isLast = i === visible.length - 1;
+          return (
+            <li key={i}>
+              <ToolRow
+                content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
+                output={p.output}
+                outputOk={p.ok}
+                running={p.running || (liveTrailing && isLast && !p.output)}
+              />
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * Single-line tool row used inside `<WorkCard>`. Click → expand to
+ * see the output preview underneath. Always renders the diff stat
+ * pill + status dot inline so the row is scannable at a glance
+ * without expanding.
+ */
+export function ToolRow({
+  content,
+  output,
+  outputOk,
+  running,
+}: {
+  content: string;
+  output?: string | null;
+  outputOk?: boolean;
+  running?: boolean;
+}) {
+  const parsed = parseToolCall(content);
+  const Icon = ICONS[parsed.kind] ?? Wrench;
+  const [open, setOpen] = useState(false);
+  const hasOutput = !!output && output.length > 0;
+  const hasInlineDetail =
+    parsed.detail != null && parsed.detailLanguage != null;
+  const expandable = hasOutput || hasInlineDetail;
+  return (
+    <div className="group rounded px-1 py-0.5 transition-colors hover:bg-ink-900/[0.025] dark:hover:bg-ink-50/[0.03]">
+      <button
+        type="button"
+        disabled={!expandable}
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          "flex w-full items-center gap-2 text-left",
+          expandable ? "cursor-pointer" : "cursor-default",
+        )}
+      >
+        <span className="grid place-items-center size-4 shrink-0">
+          {running ? (
+            <Loader2 className="h-2.5 w-2.5 animate-spin text-ember-500" />
+          ) : outputOk === false ? (
+            <span className="size-1.5 rounded-full bg-red-500 inline-block" />
+          ) : hasOutput ? (
+            <span className="size-1.5 rounded-full bg-emerald-500/70 inline-block" />
+          ) : (
+            <span className="size-1.5 rounded-full bg-ink-900/30 dark:bg-ink-50/30 inline-block" />
+          )}
+        </span>
+        <span className="grid place-items-center size-4 shrink-0 text-ink-500 dark:text-ink-400">
+          <Icon className="h-3 w-3" />
+        </span>
+        <span className="font-mono text-[11.5px] font-semibold text-ink-800 dark:text-ink-100 shrink-0">
+          {parsed.name}
+        </span>
+        {parsed.summary && (
+          <span className="font-mono text-[11.5px] text-ink-500 dark:text-ink-400 truncate min-w-0 flex-1">
+            {parsed.summary}
+          </span>
+        )}
+        {(parsed.linesAdded != null || parsed.linesRemoved != null) && (
+          <span className="shrink-0 inline-flex items-center gap-1.5 font-mono text-[10.5px] tabular-nums">
+            {parsed.linesAdded != null && parsed.linesAdded > 0 && (
+              <span className="text-emerald-700 dark:text-emerald-400">
+                +{parsed.linesAdded}
+              </span>
+            )}
+            {parsed.linesRemoved != null && parsed.linesRemoved > 0 && (
+              <span className="text-red-700 dark:text-red-400">
+                −{parsed.linesRemoved}
+              </span>
+            )}
+          </span>
+        )}
+        {expandable && (
+          <span className="shrink-0 text-ink-300 dark:text-ink-600">
+            {open ? (
+              <ChevronDown className="h-3 w-3" />
+            ) : (
+              <ChevronRight className="h-3 w-3" />
+            )}
+          </span>
+        )}
+      </button>
+      {open && hasInlineDetail && (
+        <div className="mt-1 ml-6">
+          <CodeBlock
+            code={parsed.detail!}
+            language={parsed.detailLanguage}
+            filename={parsed.detailFilename}
+            showLineNumbers={parsed.detailLanguage !== "bash"}
+            diffMarks={parsed.detailDiffMarks}
+          />
+        </div>
+      )}
+      {open && hasOutput && (
+        <div className="mt-1 ml-6">
+          <ToolOutput
+            text={output!}
+            ok={outputOk !== false}
+            expanded={true}
+            onToggle={() => {}}
+            language={inferOutputLanguage(parsed)}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * Pair each `tool_use` event with the immediately-following
  * `tool_result` (if any). Mirrors how the helper protocol always
  * emits them in lockstep — each call followed by its response.

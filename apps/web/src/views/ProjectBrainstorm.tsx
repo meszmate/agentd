@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import type { IdeationEvent } from "@agentd/client";
 import type { Idea, IdeaStatus, Suggestion } from "@agentd/contracts";
-import { ToolLine, pairToolEvents } from "@/components/tool-line";
+import { ToolLine, WorkCard, pairToolEvents } from "@/components/tool-line";
 import {
   Count,
   Kicker,
@@ -721,19 +721,7 @@ function PersistedActivity({
 }) {
   const pairs = pairToolEvents(events);
   if (pairs.length === 0) return null;
-  return (
-    <ul className="mb-3 space-y-2.5 pl-3 border-l border-ink-900/[0.06] dark:border-ink-50/[0.08]">
-      {pairs.map((p, i) => (
-        <li key={i}>
-          <ToolLine
-            content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
-            output={p.output}
-            outputOk={p.ok}
-          />
-        </li>
-      ))}
-    </ul>
-  );
+  return <WorkCard className="mb-3" pairs={pairs} />;
 }
 
 /**
@@ -772,18 +760,11 @@ function ValidatingFeed({
         </span>
       </div>
       {pairs.length > 0 && (
-        <ul className="space-y-2 pl-3 border-l border-ember-500/30">
-          {pairs.map((p, i) => (
-            <li key={i} className="animate-fade-in">
-              <ToolLine
-                content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
-                running={p.running}
-                output={p.output}
-                outputOk={p.ok}
-              />
-            </li>
-          ))}
-        </ul>
+        <WorkCard
+          pairs={pairs}
+          liveTrailing
+          className="border-ember-500/30 bg-ember-500/[0.04] dark:bg-ember-500/[0.06]"
+        />
       )}
     </div>
   );
@@ -1469,23 +1450,14 @@ function LiveTurn({
             stop
           </button>
         </div>
-        {/* Live tool activity — claude-code style, same `<ToolLine>`
-            rows the workshop and task timeline use. Output preview
-            (3 lines + N more) renders under each row so the operator
-            sees Bash output / Read content / Grep hits inline. */}
+        {/* Live tool activity grouped into one card so the timeline
+            doesn't fragment when the agent fires a long sequence. */}
         {pairs.length > 0 && (
-          <ul className="mb-4 space-y-2.5 pl-3 border-l border-ember-500/30">
-            {pairs.map((p, i) => (
-              <li key={i} className="animate-fade-in">
-                <ToolLine
-                  content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
-                  running={p.running && options.length === 0}
-                  output={p.output}
-                  outputOk={p.ok}
-                />
-              </li>
-            ))}
-          </ul>
+          <WorkCard
+            pairs={pairs}
+            liveTrailing={options.length === 0}
+            className="mb-4"
+          />
         )}
         {options.length === 0 && pairs.length === 0 && (
           <p className="text-[12px] italic text-ink-500 dark:text-ink-400">

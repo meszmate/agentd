@@ -56,7 +56,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { CodeBlock } from "@/components/code-block";
-import { ToolLine, pairToolEvents } from "@/components/tool-line";
+import { WorkCard, pairToolEvents } from "@/components/tool-line";
 import {
   ShimmerText,
   TransitioningText,
@@ -731,17 +731,7 @@ function TimelineItem({
     return (
       <li className="my-2">
         {sysToolPairs.length > 0 && (
-          <ul className="mb-3 space-y-2.5 pl-3 border-l border-ink-900/[0.06] dark:border-ink-50/[0.08]">
-            {sysToolPairs.map((p, i) => (
-              <li key={i}>
-                <ToolLine
-                  content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
-                  output={p.output}
-                  outputOk={p.ok}
-                />
-              </li>
-            ))}
-          </ul>
+          <WorkCard pairs={sysToolPairs} className="mb-3" />
         )}
         <div className="flex items-center gap-2">
           <span className="font-mono text-[12px] text-ink-400 dark:text-ink-500 leading-none select-none">
@@ -807,17 +797,7 @@ function TimelineItem({
             )}
           </div>
           {!isUser && toolPairs.length > 0 && (
-            <ul className="mb-4 space-y-2.5 pl-3 border-l border-ink-900/[0.06] dark:border-ink-50/[0.08]">
-              {toolPairs.map((p, i) => (
-                <li key={i}>
-                  <ToolLine
-                    content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
-                    output={p.output}
-                    outputOk={p.ok}
-                  />
-                </li>
-              ))}
-            </ul>
+            <WorkCard pairs={toolPairs} className="mb-4" />
           )}
           {isUser ? (
             <div className="font-mono whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink-800 dark:text-ink-100">
@@ -901,18 +881,11 @@ function ThinkingItem({
             )}
           </div>
           {toolPairs.length > 0 && (
-            <ul className="space-y-2.5 pl-3 border-l border-ember-500/30">
-              {toolPairs.map((p, i) => (
-                <li key={i}>
-                  <ToolLine
-                    content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
-                    running={p.running && !showReply}
-                    output={p.output}
-                    outputOk={p.ok}
-                  />
-                </li>
-              ))}
-            </ul>
+            <WorkCard
+              pairs={toolPairs}
+              liveTrailing={!showReply}
+              className="border-ember-500/30 bg-ember-500/[0.04] dark:bg-ember-500/[0.06]"
+            />
           )}
         </div>
       </div>
