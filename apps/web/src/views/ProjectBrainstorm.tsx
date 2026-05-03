@@ -31,7 +31,6 @@ import {
 } from "lucide-react";
 import type { IdeationEvent } from "@agentd/client";
 import type { Idea, IdeaStatus, Suggestion } from "@agentd/contracts";
-import { Markdown } from "@/components/markdown";
 import { ToolLine, WorkCard, pairToolEvents } from "@/components/tool-line";
 import {
   Count,
@@ -266,64 +265,57 @@ export function ProjectBrainstorm() {
     await runBrainstorm(text, { clearComposer: true });
   };
 
-  // "I have an existing idea — plan it." Same composer, different
-  // intent: the agent reads the repo, drafts a structured spec,
-  // saves the result as a SavedIdea (it lives in the right-rail
-  // library + workshop), AND surfaces it as a card in this chat
-  // thread so the user can act on it without leaving brainstorm.
-  const [planning, setPlanning] = useState(false);
-  interface InlinePlan {
+  // "I have an idea — save it." Light path: just stash the typed
+  // text as a SavedIdea (no agent involvement here, no auto-plan
+  // generation) and surface it as a card in this thread. The full
+  // agentic experience — Plan, Challenge, Refine, conversational
+  // chat with codebase access — lives in the workshop the user
+  // jumps into when they want to actually work on the idea.
+  // `save` is already the brainstorm-pin mutation; reuse for the
+  // "type your own idea" path — same daemon endpoint, same cache
+  // invalidation.
+  const [savingIdea, setSavingIdea] = useState(false);
+  interface InlineIdea {
     id: string;
     title: string;
     description: string;
-    plan: string;
     ts: number;
   }
-  const [localPlans, setLocalPlans] = useState<InlinePlan[]>([]);
-  const submitPlan = async () => {
+  const [localIdeas, setLocalIdeas] = useState<InlineIdea[]>([]);
+  const submitSaveIdea = async () => {
     const text = brief.trim();
     if (!text) {
-      toast("describe your idea first", true);
+      toast("type your idea first", true);
       return;
     }
-    if (planning) return;
-    setPlanning(true);
+    if (savingIdea) return;
+    setSavingIdea(true);
     try {
-      const r = await client.planIdea(project.id, { text });
-      if (!r.ok) {
-        toast(
-          (r as { error: string }).error ||
-            "the helper returned an empty plan — try a sharper brief",
-          true,
-        );
-        return;
-      }
+      const r = await save.mutateAsync({
+        projectSlug: project.slug,
+        text,
+      });
       setBrief("");
-      // Refresh the saved-ideas list so the right rail shows the new
-      // card straight away.
       void qc.invalidateQueries({ queryKey: qk.savedIdeas(project.slug) });
-      // Append the plan as an inline card in the chat thread so the
-      // user can interact with it like any other brainstorm output.
-      setLocalPlans((cur) => [
+      setLocalIdeas((cur) => [
         ...cur,
         {
           id: r.idea.id,
           title: r.idea.text,
-          description: r.idea.description ?? text,
-          plan: r.plan,
+          description: r.idea.description ?? "",
           ts: Date.now(),
         },
       ]);
-      toast("plan ready");
+      toast("idea saved — open it in the workshop to refine");
     } catch (e) {
       toast((e as Error).message, true);
     } finally {
-      setPlanning(false);
+      setSavingIdea(false);
     }
   };
 
-  const removeLocalPlan = (ideaId: string) =>
-    setLocalPlans((cur) => cur.filter((p) => p.id !== ideaId));
+  const removeLocalIdea = (ideaId: string) =>
+    setLocalIdeas((cur) => cur.filter((p) => p.id !== ideaId));
 
   /**
    * Shared brainstorm runner. Used by the composer's Send and the
@@ -474,7 +466,7 @@ export function ProjectBrainstorm() {
       <div className="flex-1 min-h-0 relative">
         <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
           <div className="px-5 lg:px-7 py-6 space-y-7">
-            {isEmpty && localPlans.length === 0 ? (
+            {isEmpty && localIdeas.length === 0 ? (
               <EmptyChat
                 projectName={project.name}
                 onPickPreset={setBrief}
@@ -499,13 +491,13 @@ export function ProjectBrainstorm() {
                     streaming={streaming}
                   />
                 ))}
-                {localPlans.map((p) => (
-                  <PlanInlineCard
+                {localIdeas.map((p) => (
+                  <SavedIdeaInlineCard
                     key={p.id}
-                    plan={p}
+                    idea={p}
                     projectSlug={project.slug}
                     onOpenIdea={openIdea}
-                    onDismiss={() => removeLocalPlan(p.id)}
+                    onDismiss={() => removeLocalIdea(p.id)}
                   />
                 ))}
               </>
@@ -517,17 +509,6 @@ export function ProjectBrainstorm() {
                 tools={liveTools}
                 onCancel={cancel}
               />
-            )}
-            {planning && (
-              <div className="flex items-baseline gap-2 px-1 py-2 text-[12.5px] text-ember-700 dark:text-ember-300 animate-fade-in">
-                <Sparkles className="h-3 w-3 self-center animate-blink" />
-                <span className="font-mono uppercase tracking-[0.08em] text-[10px]">
-                  planning
-                </span>
-                <span className="font-mono text-[11.5px] text-ink-500 dark:text-ink-400">
-                  agent is reading the repo and drafting your spec…
-                </span>
-              </div>
             )}
           </div>
         </div>
@@ -560,9 +541,9 @@ export function ProjectBrainstorm() {
               placeholder={
                 streaming
                   ? "agent is thinking…"
-                  : planning
-                    ? "agent is reading the repo and drafting your plan…"
-                    : `brainstorm a brief, or type an existing idea and tap "Plan it"`
+                  : savingIdea
+                    ? "saving idea…"
+                    : `brainstorm a brief, or type your own idea and tap "My idea" to save it`
               }
               rows={2}
               disabled={streaming}
@@ -573,30 +554,31 @@ export function ProjectBrainstorm() {
                 <Kbd>⌘</Kbd>
                 <Kbd>↵</Kbd>
               </span>
-              {/* "I have an existing idea — plan it" entry. Same input,
-                  different intent: drafts a structured spec and saves
-                  it to the library so the user can refine in the
-                  workshop or spawn it as a normal idea card. */}
+              {/* "I have an idea myself" — light path. Just stash the
+                  text as a SavedIdea so the user can work with it
+                  later in the workshop (where the full agentic
+                  experience — Plan, Challenge, Refine — lives). No
+                  agent involvement here, no auto plan. */}
               <button
                 type="button"
-                onClick={() => void submitPlan()}
-                disabled={streaming || planning || !brief.trim()}
-                title="Plan this — agent reads the repo and drafts a full spec"
+                onClick={() => void submitSaveIdea()}
+                disabled={streaming || savingIdea || !brief.trim()}
+                title="Save this as your own idea — refine + plan it in the workshop"
                 className={cn(
-                  "inline-flex items-center gap-1 h-7 px-2 rounded text-[11px] font-medium border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300 hover:bg-ember-500/15 disabled:opacity-40 disabled:cursor-not-allowed transition-colors",
+                  "inline-flex items-center gap-1 h-7 px-2 rounded text-[11px] font-medium border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/15 disabled:opacity-40 disabled:cursor-not-allowed transition-colors",
                 )}
               >
-                {planning ? (
+                {savingIdea ? (
                   <Loader2 className="h-3 w-3 animate-spin" />
                 ) : (
-                  <Sparkles className="h-3 w-3" />
+                  <Lightbulb className="h-3 w-3" />
                 )}
-                Plan it
+                My idea
               </button>
               <Button
                 size="sm"
                 onClick={() => void submit()}
-                disabled={streaming || planning || !brief.trim()}
+                disabled={streaming || savingIdea || !brief.trim()}
               >
                 {streaming ? (
                   <Loader2 className="h-3 w-3 animate-spin" />
@@ -1490,28 +1472,26 @@ function StatusBadgeSm({ status }: { status: IdeaStatus }) {
   );
 }
 
-/* ── Inline plan card ────────────────────────────────────────────── */
+/* ── Inline saved-idea card ──────────────────────────────────────── */
 
 /**
- * Renders the result of a "Plan it" run as a brainstorm-thread card.
- * Same visual rhythm as `ChatTurn` so it sits naturally next to
- * brainstorm sessions: terminal-style header, title row, collapsible
- * plan body with full markdown, action row (open in workshop /
- * dismiss). The idea is already saved by the time we render — the
- * dismiss button removes it from the local thread + drops it from
- * the right-rail library.
+ * Renders a "My idea" save as a brainstorm-thread card. Light by
+ * design — no agent involvement, no plan. The card just acknowledges
+ * the save, links into the workshop where the full agentic chat
+ * (Plan, Challenge, Refine, repo-aware Q&A) lives, and offers a
+ * dismiss action that drops the idea from both the thread and the
+ * right-rail library.
  */
-function PlanInlineCard({
-  plan,
+function SavedIdeaInlineCard({
+  idea,
   projectSlug,
   onOpenIdea,
   onDismiss,
 }: {
-  plan: {
+  idea: {
     id: string;
     title: string;
     description: string;
-    plan: string;
     ts: number;
   };
   projectSlug: string;
@@ -1520,11 +1500,10 @@ function PlanInlineCard({
 }) {
   const unsave = useDeleteSavedIdea();
   const { toast } = useApp();
-  const [expanded, setExpanded] = useState(true);
 
   const remove = async () => {
     try {
-      await unsave.mutateAsync(plan.id);
+      await unsave.mutateAsync(idea.id);
       onDismiss();
     } catch (e) {
       toast((e as Error).message, true);
@@ -1532,14 +1511,14 @@ function PlanInlineCard({
   };
 
   return (
-    <div className="rounded-lg border border-ember-500/30 bg-ember-500/[0.04] dark:bg-ember-500/[0.06] px-4 py-3 animate-fade-in">
+    <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.04] dark:bg-amber-500/[0.06] px-4 py-3 animate-fade-in">
       <div className="flex items-baseline gap-2 mb-2">
-        <Sparkles className="h-3 w-3 text-ember-500 self-center" />
-        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ember-700 dark:text-ember-300">
-          planned idea
+        <Lightbulb className="h-3 w-3 text-amber-500 self-center" />
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-amber-700 dark:text-amber-300">
+          your idea
         </span>
         <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-          {formatTs(plan.ts)}
+          {formatTs(idea.ts)}
         </span>
         <span className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] text-emerald-700 dark:text-emerald-300">
           <CheckCircle2 className="h-2.5 w-2.5" />
@@ -1548,44 +1527,30 @@ function PlanInlineCard({
       </div>
       <button
         type="button"
-        onClick={() => onOpenIdea(plan.id)}
-        className="block w-full text-left mb-1 text-[13.5px] font-medium text-ink-900 dark:text-ink-50 hover:text-ember-700 dark:hover:text-ember-300 transition-colors"
+        onClick={() => onOpenIdea(idea.id)}
+        className="block w-full text-left mb-1 text-[13.5px] font-medium text-ink-900 dark:text-ink-50 hover:text-amber-700 dark:hover:text-amber-300 transition-colors"
         title="open in workshop"
       >
-        {plan.title}
+        {idea.title}
       </button>
-      {plan.description && plan.description !== plan.title && (
+      {idea.description && idea.description !== idea.title && (
         <p className="text-[11.5px] text-ink-500 dark:text-ink-400 leading-relaxed mb-2 font-mono">
-          {plan.description.length > 200
-            ? plan.description.slice(0, 200) + "…"
-            : plan.description}
+          {idea.description.length > 200
+            ? idea.description.slice(0, 200) + "…"
+            : idea.description}
         </p>
-      )}
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="inline-flex items-center gap-1 mb-2 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-ember-700 dark:hover:text-ember-300"
-      >
-        {expanded ? (
-          <ChevronDown className="h-2.5 w-2.5" />
-        ) : (
-          <ChevronRight className="h-2.5 w-2.5" />
-        )}
-        {expanded ? "hide plan" : "show plan"}
-      </button>
-      {expanded && (
-        <div className="rounded-md border border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-800/40 px-3 py-2 max-h-72 overflow-y-auto">
-          <Markdown text={plan.plan} />
-        </div>
       )}
       <div className="flex items-center gap-1.5 mt-2">
         <Link
-          to={`/projects/${encodeURIComponent(projectSlug)}/ideas/${plan.id}`}
-          className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300 hover:bg-ember-500/15 transition-colors"
+          to={`/projects/${encodeURIComponent(projectSlug)}/ideas/${idea.id}`}
+          className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/15 transition-colors"
         >
           <ArrowUpRight className="h-2.5 w-2.5" />
-          refine in workshop
+          open in workshop
         </Link>
+        <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+          plan, challenge, refine — all in the workshop
+        </span>
         <button
           type="button"
           onClick={() => void remove()}
