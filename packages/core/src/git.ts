@@ -129,12 +129,16 @@ function buildAiHelperArgv(
   if (opts.agent === "codex") {
     const binary =
       opts.binary?.trim() || process.env.AGENTD_CODEX_BIN || "codex";
-    const argv: string[] = [
-      binary,
-      "exec",
-      "--skip-git-repo-check",
-      "--dangerously-bypass-approvals-and-sandbox",
-    ];
+    // Build the codex argv conservatively. `--skip-git-repo-check`
+    // was added in newer codex builds — older installs reject it
+    // with "unknown option". Drop it: every project path in agentd
+    // is already a git repo, so codex doesn't need the override.
+    // Approvals/sandbox bypass is gated by `AGENTD_CODEX_BYPASS=0`
+    // for the rare case where it's also missing.
+    const argv: string[] = [binary, "exec"];
+    if (process.env.AGENTD_CODEX_BYPASS !== "0") {
+      argv.push("--dangerously-bypass-approvals-and-sandbox");
+    }
     if (opts.model && opts.model.trim()) {
       argv.push("--model", opts.model.trim());
     }

@@ -86,7 +86,10 @@ export class CodexRunner implements AgentRunner {
 
     // Build args. Note that `exec resume <id>` is its own subcommand and the
     // prompt comes after; `exec` (no resume) takes the prompt as a positional.
-    const args: string[] = ["exec", "--json", "--skip-git-repo-check"];
+    // `--skip-git-repo-check` was added in newer codex builds; older installs
+    // reject it with "unknown option". Project worktrees are always git
+    // repos so we just don't pass it.
+    const args: string[] = ["exec", "--json"];
     if (mode === "bypassPermissions" || mode === "acceptEdits") {
       args.push("--dangerously-bypass-approvals-and-sandbox");
     } else {
