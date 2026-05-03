@@ -199,6 +199,31 @@ export function ProjectBrainstorm() {
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [sidebarFilter, setSidebarFilter] = useState<"all" | IdeaStatus>("all");
 
+  // Composer mode — `brainstorm` (default, agent generates ideas) vs
+  // `idea` (operator drops their own idea, agent validates it). The
+  // mode changes Send's behavior + the visual treatment of the input.
+  // Declared up here (before the early-loading return) so all hooks
+  // run unconditionally — React requires the same hook count every
+  // render.
+  const [composerMode, setComposerMode] = useState<"brainstorm" | "idea">(
+    "brainstorm",
+  );
+  // Per-idea ephemeral stream state — partial agent text + tool
+  // events for the in-flight turn, keyed by the SavedIdea id.
+  // Cleared the moment the daemon persists the turn (the per-idea
+  // query refresh via WS takes over from there).
+  interface IdeaStreamState {
+    events: IdeaChatEvent[];
+    partialText: string;
+    suggestedTitle: string;
+    error: string | null;
+  }
+  const [ideaStreams, setIdeaStreams] = useState<Map<string, IdeaStreamState>>(
+    () => new Map(),
+  );
+  const [savingIdea, setSavingIdea] = useState(false);
+  const ideaAbortRefs = useRef(new Map<string, AbortController>());
+
   const claudeModels = modelsQ.data?.models.claude ?? [];
   const codexModels = modelsQ.data?.models.codex ?? [];
   const choice = decodeAgentModel(brainstormPick);
@@ -214,6 +239,17 @@ export function ProjectBrainstorm() {
     [sugQ.data],
   );
   const allIdeas = savedQ.data?.ideas ?? [];
+  // Active idea-mode drafts — server-driven, hydrated from
+  // `useSavedIdeas` and filtered to this project + status="draft".
+  // Memoized + declared up here (above the early-loading return) so
+  // the hook count stays stable across renders.
+  const draftIdeas = useMemo(
+    () =>
+      allIdeas
+        .filter((i) => i.projectId === project?.id && i.status === "draft")
+        .sort((a, b) => a.updatedAt - b.updatedAt),
+    [allIdeas, project?.id],
+  );
   const savedKeys = useMemo(() => {
     const m = new Map<string, string>();
     for (const i of allIdeas) {
@@ -258,13 +294,6 @@ export function ProjectBrainstorm() {
 
   const cancel = () => abortRef.current?.abort();
 
-  // Composer mode — `brainstorm` (default, agent generates ideas)
-  // vs `idea` (user is dropping their own idea, no agent). The mode
-  // changes Send's behavior + the visual treatment of the input.
-  const [composerMode, setComposerMode] = useState<"brainstorm" | "idea">(
-    "brainstorm",
-  );
-
   const submit = async () => {
     const text = brief.trim();
     if (!text) {
@@ -282,38 +311,6 @@ export function ProjectBrainstorm() {
       await submit();
     }
   };
-
-  // "I have an idea" — server-driven multi-turn conversation. Each
-  // draft is a real SavedIdea (status="draft") on the daemon, with
-  // its turns living in `idea_messages`. WS events keep every device
-  // in sync. The originating client also keeps an in-memory map of
-  // the in-flight stream (events + partial text) keyed by idea id;
-  // it clears the moment the daemon persists the turn.
-  interface IdeaStreamState {
-    events: IdeaChatEvent[];
-    partialText: string;
-    suggestedTitle: string;
-    error: string | null;
-  }
-  const [ideaStreams, setIdeaStreams] = useState<Map<string, IdeaStreamState>>(
-    () => new Map(),
-  );
-  const [savingIdea, setSavingIdea] = useState(false);
-  const ideaAbortRefs = useRef(new Map<string, AbortController>());
-
-  // Active drafts come from the saved-ideas list, filtered to this
-  // project + status="draft". The brainstorm thread renders one
-  // <DraftIdeaConvo> per draft; messages flow through the per-idea
-  // query, which auto-invalidates on `saved_idea_changed` WS events.
-  const draftIdeas = useMemo(
-    () =>
-      (savedQ.data?.ideas ?? [])
-        .filter(
-          (i) => i.projectId === project.id && i.status === "draft",
-        )
-        .sort((a, b) => a.updatedAt - b.updatedAt),
-    [savedQ.data, project.id],
-  );
 
   const cancelIdea = (ideaId: string) => {
     const ctrl = ideaAbortRefs.current.get(ideaId);
