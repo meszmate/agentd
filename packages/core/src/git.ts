@@ -1685,6 +1685,41 @@ export interface ParsedPlan {
 
 const SLICE_BLOCK_RE = /```json-slices\s*\n([\s\S]*?)\n```/i;
 
+/**
+ * Shared instruction for both plan-generating prompts. Tells the model
+ * when slices are MANDATORY (any phased / multi-agent / cross-boundary
+ * plan) and gives it a concrete shape so the JSON parses cleanly.
+ *
+ * Kept in one place because the two callers (suggestion plan + idea
+ * conversation plan mode) must stay in sync — otherwise one path emits
+ * slices and the other doesn't, and the spawn sheet UX silently splits.
+ */
+const SLICE_BLOCK_INSTRUCTION = [
+  `After the plan prose, append a fenced \`\`\`json-slices\`\`\` block whose body is a JSON array of {title, prompt, agent?, model?, thinkingLevel?, permissionMode?} objects. Each entry becomes one task in a sibling chain that shares a single git branch and runs sequentially, so slices represent independent commits stacked on the same branch.`,
+  ``,
+  `The block is REQUIRED whenever ANY of these are true:`,
+  `- The plan has more than one phase (e.g. "Phase 1 — Backend", "Phase 2 — Frontend", or any numbered/named phases).`,
+  `- The plan assigns different agents or models to different sections (e.g. "agent: codex" for one part, "agent: claude" for another).`,
+  `- The work crosses a clear boundary (backend vs frontend, library vs app, codegen vs hand-edit, schema/migration vs application code).`,
+  `- The plan calls for sequential PRs or stacked branches.`,
+  ``,
+  `When you emit slices, mirror the structure of your plan body exactly: one slice per phase, in execution order, with the same agent/model assignments your prose called out. Don't write a phased plan and then collapse it into a single slice — that defeats the purpose. The operator wants to fan a multi-phase plan across specialized agents (e.g. codex on the backend, claude on the frontend).`,
+  ``,
+  `Each slice's \`prompt\` is the full standalone instruction that slice's runner will receive. Make it self-contained — it should make sense without seeing sibling slices, but can reference "the previous slice's commits on this branch" since they all share the worktree.`,
+  ``,
+  `Field rules: \`agent\` is "claude" or "codex". \`model\` is a free-form id the operator's model registry recognizes (e.g. "opus", "sonnet", "haiku", "gpt-5-codex"). \`thinkingLevel\` is "low" | "medium" | "high" | "max" | "xhigh". \`permissionMode\` is "bypassPermissions" | "acceptEdits" | "plan".`,
+  ``,
+  `Skip the block ONLY for genuinely single-phase, single-boundary work — and even then, an explicit single-slice block is fine and lets the operator tweak the spawn before launching. Don't fabricate slices to pad the plan, but don't under-slice a phased plan either.`,
+  ``,
+  `Example for a plan that splits backend → frontend:`,
+  `\`\`\`json-slices`,
+  `[`,
+  `  {"title":"Backend","prompt":"<full backend prompt — files to touch, contracts to extend, endpoints to add, acceptance>","agent":"codex","model":"gpt-5-codex"},`,
+  `  {"title":"Frontend","prompt":"<full frontend prompt — components, hooks, settings UI, acceptance — assumes the backend slice's commits are already on this branch>","agent":"claude","model":"sonnet"}`,
+  `]`,
+  `\`\`\``,
+].join("\n");
+
 export function parseSlicesFromPlan(text: string): ParsedPlan {
   const match = text.match(SLICE_BLOCK_RE);
   if (!match) return { plan: text, slices: [] };
@@ -1776,7 +1811,7 @@ export async function* streamSuggestionPlan(
     `- No code blocks unless quoting an exact API shape — the executor model will write the code.`,
     opts.extraInstructions ? `\nExtra guidance from the operator:\n${opts.extraInstructions}` : "",
     "",
-    `After the plan prose, OPTIONALLY append a fenced \`\`\`json-slices block whose body is a JSON array of {title, prompt, agent?, model?, thinkingLevel?} objects. Each entry becomes one task in a sibling chain that shares a single git branch and runs sequentially, so slices represent independent commits on the same branch. Only emit more than one slice when the work clearly crosses boundaries (backend vs frontend, library vs app, codegen vs hand-edit). One slice (or no block at all) is the right answer for most ideas. \`agent\` may be "claude" or "codex"; \`model\` is a free-form id ("opus", "gpt-5-codex", anything the operator likes). Example: \`\`\`json-slices\\n[{"title":"backend","prompt":"…","agent":"claude","model":"opus"},{"title":"frontend","prompt":"…","agent":"codex"}]\\n\`\`\` Don't fabricate slices to look thorough.`,
+    SLICE_BLOCK_INSTRUCTION,
     "",
     `The operator's idea:`,
     brief.slice(0, 2000),
@@ -1924,7 +1959,7 @@ export async function* streamIdeaConversation(
             ``,
             `If the prior plan draft already exists, refine and extend it instead of rewriting from scratch — keep what's right, fix what's wrong, fill in what's missing. The operator's latest message (if any) is the diff to apply.`,
             ``,
-            `After the plan body, OPTIONALLY append a fenced \`\`\`json-slices block whose body is a JSON array of {title, prompt, agent?, model?, thinkingLevel?} objects. Each entry becomes one task in a sibling chain that shares a single git branch and runs sequentially, so slices represent independent commits on the same branch. Only emit more than one slice when the work clearly crosses boundaries (backend vs frontend, library vs app, codegen vs hand-edit). One slice (or no block at all) is the right answer for most ideas. \`agent\` may be "claude" or "codex"; \`model\` is a free-form id ("opus", "gpt-5-codex", anything the operator likes). Don't fabricate slices to look thorough.`,
+            SLICE_BLOCK_INSTRUCTION,
           ].join("\n")
         : `Refine this idea with the operator. Be candid, concise, and specific — reference real files/patterns from the repo when relevant. Question assumptions when you spot them. Don't restate the operator; respond to them. Keep replies under 250 words.`;
 
