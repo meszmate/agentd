@@ -19,6 +19,7 @@ import {
   Shuffle,
   Loader2,
   MessageSquare,
+  Pencil,
   PanelRight,
   PanelRightClose,
   Search,
@@ -1830,18 +1831,32 @@ function DraftIdeaConvo({
               </button>
             </>
           ) : (
-            <button
-              type="button"
-              onClick={() => setTitleEditing(true)}
-              disabled={streaming}
-              className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10.5px] border border-amber-500/40 bg-amber-500/[0.06] text-amber-700 dark:text-amber-300 hover:bg-amber-500/[0.12] disabled:opacity-40 transition-colors max-w-md"
-              title="save this idea to your library"
-            >
-              <BookmarkCheck className="h-3 w-3 shrink-0" />
-              <span className="truncate">
-                save as · {suggestedTitle || "this idea"}
-              </span>
-            </button>
+            // One-click save with the agent's suggested title — that's
+            // the whole point of the chip. The pencil to its right
+            // opens the inline editor for renaming first.
+            <>
+              <button
+                type="button"
+                onClick={() => onSave(suggestedTitle)}
+                disabled={streaming}
+                className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10.5px] border border-amber-500/40 bg-amber-500/[0.06] text-amber-700 dark:text-amber-300 hover:bg-amber-500/[0.18] disabled:opacity-40 transition-colors max-w-md"
+                title={`save with title: ${suggestedTitle}`}
+              >
+                <BookmarkCheck className="h-3 w-3 shrink-0" />
+                <span className="truncate">
+                  save as · {suggestedTitle || "this idea"}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setTitleEditing(true)}
+                disabled={streaming}
+                className="inline-flex items-center justify-center size-6 rounded text-ink-400 hover:text-amber-700 dark:hover:text-amber-300 disabled:opacity-40 transition-colors"
+                title="rename before saving"
+              >
+                <Pencil className="h-3 w-3" />
+              </button>
+            </>
           )}
           {!titleEditing && (
             <button
