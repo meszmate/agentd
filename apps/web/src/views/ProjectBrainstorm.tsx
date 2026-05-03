@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ArrowDownToLine,
   Check,
+  CheckCircle2,
   ChevronRight,
   Filter,
   Flame,
@@ -30,6 +31,7 @@ import {
 } from "lucide-react";
 import type { IdeationEvent } from "@agentd/client";
 import type { Idea, IdeaStatus, Suggestion } from "@agentd/contracts";
+import { Markdown } from "@/components/markdown";
 import { ToolLine, WorkCard, pairToolEvents } from "@/components/tool-line";
 import {
   Count,
@@ -266,10 +268,18 @@ export function ProjectBrainstorm() {
 
   // "I have an existing idea — plan it." Same composer, different
   // intent: the agent reads the repo, drafts a structured spec,
-  // saves the result as a SavedIdea, then opens the workshop. The
-  // saved-ideas list refreshes immediately so the new card appears
-  // in the right rail too.
+  // saves the result as a SavedIdea (it lives in the right-rail
+  // library + workshop), AND surfaces it as a card in this chat
+  // thread so the user can act on it without leaving brainstorm.
   const [planning, setPlanning] = useState(false);
+  interface InlinePlan {
+    id: string;
+    title: string;
+    description: string;
+    plan: string;
+    ts: number;
+  }
+  const [localPlans, setLocalPlans] = useState<InlinePlan[]>([]);
   const submitPlan = async () => {
     const text = brief.trim();
     if (!text) {
@@ -292,14 +302,28 @@ export function ProjectBrainstorm() {
       // Refresh the saved-ideas list so the right rail shows the new
       // card straight away.
       void qc.invalidateQueries({ queryKey: qk.savedIdeas(project.slug) });
-      toast("plan ready — opening workshop");
-      navigate(`/projects/${encodeURIComponent(project.slug)}/ideas/${r.idea.id}`);
+      // Append the plan as an inline card in the chat thread so the
+      // user can interact with it like any other brainstorm output.
+      setLocalPlans((cur) => [
+        ...cur,
+        {
+          id: r.idea.id,
+          title: r.idea.text,
+          description: r.idea.description ?? text,
+          plan: r.plan,
+          ts: Date.now(),
+        },
+      ]);
+      toast("plan ready");
     } catch (e) {
       toast((e as Error).message, true);
     } finally {
       setPlanning(false);
     }
   };
+
+  const removeLocalPlan = (ideaId: string) =>
+    setLocalPlans((cur) => cur.filter((p) => p.id !== ideaId));
 
   /**
    * Shared brainstorm runner. Used by the composer's Send and the
@@ -450,30 +474,41 @@ export function ProjectBrainstorm() {
       <div className="flex-1 min-h-0 relative">
         <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
           <div className="px-5 lg:px-7 py-6 space-y-7">
-            {isEmpty ? (
+            {isEmpty && localPlans.length === 0 ? (
               <EmptyChat
                 projectName={project.name}
                 onPickPreset={setBrief}
               />
             ) : (
-              sessions.map((s, i) => (
-                <ChatTurn
-                  key={s.id}
-                  index={i}
-                  suggestion={s}
-                  savedKeys={savedKeys}
-                  onTogglePin={togglePinned}
-                  onOpenIdea={openIdea}
-                  onValidate={runValidate}
-                  onMore={(nudge) =>
-                    void runBrainstorm(s.prompt, { nudge })
-                  }
-                  validating={validatingId}
-                  validateLabel={validateLabel}
-                  validateTools={validateTools}
-                  streaming={streaming}
-                />
-              ))
+              <>
+                {sessions.map((s, i) => (
+                  <ChatTurn
+                    key={s.id}
+                    index={i}
+                    suggestion={s}
+                    savedKeys={savedKeys}
+                    onTogglePin={togglePinned}
+                    onOpenIdea={openIdea}
+                    onValidate={runValidate}
+                    onMore={(nudge) =>
+                      void runBrainstorm(s.prompt, { nudge })
+                    }
+                    validating={validatingId}
+                    validateLabel={validateLabel}
+                    validateTools={validateTools}
+                    streaming={streaming}
+                  />
+                ))}
+                {localPlans.map((p) => (
+                  <PlanInlineCard
+                    key={p.id}
+                    plan={p}
+                    projectSlug={project.slug}
+                    onOpenIdea={openIdea}
+                    onDismiss={() => removeLocalPlan(p.id)}
+                  />
+                ))}
+              </>
             )}
             {streaming && (
               <LiveTurn
@@ -482,6 +517,17 @@ export function ProjectBrainstorm() {
                 tools={liveTools}
                 onCancel={cancel}
               />
+            )}
+            {planning && (
+              <div className="flex items-baseline gap-2 px-1 py-2 text-[12.5px] text-ember-700 dark:text-ember-300 animate-fade-in">
+                <Sparkles className="h-3 w-3 self-center animate-blink" />
+                <span className="font-mono uppercase tracking-[0.08em] text-[10px]">
+                  planning
+                </span>
+                <span className="font-mono text-[11.5px] text-ink-500 dark:text-ink-400">
+                  agent is reading the repo and drafting your spec…
+                </span>
+              </div>
             )}
           </div>
         </div>
@@ -1441,6 +1487,121 @@ function StatusBadgeSm({ status }: { status: IdeaStatus }) {
     <span className={cn("uppercase tracking-[0.1em]", tone[status])}>
       {status}
     </span>
+  );
+}
+
+/* ── Inline plan card ────────────────────────────────────────────── */
+
+/**
+ * Renders the result of a "Plan it" run as a brainstorm-thread card.
+ * Same visual rhythm as `ChatTurn` so it sits naturally next to
+ * brainstorm sessions: terminal-style header, title row, collapsible
+ * plan body with full markdown, action row (open in workshop /
+ * dismiss). The idea is already saved by the time we render — the
+ * dismiss button removes it from the local thread + drops it from
+ * the right-rail library.
+ */
+function PlanInlineCard({
+  plan,
+  projectSlug,
+  onOpenIdea,
+  onDismiss,
+}: {
+  plan: {
+    id: string;
+    title: string;
+    description: string;
+    plan: string;
+    ts: number;
+  };
+  projectSlug: string;
+  onOpenIdea: (id: string) => void;
+  onDismiss: () => void;
+}) {
+  const unsave = useDeleteSavedIdea();
+  const { toast } = useApp();
+  const [expanded, setExpanded] = useState(true);
+
+  const remove = async () => {
+    try {
+      await unsave.mutateAsync(plan.id);
+      onDismiss();
+    } catch (e) {
+      toast((e as Error).message, true);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-ember-500/30 bg-ember-500/[0.04] dark:bg-ember-500/[0.06] px-4 py-3 animate-fade-in">
+      <div className="flex items-baseline gap-2 mb-2">
+        <Sparkles className="h-3 w-3 text-ember-500 self-center" />
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ember-700 dark:text-ember-300">
+          planned idea
+        </span>
+        <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
+          {formatTs(plan.ts)}
+        </span>
+        <span className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] text-emerald-700 dark:text-emerald-300">
+          <CheckCircle2 className="h-2.5 w-2.5" />
+          saved to library
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={() => onOpenIdea(plan.id)}
+        className="block w-full text-left mb-1 text-[13.5px] font-medium text-ink-900 dark:text-ink-50 hover:text-ember-700 dark:hover:text-ember-300 transition-colors"
+        title="open in workshop"
+      >
+        {plan.title}
+      </button>
+      {plan.description && plan.description !== plan.title && (
+        <p className="text-[11.5px] text-ink-500 dark:text-ink-400 leading-relaxed mb-2 font-mono">
+          {plan.description.length > 200
+            ? plan.description.slice(0, 200) + "…"
+            : plan.description}
+        </p>
+      )}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="inline-flex items-center gap-1 mb-2 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-ember-700 dark:hover:text-ember-300"
+      >
+        {expanded ? (
+          <ChevronDown className="h-2.5 w-2.5" />
+        ) : (
+          <ChevronRight className="h-2.5 w-2.5" />
+        )}
+        {expanded ? "hide plan" : "show plan"}
+      </button>
+      {expanded && (
+        <div className="rounded-md border border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-800/40 px-3 py-2 max-h-72 overflow-y-auto">
+          <Markdown text={plan.plan} />
+        </div>
+      )}
+      <div className="flex items-center gap-1.5 mt-2">
+        <Link
+          to={`/projects/${encodeURIComponent(projectSlug)}/ideas/${plan.id}`}
+          className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300 hover:bg-ember-500/15 transition-colors"
+        >
+          <ArrowUpRight className="h-2.5 w-2.5" />
+          refine in workshop
+        </Link>
+        <button
+          type="button"
+          onClick={() => void remove()}
+          disabled={unsave.isPending}
+          className="ml-auto inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
+          title="remove from library + thread"
+        >
+          {unsave.isPending ? (
+            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+          ) : (
+            <Trash2 className="h-2.5 w-2.5" />
+          )}
+          dismiss
+        </button>
+      </div>
+    </div>
   );
 }
 
