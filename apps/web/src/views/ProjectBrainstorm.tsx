@@ -256,6 +256,13 @@ export function ProjectBrainstorm() {
 
   const cancel = () => abortRef.current?.abort();
 
+  // Composer mode — `brainstorm` (default, agent generates ideas)
+  // vs `idea` (user is dropping their own idea, no agent). The mode
+  // changes Send's behavior + the visual treatment of the input.
+  const [composerMode, setComposerMode] = useState<"brainstorm" | "idea">(
+    "brainstorm",
+  );
+
   const submit = async () => {
     const text = brief.trim();
     if (!text) {
@@ -263,6 +270,15 @@ export function ProjectBrainstorm() {
       return;
     }
     await runBrainstorm(text, { clearComposer: true });
+  };
+
+  /** Dispatched by Send + ⌘↵ — picks the right path for the active mode. */
+  const onSend = async () => {
+    if (composerMode === "idea") {
+      await submitSaveIdea();
+    } else {
+      await submit();
+    }
   };
 
   // "I have an idea — save it." Light path: just stash the typed
@@ -514,20 +530,34 @@ export function ProjectBrainstorm() {
         </div>
       </div>
 
-      {/* Composer — terminal-style. `›` prompt prefix, mono input,
-          actions on the same line. Frames the chat as a REPL session. */}
-      <div className="border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900 shrink-0">
+      {/* Composer — terminal-style. The composer has two modes: the
+          default `brainstorm` mode (Send fires the agent), and an
+          opt-in `idea` mode (toggle below the input lights everything
+          up amber and Send becomes "save to library"). The toggle
+          frames the intent BEFORE the user types, so they always
+          know which path they're on. */}
+      <div className={cn(
+        "border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] shrink-0 transition-colors",
+        composerMode === "idea"
+          ? "bg-amber-500/[0.06] dark:bg-amber-500/[0.04] border-t-amber-500/30"
+          : "bg-paper-50 dark:bg-ink-900",
+      )}>
         <div className="px-5 lg:px-6 py-2">
           <div className="flex items-start gap-2">
             <span
               className={cn(
                 "shrink-0 mt-1.5 font-mono text-[14px] font-semibold leading-none transition-colors",
-                streaming
-                  ? "text-ember-500 animate-blink"
-                  : "text-sky-700 dark:text-sky-300",
+                streaming || savingIdea
+                  ? "animate-blink"
+                  : "",
+                composerMode === "idea"
+                  ? "text-amber-600 dark:text-amber-400"
+                  : streaming
+                    ? "text-ember-500"
+                    : "text-sky-700 dark:text-sky-300",
               )}
             >
-              ›
+              {composerMode === "idea" ? "✦" : "›"}
             </span>
             <Textarea
               value={brief}
@@ -535,7 +565,7 @@ export function ProjectBrainstorm() {
               onKeyDown={(e) => {
                 if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
                   e.preventDefault();
-                  void submit();
+                  void onSend();
                 }
               }}
               placeholder={
@@ -543,57 +573,80 @@ export function ProjectBrainstorm() {
                   ? "agent is thinking…"
                   : savingIdea
                     ? "saving idea…"
-                    : `brainstorm a brief, or type your own idea and tap "My idea" to save it`
+                    : composerMode === "idea"
+                      ? "tell me your idea — I'll save it to your library"
+                      : `brainstorm something for ${project.name}`
               }
               rows={2}
               disabled={streaming}
-              className="flex-1 resize-none border-none shadow-none bg-transparent focus-visible:ring-0 px-0 py-1 font-mono text-[12.5px] leading-snug placeholder:text-ink-400/60 dark:placeholder:text-ink-500/60"
+              className={cn(
+                "flex-1 resize-none border-none shadow-none bg-transparent focus-visible:ring-0 px-0 py-1 font-mono text-[12.5px] leading-snug",
+                composerMode === "idea"
+                  ? "placeholder:text-amber-700/50 dark:placeholder:text-amber-300/40 text-amber-900 dark:text-amber-100"
+                  : "placeholder:text-ink-400/60 dark:placeholder:text-ink-500/60",
+              )}
             />
             <div className="shrink-0 flex items-center gap-1.5 mt-0.5">
               <span className="hidden sm:flex items-center gap-1 text-2xs text-ink-400 dark:text-ink-500">
                 <Kbd>⌘</Kbd>
                 <Kbd>↵</Kbd>
               </span>
-              {/* "I have an idea myself" — light path. Just stash the
-                  text as a SavedIdea so the user can work with it
-                  later in the workshop (where the full agentic
-                  experience — Plan, Challenge, Refine — lives). No
-                  agent involvement here, no auto plan. */}
-              <button
-                type="button"
-                onClick={() => void submitSaveIdea()}
-                disabled={streaming || savingIdea || !brief.trim()}
-                title="Save this as your own idea — refine + plan it in the workshop"
-                className={cn(
-                  "inline-flex items-center gap-1 h-7 px-2 rounded text-[11px] font-medium border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/15 disabled:opacity-40 disabled:cursor-not-allowed transition-colors",
-                )}
-              >
-                {savingIdea ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : (
-                  <Lightbulb className="h-3 w-3" />
-                )}
-                My idea
-              </button>
               <Button
                 size="sm"
-                onClick={() => void submit()}
+                onClick={() => void onSend()}
                 disabled={streaming || savingIdea || !brief.trim()}
+                className={cn(
+                  composerMode === "idea" &&
+                    "bg-amber-500 hover:bg-amber-500/90 text-amber-50",
+                )}
+                title={
+                  composerMode === "idea"
+                    ? "save your idea to the library"
+                    : "brainstorm with the agent"
+                }
               >
-                {streaming ? (
+                {streaming || savingIdea ? (
                   <Loader2 className="h-3 w-3 animate-spin" />
+                ) : composerMode === "idea" ? (
+                  <Lightbulb className="h-3 w-3" />
                 ) : (
                   <Send className="h-3 w-3" />
                 )}
               </Button>
             </div>
           </div>
-          <div className="mt-1 ml-5 flex items-center gap-1">
-            <ToolbarPick
-              label={`with · ${choiceLabel}`}
-              options={buildModelOptions(claudeModels, codexModels)}
-              onSelect={setBrainstormPick}
-            />
+          <div className="mt-1 ml-5 flex items-center gap-2 flex-wrap">
+            {/* Mode toggle — click BEFORE typing to frame the intent.
+                Default = brainstorm; flip to idea when you've already
+                got an idea you just want to capture. */}
+            <button
+              type="button"
+              onClick={() =>
+                setComposerMode((m) => (m === "idea" ? "brainstorm" : "idea"))
+              }
+              disabled={streaming || savingIdea}
+              title={
+                composerMode === "idea"
+                  ? "back to brainstorm mode"
+                  : "switch to idea mode — I'll just save what you type"
+              }
+              className={cn(
+                "inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.08em] border transition-colors disabled:opacity-40",
+                composerMode === "idea"
+                  ? "border-amber-500/50 bg-amber-500/15 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20"
+                  : "border-ink-900/10 dark:border-ink-50/10 text-ink-500 hover:text-amber-700 dark:hover:text-amber-300 hover:border-amber-500/40",
+              )}
+            >
+              <Lightbulb className="h-2.5 w-2.5" />
+              {composerMode === "idea" ? "idea mode · on" : "i have an idea"}
+            </button>
+            {composerMode !== "idea" && (
+              <ToolbarPick
+                label={`with · ${choiceLabel}`}
+                options={buildModelOptions(claudeModels, codexModels)}
+                onSelect={setBrainstormPick}
+              />
+            )}
           </div>
         </div>
       </div>
