@@ -66,6 +66,14 @@ export function CodeBlock({
     : "text-ink-500 hover:bg-ink-900/[0.06] hover:text-ink-900";
   const lineNumber = isDark ? "text-ink-50/25" : "text-ink-400/70";
 
+  // Subtle background tint sits only on the code body, not the
+  // filename caption above. Slightly darker than the surrounding
+  // paper in light mode; slightly lighter than ink in dark mode.
+  // No border — just a flat surface that distinguishes the code
+  // from prose without becoming a card.
+  const tint = isDark
+    ? "bg-ink-50/[0.035]"
+    : "bg-ink-900/[0.035]";
   return (
     <div className={cn("group relative my-1.5", className)}>
       <div className="flex items-center justify-between mb-0.5">
@@ -102,11 +110,19 @@ export function CodeBlock({
           <pre
             className={cn(
               cls,
-              "overflow-auto font-mono text-[11.5px] leading-[1.5] m-0",
+              "overflow-auto font-mono text-[11.5px] leading-[1.5] m-0 px-2 py-1 rounded",
+              tint,
+              // Slim scrollbars — the default chrome height eats a
+              // visible chunk of the block on horizontal overflow.
+              "[&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5",
+              "[&::-webkit-scrollbar-thumb]:rounded [&::-webkit-scrollbar-thumb]:bg-ink-900/15 dark:[&::-webkit-scrollbar-thumb]:bg-ink-50/15",
+              "[&::-webkit-scrollbar-track]:bg-transparent",
             )}
             style={{
               ...style,
               background: "transparent",
+              scrollbarWidth: "thin",
+              scrollbarColor: "rgba(127,127,127,0.2) transparent",
               ...(maxHeight ? { maxHeight } : {}),
             }}
           >

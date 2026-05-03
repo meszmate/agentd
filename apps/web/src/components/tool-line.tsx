@@ -245,10 +245,21 @@ function HighlightedPre({
         <pre
           className={cn(
             className,
-            "whitespace-pre-wrap break-words m-0 bg-transparent",
+            "whitespace-pre overflow-x-auto m-0 px-2 py-1 rounded",
+            isDark ? "bg-ink-50/[0.035]" : "bg-ink-900/[0.035]",
             tone === "fail" && "text-red-700 dark:text-red-300",
+            // Thin scrollbar so it doesn't eat vertical space when the
+            // line overflows horizontally.
+            "[&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5",
+            "[&::-webkit-scrollbar-thumb]:rounded [&::-webkit-scrollbar-thumb]:bg-ink-900/15 dark:[&::-webkit-scrollbar-thumb]:bg-ink-50/15",
+            "[&::-webkit-scrollbar-track]:bg-transparent",
           )}
-          style={{ ...style, background: "transparent" }}
+          style={{
+            ...style,
+            background: "transparent",
+            scrollbarWidth: "thin",
+            scrollbarColor: "rgba(127,127,127,0.2) transparent",
+          }}
         >
           {tokens.map((line, i) => (
             <div key={i} {...getLineProps({ line, key: i })}>
