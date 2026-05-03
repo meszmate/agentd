@@ -629,7 +629,10 @@ export class TaskManager {
     if (task.projectId) {
       const project = getProjectById(this.db, task.projectId);
       const projectInstructions = project?.instructions?.trim();
-      if (projectInstructions) {
+      // Honor the operator's "use these instructions" toggle — when
+      // explicitly off, keep the draft in the DB but don't inject it.
+      const enabled = project?.instructionsEnabled !== false;
+      if (projectInstructions && enabled) {
         appendParts.push(
           `# Project instructions\n\n${projectInstructions}\n\nYou can update this guidance with \`agentd-instructions write "<text>"\` if you discover something important worth persisting for future runs.`,
         );

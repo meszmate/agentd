@@ -2336,6 +2336,87 @@ function deterministicSlug(prompt: string): string {
 }
 
 /**
+ * Stream a draft set of "project instructions" — concise, agent-facing
+ * guidance lines an operator can persist on a project. Either greenfield
+ * (from a one-line description) or "improve" mode (start from existing
+ * draft + a tweak request). Yields raw stdout chunks so the UI can render
+ * progressively; returns the full text on completion.
+ */
+export async function* streamProjectInstructionsDraft(
+  cwd: string,
+  opts: {
+    description: string;
+    existing?: string;
+    helper?: AiHelperOptions;
+  },
+): AsyncGenerator<string, { text: string; source: string }, void> {
+  const desc = opts.description.trim().slice(0, 1200);
+  const existing = (opts.existing ?? "").trim().slice(0, 2000);
+  const mode = existing ? "improve" : "draft";
+  const lines = [
+    `You are drafting "project instructions" — short, agent-facing rules`,
+    `that will be prepended to every coding-agent task spawned in this`,
+    `project. Think AGENTS.md / CLAUDE.md but tighter.`,
+    ``,
+    `OUTPUT FORMAT — strict:`,
+    `  - 4 to 10 bullet lines, each starting with "- ".`,
+    `  - Each bullet: one rule, imperative, under 110 chars, no fluff.`,
+    `  - No preamble, no headers, no closing summary. Bullets only.`,
+    `  - Cover what matters: tooling/runtimes, conventions to respect,`,
+    `    things to never do, when to ask before acting, test/lint`,
+    `    expectations. Skip anything obvious from the code itself.`,
+    ``,
+    mode === "improve"
+      ? `Current draft (revise; keep what's good, drop weak rules, tighten phrasing, add gaps):\n${existing}\n`
+      : ``,
+    `Operator's description of the project / what matters here:`,
+    desc || "(none provided — infer from cwd path)",
+    ``,
+    `cwd: ${cwd}`,
+  ];
+  const ask = lines.filter(Boolean).join("\n");
+  const argv = buildAiHelperArgv(opts.helper ?? {}, ask);
+  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn({
+      cmd: argv,
+      cwd,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+  } catch (e) {
+    return { text: "", source: `error:${(e as Error).message}` };
+  }
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let raw = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      raw += chunk;
+      yield chunk;
+    }
+  } catch {
+    // stream cancelled
+  }
+  await proc.exited;
+  // Strip code-fence wrappers and stray pre/post text — keep only the
+  // bullet block. The model occasionally adds a one-liner intro.
+  const cleaned = raw
+    .replace(/^```[a-zA-Z]*\n?|```$/gm, "")
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((l) => l.length > 0)
+    .join("\n")
+    .trim();
+  return { text: cleaned, source: mode };
+}
+
+/**
  * Ask Claude for a tight feature-branch slug. Returns just the slug — no
  * `feature/` prefix, no leading/trailing punctuation. Falls back to a
  * deterministic slug when Claude is unavailable or empty.

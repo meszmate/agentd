@@ -205,6 +205,12 @@ export const projects = sqliteTable("projects", {
    * `agentd-instructions write "<text>"`.
    */
   instructions: text("instructions"),
+  /**
+   * When 0, the project's instructions are kept in the DB but NOT
+   * prepended to spawn prompts. Lets the operator turn instructions
+   * off for a while without losing the draft. Defaults to 1.
+   */
+  instructionsEnabled: integer("instructions_enabled").notNull().default(1),
   /** Per-project Telegram bot — separate DM channel per project. */
   telegramBotToken: text("telegram_bot_token"),
   telegramChatId: text("telegram_chat_id"),
@@ -354,6 +360,7 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at INTEGER NOT NULL,
   last_active_at INTEGER NOT NULL,
   instructions TEXT,
+  instructions_enabled INTEGER NOT NULL DEFAULT 1,
   telegram_bot_token TEXT,
   telegram_chat_id TEXT,
   discord_channel_id TEXT
@@ -559,6 +566,7 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE suggestions ADD COLUMN input_tokens INTEGER",
   "ALTER TABLE suggestions ADD COLUMN output_tokens INTEGER",
   "ALTER TABLE tasks ADD COLUMN auto_commit INTEGER NOT NULL DEFAULT 1",
+  "ALTER TABLE projects ADD COLUMN instructions_enabled INTEGER NOT NULL DEFAULT 1",
 ];
 
 function migrate(sqlite: Database): void {

@@ -1366,6 +1366,75 @@ export class AgentdClient {
     }
   }
 
+  /**
+   * Stream an AI-drafted set of project instructions. The text comes
+   * across as raw chunks (call `onChunk` for live preview), then a
+   * `\x1e`-prefixed JSON envelope closes with the cleaned final text.
+   */
+  async streamProjectInstructionsDraft(
+    idOrSlug: string,
+    opts: { description: string; existing?: string },
+    onChunk?: (chunk: string) => void,
+    abort?: AbortSignal,
+  ): Promise<{ text: string; source: string; error?: string }> {
+    const url =
+      this.server +
+      `/api/projects/${encodeURIComponent(idOrSlug)}/draft-instructions/stream`;
+    const r = await fetch(url, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(opts),
+      ...(abort ? { signal: abort } : {}),
+    });
+    if (!r.ok || !r.body) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`stream draft-instructions ${r.status}: ${text}`);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      buf += chunk;
+      const sentinel = buf.indexOf("\x1e");
+      if (sentinel >= 0) {
+        const visible = chunk.slice(
+          0,
+          chunk.length - (buf.length - sentinel),
+        );
+        if (visible.length > 0) onChunk?.(visible);
+        while (true) {
+          const next = await reader.read();
+          if (next.done) break;
+          buf += decoder.decode(next.value, { stream: true });
+        }
+        break;
+      }
+      onChunk?.(chunk);
+    }
+    const sentinelAt = buf.indexOf("\x1e");
+    if (sentinelAt < 0) {
+      return { text: buf.trim(), source: "claude" };
+    }
+    const tail = buf.slice(sentinelAt + 1).trim();
+    try {
+      const meta = JSON.parse(tail) as {
+        text?: string;
+        source: string;
+        error?: string;
+      };
+      return {
+        text: meta.text ?? buf.slice(0, sentinelAt).trim(),
+        source: meta.source,
+        ...(meta.error ? { error: meta.error } : {}),
+      };
+    } catch {
+      return { text: buf.slice(0, sentinelAt).trim(), source: "claude" };
+    }
+  }
+
   // ── pairing tokens ──
   async issuePairToken(): Promise<{ token: string; expiresAt: number }> {
     return this.req("/api/admin/pair", { method: "POST" });

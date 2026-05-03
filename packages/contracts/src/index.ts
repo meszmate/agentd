@@ -892,6 +892,12 @@ export const Project = z.object({
    */
   instructions: z.string().nullable().optional(),
   /**
+   * When false, the project's `instructions` are kept in the DB but
+   * NOT prepended to spawn prompts. Lets the operator turn the
+   * guidance off without losing the draft. Defaults to true.
+   */
+  instructionsEnabled: z.boolean().optional(),
+  /**
    * Per-project Telegram bot token. When set, this project's task
    * events go to a dedicated bot (operator chats with each project
    * in its own DM). Falls back to `cfg.plugins.telegram` global bot
@@ -933,6 +939,7 @@ export const UpdateProjectRequest = z.object({
   name: z.string().min(1).optional(),
   color: z.string().optional(),
   instructions: z.string().nullable().optional(),
+  instructionsEnabled: z.boolean().optional(),
   telegramBotToken: z.string().nullable().optional(),
   telegramChatId: z.string().nullable().optional(),
   discordChannelId: z.string().nullable().optional(),

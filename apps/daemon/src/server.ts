@@ -67,6 +67,7 @@ import {
   streamCommitMessage,
   streamSuggestionPlan,
   streamPrMessage,
+  streamProjectInstructionsDraft,
   getPrState,
   setTaskDiscordThread,
   setTaskPrUrl,
@@ -2704,6 +2705,72 @@ export function buildServer(opts: BuildServerOptions) {
     });
   });
 
+  /**
+   * Stream an AI-drafted set of project instructions. Body:
+   *   { description: string; existing?: string }
+   * Yields raw text chunks, then a `\x1e` separator + JSON envelope
+   * with the cleaned final text (same wire format as the PR-message
+   * stream, so the web client can reuse its parser).
+   */
+  api.post("/projects/:idOrSlug/draft-instructions/stream", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project = getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      description?: string;
+      existing?: string;
+    };
+    const cfg = loadConfig(paths.root);
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const enc = new TextEncoder();
+        try {
+          const it = streamProjectInstructionsDraft(project.path, {
+            description: body.description ?? "",
+            ...(body.existing ? { existing: body.existing } : {}),
+            helper: cfg.aiHelpers,
+          });
+          let result: { text: string; source: string } | null = null;
+          while (true) {
+            const next = await it.next();
+            if (next.done) {
+              result = next.value as { text: string; source: string };
+              break;
+            }
+            controller.enqueue(enc.encode(next.value));
+          }
+          controller.enqueue(enc.encode("\x1e"));
+          controller.enqueue(
+            enc.encode(
+              JSON.stringify({
+                text: result?.text ?? "",
+                source: result?.source ?? "fallback-empty-output",
+              }),
+            ),
+          );
+        } catch (e) {
+          controller.enqueue(
+            enc.encode(
+              `\x1e${JSON.stringify({
+                text: "",
+                source: "fallback-error",
+                error: (e as Error).message,
+              })}`,
+            ),
+          );
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
   api.delete("/projects/:idOrSlug", (c) => {
     const key = c.req.param("idOrSlug");
     const project =
@@ -2839,7 +2906,12 @@ export function buildServer(opts: BuildServerOptions) {
       savedIdeas,
       pastOptions,
       recentTasks,
-      instructions: project.instructions ?? null,
+      // Honor the operator's "use these instructions" toggle so the
+      // brainstorm helper agrees with the spawn prompt.
+      instructions:
+        project.instructionsEnabled !== false
+          ? project.instructions ?? null
+          : null,
     };
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
