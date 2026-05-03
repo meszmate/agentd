@@ -69,6 +69,18 @@ export const tasks = sqliteTable("tasks", {
    * has `autoTaskThread` enabled. Cleared on archive.
    */
   discordThreadId: text("discord_thread_id"),
+  /**
+   * When set, the task waits for `dependsOnTaskId` to reach status
+   * `done` before its runner spawns. Powers plan-slice chains: each
+   * sibling executes after the previous one commits + pushes on the
+   * shared branch.
+   */
+  dependsOnTaskId: text("depends_on_task_id"),
+  /**
+   * Group key shared by every sibling task that came from the same
+   * plan-slice spawn. NULL for solo tasks.
+   */
+  planGroupId: text("plan_group_id"),
 });
 
 /**
@@ -107,6 +119,13 @@ export const savedIdeas = sqliteTable("saved_ideas", {
   tagsCsv: text("tags_csv"),
   /** Optional pre-generated plan blob the operator hand-edited and stashed. */
   planDraft: text("plan_draft"),
+  /**
+   * JSON-encoded `PlanSlice[]`. NULL when the operator hasn't split
+   * the plan into executable slices yet. The planner can pre-fill
+   * this; the operator can edit before spawning. Empty array means
+   * "explicitly cleared" — same UI behavior as NULL.
+   */
+  planSlices: text("plan_slices"),
   savedAt: integer("saved_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
   /** Filled when the operator finally spawned a task from this idea. */
@@ -586,6 +605,9 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE projects ADD COLUMN instructions_enabled INTEGER NOT NULL DEFAULT 1",
   "ALTER TABLE tasks ADD COLUMN codex_thread_id TEXT",
   "ALTER TABLE projects ADD COLUMN notify_suggestions INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE saved_ideas ADD COLUMN plan_slices TEXT",
+  "ALTER TABLE tasks ADD COLUMN depends_on_task_id TEXT",
+  "ALTER TABLE tasks ADD COLUMN plan_group_id TEXT",
 ];
 
 function migrate(sqlite: Database): void {

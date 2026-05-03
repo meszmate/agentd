@@ -50,6 +50,7 @@ import {
   useStopTask,
   useTask,
   useTaskStream,
+  useTasks,
 } from "@/queries";
 import { useApp, useClient } from "@/AppContext";
 import {
@@ -537,6 +538,12 @@ export function TaskDetail({ task }: { task: Task }) {
           <>
             <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
             <CouncilChip task={task} />
+          </>
+        )}
+        {task.planGroupId && (
+          <>
+            <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
+            <SliceChip task={task} />
           </>
         )}
       </div>
@@ -1092,6 +1099,99 @@ function CouncilChip({ task }: { task: Task }) {
             </DropdownMenuItem>
           </>
         )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * Plan-slice membership chip — shows "slice K of N" + a quick-jump
+ * dropdown to siblings, plus a "waiting on parent" pill when the
+ * task is still pending behind an upstream slice.
+ */
+function SliceChip({ task }: { task: Task }) {
+  const tasksQ = useTasks();
+  const all = tasksQ.data?.tasks ?? [];
+  const siblings = useMemo(
+    () =>
+      all
+        .filter((t) => t.planGroupId === task.planGroupId)
+        .sort((a, b) => a.createdAt - b.createdAt),
+    [all, task.planGroupId],
+  );
+  const myIdx = siblings.findIndex((t) => t.id === task.id);
+  const total = siblings.length || 1;
+  const parent = task.dependsOnTaskId
+    ? all.find((t) => t.id === task.dependsOnTaskId) ?? null
+    : null;
+  const isWaiting =
+    task.status === "pending" && !!task.dependsOnTaskId && parent
+      ? parent.status !== "done" && parent.status !== "idle"
+      : false;
+  const tone = isWaiting
+    ? "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/20"
+    : "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/20";
+  const label = isWaiting
+    ? `waiting · slice ${myIdx + 1}/${total}`
+    : `slice ${myIdx + 1}/${total}`;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          title={
+            parent
+              ? `Sibling slice — depends on ${parent.title.slice(0, 60)}`
+              : "Plan slice sibling group"
+          }
+          className={cn(
+            "inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] border shrink-0 transition-colors",
+            tone,
+          )}
+        >
+          {label}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-72">
+        <DropdownMenuLabel className="text-[10px] uppercase tracking-[0.12em]">
+          Plan group {task.planGroupId?.slice(-6)}
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {parent && (
+          <div className="px-2 py-1.5 text-[11px] text-ink-600 dark:text-ink-300 leading-relaxed">
+            <span className="font-mono uppercase tracking-[0.08em] text-ink-400 dark:text-ink-500">
+              waiting on
+            </span>
+            <div className="mt-0.5">
+              <Link
+                to={`/tasks/${parent.id}`}
+                className="font-mono hover:underline"
+              >
+                → {parent.title.slice(0, 64)} · {parent.status}
+              </Link>
+            </div>
+          </div>
+        )}
+        <div className="px-2 py-1.5 text-[10px] text-ink-500 dark:text-ink-400">
+          siblings ({siblings.length}):
+          <ul className="mt-1 space-y-0.5">
+            {siblings.map((t, i) => (
+              <li key={t.id}>
+                <Link
+                  to={`/tasks/${t.id}`}
+                  className={cn(
+                    "font-mono hover:underline",
+                    t.id === task.id &&
+                      "text-ember-700 dark:text-ember-300",
+                  )}
+                >
+                  {t.id === task.id ? "→ " : "  "}
+                  {i + 1}. {t.title.slice(0, 48)} · {t.status}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   );

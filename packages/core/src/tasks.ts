@@ -32,6 +32,14 @@ export interface CreateTaskInput {
   model?: string;
   mirrorTo?: MirrorTarget | null;
   councilId?: string | null;
+  /**
+   * When set, the task is created in `pending` status and won't
+   * spawn until the named parent reaches `done`. Powers plan-slice
+   * chains.
+   */
+  dependsOnTaskId?: string | null;
+  /** Group key shared by every sibling slice in one plan. */
+  planGroupId?: string | null;
 }
 
 function parseMirrorTo(raw: string | null): MirrorTarget | null {
@@ -101,6 +109,8 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     sortOrder: row.sortOrder ?? undefined,
     lastCompactedAt: row.lastCompactedAt ?? null,
     discordThreadId: row.discordThreadId ?? null,
+    dependsOnTaskId: row.dependsOnTaskId ?? null,
+    planGroupId: row.planGroupId ?? null,
   };
 }
 
@@ -202,10 +212,56 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       model: input.model ?? "",
       mirrorTo: input.mirrorTo ? JSON.stringify(input.mirrorTo) : null,
       councilId: input.councilId ?? null,
+      dependsOnTaskId: input.dependsOnTaskId ?? null,
+      planGroupId: input.planGroupId ?? null,
     })
     .run();
   return getTask(db, id)!;
 }
+
+/**
+ * Tasks waiting on `parentTaskId` to finish before they spawn. The
+ * lifecycle hook in TaskManager fans this out on each `done` event
+ * so the next slice picks up the parent's commits on the shared
+ * branch.
+ */
+export function getTasksDependingOn(db: Db, parentTaskId: string): Task[] {
+  return db
+    .select()
+    .from(tasks)
+    .where(eq(tasks.dependsOnTaskId, parentTaskId))
+    .all()
+    .map(rowToTask);
+}
+
+/**
+ * Sibling tasks that share the given `planGroupId`, ordered by creation
+ * so the UI can render "slice 2 of N" chips deterministically.
+ */
+export function listTasksByPlanGroup(db: Db, planGroupId: string): Task[] {
+  return db
+    .select()
+    .from(tasks)
+    .where(eq(tasks.planGroupId, planGroupId))
+    .orderBy(tasks.createdAt)
+    .all()
+    .map(rowToTask);
+}
+
+/**
+ * Set status without bumping updatedAt (used by the chain hook
+ * when a parent fails — children should record the cancel reason
+ * but not jostle list ordering).
+ */
+export function setTaskStatusOnly(
+  db: Db,
+  id: string,
+  status: TaskStatus,
+): Task | null {
+  db.update(tasks).set({ status }).where(eq(tasks.id, id)).run();
+  return getTask(db, id);
+}
+
 
 export function updateTaskStatus(
   db: Db,

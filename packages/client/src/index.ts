@@ -5,6 +5,7 @@ import type {
   Idea,
   IdeaMessage,
   IdeaStatus,
+  PlanSlice,
   SavedIdea,
   Suggestion,
   Todo,
@@ -77,7 +78,7 @@ export interface AgentdUserPrefs {
   lastModelClaude: string;
   lastModelCodex: string;
   workspaceMode: "worktree" | "in_place";
-  branchMode: "new" | "existing";
+  branchMode: "new" | "existing" | "shared";
   pullLatest: boolean;
   sidebarExpandedProjects: string[];
   taskWorkspaceOpen: boolean;
@@ -522,6 +523,8 @@ export class AgentdClient {
         message: IdeaMessage;
         ideaStatus: IdeaStatus;
         planDraft?: string | null;
+        planSlices?: PlanSlice[];
+        suggestedTitle?: string;
       }
     | { ok: false; source: string; error: string }
   > {
@@ -758,6 +761,15 @@ export class AgentdClient {
       body: JSON.stringify({ planDraft }),
     });
   }
+  async updateSavedIdeaSlices(
+    id: string,
+    slices: PlanSlice[] | null,
+  ): Promise<{ idea: SavedIdea }> {
+    return this.req(`/api/saved-ideas/${encodeURIComponent(id)}/slices`, {
+      method: "PUT",
+      body: JSON.stringify({ slices }),
+    });
+  }
   async spawnFromSavedIdea(
     id: string,
     body: {
@@ -770,6 +782,26 @@ export class AgentdClient {
     },
   ): Promise<{ idea: SavedIdea; task: Task }> {
     return this.req(`/api/saved-ideas/${encodeURIComponent(id)}/spawn`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+  /**
+   * Fan a saved idea's slices out into N sibling tasks. Returns the
+   * created tasks in slice order; the first one starts immediately,
+   * the rest stay `pending` until their parent finishes.
+   */
+  async spawnMultiFromSavedIdea(
+    id: string,
+    body: {
+      slices: PlanSlice[];
+      shareWorktree?: boolean;
+      branchName?: string;
+      baseBranch?: string;
+      title?: string;
+    },
+  ): Promise<{ idea: SavedIdea; tasks: Task[] }> {
+    return this.req(`/api/saved-ideas/${encodeURIComponent(id)}/spawn-multi`, {
       method: "POST",
       body: JSON.stringify(body),
     });
@@ -787,7 +819,7 @@ export class AgentdClient {
       thinkingLevel?: ThinkingLevel;
       permissionMode?: "bypassPermissions" | "acceptEdits" | "plan";
       workspaceMode?: "worktree" | "in_place";
-      branchMode?: "new" | "existing";
+      branchMode?: "new" | "existing" | "shared";
       branchName?: string;
       pullLatest?: boolean;
       title?: string;
@@ -815,7 +847,12 @@ export class AgentdClient {
     },
     onChunk: (chunk: string) => void,
     signal?: AbortSignal,
-  ): Promise<{ plan: string; source: string; error?: string }> {
+  ): Promise<{
+    plan: string;
+    source: string;
+    error?: string;
+    slices?: PlanSlice[];
+  }> {
     const r = await fetch(
       `${this.server}/api/suggestions/${encodeURIComponent(id)}/plan`,
       {

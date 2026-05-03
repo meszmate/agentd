@@ -1,7 +1,29 @@
 import { eq, desc, and, sql } from "drizzle-orm";
-import type { Idea, IdeaStatus } from "@agentd/contracts";
+import type { Idea, IdeaStatus, PlanSlice } from "@agentd/contracts";
+import { PlanSlice as PlanSliceSchema } from "@agentd/contracts";
 import { ideaMessages, savedIdeas, type Db } from "./db.ts";
 import { newId } from "./auth.ts";
+
+function parsePlanSlices(raw: string | null | undefined): PlanSlice[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return undefined;
+    const out: PlanSlice[] = [];
+    for (const r of arr) {
+      const parsed = PlanSliceSchema.safeParse(r);
+      if (parsed.success) out.push(parsed.data);
+    }
+    return out;
+  } catch {
+    return undefined;
+  }
+}
+
+function planSlicesToJson(slices: PlanSlice[] | null | undefined): string | null {
+  if (!slices || slices.length === 0) return null;
+  return JSON.stringify(slices);
+}
 
 function rowToIdea(row: typeof savedIdeas.$inferSelect): Idea {
   const tags = row.tagsCsv
@@ -10,6 +32,7 @@ function rowToIdea(row: typeof savedIdeas.$inferSelect): Idea {
         .map((s) => s.trim())
         .filter(Boolean)
     : [];
+  const planSlices = parsePlanSlices(row.planSlices ?? null);
   return {
     id: row.id,
     projectId: row.projectId,
@@ -24,6 +47,7 @@ function rowToIdea(row: typeof savedIdeas.$inferSelect): Idea {
     updatedAt: row.updatedAt || row.savedAt,
     spawnedTaskId: row.spawnedTaskId ?? null,
     spawnedAt: row.spawnedAt ?? null,
+    ...(planSlices && planSlices.length > 0 ? { planSlices } : {}),
   };
 }
 
@@ -44,6 +68,7 @@ export interface CreateIdeaInput {
   suggestionId?: string | null;
   optionIndex?: number | null;
   planDraft?: string | null;
+  planSlices?: PlanSlice[] | null;
 }
 
 export function createSavedIdea(db: Db, input: CreateIdeaInput): Idea {
@@ -76,6 +101,7 @@ export function createSavedIdea(db: Db, input: CreateIdeaInput): Idea {
       status: input.status ?? "draft",
       tagsCsv: tagsToCsv(input.tags),
       planDraft: input.planDraft ?? null,
+      planSlices: planSlicesToJson(input.planSlices),
       savedAt: now,
       updatedAt: now,
       spawnedTaskId: null,
@@ -149,6 +175,7 @@ export interface UpdateIdeaInput {
   status?: IdeaStatus;
   tags?: string[];
   planDraft?: string | null;
+  planSlices?: PlanSlice[] | null;
 }
 
 export function updateSavedIdea(
@@ -162,6 +189,8 @@ export function updateSavedIdea(
   if (patch.status != null) next.status = patch.status;
   if (patch.tags !== undefined) next.tagsCsv = tagsToCsv(patch.tags);
   if (patch.planDraft !== undefined) next.planDraft = patch.planDraft;
+  if (patch.planSlices !== undefined)
+    next.planSlices = planSlicesToJson(patch.planSlices);
   db.update(savedIdeas).set(next).where(eq(savedIdeas.id, id)).run();
   return getSavedIdea(db, id);
 }
@@ -172,6 +201,14 @@ export function updateSavedIdeaPlan(
   planDraft: string | null,
 ): Idea | null {
   return updateSavedIdea(db, id, { planDraft });
+}
+
+export function updateSavedIdeaSlices(
+  db: Db,
+  id: string,
+  slices: PlanSlice[] | null,
+): Idea | null {
+  return updateSavedIdea(db, id, { planSlices: slices });
 }
 
 export function markSavedIdeaSpawned(

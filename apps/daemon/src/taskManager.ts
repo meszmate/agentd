@@ -5,6 +5,7 @@ import type {
   Council,
   CouncilMember,
   PermissionMode,
+  PlanSlice,
   ResolveSuggestionRequest,
   Suggestion,
   Task,
@@ -20,7 +21,9 @@ import {
   detectDefaultBranch,
   EventBus,
   getTask,
+  getTasksDependingOn,
   listTasks,
+  listTasksByPlanGroup,
   listMessages,
   createCouncil as dbCreateCouncil,
   createSuggestion,
@@ -82,6 +85,26 @@ export interface CreateTaskParams {
   pullLatest?: boolean;
   thinkingLevel?: ThinkingLevel;
   model?: string;
+  /**
+   * Plan-slice chain: when set, the task is created as `pending` and
+   * spawnRunner is held until the parent transitions to `done`. The
+   * lifecycle hook in `runCompletionHooks` fans out from the parent.
+   */
+  dependsOnTaskId?: string | null;
+  /** Group key shared by every sibling slice in one plan. */
+  planGroupId?: string | null;
+  /**
+   * Pre-created worktree path (used by `createBatch` so every sibling
+   * reuses the single shared worktree). When set, the manager skips
+   * its own `createWorktree` call.
+   */
+  sharedWorktreePath?: string;
+  /**
+   * Pre-resolved branch name for the shared worktree. Required when
+   * `sharedWorktreePath` is set so the persisted task row matches the
+   * branch the worktree is checked out on.
+   */
+  sharedBranch?: string;
 }
 
 export class TaskManager {
@@ -279,37 +302,47 @@ export class TaskManager {
     const taskId = newId("task");
     const workspaceMode = params.workspaceMode ?? "worktree";
     const branchMode = params.branchMode ?? "new";
-    // Auto-name the branch when the caller didn't provide one. We try the
-    // AI helper first because the prompt usually has a clear intent ("fix
-    // X", "add Y") that maps to a much tighter slug than the title.
-    // Falls back to a deterministic slug if Claude isn't available — and
-    // we never include the task id, so names look like `feature/auth-rate-limit`
-    // instead of the old `feature/<long-title>-7a5a4a`.
     let branch: string;
-    if (branchMode === "existing") {
-      branch = params.branchName?.trim() || baseBranch;
-    } else if (params.branchName?.trim()) {
-      branch = params.branchName.trim();
+    let worktreePath: string;
+    if (params.sharedWorktreePath && params.sharedBranch) {
+      // Plan-slice sibling: the batch already created the shared
+      // worktree + branch; just reuse them so every slice lands on
+      // the same checkout.
+      worktreePath = params.sharedWorktreePath;
+      branch = params.sharedBranch;
     } else {
-      const cfg = loadConfig(this.paths.root);
-      const ai = await generateBranchName(params.prompt, {
-        helper: cfg.aiHelpers,
+      // Auto-name the branch when the caller didn't provide one. We try the
+      // AI helper first because the prompt usually has a clear intent ("fix
+      // X", "add Y") that maps to a much tighter slug than the title.
+      // Falls back to a deterministic slug if Claude isn't available — and
+      // we never include the task id, so names look like `feature/auth-rate-limit`
+      // instead of the old `feature/<long-title>-7a5a4a`.
+      if (branchMode === "existing") {
+        branch = params.branchName?.trim() || baseBranch;
+      } else if (params.branchName?.trim()) {
+        branch = params.branchName.trim();
+      } else {
+        const cfg = loadConfig(this.paths.root);
+        const ai = await generateBranchName(params.prompt, {
+          helper: cfg.aiHelpers,
+        });
+        branch = `feature/${ai.slug}`;
+      }
+      const result = await createWorktree({
+        repoPath: params.repoPath,
+        worktreeRoot: this.paths.worktrees,
+        taskId,
+        baseBranch,
+        branchName: branch,
+        workspaceMode,
+        branchMode: branchMode === "shared" ? "new" : branchMode,
+        pullLatest: params.pullLatest ?? false,
       });
-      branch = `feature/${ai.slug}`;
+      worktreePath = result.worktreePath;
     }
     // Auto-create or look up the project for this repo path. Tasks belong
     // to projects so the sidebar can group them and surface what's new.
     const project = ensureProjectForPath(this.db, params.repoPath);
-    const { worktreePath } = await createWorktree({
-      repoPath: params.repoPath,
-      worktreeRoot: this.paths.worktrees,
-      taskId,
-      baseBranch,
-      branchName: branch,
-      workspaceMode,
-      branchMode,
-      pullLatest: params.pullLatest ?? false,
-    });
     const task: Task = createTask(this.db, {
       id: taskId,
       title,
@@ -335,11 +368,124 @@ export class TaskManager {
           return cfg.defaultThinking[params.agent];
         })(),
       model: params.model ?? "",
+      dependsOnTaskId: params.dependsOnTaskId ?? null,
+      planGroupId: params.planGroupId ?? null,
     });
     touchProject(this.db, project.id);
     appendMessage(this.db, task.id, "user", params.prompt);
+    if (params.dependsOnTaskId) {
+      // Chained child — wait for parent to finish. The lifecycle hook
+      // in runCompletionHooks fires spawnRunner once the parent reaches
+      // `done`. Tell the operator on the timeline so the pending state
+      // isn't a mystery.
+      const parent = getTask(this.db, params.dependsOnTaskId);
+      const label = parent?.title?.slice(0, 60) ?? params.dependsOnTaskId;
+      appendMessage(
+        this.db,
+        task.id,
+        "system",
+        `Waiting on parent slice "${label}" to finish before this slice runs.`,
+      );
+      this.bus.publishSystem({ kind: "task_changed", task });
+      return task;
+    }
     await this.spawnRunner(task, params.prompt, false);
     return task;
+  }
+
+  /**
+   * Spawn N sibling tasks from a single plan. Every slice shares one
+   * worktree on one branch (when `shareWorktree` is true, the default);
+   * slices run sequentially via `dependsOnTaskId` chains so two runners
+   * never race on the same checkout.
+   *
+   * Returns the created tasks in slice order. The first slice is
+   * spawned immediately; subsequent slices stay pending until the hook
+   * in `runCompletionHooks` drives them on parent completion.
+   */
+  async createBatch(params: {
+    repoPath: string;
+    baseBranch?: string;
+    slices: PlanSlice[];
+    titlePrefix?: string;
+    branchName?: string;
+    shareWorktree?: boolean;
+    autoPush?: boolean;
+  }): Promise<Task[]> {
+    if (params.slices.length === 0) {
+      throw new Error("createBatch needs at least one slice");
+    }
+    const baseBranch =
+      params.baseBranch ?? (await detectDefaultBranch(params.repoPath));
+    const cfg = loadConfig(this.paths.root);
+    const project = ensureProjectForPath(this.db, params.repoPath);
+    const planGroupId = newId("grp");
+    const shareWorktree = params.shareWorktree ?? params.slices.length > 1;
+
+    let sharedWorktreePath: string | undefined;
+    let sharedBranch: string | undefined;
+    if (shareWorktree) {
+      const branchName =
+        params.branchName?.trim() ||
+        `feature/${
+          (
+            await generateBranchName(
+              params.titlePrefix || params.slices[0]!.prompt,
+              { helper: cfg.aiHelpers },
+            )
+          ).slug
+        }`;
+      const result = await createWorktree({
+        repoPath: params.repoPath,
+        worktreeRoot: this.paths.worktrees,
+        taskId: planGroupId,
+        baseBranch,
+        branchName,
+        workspaceMode: "worktree",
+        branchMode: "shared",
+        planGroupId,
+        pullLatest: false,
+      });
+      sharedWorktreePath = result.worktreePath;
+      sharedBranch = result.branch;
+    }
+
+    const created: Task[] = [];
+    let prevId: string | null = null;
+    for (let i = 0; i < params.slices.length; i++) {
+      const slice = params.slices[i]!;
+      const agent: AgentKind = slice.agent ?? "claude";
+      const titleBase =
+        params.titlePrefix?.trim() || slice.prompt.split("\n")[0]!.slice(0, 60);
+      const title =
+        params.slices.length > 1
+          ? `[${i + 1}/${params.slices.length}] ${slice.title || titleBase}`.slice(
+              0,
+              120,
+            )
+          : slice.title || titleBase;
+      const task = await this.create({
+        agent,
+        repoPath: params.repoPath,
+        baseBranch,
+        prompt: slice.prompt,
+        title,
+        ...(slice.model ? { model: slice.model } : {}),
+        ...(slice.thinkingLevel ? { thinkingLevel: slice.thinkingLevel } : {}),
+        ...(slice.permissionMode
+          ? { permissionMode: slice.permissionMode }
+          : {}),
+        ...(params.autoPush != null ? { autoPush: params.autoPush } : {}),
+        ...(prevId ? { dependsOnTaskId: prevId } : {}),
+        planGroupId,
+        ...(sharedWorktreePath ? { sharedWorktreePath } : {}),
+        ...(sharedBranch ? { sharedBranch } : {}),
+      });
+      created.push(task);
+      prevId = task.id;
+    }
+    void project;
+    return created;
   }
 
   async sendInput(taskId: string, text: string): Promise<void> {
@@ -556,7 +702,25 @@ export class TaskManager {
 
   async stop(taskId: string): Promise<void> {
     const session = this.running.get(taskId);
-    if (!session) return;
+    if (!session) {
+      // Even if no runner is alive, a pending chained child can be
+      // explicitly cancelled — propagate to its dependents and mark
+      // the row stopped so the UI clears the "waiting on parent" pill.
+      const cur = getTask(this.db, taskId);
+      if (cur && cur.status === "pending" && cur.dependsOnTaskId) {
+        updateTaskStatus(this.db, taskId, "stopped");
+        this.bus.publish({
+          taskId,
+          event: { kind: "status", status: "stopped" },
+          ts: Date.now(),
+        });
+        this.propagateCancelToDependents(
+          taskId,
+          "an upstream slice was cancelled",
+        );
+      }
+      return;
+    }
     await session.runner.stop("SIGTERM");
     session.unsubscribe();
     this.running.delete(taskId);
@@ -566,6 +730,10 @@ export class TaskManager {
       event: { kind: "status", status: "stopped" },
       ts: Date.now(),
     });
+    this.propagateCancelToDependents(
+      taskId,
+      "an upstream slice was cancelled",
+    );
   }
 
   async remove(taskId: string, opts?: { keepWorktree?: boolean }): Promise<void> {
@@ -734,6 +902,10 @@ export class TaskManager {
       });
       updateTaskStatus(this.db, task.id, "failed");
       this.running.delete(task.id);
+      this.propagateCancelToDependents(
+        task.id,
+        "an upstream slice failed to start",
+      );
       throw err;
     }
   }
@@ -867,6 +1039,83 @@ export class TaskManager {
     // siblings have settled and run the judge if so.
     if (task.councilId) {
       void this.maybeRunJudge(task.councilId);
+    }
+    // Plan-slice chain hook — surface the next slice if this one
+    // landed cleanly, or cancel dependents on a failure exit.
+    const fresh = getTask(this.db, taskId);
+    if (fresh?.status === "failed") {
+      this.propagateCancelToDependents(
+        taskId,
+        "an upstream slice failed",
+      );
+    } else {
+      void this.maybeChainNextSlice(taskId);
+    }
+  }
+
+  /**
+   * If the just-finished task has dependent slices, spawn the next
+   * one(s). Reads the freshest task row so we see the post-commit
+   * status. Idempotent: a sibling already running won't be respawned.
+   */
+  private async maybeChainNextSlice(parentTaskId: string): Promise<void> {
+    const parent = getTask(this.db, parentTaskId);
+    if (!parent) return;
+    if (parent.status !== "done" && parent.status !== "idle") return;
+    const dependents = getTasksDependingOn(this.db, parentTaskId);
+    for (const child of dependents) {
+      if (child.status !== "pending") continue;
+      if (this.isRunning(child.id)) continue;
+      try {
+        appendMessage(
+          this.db,
+          child.id,
+          "system",
+          `Parent slice "${parent.title.slice(0, 60)}" finished — starting this slice.`,
+        );
+        const promptMsgs = listMessages(this.db, child.id, 50);
+        const initial =
+          promptMsgs.find((m) => m.role === "user")?.content ?? child.title;
+        await this.spawnRunner(child, initial, false);
+      } catch (e) {
+        this.bus.publish({
+          taskId: child.id,
+          event: {
+            kind: "raw",
+            stream: "stderr",
+            text: `[chain spawn failed] ${(e as Error).message}`,
+          },
+          ts: Date.now(),
+        });
+      }
+    }
+  }
+
+  /**
+   * Mark every dependent of `parentTaskId` (transitively) as `stopped`
+   * with an explanatory system message. Used when a parent fails or is
+   * cancelled — children would never start otherwise.
+   */
+  private propagateCancelToDependents(parentTaskId: string, reason: string): void {
+    const dependents = getTasksDependingOn(this.db, parentTaskId);
+    for (const child of dependents) {
+      if (child.status !== "pending") continue;
+      appendMessage(
+        this.db,
+        child.id,
+        "system",
+        `Cancelled — ${reason}`,
+      );
+      updateTaskStatus(this.db, child.id, "stopped");
+      this.bus.publish({
+        taskId: child.id,
+        event: { kind: "status", status: "stopped" },
+        ts: Date.now(),
+      });
+      const fresh = getTask(this.db, child.id);
+      if (fresh) this.bus.publishSystem({ kind: "task_changed", task: fresh });
+      // Cascade: a stopped child cancels its own children too.
+      this.propagateCancelToDependents(child.id, reason);
     }
   }
 

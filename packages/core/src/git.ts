@@ -1660,6 +1660,74 @@ function parseScores(
   return { scores, source: "claude" };
 }
 
+/* ── Plan-slice parsing ───────────────────────────────────────────── */
+
+/**
+ * Parse a planner's output into prose + executable slices. The planner
+ * emits a fenced \`\`\`json-slices block at the tail; this helper
+ * strips the block from the prose body and returns its parsed payload.
+ *
+ * Forgiving: a missing or malformed block returns `slices: []` and
+ * leaves the original text untouched. Operators don't lose their plan
+ * to a JSON syntax glitch.
+ */
+export interface ParsedPlan {
+  plan: string;
+  slices: Array<{
+    title: string;
+    prompt: string;
+    agent?: "claude" | "codex";
+    model?: string;
+    thinkingLevel?: "low" | "medium" | "high" | "max" | "xhigh";
+    permissionMode?: "bypassPermissions" | "acceptEdits" | "plan";
+  }>;
+}
+
+const SLICE_BLOCK_RE = /```json-slices\s*\n([\s\S]*?)\n```/i;
+
+export function parseSlicesFromPlan(text: string): ParsedPlan {
+  const match = text.match(SLICE_BLOCK_RE);
+  if (!match) return { plan: text, slices: [] };
+  const plan = text.replace(SLICE_BLOCK_RE, "").trimEnd();
+  const raw = match[1] ?? "";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { plan, slices: [] };
+  }
+  if (!Array.isArray(parsed)) return { plan, slices: [] };
+  const out: ParsedPlan["slices"] = [];
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    const title = typeof e.title === "string" ? e.title.trim() : "";
+    const prompt = typeof e.prompt === "string" ? e.prompt.trim() : "";
+    if (!title || !prompt) continue;
+    const slice: ParsedPlan["slices"][number] = { title, prompt };
+    if (e.agent === "claude" || e.agent === "codex") slice.agent = e.agent;
+    if (typeof e.model === "string" && e.model.trim()) slice.model = e.model.trim();
+    if (
+      e.thinkingLevel === "low" ||
+      e.thinkingLevel === "medium" ||
+      e.thinkingLevel === "high" ||
+      e.thinkingLevel === "max" ||
+      e.thinkingLevel === "xhigh"
+    ) {
+      slice.thinkingLevel = e.thinkingLevel;
+    }
+    if (
+      e.permissionMode === "bypassPermissions" ||
+      e.permissionMode === "acceptEdits" ||
+      e.permissionMode === "plan"
+    ) {
+      slice.permissionMode = e.permissionMode;
+    }
+    out.push(slice);
+  }
+  return { plan, slices: out };
+}
+
 /* ── Suggestion → plan generator ───────────────────────────────────── */
 
 /**
@@ -1677,6 +1745,8 @@ export interface PlanResult {
   plan: string;
   source: "claude" | "fallback-empty" | "fallback-error";
   error?: string;
+  /** Parsed slices from the trailing json-slices block, when present. */
+  slices?: ParsedPlan["slices"];
 }
 
 export async function* streamSuggestionPlan(
@@ -1705,6 +1775,8 @@ export async function* streamSuggestionPlan(
     `- 250–500 words total. No preamble.`,
     `- No code blocks unless quoting an exact API shape — the executor model will write the code.`,
     opts.extraInstructions ? `\nExtra guidance from the operator:\n${opts.extraInstructions}` : "",
+    "",
+    `After the plan prose, OPTIONALLY append a fenced \`\`\`json-slices block whose body is a JSON array of {title, prompt, agent?, model?, thinkingLevel?} objects. Each entry becomes one task in a sibling chain that shares a single git branch and runs sequentially, so slices represent independent commits on the same branch. Only emit more than one slice when the work clearly crosses boundaries (backend vs frontend, library vs app, codegen vs hand-edit). One slice (or no block at all) is the right answer for most ideas. \`agent\` may be "claude" or "codex"; \`model\` is a free-form id ("opus", "gpt-5-codex", anything the operator likes). Example: \`\`\`json-slices\\n[{"title":"backend","prompt":"…","agent":"claude","model":"opus"},{"title":"frontend","prompt":"…","agent":"codex"}]\\n\`\`\` Don't fabricate slices to look thorough.`,
     "",
     `The operator's idea:`,
     brief.slice(0, 2000),
@@ -1750,7 +1822,12 @@ export async function* streamSuggestionPlan(
     .replace(/^```[a-z]*\n?|```$/g, "")
     .trim();
   if (!cleaned) return { plan: "", source: "fallback-empty" };
-  return { plan: cleaned, source: "claude" };
+  const parsed = parseSlicesFromPlan(cleaned);
+  return {
+    plan: parsed.plan,
+    source: "claude",
+    ...(parsed.slices.length > 0 ? { slices: parsed.slices } : {}),
+  };
 }
 
 /* ── Idea workshop conversation ────────────────────────────────────── */
@@ -1784,6 +1861,13 @@ export interface IdeaChatResult {
    * brainstorm UI uses this to keep its save-button label fresh.
    */
   suggestedTitle?: string | null;
+  /**
+   * Plan slices parsed from the agent's tail json-slices block. Only
+   * populated for `mode === "plan"` and when the agent actually emitted
+   * the block. The chat-mode plan-update path also routes through
+   * `parseSlicesFromPlan` so slices found there flow through too.
+   */
+  planSlices?: ParsedPlan["slices"];
 }
 
 export async function* streamIdeaConversation(
@@ -1839,6 +1923,8 @@ export async function* streamIdeaConversation(
             `Be specific. Reference real files/symbols/lines. Avoid filler. If a section truly has nothing to say, write "n/a — <one-line reason>".`,
             ``,
             `If the prior plan draft already exists, refine and extend it instead of rewriting from scratch — keep what's right, fix what's wrong, fill in what's missing. The operator's latest message (if any) is the diff to apply.`,
+            ``,
+            `After the plan body, OPTIONALLY append a fenced \`\`\`json-slices block whose body is a JSON array of {title, prompt, agent?, model?, thinkingLevel?} objects. Each entry becomes one task in a sibling chain that shares a single git branch and runs sequentially, so slices represent independent commits on the same branch. Only emit more than one slice when the work clearly crosses boundaries (backend vs frontend, library vs app, codegen vs hand-edit). One slice (or no block at all) is the right answer for most ideas. \`agent\` may be "claude" or "codex"; \`model\` is a free-form id ("opus", "gpt-5-codex", anything the operator likes). Don't fabricate slices to look thorough.`,
           ].join("\n")
         : `Refine this idea with the operator. Be candid, concise, and specific — reference real files/patterns from the repo when relevant. Question assumptions when you spot them. Don't restate the operator; respond to them. Keep replies under 250 words.`;
 
@@ -1950,11 +2036,28 @@ export async function* streamIdeaConversation(
     const tm = cleaned.match(/(^|\n)\s*TITLE:\s*([^\n]+?)\s*$/i);
     if (tm) suggestedTitle = (tm[2] ?? "").trim() || null;
   }
+  // Plan slices: parse from the plan body (mode === "plan") or from a
+  // chat-mode plan-update block. Either way, the slice block is part
+  // of the plan markdown so we feed both sources through the same
+  // helper. Returning the slices on the result lets the daemon
+  // persist them on the idea without a second round trip.
+  let planSlices: ParsedPlan["slices"] | undefined;
+  let finalReply = cleaned;
+  if (mode === "plan") {
+    const parsed = parseSlicesFromPlan(cleaned);
+    finalReply = parsed.plan;
+    if (parsed.slices.length > 0) planSlices = parsed.slices;
+  } else if (planContent) {
+    const parsed = parseSlicesFromPlan(planContent);
+    planContent = parsed.plan;
+    if (parsed.slices.length > 0) planSlices = parsed.slices;
+  }
   return {
-    reply: cleaned,
+    reply: finalReply,
     source: "claude",
     ...(planContent ? { planContent } : {}),
     ...(suggestedTitle ? { suggestedTitle } : {}),
+    ...(planSlices ? { planSlices } : {}),
   };
 }
 

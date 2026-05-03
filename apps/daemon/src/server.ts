@@ -26,6 +26,7 @@ import {
   PlanSuggestionRequest,
   ResolveSuggestionRequest,
   SaveIdeaRequest,
+  SpawnMultiRequest,
   UpdateIdeaRequest,
   CreateTodoRequest,
   UpdateTodoRequest,
@@ -97,6 +98,7 @@ import {
   streamValidateIdeas,
   updateSavedIdea,
   updateSavedIdeaPlan,
+  updateSavedIdeaSlices,
   listTodos,
   reopenTask,
   setCouncilWinner,
@@ -1953,7 +1955,12 @@ export function buildServer(opts: BuildServerOptions) {
               ? { extraInstructions: cfg.agentInstructions }
               : {}),
           });
-          type Final = { plan: string; source: string; error?: string };
+          type Final = {
+            plan: string;
+            source: string;
+            error?: string;
+            slices?: import("@agentd/contracts").PlanSlice[];
+          };
           let result: Final | null = null;
           while (true) {
             const next = await it.next();
@@ -1969,6 +1976,9 @@ export function buildServer(opts: BuildServerOptions) {
               JSON.stringify({
                 source: result?.source ?? "fallback-empty",
                 plan: result?.plan ?? "",
+                ...(result?.slices && result.slices.length > 0
+                  ? { slices: result.slices }
+                  : {}),
               }),
             ),
           );
@@ -3533,6 +3543,7 @@ export function buildServer(opts: BuildServerOptions) {
                 }
                 let persisted;
                 let nextPlanDraft = idea.planDraft;
+                let nextPlanSlices = idea.planSlices ?? null;
                 if (mode === "plan") {
                   // Plan mode: the agent's reply IS the new plan. Stash
                   // it on the idea (the right-side plan panel shows
@@ -3542,6 +3553,14 @@ export function buildServer(opts: BuildServerOptions) {
                   // the activity history still survives reload.
                   const planned = updateSavedIdeaPlan(db, id, result.reply);
                   if (planned) nextPlanDraft = planned.planDraft;
+                  if (result.planSlices && result.planSlices.length > 0) {
+                    const sliced = updateSavedIdeaSlices(
+                      db,
+                      id,
+                      result.planSlices,
+                    );
+                    if (sliced) nextPlanSlices = sliced.planSlices ?? null;
+                  }
                   persisted = appendIdeaMessage(db, {
                     ideaId: id,
                     role: "system",
@@ -3583,6 +3602,14 @@ export function buildServer(opts: BuildServerOptions) {
                       result.planContent,
                     );
                     if (planned) nextPlanDraft = planned.planDraft;
+                    if (result.planSlices && result.planSlices.length > 0) {
+                      const sliced = updateSavedIdeaSlices(
+                        db,
+                        id,
+                        result.planSlices,
+                      );
+                      if (sliced) nextPlanSlices = sliced.planSlices ?? null;
+                    }
                     appendIdeaMessage(db, {
                       ideaId: id,
                       role: "system",
@@ -3599,6 +3626,9 @@ export function buildServer(opts: BuildServerOptions) {
                       message: persisted,
                       ideaStatus: nextStatus,
                       planDraft: nextPlanDraft,
+                      ...(nextPlanSlices && nextPlanSlices.length > 0
+                        ? { planSlices: nextPlanSlices }
+                        : {}),
                       ...(result.suggestedTitle
                         ? { suggestedTitle: result.suggestedTitle }
                         : {}),
@@ -3665,6 +3695,22 @@ export function buildServer(opts: BuildServerOptions) {
   });
 
   /**
+   * Persist the operator-edited slice list. Empty array (or null) clears
+   * the slices and reverts the spawn sheet to single-task mode.
+   */
+  api.put("/saved-ideas/:id/slices", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => null)) as {
+      slices?: import("@agentd/contracts").PlanSlice[] | null;
+    } | null;
+    const slices = body?.slices ?? null;
+    const updated = updateSavedIdeaSlices(db, id, slices);
+    if (!updated) return c.json({ error: "not found" }, 404);
+    pubSavedIdeaChanged(id);
+    return c.json({ idea: updated });
+  });
+
+  /**
    * Spawn a real task from a saved idea. Same machinery as the
    * suggestion resolve path — accepts the full executor knob set.
    */
@@ -3699,6 +3745,47 @@ export function buildServer(opts: BuildServerOptions) {
       const updated = markSavedIdeaSpawned(db, id, task.id) ?? idea;
       pubTaskChanged(task.id);
       return c.json({ idea: updated, task });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  /**
+   * Fan a saved idea's plan slices out into N sibling tasks. Slices
+   * share one worktree on one branch by default and run sequentially
+   * via dependsOnTaskId chains so they can land independent commits
+   * without racing on the same checkout. Returns the created tasks
+   * in slice order; the first one starts immediately.
+   */
+  api.post("/saved-ideas/:id/spawn-multi", async (c) => {
+    const id = c.req.param("id");
+    const idea = getSavedIdea(db, id);
+    if (!idea) return c.json({ error: "not found" }, 404);
+    const project = getProjectById(db, idea.projectId);
+    if (!project) return c.json({ error: "project gone" }, 400);
+    const body = await c.req.json().catch(() => null);
+    const parsed = SpawnMultiRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid body", issues: parsed.error.issues },
+        400,
+      );
+    }
+    try {
+      const created = await tasks.createBatch({
+        repoPath: project.path,
+        slices: parsed.data.slices,
+        ...(parsed.data.shareWorktree != null
+          ? { shareWorktree: parsed.data.shareWorktree }
+          : {}),
+        ...(parsed.data.branchName ? { branchName: parsed.data.branchName } : {}),
+        ...(parsed.data.baseBranch ? { baseBranch: parsed.data.baseBranch } : {}),
+        ...(parsed.data.title ? { titlePrefix: parsed.data.title } : {}),
+      });
+      const firstTask = created[0]!;
+      const updated = markSavedIdeaSpawned(db, id, firstTask.id) ?? idea;
+      for (const t of created) pubTaskChanged(t.id);
+      return c.json({ idea: updated, tasks: created });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }

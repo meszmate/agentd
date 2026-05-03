@@ -37,8 +37,11 @@ export type WorkspaceMode = z.infer<typeof WorkspaceMode>;
 /**
  *   new      — create a fresh branch (auto-named or via `branchName`).
  *   existing — switch the worktree onto an existing branch and work there.
+ *   shared   — reuse a single worktree shared by every sibling task in the
+ *              same `planGroupId`. Sequential execution via `dependsOnTaskId`
+ *              guarantees only one runner touches the checkout at a time.
  */
-export const BranchMode = z.enum(["new", "existing"]);
+export const BranchMode = z.enum(["new", "existing", "shared"]);
 export type BranchMode = z.infer<typeof BranchMode>;
 
 /**
@@ -228,6 +231,20 @@ export const Task = z.object({
    * ideas into the project's Idea Library.
    */
   kind: z.enum(["work", "ideation"]).optional(),
+  /**
+   * When set, the task waits for `dependsOnTaskId` to reach status
+   * `done` before its runner spawns. Used by plan-slice batches so
+   * the second slice automatically picks up the first slice's
+   * commits on the shared branch. The lifecycle hook in
+   * TaskManager fires the dependent on parent completion.
+   */
+  dependsOnTaskId: z.string().nullable().optional(),
+  /**
+   * When set, the task is one of N siblings produced from a single
+   * plan. Same `planGroupId` means the same worktree + branch and a
+   * shared lineage in the UI ("slice 2 of 3"). Empty for solo tasks.
+   */
+  planGroupId: z.string().nullable().optional(),
 });
 export type Task = z.infer<typeof Task>;
 
@@ -484,6 +501,28 @@ export const IdeaStatus = z.enum([
 export type IdeaStatus = z.infer<typeof IdeaStatus>;
 
 /**
+ * One executable slice of a plan. The operator can split a single
+ * planDraft into N slices, each with its own agent / model / prompt,
+ * and spawn the whole batch as sibling tasks that share a worktree.
+ *
+ * Every field except `prompt` is optional — a slice without an
+ * agent/model just inherits the spawn defaults at creation time.
+ * The model is a free-form string so the operator can pin any
+ * version they like (or leave it blank to inherit).
+ */
+export const PlanSlice = z.object({
+  /** Short label shown in the editor + as a chip on the spawned task. */
+  title: z.string().min(1),
+  /** The text fed to the runner as the prompt. */
+  prompt: z.string().min(1),
+  agent: AgentKind.optional(),
+  model: z.string().optional(),
+  thinkingLevel: ThinkingLevel.optional(),
+  permissionMode: PermissionMode.optional(),
+});
+export type PlanSlice = z.infer<typeof PlanSlice>;
+
+/**
  * First-class project-scoped idea. Has a workflow status, optional
  * extended description, tags, optional plan draft, and an attached
  * conversation thread (`IdeaMessage[]`) where the operator and the
@@ -510,6 +549,14 @@ export const Idea = z.object({
   tags: z.array(z.string()),
   /** Plan draft the operator stashed alongside the idea. */
   planDraft: z.string().nullable(),
+  /**
+   * Optional executable cut of the plan. Each entry becomes its own
+   * sibling task at spawn time (sharing one worktree + branch). When
+   * empty, the spawn sheet behaves like the legacy "one prompt → one
+   * task" path. The planner can pre-populate this; the operator can
+   * edit / add / remove rows before spawning.
+   */
+  planSlices: z.array(PlanSlice).optional(),
   savedAt: z.number(),
   updatedAt: z.number(),
   spawnedTaskId: z.string().nullable(),
@@ -531,6 +578,7 @@ export const SaveIdeaRequest = z.object({
   suggestionId: z.string().optional(),
   optionIndex: z.number().int().min(0).optional(),
   planDraft: z.string().optional(),
+  planSlices: z.array(PlanSlice).optional(),
 });
 export type SaveIdeaRequest = z.infer<typeof SaveIdeaRequest>;
 
@@ -540,8 +588,28 @@ export const UpdateIdeaRequest = z.object({
   status: IdeaStatus.optional(),
   tags: z.array(z.string()).optional(),
   planDraft: z.string().nullable().optional(),
+  planSlices: z.array(PlanSlice).nullable().optional(),
 });
 export type UpdateIdeaRequest = z.infer<typeof UpdateIdeaRequest>;
+
+/**
+ * Body for `POST /api/saved-ideas/:id/spawn-multi` — fans the plan
+ * out into N sibling tasks. Slices share a `planGroupId` and run
+ * sequentially via `dependsOnTaskId` chains. When `shareWorktree`
+ * is true (default for >1 slices), every sibling reuses the same
+ * worktree path on the same branch.
+ */
+export const SpawnMultiRequest = z.object({
+  slices: z.array(PlanSlice).min(1),
+  /** Default true. When false each slice gets its own worktree (still chained). */
+  shareWorktree: z.boolean().optional(),
+  /** Override the auto-generated branch name. Honored when shareWorktree=true. */
+  branchName: z.string().optional(),
+  baseBranch: z.string().optional(),
+  /** Optional title prefix — falls back to the idea's text. */
+  title: z.string().optional(),
+});
+export type SpawnMultiRequest = z.infer<typeof SpawnMultiRequest>;
 
 /**
  * Tool-call activity captured during the agent's turn — persisted
