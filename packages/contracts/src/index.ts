@@ -811,6 +811,55 @@ export type DeviceSession = z.infer<typeof DeviceSession>;
 // host many tasks (each on its own worktree branch). Auto-created when a
 // task spawns at a path that doesn't have one yet.
 
+/**
+ * Per-project auto-brainstorm config. When `enabled`, the daemon's
+ * scheduler tick fires the brainstorm helper on this project at the
+ * given cadence, runs every chosen validator over the result, and
+ * auto-promotes any option whose average score crosses
+ * `keepThreshold` into the Idea Library (status: draft). The
+ * operator wakes up to a queue of pre-vetted ideas instead of having
+ * to brainstorm by hand.
+ */
+export const BrainstormAuto = z.object({
+  enabled: z.boolean().default(false),
+  /** Free-text brief the agent uses each run. Same shape the operator
+   *  would type into the brainstorm composer by hand. */
+  prompt: z.string().default(""),
+  /** How many options to ask for per run (2-9). */
+  maxOptions: z.number().int().min(2).max(9).default(5),
+  /** Minutes between runs. The scheduler ticks once per minute and
+   *  fires when `now >= lastRunAt + intervalMin * 60_000`. */
+  intervalMin: z.number().int().min(15).default(360),
+  /** Generator agent + model that drafts the ideas. */
+  generator: z.object({
+    agent: AgentKind.default("claude"),
+    model: z.string().default(""),
+  }).default({ agent: "claude", model: "" }),
+  /** Validators that re-score each idea after generation. Empty
+   *  list = no auto-validation; promotion uses the generator's score. */
+  validators: z
+    .array(
+      z.object({
+        agent: AgentKind,
+        model: z.string().default(""),
+      }),
+    )
+    .default([]),
+  /** Average score (0-100, across generator + validators) at or above
+   *  which the option is auto-saved to the Idea Library. */
+  keepThreshold: z.number().int().min(0).max(100).default(80),
+  /** Wall-clock of the last run. Daemon-managed. Reset to 0 by the
+   *  operator (via the settings panel) to force the next tick. */
+  lastRunAt: z.number().default(0),
+  /** Wall-clock of the last successful run (any options promoted).
+   *  Surfaced in the UI so the operator knows the loop is live. */
+  lastSuccessAt: z.number().nullable().default(null),
+  /** One-line error from the most recent failed run. Cleared on
+   *  success. Helps debug a stuck loop without tailing the daemon. */
+  lastError: z.string().nullable().default(null),
+});
+export type BrainstormAuto = z.infer<typeof BrainstormAuto>;
+
 export const Project = z.object({
   id: z.string(),
   slug: z.string(),
@@ -855,6 +904,8 @@ export const Project = z.object({
    * Requires `discordChannelId` to be set; ignored otherwise.
    */
   autoTaskThread: z.boolean().optional(),
+  /** Per-project auto-brainstorm settings (cron-driven sweeps). */
+  brainstormAuto: BrainstormAuto.nullable().optional(),
 });
 export type Project = z.infer<typeof Project>;
 
@@ -873,6 +924,9 @@ export const UpdateProjectRequest = z.object({
   telegramChatId: z.string().nullable().optional(),
   discordChannelId: z.string().nullable().optional(),
   autoTaskThread: z.boolean().optional(),
+  /** Replaces the auto-brainstorm config wholesale. Pass null to
+   *  disable; pass a partial-but-complete BrainstormAuto to enable. */
+  brainstormAuto: BrainstormAuto.nullable().optional(),
 });
 export type UpdateProjectRequest = z.infer<typeof UpdateProjectRequest>;
 

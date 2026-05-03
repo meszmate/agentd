@@ -1,7 +1,18 @@
 import { eq, sql } from "drizzle-orm";
-import type { Project } from "@agentd/contracts";
+import type { BrainstormAuto, Project } from "@agentd/contracts";
 import { newId } from "./auth.ts";
 import { projects, tasks, type Db } from "./db.ts";
+
+function parseBrainstormAuto(
+  raw: string | null | undefined,
+): BrainstormAuto | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as BrainstormAuto;
+  } catch {
+    return null;
+  }
+}
 
 function basenameOf(p: string): string {
   const trimmed = p.replace(/\/+$/, "");
@@ -21,6 +32,7 @@ function slugifyProjectName(s: string): string {
 }
 
 function rowToProject(row: typeof projects.$inferSelect): Project {
+  const brainstormAuto = parseBrainstormAuto(row.brainstormAutoJson);
   return {
     id: row.id,
     slug: row.slug,
@@ -34,6 +46,7 @@ function rowToProject(row: typeof projects.$inferSelect): Project {
     telegramChatId: row.telegramChatId ?? null,
     discordChannelId: row.discordChannelId ?? null,
     autoTaskThread: !!row.autoTaskThread,
+    brainstormAuto,
   };
 }
 
@@ -110,6 +123,7 @@ export interface UpdateProjectInput {
   telegramChatId?: string | null;
   discordChannelId?: string | null;
   autoTaskThread?: boolean;
+  brainstormAuto?: BrainstormAuto | null;
 }
 
 export function updateProject(
@@ -131,6 +145,10 @@ export function updateProject(
     next.discordChannelId = patch.discordChannelId;
   if (patch.autoTaskThread !== undefined)
     next.autoTaskThread = patch.autoTaskThread ? 1 : 0;
+  if (patch.brainstormAuto !== undefined)
+    next.brainstormAutoJson = patch.brainstormAuto
+      ? JSON.stringify(patch.brainstormAuto)
+      : null;
   // Drizzle's .set() throws "No values to set" on an empty object —
   // skip the UPDATE entirely when the patch had nothing meaningful.
   if (Object.keys(next).length === 0) return cur;

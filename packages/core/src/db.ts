@@ -200,6 +200,13 @@ export const projects = sqliteTable("projects", {
   discordChannelId: text("discord_channel_id"),
   /** When 1, every task in this project spawns its own Discord thread. */
   autoTaskThread: integer("auto_task_thread").notNull().default(0),
+  /**
+   * Per-project auto-brainstorm config. JSON blob of `BrainstormAuto`
+   * (see contracts) — generator agent/model, validator list, score
+   * threshold, cron schedule. NULL means auto-brainstorm is off for
+   * this project. The cron tick reads it once per minute.
+   */
+  brainstormAutoJson: text("brainstorm_auto_json"),
 });
 
 export const templates = sqliteTable("templates", {
@@ -535,6 +542,7 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE saved_ideas ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE suggestions ADD COLUMN events_json TEXT",
   "ALTER TABLE suggestions ADD COLUMN validations_json TEXT",
+  "ALTER TABLE projects ADD COLUMN brainstorm_auto_json TEXT",
 ];
 
 function migrate(sqlite: Database): void {

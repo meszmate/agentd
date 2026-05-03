@@ -91,7 +91,7 @@ import {
   runIdeation,
   streamIdeaConversation,
   streamIdeation,
-  validateIdeas,
+  streamValidateIdeas,
   updateSavedIdea,
   updateSavedIdeaPlan,
   listTodos,
@@ -1733,42 +1733,86 @@ export function buildServer(opts: BuildServerOptions) {
       ...(body?.model ? { model: body.model } : {}),
       ...(body?.effort ? { effort: body.effort } : {}),
     };
-    // Validation needs the project repo for grounding. Project-scoped
-    // suggestions read from `projects.path`; orphan suggestions fall
-    // back to the daemon's working dir.
     let cwd = process.cwd();
     if (sug.projectId) {
       const project = getProjectById(db, sug.projectId);
       if (project) cwd = project.path;
     }
-    try {
-      const r = await validateIdeas({
-        cwd,
-        brief: sug.prompt,
-        ideas: sug.options,
-        helper,
-      });
-      if (r.scores.length === 0) {
-        return c.json(
-          { error: r.error ?? "the rater returned no scores" },
-          400,
-        );
-      }
-      const updated = addSuggestionValidation(db, id, {
-        agent: helper.agent ?? "claude",
-        model: helper.model ?? "",
-        scores: r.scores,
-        validatedAt: Date.now(),
-      });
-      if (!updated) return c.json({ error: "vanished" }, 404);
-      bus.publishSystem({
-        kind: "suggestion_updated",
-        suggestion: updated,
-      });
-      return c.json({ suggestion: updated });
-    } catch (e) {
-      return c.json({ error: (e as Error).message }, 500);
-    }
+    // Streamed: each tool_use / tool_result lands as `\x1f<json>\n`
+    // so the brainstorm UI can show "claude opus is reading the
+    // README…" live. Final result is `\x1e<JSON envelope>` with
+    // `{ok, suggestion}` or `{ok:false, error}`.
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const enc = new TextEncoder();
+        try {
+          const it = streamValidateIdeas({
+            cwd,
+            brief: sug.prompt,
+            ideas: sug.options,
+            helper,
+          });
+          while (true) {
+            const next = await it.next();
+            if (next.done) {
+              const r = next.value;
+              if (r.scores.length === 0) {
+                controller.enqueue(
+                  enc.encode(
+                    `\x1e${JSON.stringify({
+                      ok: false,
+                      error: r.error ?? "the rater returned no scores",
+                    })}`,
+                  ),
+                );
+                break;
+              }
+              const updated = addSuggestionValidation(db, id, {
+                agent: helper.agent ?? "claude",
+                model: helper.model ?? "",
+                scores: r.scores,
+                validatedAt: Date.now(),
+              });
+              if (updated) {
+                bus.publishSystem({
+                  kind: "suggestion_updated",
+                  suggestion: updated,
+                });
+              }
+              controller.enqueue(
+                enc.encode(
+                  `\x1e${JSON.stringify({
+                    ok: true,
+                    suggestion: updated ?? sug,
+                  })}`,
+                ),
+              );
+              break;
+            }
+            controller.enqueue(
+              enc.encode(`\x1f${JSON.stringify(next.value)}\n`),
+            );
+          }
+        } catch (e) {
+          controller.enqueue(
+            enc.encode(
+              `\x1e${JSON.stringify({
+                ok: false,
+                error: (e as Error).message,
+              })}`,
+            ),
+          );
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-cache",
+      },
+    });
   });
 
   /**

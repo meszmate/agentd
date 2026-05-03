@@ -648,23 +648,74 @@ export class AgentdClient {
   }
   /**
    * Re-score every option on a suggestion with the given agent + model.
-   * Adds (or replaces) one validation entry on the suggestion, returns
-   * the updated row so the UI can render the new score badges
-   * immediately. Realtime bus also fires `suggestion_updated` for
-   * other connected surfaces.
+   * Streams the rater's tool calls (Read / Glob / Bash) so the UI can
+   * show "claude opus is reading the README…" live, then resolves
+   * with the updated suggestion (new score badges) or the error.
+   * Realtime bus also fires `suggestion_updated` for other surfaces.
    */
-  async validateSuggestion(
+  async streamValidateSuggestion(
     id: string,
     body: {
       agent: "claude" | "codex";
       model?: string;
       effort?: ThinkingLevel;
     },
-  ): Promise<{ suggestion: Suggestion }> {
-    return this.req(`/api/suggestions/${encodeURIComponent(id)}/validate`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    onEvent: (event: IdeaChatEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<
+    | { ok: true; suggestion: Suggestion }
+    | { ok: false; error: string }
+  > {
+    const r = await fetch(
+      `${this.server}/api/suggestions/${encodeURIComponent(id)}/validate`,
+      {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(body),
+        signal,
+      },
+    );
+    if (!r.ok || !r.body) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`validate failed: ${r.status} ${text}`);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let envelope = "";
+    let sawSentinel = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      while (!sawSentinel) {
+        const sIdx = buffer.indexOf("\x1e");
+        const oIdx = buffer.indexOf("\x1f");
+        if (sIdx >= 0 && (oIdx < 0 || sIdx < oIdx)) {
+          envelope += buffer.slice(sIdx + 1);
+          buffer = "";
+          sawSentinel = true;
+          break;
+        }
+        if (oIdx < 0) break;
+        const eol = buffer.indexOf("\n", oIdx + 1);
+        if (eol < 0) break;
+        const json = buffer.slice(oIdx + 1, eol);
+        buffer = buffer.slice(eol + 1);
+        try {
+          onEvent(JSON.parse(json));
+        } catch {
+          // bad event — skip
+        }
+      }
+      if (sawSentinel) envelope += buffer.length ? buffer : "";
+      if (sawSentinel) buffer = "";
+    }
+    try {
+      return JSON.parse(envelope || "{}");
+    } catch {
+      return { ok: false, error: envelope || "empty stream" };
+    }
   }
   /**
    * Conversational reply — heuristic + AI router. The text is whatever

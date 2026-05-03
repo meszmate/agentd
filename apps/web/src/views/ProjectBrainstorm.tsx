@@ -65,13 +65,13 @@ import {
   useDeleteSavedIdea,
   useIdeateForProject,
   useModels,
+  useInvalidateSuggestions,
   useProject,
   useProjectGitState,
   useProjectSuggestions,
   usePullProject,
   useSaveIdea,
   useSavedIdeas,
-  useValidateSuggestion,
 } from "@/queries";
 import { useQueryClient } from "@tanstack/react-query";
 import { cn, formatTs } from "@/lib/utils";
@@ -134,7 +134,7 @@ export function ProjectBrainstorm() {
   const ideate = useIdeateForProject();
   const save = useSaveIdea();
   const unsave = useDeleteSavedIdea();
-  const validate = useValidateSuggestion();
+  const invalidateSuggestions = useInvalidateSuggestions();
   const modelsQ = useModels();
   const client = useClient();
   const qc = useQueryClient();
@@ -142,8 +142,12 @@ export function ProjectBrainstorm() {
 
   const [brief, setBrief] = useState("");
   const [streaming, setStreaming] = useState(false);
-  /** Suggestion id currently being validated — drives the spinner UI. */
+  /** Suggestion id currently being validated + which rater fired it. */
   const [validatingId, setValidatingId] = useState<string | null>(null);
+  const [validateLabel, setValidateLabel] = useState<string>("");
+  /** Live tool calls from the in-flight rater so the suggestion can
+   *  show "claude opus is reading the README…" instead of a spinner. */
+  const [validateTools, setValidateTools] = useState<IdeationEvent[]>([]);
   const [liveOptions, setLiveOptions] = useState<string[]>([]);
   /**
    * Tool calls the agent is firing during the brainstorm — Read,
@@ -329,17 +333,33 @@ export function ProjectBrainstorm() {
     model: string,
   ) => {
     setValidatingId(sid);
+    setValidateLabel(`${agent}${model ? ` · ${model}` : ""}`);
+    setValidateTools([]);
     try {
-      await validate.mutateAsync({
-        id: sid,
-        agent,
-        ...(model ? { model } : {}),
-      });
-      toast(`scored with ${agent}${model ? `:${model}` : ""}`);
+      const r = await client.streamValidateSuggestion(
+        sid,
+        { agent, ...(model ? { model } : {}) },
+        (event) => {
+          if (event.kind === "tool_use" || event.kind === "tool_result") {
+            setValidateTools((prev) => [
+              ...prev,
+              event as unknown as IdeationEvent,
+            ]);
+          }
+        },
+      );
+      if (r.ok === false) {
+        toast(r.error || "validation failed", true);
+      } else {
+        toast(`scored with ${agent}${model ? `:${model}` : ""}`);
+        invalidateSuggestions();
+      }
     } catch (e) {
       toast((e as Error).message, true);
     } finally {
       setValidatingId(null);
+      setValidateLabel("");
+      setValidateTools([]);
     }
   };
 
@@ -385,6 +405,8 @@ export function ProjectBrainstorm() {
                   onOpenIdea={openIdea}
                   onValidate={runValidate}
                   validating={validatingId}
+                  validateLabel={validateLabel}
+                  validateTools={validateTools}
                 />
               ))
             )}
@@ -543,6 +565,8 @@ function ChatTurn({
   onOpenIdea,
   onValidate,
   validating,
+  validateLabel,
+  validateTools,
   index,
 }: {
   suggestion: Suggestion;
@@ -551,8 +575,11 @@ function ChatTurn({
   onOpenIdea: (id: string) => void;
   onValidate: (sid: string, agent: "claude" | "codex", model: string) => void;
   validating: string | null;
+  validateLabel: string;
+  validateTools: IdeationEvent[];
   index: number;
 }) {
+  const isValidating = validating === suggestion.id;
   return (
     <article className="relative">
       {/* Hairline rule between turns — the only chrome between
@@ -570,7 +597,9 @@ function ChatTurn({
         onTogglePin={onTogglePin}
         onOpenIdea={onOpenIdea}
         onValidate={onValidate}
-        validating={validating === suggestion.id}
+        validating={isValidating}
+        validateLabel={isValidating ? validateLabel : ""}
+        validateTools={isValidating ? validateTools : []}
       />
     </article>
   );
@@ -669,6 +698,68 @@ function PersistedActivity({
             <li key={i}>
               <ToolLine
                 content={`[call ${ev.name}] ${JSON.stringify(ev.input ?? {})}`}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Live activity panel for an in-flight validation run. Renders the
+ * rater's tool calls (Read / Glob / Bash) inline so the operator
+ * sees what the model is actually doing while it scores. Same
+ * `<ToolLine>` rendering the workshop + brainstorm use, so the
+ * dashboard reads the same way everywhere.
+ */
+function ValidatingFeed({
+  label,
+  tools,
+}: {
+  label: string;
+  tools: IdeationEvent[];
+}) {
+  const toolUses = tools.filter((t) => t.kind === "tool_use") as Array<
+    Extract<IdeationEvent, { kind: "tool_use" }>
+  >;
+  const elapsedMs = useElapsedMs(true);
+  return (
+    <div className="mb-3 -mx-2 px-3 py-2.5 rounded-md border border-ember-500/25 bg-gradient-to-br from-ember-500/[0.05] to-transparent dark:from-ember-500/[0.08]">
+      <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+        <span className="relative inline-flex h-2 w-2">
+          <span className="absolute inline-flex h-full w-full rounded-full bg-ember-500 opacity-60 animate-ping" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-ember-500" />
+        </span>
+        <ShimmerText className="text-[12px] font-medium">
+          <TransitioningText>
+            {toolUses.length === 0
+              ? `${label} is reading the repo`
+              : `${label} is scoring ideas`}
+          </TransitioningText>
+        </ShimmerText>
+        <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
+          {formatElapsed(elapsedMs)}
+        </span>
+        {toolUses.length > 0 && (
+          <>
+            <span className="text-ink-300 dark:text-ink-600 font-mono text-[10px]">
+              ·
+            </span>
+            <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
+              {toolUses.length} step{toolUses.length === 1 ? "" : "s"}
+            </span>
+          </>
+        )}
+      </div>
+      {toolUses.length > 0 && (
+        <ul className="space-y-1.5 pl-4 border-l-2 border-ember-500/30">
+          {toolUses.map((ev, i) => (
+            <li key={i} className="animate-fade-in">
+              <ToolLine
+                content={`[call ${ev.name}] ${JSON.stringify(ev.input ?? {})}`}
+                running={i === toolUses.length - 1}
               />
             </li>
           ))}
@@ -801,6 +892,8 @@ function AgentCluster({
   onOpenIdea,
   onValidate,
   validating,
+  validateLabel,
+  validateTools,
 }: {
   suggestion: Suggestion;
   savedKeys: Map<string, string>;
@@ -808,6 +901,8 @@ function AgentCluster({
   onOpenIdea: (id: string) => void;
   onValidate: (sid: string, agent: "claude" | "codex", model: string) => void;
   validating: boolean;
+  validateLabel: string;
+  validateTools: IdeationEvent[];
 }) {
   // Clarifying-question turn — agent decided the brief was too vague
   // and asked back instead of generating speculative options. Render
@@ -897,6 +992,9 @@ function AgentCluster({
         </span>
       </div>
       {events.length > 0 && <PersistedActivity events={events} />}
+      {validating && (
+        <ValidatingFeed label={validateLabel} tools={validateTools} />
+      )}
       <ol className="space-y-1">
         {sorted.map(({ raw: opt, index: i, parsed }) => {
           const savedId = savedKeys.get(`${suggestion.id}:${i}`);

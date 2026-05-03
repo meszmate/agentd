@@ -617,21 +617,16 @@ export function useDismissSuggestion() {
   });
 }
 
-export function useValidateSuggestion() {
-  const client = useClient();
+// validateSuggestion is a streaming call now — see
+// `client.streamValidateSuggestion`. The call site holds its own
+// "validating" state so it can render live tool activity rows; once
+// done it calls `qc.invalidateQueries({ queryKey: ["project-suggestions"] })`
+// to refresh the persisted scores. Keeping a thin invalidation
+// helper here so the brainstorm view doesn't have to know the key.
+export function useInvalidateSuggestions() {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      id,
-      ...body
-    }: {
-      id: string;
-    } & Parameters<AgentdClient["validateSuggestion"]>[1]) =>
-      client.validateSuggestion(id, body),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["project-suggestions"] });
-    },
-  });
+  return () =>
+    void qc.invalidateQueries({ queryKey: ["project-suggestions"] });
 }
 
 export function useSavedIdeas(

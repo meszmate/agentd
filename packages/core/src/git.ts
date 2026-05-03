@@ -1228,33 +1228,13 @@ export interface ValidateIdeasResult {
   error?: string;
 }
 
-/**
- * Re-score a set of brainstorm ideas with a fresh AI helper — usually
- * a different agent / model than the one that produced them — to get
- * a second opinion on value vs. effort. Returns one 0-100 score per
- * idea, in the same order as the input. Lets the operator triangulate
- * across raters instead of trusting a single model's calibration.
- *
- * The output is a tight space-separated number list (e.g. "82 71 45")
- * because that survives transport better than json from CLIs that
- * sometimes wrap output in markdown fences.
- */
-export async function validateIdeas(args: {
-  cwd: string;
-  brief: string;
-  ideas: string[];
-  helper?: AiHelperOptions;
-}): Promise<ValidateIdeasResult> {
-  if (args.ideas.length === 0) {
-    return { scores: [], source: "fallback-empty" };
-  }
-  const numbered = args.ideas
-    .map((opt, i) => `${i + 1}. ${opt}`)
-    .join("\n");
-  const ask = [
+function buildValidateIdeasPrompt(brief: string, ideas: string[]): string {
+  const numbered = ideas.map((opt, i) => `${i + 1}. ${opt}`).join("\n");
+  return [
     `You are evaluating brainstorm ideas for a project. The operator wants a second opinion on each idea's value-vs-effort.`,
     "",
-    `Look at the project (read README / manifest / glob top-level dirs) so your scoring is grounded in what the project actually is — don't score from the brief alone.`,
+    `RECON STEP (mandatory, do this BEFORE scoring):`,
+    `Use your tools to glob the layout and read the README + manifest (package.json / Cargo.toml / etc) so your scoring is grounded in what the project actually is. Don't score from the brief alone.`,
     "",
     `Then for each numbered idea below, give a single integer 0-100 where:`,
     `  90+  ship-now obvious win`,
@@ -1263,52 +1243,129 @@ export async function validateIdeas(args: {
     `  <50  niche / risky / off-strategy`,
     `Calibrate honestly. Spread the scores; don't bunch everything in 80-90.`,
     "",
-    `Output format: ONE LINE only — exactly N space-separated integers in the same order as the ideas, where N is the number of ideas. NO preamble, NO commentary, NO numbering, NO markdown. Just the numbers.`,
+    `Output format: ONE LINE only — exactly ${ideas.length} space-separated integers in the same order as the ideas. NO preamble, NO commentary, NO numbering, NO markdown. Just the numbers.`,
     `Example for 3 ideas: "82 64 41"`,
     "",
     `Operator's original brief:`,
-    args.brief,
+    brief,
     "",
-    `Ideas (${args.ideas.length}):`,
+    `Ideas (${ideas.length}):`,
     numbered,
   ].join("\n");
-  const argv = buildAiHelperArgv(args.helper ?? {}, ask, args.cwd);
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
-  try {
-    proc = Bun.spawn({
-      cmd: argv,
-      cwd: args.cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: process.env as Record<string, string>,
-    });
-  } catch (e) {
-    return { scores: [], source: "fallback-error", error: (e as Error).message };
+}
+
+/**
+ * Streaming validator — same shape as `streamIdeation`, yields tool
+ * events as the rater explores the repo, then returns the parsed
+ * scores. Lets the UI show "claude opus is reading the README…"
+ * during the rate so the operator isn't staring at a silent spinner.
+ */
+export async function* streamValidateIdeas(args: {
+  cwd: string;
+  brief: string;
+  ideas: string[];
+  helper?: AiHelperOptions;
+}): AsyncGenerator<HelperStreamEvent, ValidateIdeasResult, void> {
+  if (args.ideas.length === 0) {
+    return { scores: [], source: "fallback-empty" };
   }
-  const out = (await new Response(proc.stdout).text()).trim();
-  await proc.exited;
-  // Pull the longest run of "<int> <int> ..." we can find — guards
-  // against helpers that wrap with stray prose despite the prompt.
-  const numLine = (out.match(/\b\d{1,3}(?:\s+\d{1,3}){1,}\b/g) ?? [])
-    .sort((a, b) => b.length - a.length)[0];
-  if (!numLine) {
+  const ask = buildValidateIdeasPrompt(args.brief, args.ideas);
+  const it = runHelperWithEvents(args.cwd, ask, args.helper ?? {});
+  let final: { text: string; source: string; error?: string } | null = null;
+  try {
+    while (true) {
+      const next = await it.next();
+      if (next.done) {
+        final = next.value;
+        break;
+      }
+      const ev = next.value;
+      // Forward tool activity so the UI can render live; drop text
+      // deltas — the helper's prose is the score line itself which
+      // we parse below from final.text.
+      if (ev.kind === "tool_use" || ev.kind === "tool_result") yield ev;
+    }
+  } catch {
+    // stream cancelled
+  }
+  return parseScores(final?.text ?? "", args.ideas.length, final?.error ?? null);
+}
+
+/**
+ * Synchronous wrapper kept for the (now unused) one-shot validate
+ * endpoint and any future caller that doesn't care about live tool
+ * events. Drains the streaming variant.
+ */
+export async function validateIdeas(args: {
+  cwd: string;
+  brief: string;
+  ideas: string[];
+  helper?: AiHelperOptions;
+}): Promise<ValidateIdeasResult> {
+  const it = streamValidateIdeas(args);
+  while (true) {
+    const next = await it.next();
+    if (next.done) return next.value;
+  }
+}
+
+function parseScores(
+  raw: string,
+  expectedLen: number,
+  err: string | null,
+): ValidateIdeasResult {
+  const out = raw.trim();
+  if (!out && err) {
+    return { scores: [], source: "fallback-error", error: err };
+  }
+  if (expectedLen === 0) {
+    return { scores: [], source: "fallback-empty" };
+  }
+  // Strip ANSI escape sequences (codex / claude both emit color codes
+  // that wreck regex matching). Then extract integer runs of any
+  // length — single numbers count too, since some helpers emit
+  // "1. 82\n2. 64" style instead of a single line. We then pick
+  // either the longest space-separated run, OR concatenate the leading
+  // integers in order until we have N (one per idea).
+  const stripAnsi = (s: string) => s.replace(/\[[0-9;]*[mGKHF]/g, "");
+  const cleaned = stripAnsi(out);
+  // Try the strict "N1 N2 N3 ..." line first.
+  const runs = cleaned.match(/\b\d{1,3}(?:\s+\d{1,3}){1,}\b/g) ?? [];
+  let parsed: number[] = [];
+  if (runs.length > 0) {
+    parsed = runs
+      .sort((a, b) => b.length - a.length)[0]!
+      .split(/\s+/)
+      .map((s) => parseInt(s, 10))
+      .filter((n) => Number.isFinite(n) && n >= 0 && n <= 100);
+  }
+  // Fallback: scrape every "<int>" in document order. Skip numbers
+  // that obviously aren't scores (option indexes 1..N when printed
+  // as "1." or "1)" — strip them so we don't count `1` as a score
+  // for option 1).
+  if (parsed.length < expectedLen) {
+    const ints = (cleaned.replace(/\b\d+[\.\)]\s+/g, "").match(/\b\d{1,3}\b/g) ?? [])
+      .map((s) => parseInt(s, 10))
+      .filter((n) => Number.isFinite(n) && n >= 0 && n <= 100);
+    if (ints.length > parsed.length) parsed = ints;
+  }
+  if (parsed.length === 0) {
+    const preview = cleaned.trim().slice(0, 400);
     return {
       scores: [],
       source: "fallback-empty",
-      ...(out ? { error: `unparseable response: ${out.slice(0, 200)}` } : {}),
+      error: preview
+        ? `unparseable rater response: ${preview}`
+        : err ?? `rater returned no output`,
     };
   }
-  const parsed = numLine
-    .split(/\s+/)
-    .map((s) => parseInt(s, 10))
-    .filter((n) => Number.isFinite(n) && n >= 0 && n <= 100);
   // Pad / trim to match the input length so the index alignment
   // contract holds even when the helper returned the wrong count.
   const scores: number[] = [];
-  for (let i = 0; i < args.ideas.length; i++) {
+  for (let i = 0; i < expectedLen; i++) {
     scores.push(parsed[i] ?? 0);
   }
-  return { scores, source: (args.helper?.agent ?? "claude") };
+  return { scores, source: "claude" };
 }
 
 /* ── Suggestion → plan generator ───────────────────────────────────── */
