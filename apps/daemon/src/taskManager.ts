@@ -279,12 +279,12 @@ export class TaskManager {
     const taskId = newId("task");
     const workspaceMode = params.workspaceMode ?? "worktree";
     const branchMode = params.branchMode ?? "new";
-    // Auto-name the branch when the caller didn't provide one. We try the
-    // AI helper first because the prompt usually has a clear intent ("fix
-    // X", "add Y") that maps to a much tighter slug than the title.
-    // Falls back to a deterministic slug if Claude isn't available — and
-    // we never include the task id, so names look like `feature/auth-rate-limit`
-    // instead of the old `feature/<long-title>-7a5a4a`.
+    // Auto-name the branch when the caller didn't provide one. The AI
+    // helper picks both the conventional prefix (feature/fix/refactor/
+    // chore) and a tight slug, so a "fix the worktree delete bug"
+    // prompt becomes `fix/worktree-delete` rather than getting jammed
+    // under `feature/`. Falls back to a heuristic prefix + deterministic
+    // slug if Claude isn't available.
     let branch: string;
     if (branchMode === "existing") {
       branch = params.branchName?.trim() || baseBranch;
@@ -295,7 +295,7 @@ export class TaskManager {
       const ai = await generateBranchName(params.prompt, {
         helper: cfg.aiHelpers,
       });
-      branch = `feature/${ai.slug}`;
+      branch = `${ai.prefix}/${ai.slug}`;
     }
     // Auto-create or look up the project for this repo path. Tasks belong
     // to projects so the sidebar can group them and surface what's new.
@@ -1172,7 +1172,7 @@ export class TaskManager {
         .slice(0, 24);
       memberLabels.push(label);
       const taskId = newId("task");
-      const branch = `feature/${baseSlug}-${safeLabel}-${taskId.slice(-4)}`;
+      const branch = `${ai.prefix}/${baseSlug}-${safeLabel}-${taskId.slice(-4)}`;
       const { worktreePath } = await createWorktree({
         repoPath: params.repoPath,
         worktreeRoot: this.paths.worktrees,
