@@ -1935,6 +1935,108 @@ export async function* streamIdeaConversation(
 }
 
 /**
+ * "I have an idea" agentic flow — the operator types something they
+ * want to build; the agent reads the repo (Read/Glob/Grep/Bash) and
+ * streams back: (a) what it understood the idea to be, (b) how it
+ * would look in this codebase (real files, real paths), (c) honest
+ * critique. Ends with `TITLE: <suggested title>` on its own line so
+ * the UI can populate a save-button label. The brainstorm view
+ * renders this turn just like a brainstorm session: live tool
+ * activity above, prose body, action row when finished.
+ */
+export interface ValidateIdeaResult {
+  ok: boolean;
+  critique: string;
+  suggestedTitle: string;
+  source: "claude" | "codex" | "fallback-empty" | "fallback-error";
+  error?: string;
+}
+
+export async function* streamValidateIdea(
+  cwd: string,
+  args: { text: string; helper?: AiHelperOptions },
+): AsyncGenerator<HelperStreamEvent, ValidateIdeaResult, void> {
+  const text = args.text.trim();
+  if (!text) {
+    return {
+      ok: false,
+      critique: "",
+      suggestedTitle: "",
+      source: "fallback-empty",
+      error: "no idea text provided",
+    };
+  }
+  const ask = [
+    `The operator has an idea for THIS project. Use your tools to look`,
+    `at the actual codebase first — Read/Glob/Grep/Bash whatever's`,
+    `relevant. Then reply with:`,
+    ``,
+    `1. **What I understood** — restate the idea in your own words so`,
+    `   the operator can correct any misread.`,
+    `2. **How it would look here** — concrete sketch grounded in the`,
+    `   actual repo: which files would change, what shape the new code`,
+    `   would take, where it'd plug in. Cite real paths/symbols.`,
+    `3. **Honest take** — risks, gaps, alternatives, edge cases worth`,
+    `   considering. Be specific, not generic.`,
+    ``,
+    `Format: tight markdown prose, max ~400 words total. Don't pad.`,
+    ``,
+    `Then on a final line, EXACTLY:`,
+    `TITLE: <a clean, specific 3-6 word title for this idea>`,
+    ``,
+    `The operator's idea:`,
+    text,
+  ].join("\n");
+
+  const it = runHelperWithEvents(cwd, ask, args.helper ?? {});
+  let final: { text: string; source: string; error?: string } | null = null;
+  try {
+    while (true) {
+      const next = await it.next();
+      if (next.done) {
+        final = next.value;
+        break;
+      }
+      yield next.value;
+    }
+  } catch {
+    // stream cancelled
+  }
+
+  if (!final || !final.text.trim()) {
+    return {
+      ok: false,
+      critique: "",
+      suggestedTitle: "",
+      source: (final?.source as ValidateIdeaResult["source"]) ?? "fallback-empty",
+      ...(final?.error ? { error: final.error } : {}),
+    };
+  }
+
+  // Pull the trailing TITLE: line out of the body so the UI can
+  // suggest a save title without surfacing the marker in the prose.
+  const body = cleanAssistantText(final.text);
+  const m = body.match(/(^|\n)\s*TITLE:\s*([^\n]+?)\s*$/i);
+  const suggestedTitle = (m?.[2] ?? "").trim();
+  const critique = m
+    ? body.slice(0, m.index).trim()
+    : body.trim();
+
+  return {
+    ok: true,
+    critique,
+    suggestedTitle:
+      suggestedTitle ||
+      // Fallback: first 6 words of the operator's idea, title-case.
+      text
+        .split(/\s+/)
+        .slice(0, 6)
+        .join(" "),
+    source: "claude",
+  };
+}
+
+/**
  * Conversational turn for the project-instructions workshop. The
  * agent has full codebase access (Read/Glob/Grep/Bash) so it can
  * actually look at the project before suggesting rules. Each reply

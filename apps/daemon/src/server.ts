@@ -69,6 +69,7 @@ import {
   streamPrMessage,
   streamProjectInstructionsDraft,
   streamInstructionsConversation,
+  streamValidateIdea,
   getPrState,
   setTaskDiscordThread,
   setTaskPrUrl,
@@ -3185,6 +3186,86 @@ export function buildServer(opts: BuildServerOptions) {
         : {}),
     });
     return c.json({ idea });
+  });
+
+  /**
+   * "I have an idea" — agentic validation flow. Streams the agent's
+   * critique + sketch + suggested title back as it reads the repo.
+   * The web's brainstorm view renders this turn just like a brain-
+   * storm session: live tool activity above, prose body, action row
+   * (save / discard) when finished. NOTHING is persisted by this
+   * endpoint — the operator clicks Save explicitly, which hits the
+   * existing saved-ideas POST.
+   *
+   * Wire format mirrors the saved-idea chat stream:
+   *   - per-event:  `\x1f<HelperStreamEvent json>\n`
+   *   - terminator: `\x1e<{ ok, critique, suggestedTitle, source } json>`
+   */
+  api.post("/projects/:idOrSlug/validate-idea/stream", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project = getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => null)) as {
+      text?: string;
+    } | null;
+    const text = (body?.text ?? "").trim();
+    if (!text) return c.json({ error: "text required" }, 400);
+    const cfg = loadConfig(paths.root);
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const enc = new TextEncoder();
+        try {
+          const it = streamValidateIdea(project.path, {
+            text,
+            helper: cfg.aiHelpers,
+          });
+          let result: {
+            ok: boolean;
+            critique: string;
+            suggestedTitle: string;
+            source: string;
+            error?: string;
+          } | null = null;
+          while (true) {
+            const next = await it.next();
+            if (next.done) {
+              result = next.value;
+              break;
+            }
+            controller.enqueue(enc.encode(`\x1f${JSON.stringify(next.value)}\n`));
+          }
+          controller.enqueue(
+            enc.encode(
+              `\x1e${JSON.stringify({
+                ok: result?.ok ?? false,
+                critique: result?.critique ?? "",
+                suggestedTitle: result?.suggestedTitle ?? "",
+                source: result?.source ?? "fallback-empty",
+                ...(result?.error ? { error: result.error } : {}),
+              })}`,
+            ),
+          );
+        } catch (e) {
+          controller.enqueue(
+            enc.encode(
+              `\x1e${JSON.stringify({
+                ok: false,
+                source: "fallback-error",
+                error: (e as Error).message,
+              })}`,
+            ),
+          );
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-cache",
+      },
+    });
   });
 
   /**

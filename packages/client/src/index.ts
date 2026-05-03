@@ -589,6 +589,81 @@ export class AgentdClient {
   }
 
   /**
+   * "I have an idea" agentic flow. Streams the agent reading the
+   * repo + drafting a critique + sketch, ending with a suggested
+   * title the UI uses for the Save button. Same wire format as
+   * `streamIdeaChat` — `\x1f<event>\n` per event + `\x1e<envelope>`.
+   * Nothing is persisted server-side; the operator clicks Save
+   * explicitly to land it as a SavedIdea.
+   */
+  async streamValidateIdea(
+    idOrSlug: string,
+    body: { text: string },
+    onEvent: (event: IdeaChatEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<
+    | { ok: true; critique: string; suggestedTitle: string; source: string }
+    | { ok: false; source: string; error: string }
+  > {
+    const r = await fetch(
+      `${this.server}/api/projects/${encodeURIComponent(idOrSlug)}/validate-idea/stream`,
+      {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(body),
+        signal,
+      },
+    );
+    if (!r.ok || !r.body) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`validate-idea failed: ${r.status} ${text}`);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let envelope = "";
+    let sawSentinel = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      while (!sawSentinel) {
+        const sIdx = buffer.indexOf("\x1e");
+        const oIdx = buffer.indexOf("\x1f");
+        if (sIdx >= 0 && (oIdx < 0 || sIdx < oIdx)) {
+          envelope += buffer.slice(sIdx + 1);
+          buffer = "";
+          sawSentinel = true;
+          break;
+        }
+        if (oIdx < 0) break;
+        const eol = buffer.indexOf("\n", oIdx + 1);
+        if (eol < 0) break;
+        const json = buffer.slice(oIdx + 1, eol);
+        buffer = buffer.slice(eol + 1);
+        try {
+          onEvent(JSON.parse(json));
+        } catch {
+          // bad event — skip
+        }
+      }
+      if (sawSentinel && buffer) {
+        envelope += buffer;
+        buffer = "";
+      }
+    }
+    try {
+      return JSON.parse(envelope || "{}");
+    } catch {
+      return {
+        ok: false,
+        source: "fallback-error",
+        error: envelope || "empty stream",
+      };
+    }
+  }
+
+  /**
    * Conversational editor for project instructions. Uses the same
    * `\x1f<event>\n` + `\x1e<envelope>` wire format as `streamIdeaChat`.
    * The agent has codebase access; events arrive as `InstructionsChatEvent`s

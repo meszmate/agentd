@@ -29,8 +29,9 @@ import {
   Wand2,
   X,
 } from "lucide-react";
-import type { IdeationEvent } from "@agentd/client";
+import type { IdeaChatEvent, IdeationEvent } from "@agentd/client";
 import type { Idea, IdeaStatus, Suggestion } from "@agentd/contracts";
+import { Markdown } from "@/components/markdown";
 import { ToolLine, WorkCard, pairToolEvents } from "@/components/tool-line";
 import {
   Count,
@@ -275,63 +276,169 @@ export function ProjectBrainstorm() {
   /** Dispatched by Send + ⌘↵ — picks the right path for the active mode. */
   const onSend = async () => {
     if (composerMode === "idea") {
-      await submitSaveIdea();
+      await submitValidateIdea();
     } else {
       await submit();
     }
   };
 
-  // "I have an idea — save it." Light path: just stash the typed
-  // text as a SavedIdea (no agent involvement here, no auto-plan
-  // generation) and surface it as a card in this thread. The full
-  // agentic experience — Plan, Challenge, Refine, conversational
-  // chat with codebase access — lives in the workshop the user
-  // jumps into when they want to actually work on the idea.
-  // `save` is already the brainstorm-pin mutation; reuse for the
-  // "type your own idea" path — same daemon endpoint, same cache
-  // invalidation.
-  const [savingIdea, setSavingIdea] = useState(false);
-  interface InlineIdea {
+  // "I have an idea" — full agentic flow. The agent reads the repo
+  // (live tool activity visible in the thread), drafts a critique +
+  // sketch + suggested title, and finishes. The operator then clicks
+  // Save (button labeled with the suggested title) to land it as a
+  // SavedIdea — or Discard. Nothing is persisted until the explicit
+  // save. Same realtime feel as a normal brainstorm session.
+  interface InlineIdeaTurn {
     id: string;
-    title: string;
-    description: string;
+    text: string;
+    /** Streaming critique body — accumulated text deltas. */
+    body: string;
+    /** Live tool activity (tool_use + tool_result events). */
+    events: IdeaChatEvent[];
+    /** Set when the helper finishes — drives the action row. */
+    finished: boolean;
+    suggestedTitle: string;
+    error: string | null;
+    /** Once the operator hits Save, the resulting SavedIdea id. */
+    savedIdeaId: string | null;
+    saving: boolean;
+    discarded: boolean;
     ts: number;
   }
-  const [localIdeas, setLocalIdeas] = useState<InlineIdea[]>([]);
-  const submitSaveIdea = async () => {
+  const [localIdeas, setLocalIdeas] = useState<InlineIdeaTurn[]>([]);
+  const [savingIdea, setSavingIdea] = useState(false);
+  const ideaAbortRefs = useRef(new Map<string, AbortController>());
+
+  const removeLocalIdea = (turnId: string) => {
+    const ctrl = ideaAbortRefs.current.get(turnId);
+    if (ctrl) {
+      ctrl.abort();
+      ideaAbortRefs.current.delete(turnId);
+    }
+    setLocalIdeas((cur) => cur.filter((p) => p.id !== turnId));
+  };
+
+  const cancelIdea = (turnId: string) => {
+    const ctrl = ideaAbortRefs.current.get(turnId);
+    if (ctrl) ctrl.abort();
+  };
+
+  const saveLocalIdea = async (turnId: string, title: string) => {
+    setLocalIdeas((cur) =>
+      cur.map((p) => (p.id === turnId ? { ...p, saving: true } : p)),
+    );
+    try {
+      const turn = localIdeas.find((p) => p.id === turnId);
+      if (!turn) return;
+      const r = await save.mutateAsync({
+        projectSlug: project.slug,
+        text: title.trim() || turn.suggestedTitle || turn.text.slice(0, 60),
+        description: turn.body || turn.text,
+      });
+      setLocalIdeas((cur) =>
+        cur.map((p) =>
+          p.id === turnId
+            ? { ...p, saving: false, savedIdeaId: r.idea.id }
+            : p,
+        ),
+      );
+      void qc.invalidateQueries({ queryKey: qk.savedIdeas(project.slug) });
+      toast("idea saved");
+    } catch (e) {
+      setLocalIdeas((cur) =>
+        cur.map((p) => (p.id === turnId ? { ...p, saving: false } : p)),
+      );
+      toast((e as Error).message, true);
+    }
+  };
+
+  const submitValidateIdea = async () => {
     const text = brief.trim();
     if (!text) {
       toast("type your idea first", true);
       return;
     }
-    if (savingIdea) return;
+    const turnId = `idea-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const ctrl = new AbortController();
+    ideaAbortRefs.current.set(turnId, ctrl);
+    setLocalIdeas((cur) => [
+      ...cur,
+      {
+        id: turnId,
+        text,
+        body: "",
+        events: [],
+        finished: false,
+        suggestedTitle: "",
+        error: null,
+        savedIdeaId: null,
+        saving: false,
+        discarded: false,
+        ts: Date.now(),
+      },
+    ]);
+    setBrief("");
     setSavingIdea(true);
     try {
-      const r = await save.mutateAsync({
-        projectSlug: project.slug,
-        text,
-      });
-      setBrief("");
-      void qc.invalidateQueries({ queryKey: qk.savedIdeas(project.slug) });
-      setLocalIdeas((cur) => [
-        ...cur,
-        {
-          id: r.idea.id,
-          title: r.idea.text,
-          description: r.idea.description ?? "",
-          ts: Date.now(),
+      const r = await client.streamValidateIdea(
+        project.id,
+        { text },
+        (event) => {
+          setLocalIdeas((cur) =>
+            cur.map((p) => {
+              if (p.id !== turnId) return p;
+              if (event.kind === "text") {
+                return { ...p, body: p.body + event.delta };
+              }
+              if (event.kind === "tool_use" || event.kind === "tool_result") {
+                return { ...p, events: [...p.events, event] };
+              }
+              return p;
+            }),
+          );
         },
-      ]);
-      toast("idea saved — open it in the workshop to refine");
+        ctrl.signal,
+      );
+      if (r.ok === false) {
+        setLocalIdeas((cur) =>
+          cur.map((p) =>
+            p.id === turnId
+              ? { ...p, finished: true, error: r.error || "agent returned no response" }
+              : p,
+          ),
+        );
+      } else {
+        setLocalIdeas((cur) =>
+          cur.map((p) =>
+            p.id === turnId
+              ? {
+                  ...p,
+                  finished: true,
+                  body: r.critique || p.body,
+                  suggestedTitle: r.suggestedTitle,
+                }
+              : p,
+          ),
+        );
+      }
     } catch (e) {
-      toast((e as Error).message, true);
+      const aborted = (e as { name?: string }).name === "AbortError";
+      setLocalIdeas((cur) =>
+        cur.map((p) =>
+          p.id === turnId
+            ? {
+                ...p,
+                finished: true,
+                error: aborted ? "stopped" : (e as Error).message,
+              }
+            : p,
+        ),
+      );
     } finally {
       setSavingIdea(false);
+      ideaAbortRefs.current.delete(turnId);
     }
   };
-
-  const removeLocalIdea = (ideaId: string) =>
-    setLocalIdeas((cur) => cur.filter((p) => p.id !== ideaId));
 
   /**
    * Shared brainstorm runner. Used by the composer's Send and the
@@ -508,12 +615,14 @@ export function ProjectBrainstorm() {
                   />
                 ))}
                 {localIdeas.map((p) => (
-                  <SavedIdeaInlineCard
+                  <IdeaValidationTurn
                     key={p.id}
-                    idea={p}
+                    turn={p}
                     projectSlug={project.slug}
-                    onOpenIdea={openIdea}
+                    onCancel={() => cancelIdea(p.id)}
+                    onSave={(title) => void saveLocalIdea(p.id, title)}
                     onDismiss={() => removeLocalIdea(p.id)}
+                    onOpenIdea={openIdea}
                   />
                 ))}
               </>
@@ -1525,38 +1634,64 @@ function StatusBadgeSm({ status }: { status: IdeaStatus }) {
   );
 }
 
-/* ── Inline saved-idea card ──────────────────────────────────────── */
+/* ── Idea validation turn ────────────────────────────────────────── */
 
 /**
- * Renders a "My idea" save as a brainstorm-thread card. Light by
- * design — no agent involvement, no plan. The card just acknowledges
- * the save, links into the workshop where the full agentic chat
- * (Plan, Challenge, Refine, repo-aware Q&A) lives, and offers a
- * dismiss action that drops the idea from both the thread and the
- * right-rail library.
+ * Renders an "I have an idea" agentic turn. While streaming: shows
+ * the operator's idea text + live tool activity (Read/Glob/Grep/Bash
+ * cards as the agent reads the repo) + the streaming critique body.
+ * When finished: action row appears with [Save with suggested title]
+ * + [Discard]. After save: card flips to "saved" state with a
+ * workshop link so the user can keep refining the idea there.
  */
-function SavedIdeaInlineCard({
-  idea,
+function IdeaValidationTurn({
+  turn,
   projectSlug,
-  onOpenIdea,
+  onCancel,
+  onSave,
   onDismiss,
+  onOpenIdea,
 }: {
-  idea: {
+  turn: {
     id: string;
-    title: string;
-    description: string;
+    text: string;
+    body: string;
+    events: IdeaChatEvent[];
+    finished: boolean;
+    suggestedTitle: string;
+    error: string | null;
+    savedIdeaId: string | null;
+    saving: boolean;
+    discarded: boolean;
     ts: number;
   };
   projectSlug: string;
-  onOpenIdea: (id: string) => void;
+  onCancel: () => void;
+  onSave: (title: string) => void;
   onDismiss: () => void;
+  onOpenIdea: (id: string) => void;
 }) {
   const unsave = useDeleteSavedIdea();
   const { toast } = useApp();
+  const streaming = !turn.finished;
+  const tools = pairToolEvents(turn.events);
 
-  const remove = async () => {
+  const [titleDraft, setTitleDraft] = useState("");
+  // Sync the title draft to the suggested title once it lands. The
+  // user can still edit it before saving.
+  useEffect(() => {
+    if (turn.suggestedTitle && !titleDraft) {
+      setTitleDraft(turn.suggestedTitle);
+    }
+  }, [turn.suggestedTitle, titleDraft]);
+
+  const removeSaved = async () => {
+    if (!turn.savedIdeaId) {
+      onDismiss();
+      return;
+    }
     try {
-      await unsave.mutateAsync(idea.id);
+      await unsave.mutateAsync(turn.savedIdeaId);
       onDismiss();
     } catch (e) {
       toast((e as Error).message, true);
@@ -1565,60 +1700,163 @@ function SavedIdeaInlineCard({
 
   return (
     <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.04] dark:bg-amber-500/[0.06] px-4 py-3 animate-fade-in">
+      {/* Header */}
       <div className="flex items-baseline gap-2 mb-2">
-        <Lightbulb className="h-3 w-3 text-amber-500 self-center" />
+        <Lightbulb
+          className={cn(
+            "h-3 w-3 self-center text-amber-500",
+            streaming && "animate-blink",
+          )}
+        />
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-amber-700 dark:text-amber-300">
           your idea
         </span>
         <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-          {formatTs(idea.ts)}
+          {formatTs(turn.ts)}
         </span>
-        <span className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] text-emerald-700 dark:text-emerald-300">
-          <CheckCircle2 className="h-2.5 w-2.5" />
-          saved to library
-        </span>
-      </div>
-      <button
-        type="button"
-        onClick={() => onOpenIdea(idea.id)}
-        className="block w-full text-left mb-1 text-[13.5px] font-medium text-ink-900 dark:text-ink-50 hover:text-amber-700 dark:hover:text-amber-300 transition-colors"
-        title="open in workshop"
-      >
-        {idea.title}
-      </button>
-      {idea.description && idea.description !== idea.title && (
-        <p className="text-[11.5px] text-ink-500 dark:text-ink-400 leading-relaxed mb-2 font-mono">
-          {idea.description.length > 200
-            ? idea.description.slice(0, 200) + "…"
-            : idea.description}
-        </p>
-      )}
-      <div className="flex items-center gap-1.5 mt-2">
-        <Link
-          to={`/projects/${encodeURIComponent(projectSlug)}/ideas/${idea.id}`}
-          className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/15 transition-colors"
-        >
-          <ArrowUpRight className="h-2.5 w-2.5" />
-          open in workshop
-        </Link>
-        <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
-          plan, challenge, refine — all in the workshop
-        </span>
-        <button
-          type="button"
-          onClick={() => void remove()}
-          disabled={unsave.isPending}
-          className="ml-auto inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
-          title="remove from library + thread"
-        >
-          {unsave.isPending ? (
+        {streaming ? (
+          <span className="font-mono text-[10px] text-amber-700/80 dark:text-amber-300/80 inline-flex items-center gap-1">
             <Loader2 className="h-2.5 w-2.5 animate-spin" />
-          ) : (
-            <Trash2 className="h-2.5 w-2.5" />
-          )}
-          dismiss
-        </button>
+            agent is reading the repo…
+          </span>
+        ) : turn.savedIdeaId ? (
+          <span className="font-mono text-[10px] text-emerald-700 dark:text-emerald-300 inline-flex items-center gap-1">
+            <CheckCircle2 className="h-2.5 w-2.5" />
+            saved
+          </span>
+        ) : turn.error ? (
+          <span className="font-mono text-[10px] text-red-700 dark:text-red-400">
+            {turn.error}
+          </span>
+        ) : (
+          <span className="font-mono text-[10px] text-amber-700/80 dark:text-amber-300/80">
+            ready
+          </span>
+        )}
+        {streaming && (
+          <button
+            type="button"
+            onClick={onCancel}
+            className="ml-auto font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400"
+            title="stop the agent"
+          >
+            stop
+          </button>
+        )}
       </div>
+
+      {/* Operator's typed idea — quoted so it reads like a chat turn. */}
+      <div className="mb-3 pl-2 border-l-2 border-amber-500/40">
+        <p className="font-mono text-[12px] text-ink-700 dark:text-ink-200 leading-relaxed whitespace-pre-wrap">
+          {turn.text}
+        </p>
+      </div>
+
+      {/* Tool activity (live or replayed). */}
+      {tools.length > 0 && (
+        <WorkCard pairs={tools} liveTrailing={streaming} className="mb-3" />
+      )}
+
+      {/* Agent body — streaming markdown. */}
+      {turn.body ? (
+        <div className="rounded-md border border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-800/40 px-3 py-2 mb-3">
+          <Markdown text={turn.body} />
+          {streaming && (
+            <span className="inline-block w-1.5 h-3 bg-amber-500/70 animate-pulse ml-0.5 align-baseline" />
+          )}
+        </div>
+      ) : streaming ? (
+        <div className="font-mono text-[11px] text-amber-700/70 dark:text-amber-300/70 italic mb-3">
+          thinking…
+        </div>
+      ) : null}
+
+      {/* Action row — only after the agent finishes. */}
+      {!streaming && !turn.error && (
+        <div className="space-y-2">
+          {!turn.savedIdeaId && (
+            <div className="flex items-center gap-2">
+              <Lightbulb className="h-3 w-3 text-amber-500 shrink-0" />
+              <Input
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                placeholder={turn.suggestedTitle || "title for this idea"}
+                disabled={turn.saving}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    onSave(titleDraft);
+                  }
+                }}
+                className="h-7 text-[12px] font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => onSave(titleDraft)}
+                disabled={turn.saving}
+                className="shrink-0 inline-flex items-center gap-1 h-7 px-2.5 rounded text-[11px] font-medium border border-amber-500/40 bg-amber-500 text-amber-50 hover:bg-amber-500/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                {turn.saving ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <BookmarkCheck className="h-3 w-3" />
+                )}
+                Save to library
+              </button>
+              <button
+                type="button"
+                onClick={onDismiss}
+                disabled={turn.saving}
+                className="shrink-0 inline-flex items-center gap-1 h-7 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
+                title="discard this turn"
+              >
+                <X className="h-2.5 w-2.5" />
+                discard
+              </button>
+            </div>
+          )}
+          {turn.savedIdeaId && (
+            <div className="flex items-center gap-2">
+              <Link
+                to={`/projects/${encodeURIComponent(projectSlug)}/ideas/${turn.savedIdeaId}`}
+                className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/15 transition-colors"
+                onClick={() => turn.savedIdeaId && onOpenIdea(turn.savedIdeaId)}
+              >
+                <ArrowUpRight className="h-2.5 w-2.5" />
+                open in workshop
+              </Link>
+              <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+                plan, challenge, refine — all in the workshop
+              </span>
+              <button
+                type="button"
+                onClick={() => void removeSaved()}
+                disabled={unsave.isPending}
+                className="ml-auto inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
+              >
+                {unsave.isPending ? (
+                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                ) : (
+                  <Trash2 className="h-2.5 w-2.5" />
+                )}
+                remove
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {!streaming && turn.error && (
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onDismiss}
+            className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400"
+          >
+            <X className="h-2.5 w-2.5" />
+            dismiss
+          </button>
+        </div>
+      )}
     </div>
   );
 }
