@@ -2787,6 +2787,30 @@ export function buildServer(opts: BuildServerOptions) {
       ...(parsed.data.model ? { model: parsed.data.model } : {}),
       ...(parsed.data.effort ? { effort: parsed.data.effort } : {}),
     };
+    // Gather project context so the agent can dedup against work
+    // the operator already saved, brainstormed, or shipped. Most-
+    // recent first; helper caps each list internally.
+    const savedIdeas = listSavedIdeas(db, {
+      projectId: project.id,
+      includeSpawned: false,
+    }).map((i) => i.text);
+    const pastSuggestions = listSuggestions(db, {
+      projectId: project.id,
+      limit: 8,
+    });
+    const pastOptions = pastSuggestions.flatMap((s) => s.options);
+    const recentTasks = tasks
+      .list()
+      .filter((t) => t.projectId === project.id)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, 30)
+      .map((t) => t.title);
+    const ctx = {
+      savedIdeas,
+      pastOptions,
+      recentTasks,
+      instructions: project.instructions ?? null,
+    };
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         const enc = new TextEncoder();
@@ -2802,6 +2826,7 @@ export function buildServer(opts: BuildServerOptions) {
         try {
           const it = streamIdeation(project.path, parsed.data.prompt, {
             helper,
+            context: ctx,
             ...(parsed.data.max != null ? { max: parsed.data.max } : {}),
           });
           while (true) {

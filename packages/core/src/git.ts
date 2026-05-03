@@ -1053,7 +1053,67 @@ export interface IdeationResult {
  * `cwd` is the project's repo path so the agent can `Read` real files.
  * `extraInstructions` is the operator's optional `agentInstructions`.
  */
-function buildIdeationPrompt(prompt: string, max: number): string {
+/**
+ * Project context the brainstorm agent uses to avoid proposing
+ * duplicates of work the operator already saved, generated, or
+ * shipped. Each list is passed verbatim so the agent can pattern-
+ * match against it; we cap each section so the prompt stays small.
+ */
+export interface BrainstormContext {
+  /** Currently saved ideas in the Idea Library. */
+  savedIdeas?: string[];
+  /** Options from past brainstorm sessions (across all suggestions). */
+  pastOptions?: string[];
+  /** Recent task titles (open + closed) — what the project's been
+   *  building / has built. */
+  recentTasks?: string[];
+  /** Project's free-text instructions (CLAUDE.md-style). */
+  instructions?: string | null;
+}
+
+function buildIdeationPrompt(
+  prompt: string,
+  max: number,
+  ctx: BrainstormContext = {},
+): string {
+  // Cap each list so the prompt doesn't blow up on long-running
+  // projects. The most recent entries are the most useful for
+  // dedup; older ones are more likely to be stale.
+  const cap = (arr: string[] | undefined, n: number) =>
+    (arr ?? []).slice(0, n).map((s) => `- ${s.replace(/\s+/g, " ").trim()}`);
+  const savedSection = cap(ctx.savedIdeas, 30);
+  const pastSection = cap(ctx.pastOptions, 40);
+  const taskSection = cap(ctx.recentTasks, 20);
+  const dedupBlock: string[] = [];
+  if (savedSection.length > 0) {
+    dedupBlock.push(
+      "",
+      `Already saved in the Idea Library (do NOT propose these again):`,
+      ...savedSection,
+    );
+  }
+  if (pastSection.length > 0) {
+    dedupBlock.push(
+      "",
+      `Options from past brainstorm sessions (don't repeat these — propose adjacent or different angles instead):`,
+      ...pastSection,
+    );
+  }
+  if (taskSection.length > 0) {
+    dedupBlock.push(
+      "",
+      `Recent tasks the project has worked on or shipped (already done — avoid suggesting these as "next features"):`,
+      ...taskSection,
+    );
+  }
+  const instructionsBlock =
+    ctx.instructions && ctx.instructions.trim().length > 0
+      ? [
+          "",
+          `Project instructions (operator's guidance for any agent — respect these when picking directions):`,
+          ctx.instructions.trim().slice(0, 1500),
+        ]
+      : [];
   return [
     `You are brainstorming high-leverage ideas for the operator's project. Each idea is a SHORT directional pitch — what to build and why it's worth doing — not a full implementation spec. The plan tool will name files and steps later when the operator picks one to refine.`,
     "",
@@ -1089,6 +1149,13 @@ function buildIdeationPrompt(prompt: string, max: number): string {
     `- The critique (after " — ") is candid: why this matters now, the main risk, or what would make it shippable. Don't praise. Surface the load-bearing concern.`,
     `- Use exactly the em dash separator " — " between pitch and critique.`,
     `- One line per option. No numbering, no bullets, no markdown headers, no preamble.`,
+    ...(savedSection.length > 0 || pastSection.length > 0
+      ? [
+          `- DEDUP: don't propose anything substantively similar to ideas already in the lists below. Different angles on the same area are fine; near-restatements aren't.`,
+        ]
+      : []),
+    ...dedupBlock,
+    ...instructionsBlock,
     "",
     `Operator's brief:`,
     prompt.slice(0, 2000),
@@ -1129,10 +1196,16 @@ export type IdeationStreamEvent =
 export async function* streamIdeation(
   cwd: string,
   prompt: string,
-  opts: { helper?: AiHelperOptions; max?: number } = {},
+  opts: {
+    helper?: AiHelperOptions;
+    max?: number;
+    /** Existing project ideas / past suggestions / recent tasks the
+     *  agent should dedup against. */
+    context?: BrainstormContext;
+  } = {},
 ): AsyncGenerator<IdeationStreamEvent, IdeationResult, void> {
   const max = Math.max(2, Math.min(9, opts.max ?? 5));
-  const ask = buildIdeationPrompt(prompt, max);
+  const ask = buildIdeationPrompt(prompt, max, opts.context);
   const collected: string[] = [];
   const seen = new Set<string>();
   let buffer = "";
