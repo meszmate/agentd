@@ -107,7 +107,7 @@ export function CodeBlock({
           <pre
             className={cn(
               cls,
-              "overflow-auto font-mono text-[11.5px] leading-[1.5] m-0 px-2 py-1 rounded",
+              "overflow-auto font-mono text-[11.5px] leading-[1.5] m-0 rounded",
               "[&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5",
               "[&::-webkit-scrollbar-thumb]:rounded [&::-webkit-scrollbar-thumb]:bg-ink-900/15 dark:[&::-webkit-scrollbar-thumb]:bg-ink-50/15",
               "[&::-webkit-scrollbar-track]:bg-transparent",

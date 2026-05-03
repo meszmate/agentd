@@ -245,7 +245,7 @@ function HighlightedPre({
         <pre
           className={cn(
             className,
-            "whitespace-pre overflow-x-auto m-0 px-2 py-1 rounded",
+            "whitespace-pre overflow-x-auto m-0 rounded",
             tone === "fail" && "text-red-700 dark:text-red-300",
             // Thin scrollbar so it doesn't eat vertical space when the
             // line overflows horizontally.
