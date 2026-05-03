@@ -159,6 +159,13 @@ export const Task = z.object({
   autoCommit: z.boolean().optional(),
   autoPush: z.boolean().optional(),
   prUrl: z.string().nullable().optional(),
+  /**
+   * Codex session/thread id captured the first time a codex task
+   * spawns. Used on subsequent turns to call `codex exec resume <id>`
+   * so conversation context, MCP init, and AGENTS.md loading carry
+   * over instead of re-paying the cost on every steer.
+   */
+  codexThreadId: z.string().nullable().optional(),
   totalInputTokens: z.number().optional(),
   totalOutputTokens: z.number().optional(),
   totalCacheReadTokens: z.number().optional(),

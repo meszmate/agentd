@@ -80,6 +80,7 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     autoCommit: row.autoCommit !== 0,
     autoPush: row.autoPush === 1,
     prUrl: row.prUrl ?? null,
+    codexThreadId: row.codexThreadId ?? null,
     totalInputTokens: row.totalInputTokens ?? 0,
     totalOutputTokens: row.totalOutputTokens ?? 0,
     totalCacheReadTokens: row.totalCacheReadTokens ?? 0,
@@ -288,6 +289,24 @@ export function setTaskMirrorTo(
 export function setTaskPrUrl(db: Db, id: string, prUrl: string): void {
   db.update(tasks)
     .set({ prUrl, updatedAt: Date.now() })
+    .where(eq(tasks.id, id))
+    .run();
+}
+
+/**
+ * Persist the codex thread/session id captured from the runner's
+ * `thread.started` stream event. Subsequent codex turns read this
+ * back and call `codex exec resume <id>` instead of starting a
+ * fresh conversation, keeping AGENTS.md / MCP / context loaded.
+ * Idempotent — same id can be written repeatedly without harm.
+ */
+export function setTaskCodexThreadId(
+  db: Db,
+  id: string,
+  threadId: string,
+): void {
+  db.update(tasks)
+    .set({ codexThreadId: threadId, updatedAt: Date.now() })
     .where(eq(tasks.id, id))
     .run();
 }

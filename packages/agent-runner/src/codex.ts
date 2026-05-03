@@ -130,13 +130,18 @@ export class CodexRunner implements AgentRunner {
       this.opts.defaultPermissionMode ??
       "bypassPermissions";
 
-    // Build args. Note that `exec resume <id>` is its own subcommand and the
-    // prompt comes after; `exec` (no resume) takes the prompt as a positional.
-    // Probe the codex binary at runtime so we use the right approval/sandbox
-    // flag combo for this version (the bypass flag was added in newer
-    // builds and may be renamed/missing in others).
+    // Build args. Two subcommand shapes:
+    //   - first turn:  `codex exec [flags] <prompt>`
+    //   - subsequent:  `codex exec resume <thread_id> [flags] <prompt>`
+    // Resume reuses the original session's cwd/AGENTS.md/MCP init —
+    // we just pass the same flag set + the new prompt and codex picks
+    // up where the prior turn left off. (`--cd` is not accepted on
+    // resume; the original cwd is remembered.)
     const caps = detectCodexRunnerCaps(binary);
-    const args: string[] = ["exec", "--json"];
+    const resumeId = opts.resumeThreadId?.trim() || null;
+    const args: string[] = resumeId
+      ? ["exec", "resume", resumeId, "--json"]
+      : ["exec", "--json"];
     if (caps.supportsSkipGitRepoCheck) {
       args.push("--skip-git-repo-check");
     }
@@ -155,7 +160,9 @@ export class CodexRunner implements AgentRunner {
           args.push("--config", 'approval_policy="never"');
         }
       }
-    } else if (caps.supportsFullAuto) {
+    } else if (caps.supportsFullAuto && !resumeId) {
+      // `--full-auto` is only valid on the bare `exec` subcommand;
+      // resume already inherits the prior turn's mode.
       args.push("--full-auto");
     }
     const model = (opts.model && opts.model.trim()) || this.opts.model;
@@ -169,13 +176,19 @@ export class CodexRunner implements AgentRunner {
     if (opts.appendSystemPrompt && opts.appendSystemPrompt.trim().length > 0) {
       // codex doesn't have a dedicated --append-system-prompt flag; the next
       // best thing is prepending the instructions to the user prompt with a
-      // clear separator.
-      opts = {
-        ...opts,
-        prompt: `${opts.appendSystemPrompt}\n\n---\n\n${opts.prompt}`,
-      };
+      // clear separator. On resume turns the agent has already seen the
+      // catalog/instructions, so just pass the raw prompt to avoid re-stuffing
+      // tokens on every steer.
+      if (!resumeId) {
+        opts = {
+          ...opts,
+          prompt: `${opts.appendSystemPrompt}\n\n---\n\n${opts.prompt}`,
+        };
+      }
     }
     if (this.opts.extraArgs) args.push(...this.opts.extraArgs);
+    // No `--cd` flag — Bun.spawn's `cwd` below sets the process working
+    // directory, and resume reuses the original session's cwd anyway.
     args.push(opts.prompt);
 
     const proc = Bun.spawn({
@@ -312,5 +325,14 @@ export class CodexRunner implements AgentRunner {
     } catch {
       // ignore
     }
+  }
+
+  /**
+   * The session id captured from codex's `thread.started` stream
+   * event on the most recent run. Stable across `exec resume` calls
+   * (codex re-emits the same id on resume).
+   */
+  getThreadId(): string | null {
+    return this.threadId;
   }
 }

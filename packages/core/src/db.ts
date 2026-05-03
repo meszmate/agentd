@@ -30,6 +30,13 @@ export const tasks = sqliteTable("tasks", {
    */
   autoCommit: integer("auto_commit").notNull().default(1),
   prUrl: text("pr_url"),
+  /**
+   * Codex thread/session id — captured on the first codex turn from
+   * the `thread.started` stream event, then passed to subsequent
+   * `codex exec resume <id>` calls so each steer keeps the prior
+   * context instead of re-initializing.
+   */
+  codexThreadId: text("codex_thread_id"),
   totalInputTokens: integer("total_input_tokens").notNull().default(0),
   totalOutputTokens: integer("total_output_tokens").notNull().default(0),
   totalCacheReadTokens: integer("total_cache_read_tokens").notNull().default(0),
@@ -332,6 +339,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   auto_push INTEGER NOT NULL DEFAULT 0,
   auto_pr INTEGER NOT NULL DEFAULT 0,
   pr_url TEXT,
+  codex_thread_id TEXT,
   total_input_tokens INTEGER NOT NULL DEFAULT 0,
   total_output_tokens INTEGER NOT NULL DEFAULT 0,
   total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
@@ -567,6 +575,7 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE suggestions ADD COLUMN output_tokens INTEGER",
   "ALTER TABLE tasks ADD COLUMN auto_commit INTEGER NOT NULL DEFAULT 1",
   "ALTER TABLE projects ADD COLUMN instructions_enabled INTEGER NOT NULL DEFAULT 1",
+  "ALTER TABLE tasks ADD COLUMN codex_thread_id TEXT",
 ];
 
 function migrate(sqlite: Database): void {

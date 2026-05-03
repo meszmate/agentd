@@ -26,6 +26,15 @@ export interface RunnerStartOptions {
   /** Appended to the agent's system prompt for this run. */
   appendSystemPrompt?: string;
   /**
+   * Codex-only — when set, spawn `codex exec resume <id>` instead of
+   * a fresh `codex exec`, so AGENTS.md/MCP init carries over and the
+   * conversation keeps its prior context. Captured by the runner on
+   * the first turn (`thread.started` stream event) and persisted on
+   * the task; the daemon passes it back on every subsequent steer.
+   * Other runners ignore this field.
+   */
+  resumeThreadId?: string;
+  /**
    * Extra directories the agent is allowed to Read outside its cwd. Used
    * to grant access to active skill directories so the agent can load
    * the catalog entries it cares about mid-conversation.
@@ -59,4 +68,10 @@ export interface AgentRunner {
   sendInput(text: string): Promise<void>;
   stop(signal?: NodeJS.Signals): Promise<void>;
   on(listener: RunnerEventListener): () => void;
+  /**
+   * Codex captures a session/thread id from its stream so the daemon
+   * can persist it and pass it back as `resumeThreadId` on the next
+   * spawn. Other runners return null.
+   */
+  getThreadId?(): string | null;
 }

@@ -47,6 +47,7 @@ import {
   pushBranch,
   removeWorktree,
   syncAgentPlan,
+  setTaskCodexThreadId,
   updateTaskStatus,
   createWorktree,
   type AgentdPaths,
@@ -680,10 +681,19 @@ export class TaskManager {
         (task.model && task.model.trim()) ||
         cfg.defaultModel?.[task.agent] ||
         "";
+      // Codex-only — when this task already has a thread id from a
+      // prior turn, pass it so the runner builds `codex exec resume
+      // <id>` instead of a fresh `codex exec`. Saves AGENTS.md/MCP
+      // re-init + keeps conversation context across steers.
+      const resumeThreadId =
+        task.agent === "codex" && resume && task.codexThreadId
+          ? task.codexThreadId
+          : undefined;
       await runner.start({
         prompt,
         cwd: task.worktreePath,
         resume,
+        ...(resumeThreadId ? { resumeThreadId } : {}),
         ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
         permissionMode: task.permissionMode ?? "bypassPermissions",
         thinkingLevel: task.thinkingLevel ?? "high",
@@ -790,6 +800,19 @@ export class TaskManager {
       }
       // Fire-and-forget; commit + push + PR all run after the agent exits.
       void this.runCompletionHooks(taskId);
+    } else if (event.kind === "raw" && event.stream === "stdout") {
+      // CodexRunner emits a `[codex thread] <uuid>` marker the first
+      // time it sees `thread.started`. Persist the id on the task so
+      // every subsequent steer can call `codex exec resume <uuid>`
+      // and keep AGENTS.md/MCP/conversation context.
+      const m = /^\[codex thread\] ([0-9a-f-]{36})$/i.exec(event.text.trim());
+      if (m) {
+        const tid = m[1]!;
+        const cur = getTask(this.db, taskId);
+        if (cur && cur.codexThreadId !== tid) {
+          setTaskCodexThreadId(this.db, taskId, tid);
+        }
+      }
     }
     this.bus.publish({ taskId, event, ts: Date.now() });
   }
