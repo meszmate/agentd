@@ -628,6 +628,11 @@ export const Suggestion = z.object({
    * shows these as extra badges next to each option.
    */
   validations: z.array(SuggestionValidation).optional(),
+  /** Wall-clock duration of the brainstorm helper run, in ms. */
+  durationMs: z.number().int().nullable().optional(),
+  /** Tokens the helper consumed (claude only — codex doesn't expose). */
+  inputTokens: z.number().int().nullable().optional(),
+  outputTokens: z.number().int().nullable().optional(),
 });
 export type Suggestion = z.infer<typeof Suggestion>;
 

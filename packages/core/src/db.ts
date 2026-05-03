@@ -162,6 +162,11 @@ export const suggestions = sqliteTable("suggestions", {
    * across all available raters (original + validations).
    */
   validationsJson: text("validations_json"),
+  /** Wall-clock duration of the brainstorm helper run in ms. */
+  durationMs: integer("duration_ms"),
+  /** Tokens the helper consumed across the whole turn (claude only). */
+  inputTokens: integer("input_tokens"),
+  outputTokens: integer("output_tokens"),
 });
 
 export const councils = sqliteTable("councils", {
@@ -543,6 +548,9 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE suggestions ADD COLUMN events_json TEXT",
   "ALTER TABLE suggestions ADD COLUMN validations_json TEXT",
   "ALTER TABLE projects ADD COLUMN brainstorm_auto_json TEXT",
+  "ALTER TABLE suggestions ADD COLUMN duration_ms INTEGER",
+  "ALTER TABLE suggestions ADD COLUMN input_tokens INTEGER",
+  "ALTER TABLE suggestions ADD COLUMN output_tokens INTEGER",
 ];
 
 function migrate(sqlite: Database): void {

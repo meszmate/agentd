@@ -57,19 +57,21 @@ export function CodeBlock({
 
   const label = filename ?? (lang || "text");
 
-  // Surface palette tokens — one set for dark, one for light — so the
-  // block reads cleanly in either theme.
+  // Modern, low-contrast surface palette. Light mode uses a soft warm
+  // off-white (closer to a notebook than to a stark IDE panel) with
+  // a hairline border; dark mode keeps the IDE feel but with a
+  // subtler border. Header is integrated, not chunky.
   const surface = isDark
-    ? "bg-[#1e1e1e] border-ink-50/10"
-    : "bg-[#f8f8fa] border-ink-900/10";
+    ? "bg-[#1a1b22] border-ink-50/[0.08]"
+    : "bg-[#fafaf7] border-ink-900/[0.08]";
   const headerBg = isDark
-    ? "bg-black/30 border-ink-50/10"
-    : "bg-ink-900/[0.04] border-ink-900/[0.08]";
-  const headerLabel = isDark ? "text-ink-50/60" : "text-ink-700";
+    ? "bg-[#13141a] border-ink-50/[0.06]"
+    : "bg-[#f3f3ee] border-ink-900/[0.05]";
+  const headerLabel = isDark ? "text-ink-50/55" : "text-ink-500";
   const copyButton = isDark
     ? "text-ink-50/55 hover:bg-ink-50/10 hover:text-ink-50"
     : "text-ink-500 hover:bg-ink-900/[0.06] hover:text-ink-900";
-  const lineNumber = isDark ? "text-ink-50/30" : "text-ink-400";
+  const lineNumber = isDark ? "text-ink-50/25" : "text-ink-400/70";
 
   return (
     <div
@@ -112,7 +114,7 @@ export function CodeBlock({
       <Highlight
         code={code.replace(/\n+$/, "")}
         language={prismLang}
-        theme={isDark ? themes.vsDark : themes.vsLight}
+        theme={isDark ? themes.vsDark : themes.github}
       >
         {({ className: cls, style, tokens, getLineProps, getTokenProps }) => (
           <pre

@@ -90,7 +90,7 @@ export function ToolLine({
         )}
       </div>
       {showInlineCode && (
-        <div className="mt-1 ml-5">
+        <div className="mt-1">
           <CodeBlock
             code={parsed.detail!}
             language={parsed.detailLanguage}
@@ -101,7 +101,7 @@ export function ToolLine({
         </div>
       )}
       {showTextToggle && openText && parsed.detail && (
-        <pre className="mt-1 ml-5 whitespace-pre-wrap break-words rounded border border-ink-900/[0.06] bg-ink-900/[0.03] px-1.5 py-0.5 text-[10px] text-ink-500 dark:border-ink-50/[0.06] dark:bg-ink-50/[0.03] dark:text-ink-400">
+        <pre className="mt-1 whitespace-pre-wrap break-words rounded border border-ink-900/[0.06] bg-ink-900/[0.03] px-1.5 py-0.5 text-[10px] text-ink-500 dark:border-ink-50/[0.06] dark:bg-ink-50/[0.03] dark:text-ink-400">
           {parsed.detail}
         </pre>
       )}

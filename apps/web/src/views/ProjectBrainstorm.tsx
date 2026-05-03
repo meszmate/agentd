@@ -699,35 +699,23 @@ function PersistedActivity({
 }: {
   events: Array<{ kind: "tool_use"; name: string; input?: unknown }>;
 }) {
-  const [open, setOpen] = useState(false);
   return (
-    <div className="mb-3 -mx-2 px-2 py-1.5 rounded-md border border-ink-900/[0.05] dark:border-ink-50/[0.06] bg-ink-900/[0.015] dark:bg-ink-50/[0.02]">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1.5 w-full font-mono text-[10px] uppercase tracking-[0.12em] text-ink-500 dark:text-ink-400 hover:text-ink-900 dark:hover:text-ink-50 transition-colors"
-      >
-        {open ? (
-          <ChevronDown className="h-3 w-3" />
-        ) : (
-          <ChevronRight className="h-3 w-3" />
-        )}
+    <div className="mb-2">
+      <div className="flex items-center gap-1.5 mb-1 font-mono text-[9.5px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
         <span>
           {events.length} {events.length === 1 ? "step" : "steps"} · what the
           agent did
         </span>
-      </button>
-      {open && (
-        <ul className="mt-2 space-y-1 pl-4 border-l-2 border-ink-900/[0.06] dark:border-ink-50/[0.08]">
-          {events.map((ev, i) => (
-            <li key={i}>
-              <ToolLine
-                content={`[call ${ev.name}] ${JSON.stringify(ev.input ?? {})}`}
-              />
-            </li>
-          ))}
-        </ul>
-      )}
+      </div>
+      <ul className="space-y-0.5">
+        {events.map((ev, i) => (
+          <li key={i}>
+            <ToolLine
+              content={`[call ${ev.name}] ${JSON.stringify(ev.input ?? {})}`}
+            />
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -786,69 +774,73 @@ function ValidatingFeed({
 }
 
 /**
- * Inline "more ideas" actions — three small icon buttons. No
- * dropdown; the operator sees every option at a glance and clicks
- * directly. The agent's dedup context (saved + past options) is
- * wired server-side so each variant naturally avoids restating
- * what's already there.
- *
- *   ↻ more like these        same direction, fresh angles
- *   ⇄ completely different   hard pivot, orthogonal takes
- *   ✦ go wild                weird, opinionated, "no careful PM"
+ * "More" dropdown — re-runs the same brief in a fresh suggestion
+ * with one of three nudges. Dedup against existing ideas / past
+ * options / recent tasks happens server-side via the prompt context.
  */
-function MoreActions({
+function MorePicker({
   onMore,
   disabled,
 }: {
   onMore: (nudge: string) => void;
   disabled: boolean;
 }) {
-  const choices: { title: string; icon: React.ReactNode; nudge: string }[] = [
+  const choices: { label: string; icon: React.ReactNode; nudge: string }[] = [
     {
-      title: "more like these",
+      label: "more like these",
       icon: <Repeat className="h-3 w-3" />,
       nudge:
         "Generate fresh ideas in the same direction as the brief above. Don't restate ideas the dedup list already covers — find adjacent angles, sharper variants, or things in the same neighborhood that haven't been raised yet.",
     },
     {
-      title: "completely different angle",
+      label: "completely different",
       icon: <Shuffle className="h-3 w-3" />,
       nudge:
         "IMPORTANT: pivot. The previous round already covered the obvious directions for this brief. Now propose ideas from a DIFFERENT angle entirely — orthogonal directions, contrarian takes, things that re-frame the brief instead of answering it directly. Avoid anything that overlaps with the dedup list.",
     },
     {
-      title: "go wild — strange, opinionated takes",
+      label: "go wild",
       icon: <Flame className="h-3 w-3" />,
       nudge:
         "Forget the safe roadmap. Propose ideas that would make this project weird, opinionated, or memorable — directions a careful PM would never green-light. Lean into the strange ones. Don't sandbag with safety. The operator wants to see the edges of the design space, not the median path.",
     },
   ];
   return (
-    <>
-      {choices.map((c) => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
         <button
-          key={c.title}
           type="button"
           disabled={disabled}
-          onClick={() => onMore(c.nudge)}
-          title={c.title}
-          className="grid place-items-center size-5 rounded text-ink-400 hover:text-ember-700 hover:bg-ember-500/10 dark:text-ink-500 dark:hover:text-ember-300 transition-colors disabled:opacity-40 disabled:cursor-wait"
+          title="Generate more ideas off this brief"
+          className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] border border-ink-900/10 bg-paper-50 text-ink-600 hover:bg-paper-100 hover:border-ink-900/20 transition-colors dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-300 dark:hover:bg-ink-700 disabled:opacity-50 disabled:cursor-wait"
         >
-          {c.icon}
+          <Plus className="h-3 w-3" />
+          more
+          <ChevronDown className="h-3 w-3 opacity-60" />
         </button>
-      ))}
-    </>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-[14rem]">
+        {choices.map((c) => (
+          <DropdownMenuItem
+            key={c.label}
+            onClick={() => onMore(c.nudge)}
+            className="gap-2"
+          >
+            {c.icon}
+            <span className="font-mono text-[11.5px]">{c.label}</span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
 /**
- * Inline validators. One small icon per agent (claude / codex) using
- * each agent's first available model — keeps the controls visible
- * inline instead of hidden behind a dropdown. A small dot on the
- * icon means this rater already scored this suggestion; clicking it
- * re-runs and overwrites.
+ * "Validate with…" dropdown — picks an agent + model to re-score
+ * the suggestion's options. Disables agent/model pairs that already
+ * validated this suggestion to avoid pointless re-runs.
  */
-function ValidateActions({
+function ValidatePicker({
   suggestion,
   onValidate,
   validating,
@@ -859,49 +851,54 @@ function ValidateActions({
 }) {
   const modelsQ = useModels();
   const models = modelsQ.data?.models;
-  const defaults = modelsQ.data?.defaults;
   const used = new Set(
-    (suggestion.validations ?? []).map((v) => v.agent),
+    (suggestion.validations ?? []).map((v) => `${v.agent}:${v.model}`),
   );
-  // Pick the configured default model for each agent, falling back to
-  // the first one in the registry. Single click → uses sensible default.
-  const pickModel = (agent: "claude" | "codex"): string => {
-    const def = defaults?.[agent];
-    const list = models?.[agent] ?? [];
-    if (def && list.some((m) => m.id === def)) return def;
-    return list[0]?.id ?? "";
-  };
-  const buttons: { agent: "claude" | "codex"; label: string }[] = [
-    { agent: "claude", label: "C" },
-    { agent: "codex", label: "X" },
-  ];
+  type Choice = { agent: "claude" | "codex"; model: string; label: string };
+  const choices: Choice[] = [];
+  for (const a of ["claude", "codex"] as const) {
+    for (const m of models?.[a] ?? []) {
+      choices.push({ agent: a, model: m.id, label: `${a} · ${m.label}` });
+    }
+  }
+  if (choices.length === 0) return null;
   return (
-    <>
-      {buttons.map((b) => {
-        const model = pickModel(b.agent);
-        if (!model && (models?.[b.agent]?.length ?? 0) === 0) return null;
-        const already = used.has(b.agent);
-        return (
-          <button
-            key={b.agent}
-            type="button"
-            disabled={validating}
-            onClick={() => onValidate(suggestion.id, b.agent, model)}
-            title={`validate with ${b.agent}${model ? ` · ${model}` : ""}${already ? " (re-runs)" : ""}`}
-            className="relative grid place-items-center size-5 rounded font-mono text-[10px] font-semibold text-ink-400 hover:text-violet-700 hover:bg-violet-500/10 dark:text-ink-500 dark:hover:text-violet-300 transition-colors disabled:opacity-40 disabled:cursor-wait"
-          >
-            {validating ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              b.label
-            )}
-            {already && !validating && (
-              <span className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-emerald-500" />
-            )}
-          </button>
-        );
-      })}
-    </>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          disabled={validating}
+          className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] border border-ink-900/10 bg-paper-50 text-ink-600 hover:bg-paper-100 hover:border-ink-900/20 transition-colors dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-300 dark:hover:bg-ink-700 disabled:opacity-50 disabled:cursor-wait"
+        >
+          {validating ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <Sparkles className="h-3 w-3" />
+          )}
+          validate
+          <ChevronDown className="h-3 w-3 opacity-60" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="max-h-80 overflow-y-auto">
+        {choices.map((c) => {
+          const key = `${c.agent}:${c.model}`;
+          const already = used.has(key);
+          return (
+            <DropdownMenuItem
+              key={key}
+              onClick={() => onValidate(suggestion.id, c.agent, c.model)}
+            >
+              <span className="font-mono text-[11.5px] flex-1">
+                {c.label}
+              </span>
+              {already && (
+                <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+              )}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -1037,13 +1034,9 @@ function AgentCluster({
             {savedHere}
           </span>
         )}
-        <span className="ml-auto inline-flex items-center gap-0.5">
-          <MoreActions
-            onMore={onMore}
-            disabled={streaming || validating}
-          />
-          <span className="w-px h-3 bg-ink-900/10 dark:bg-ink-50/10 mx-0.5" />
-          <ValidateActions
+        <span className="ml-auto inline-flex items-center gap-1">
+          <MorePicker onMore={onMore} disabled={streaming || validating} />
+          <ValidatePicker
             suggestion={suggestion}
             onValidate={onValidate}
             validating={validating}

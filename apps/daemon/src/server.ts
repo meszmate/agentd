@@ -2815,6 +2815,11 @@ export function buildServer(opts: BuildServerOptions) {
       async start(controller) {
         const enc = new TextEncoder();
         const collected: string[] = [];
+        const startedAt = Date.now();
+        let lastUsage: {
+          inputTokens?: number;
+          outputTokens?: number;
+        } | null = null;
         // Tool-call events accumulated so they can be persisted on
         // the suggestion. The brainstorm thread renders these as
         // `<ToolLine>` rows so the operator sees what the agent
@@ -2856,6 +2861,13 @@ export function buildServer(opts: BuildServerOptions) {
                   title,
                   prompt: parsed.data.prompt,
                   options: collected,
+                  durationMs: Date.now() - startedAt,
+                  ...(lastUsage?.inputTokens != null
+                    ? { inputTokens: lastUsage.inputTokens }
+                    : {}),
+                  ...(lastUsage?.outputTokens != null
+                    ? { outputTokens: lastUsage.outputTokens }
+                    : {}),
                   ...(accumulatedEvents.length > 0
                     ? {
                         events: accumulatedEvents as Array<
@@ -2887,9 +2899,14 @@ export function buildServer(opts: BuildServerOptions) {
               accumulatedEvents.push(
                 ev as { kind: "tool_use" | "tool_result"; [k: string]: unknown },
               );
+            } else if (ev.kind === "usage") {
+              lastUsage = {
+                inputTokens: ev.inputTokens,
+                outputTokens: ev.outputTokens,
+              };
             }
             // Each event lands as `\x1f<json>\n` so the web can render
-            // tool_use / tool_result rows live alongside the options.
+            // tool_use / tool_result / usage rows live.
             controller.enqueue(enc.encode(`\x1f${JSON.stringify(ev)}\n`));
           }
         } catch (e) {

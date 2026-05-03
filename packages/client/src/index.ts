@@ -126,7 +126,15 @@ export type IdeaChatEvent =
 export type IdeationEvent =
   | { kind: "option"; text: string }
   | { kind: "tool_use"; name: string; input: unknown }
-  | { kind: "tool_result"; ok: boolean; preview?: string };
+  | { kind: "tool_result"; ok: boolean; preview?: string }
+  | {
+      kind: "usage";
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+      costUsd?: number;
+    };
 
 export type PluginName = "telegram" | "discord";
 

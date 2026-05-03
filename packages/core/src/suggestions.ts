@@ -21,6 +21,11 @@ export interface CreateSuggestionInput {
    * only the persistable kinds (tool_use + tool_result).
    */
   events?: IdeaMessageEvent[];
+  /** Wall-clock duration of the helper run, in ms. */
+  durationMs?: number;
+  /** Token totals reported by the helper (claude). */
+  inputTokens?: number;
+  outputTokens?: number;
 }
 
 function parseEvents(
@@ -78,6 +83,9 @@ function rowToSuggestion(
     spawnedTaskId: row.spawnedTaskId ?? null,
     ...(events && events.length > 0 ? { events } : {}),
     ...(validations && validations.length > 0 ? { validations } : {}),
+    ...(row.durationMs != null ? { durationMs: row.durationMs } : {}),
+    ...(row.inputTokens != null ? { inputTokens: row.inputTokens } : {}),
+    ...(row.outputTokens != null ? { outputTokens: row.outputTokens } : {}),
   };
 }
 
@@ -133,6 +141,9 @@ export function createSuggestion(
       spawnedTaskId: null,
       eventsJson:
         persistable.length > 0 ? JSON.stringify(persistable) : null,
+      durationMs: input.durationMs ?? null,
+      inputTokens: input.inputTokens ?? null,
+      outputTokens: input.outputTokens ?? null,
     })
     .run();
   return getSuggestion(db, id)!;

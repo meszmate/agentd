@@ -68,6 +68,21 @@ export type HelperStreamEvent =
    * plan panel in the workshop UI; never persisted as a chat token.
    */
   | { kind: "plan_delta"; delta: string }
+  /**
+   * Cumulative token + cost usage emitted as the helper progresses
+   * (and once more on the final `result` envelope). The UI reads
+   * these to render a live "N tok in / M tok out" counter beside
+   * the elapsed timer, so the operator can watch how much the agent
+   * is burning while it works.
+   */
+  | {
+      kind: "usage";
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+      costUsd?: number;
+    }
   | { kind: "raw"; text: string };
 
 interface ClaudeJsonLine {
@@ -84,6 +99,7 @@ interface ClaudeJsonLine {
       content?: unknown;
       is_error?: boolean;
     }>;
+    usage?: ClaudeUsage;
   };
   result?: string;
   is_error?: boolean;
@@ -93,6 +109,15 @@ interface ClaudeJsonLine {
   };
   content?: unknown;
   tool_use_id?: string;
+  usage?: ClaudeUsage;
+  total_cost_usd?: number;
+}
+
+interface ClaudeUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
 }
 
 function buildAiHelperArgv(
@@ -253,12 +278,65 @@ async function* runHelperWithEvents(
       return;
     }
     // Final result envelope from claude — overrides accumulated text
-    // with the canonical reply.
-    if (parsed.type === "result" && typeof parsed.result === "string") {
-      acc = parsed.result;
+    // with the canonical reply, plus emits a final usage event.
+    if (parsed.type === "result") {
+      if (typeof parsed.result === "string") acc = parsed.result;
+      const u = parsed.usage;
+      if (u) {
+        pendingEvents.push({
+          kind: "usage",
+          inputTokens: u.input_tokens ?? 0,
+          outputTokens: u.output_tokens ?? 0,
+          ...(u.cache_read_input_tokens != null
+            ? { cacheReadTokens: u.cache_read_input_tokens }
+            : {}),
+          ...(u.cache_creation_input_tokens != null
+            ? { cacheWriteTokens: u.cache_creation_input_tokens }
+            : {}),
+          ...(typeof parsed.total_cost_usd === "number"
+            ? { costUsd: parsed.total_cost_usd }
+            : {}),
+        });
+      }
+      return;
+    }
+    // Per-turn usage on assistant messages — gives the UI a live
+    // counter while the helper is still running.
+    if (parsed.type === "assistant" && parsed.message?.usage) {
+      const u = parsed.message.usage;
+      pendingEvents.push({
+        kind: "usage",
+        inputTokens: u.input_tokens ?? 0,
+        outputTokens: u.output_tokens ?? 0,
+        ...(u.cache_read_input_tokens != null
+          ? { cacheReadTokens: u.cache_read_input_tokens }
+          : {}),
+        ...(u.cache_creation_input_tokens != null
+          ? { cacheWriteTokens: u.cache_creation_input_tokens }
+          : {}),
+      });
     }
   };
 
+  // For codex (text mode), drain stderr into `acc` too. Codex's
+  // `exec` mode prints progress lines to stderr and the actual reply
+  // is interleaved across both streams; if we only watch stdout the
+  // SCORES line can land on the wrong fd and the parser sees
+  // nothing. Claude in stream-json mode keeps stderr quiet so we
+  // skip the drain there.
+  const stderrChunks: string[] = [];
+  let stderrDrain: Promise<void> | null = null;
+  if (!useJson) {
+    stderrDrain = (async () => {
+      const r = proc.stderr.getReader();
+      const d = new TextDecoder();
+      while (true) {
+        const { value, done } = await r.read();
+        if (done) break;
+        stderrChunks.push(d.decode(value, { stream: true }));
+      }
+    })().catch(() => {});
+  }
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -293,6 +371,19 @@ async function* runHelperWithEvents(
     // stream cancelled
   }
   await proc.exited;
+  if (stderrDrain) {
+    try {
+      await stderrDrain;
+    } catch {
+      // ignore — best-effort
+    }
+    if (stderrChunks.length > 0) {
+      // Concat stderr after stdout — rare for codex to put the
+      // payload on stderr only, but if it does the parser needs it.
+      const errText = stderrChunks.join("");
+      if (errText.trim()) acc = acc + (acc.endsWith("\n") ? "" : "\n") + errText;
+    }
+  }
   if (!acc.trim()) {
     return { text: "", source: "fallback-empty" };
   }
@@ -1191,7 +1282,15 @@ function cleanIdeationLine(raw: string): string {
 export type IdeationStreamEvent =
   | { kind: "option"; text: string }
   | { kind: "tool_use"; name: string; input: unknown }
-  | { kind: "tool_result"; ok: boolean; preview?: string };
+  | { kind: "tool_result"; ok: boolean; preview?: string }
+  | {
+      kind: "usage";
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+      costUsd?: number;
+    };
 
 export async function* streamIdeation(
   cwd: string,
@@ -1253,6 +1352,19 @@ export async function* streamIdeation(
           kind: "tool_result",
           ok: ev.ok,
           ...(ev.preview ? { preview: ev.preview } : {}),
+        };
+      } else if (ev.kind === "usage") {
+        yield {
+          kind: "usage",
+          inputTokens: ev.inputTokens,
+          outputTokens: ev.outputTokens,
+          ...(ev.cacheReadTokens != null
+            ? { cacheReadTokens: ev.cacheReadTokens }
+            : {}),
+          ...(ev.cacheWriteTokens != null
+            ? { cacheWriteTokens: ev.cacheWriteTokens }
+            : {}),
+          ...(ev.costUsd != null ? { costUsd: ev.costUsd } : {}),
         };
       }
       if (collected.length >= max) break;
@@ -1406,7 +1518,13 @@ function parseScores(
   // "1. 82\n2. 64" style instead of a single line. We then pick
   // either the longest space-separated run, OR concatenate the leading
   // integers in order until we have N (one per idea).
-  const cleaned = out.replace(/\[[0-9;]*[mGKHF]/g, "");
+  // Strip a wider set of ANSI sequences plus stray control bytes —
+  // codex's TUI emits CSI ("\x1b[...X"), OSC ("\x1b]...BEL"), and
+  // raw control chars that the regex parser would otherwise miss.
+  const cleaned = out
+    .replace(/\x1b\[\??[0-9;]*[a-zA-Z]/g, "")
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
   let parsed: number[] = [];
   // Tier 1 (most reliable): the prompt mandates a "SCORES: N1 N2 …"
   // line as the LAST thing in the reply. Take the latest match so
@@ -1444,6 +1562,13 @@ function parseScores(
   }
   if (parsed.length === 0) {
     const preview = cleaned.trim().slice(0, 400);
+    // Surface the raw output so we can see what the rater actually
+    // returned without bouncing through a debugger. Operators read
+    // the daemon log when validation breaks.
+    console.warn(
+      "[validateIdeas] no scores parsed; raw rater output:",
+      JSON.stringify(raw.slice(0, 800)),
+    );
     return {
       scores: [],
       source: "fallback-empty",
