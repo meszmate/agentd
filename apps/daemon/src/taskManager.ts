@@ -748,6 +748,20 @@ export class TaskManager {
           }
         }
       }
+    } else if (event.kind === "tool_result") {
+      // Persist the tool's response so the timeline can render the
+      // claude-code-style output preview ("3 lines + N more") and a
+      // green/red status dot under the matching tool_call row above.
+      // Format keeps the next-message pairing logic simple — `[result
+      // <tool> ok|err] <output>`.
+      const okFlag = event.ok ? "ok" : "err";
+      const trimmed = event.output.slice(0, 4000);
+      appendMessage(
+        this.db,
+        taskId,
+        "tool",
+        `[result ${event.tool} ${okFlag}] ${trimmed}`,
+      );
     } else if (event.kind === "status") {
       updateTaskStatus(this.db, taskId, event.status);
       // Auto-fire any queued items at the turn boundary for

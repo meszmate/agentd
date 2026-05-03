@@ -324,10 +324,47 @@ export function TaskTimeline({
                   compactedAt != null &&
                   m.ts >= compactedAt &&
                   (i === 0 || messages[i - 1]!.ts < compactedAt);
+                // Pair `[call X]` rows with the immediately-following
+                // `[result X ok|err] ...` row so the timeline shows
+                // each tool with its output preview underneath. The
+                // result message is then suppressed (merged into the
+                // call above).
+                if (m.role === "tool") {
+                  const prev = messages[i - 1];
+                  const parsedResult = parseToolResultMessage(m.content);
+                  if (
+                    parsedResult &&
+                    prev &&
+                    prev.role === "tool" &&
+                    prev.content.startsWith(`[call ${parsedResult.tool}]`)
+                  ) {
+                    // already merged into the call render
+                    return null;
+                  }
+                }
+                const next = messages[i + 1];
+                const callMatch =
+                  m.role === "tool" &&
+                  m.content.startsWith("[call ")
+                    ? m.content.match(/^\[call ([^\]]+)\]/)
+                    : null;
+                const callTool = callMatch?.[1];
+                const pairedResult =
+                  callTool && next && next.role === "tool"
+                    ? parseToolResultMessage(next.content)
+                    : null;
+                const matchedResult =
+                  pairedResult && pairedResult.tool === callTool
+                    ? pairedResult
+                    : null;
                 return (
                   <Fragment key={m.id}>
                     {showDivider && <CompactDivider ts={compactedAt!} />}
-                    <TimelineItem message={m} />
+                    <TimelineItem
+                      message={m}
+                      output={matchedResult?.output}
+                      outputOk={matchedResult?.ok}
+                    />
                   </Fragment>
                 );
               })}
@@ -519,7 +556,32 @@ export function TaskTimeline({
   );
 }
 
-function TimelineItem({ message: m }: { message: Message }) {
+/**
+ * Parse a `[result <tool> ok|err] <output>` message into its parts.
+ * Returns null when the message isn't a tool result (so the caller
+ * can fall through to the regular tool_call render).
+ */
+function parseToolResultMessage(
+  content: string,
+): { tool: string; ok: boolean; output: string } | null {
+  const m = content.match(/^\[result ([^\s\]]+) (ok|err)\]\s*([\s\S]*)$/);
+  if (!m) return null;
+  return {
+    tool: m[1]!,
+    ok: m[2] === "ok",
+    output: m[3] ?? "",
+  };
+}
+
+function TimelineItem({
+  message: m,
+  output,
+  outputOk,
+}: {
+  message: Message;
+  output?: string;
+  outputOk?: boolean;
+}) {
   // Structured system messages — `agentd-progress`, `agentd-share`,
   // `agentd-ask` — get pulled into a styled chip so the operator's
   // eye reads them as "agent told me X" instead of generic sys text.
@@ -535,7 +597,11 @@ function TimelineItem({ message: m }: { message: Message }) {
     return (
       <li className="relative">
         <span className="absolute -left-7 top-1.5 size-2 rounded-full bg-ink-900/20 dark:bg-ink-50/20" />
-        <ToolLine content={m.content} />
+        <ToolLine
+          content={m.content}
+          {...(output !== undefined ? { output } : {})}
+          {...(outputOk !== undefined ? { outputOk } : {})}
+        />
       </li>
     );
   }
