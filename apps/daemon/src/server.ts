@@ -666,7 +666,6 @@ export function buildServer(opts: BuildServerOptions) {
         prompt: parsed.data.prompt,
         ...(parsed.data.title ? { title: parsed.data.title } : {}),
         ...(parsed.data.autoPush != null ? { autoPush: parsed.data.autoPush } : {}),
-        ...(parsed.data.autoPr != null ? { autoPr: parsed.data.autoPr } : {}),
         ...(parsed.data.skills?.length ? { skills: parsed.data.skills } : {}),
         ...(parsed.data.permissionMode
           ? { permissionMode: parsed.data.permissionMode }
@@ -1274,23 +1273,19 @@ export function buildServer(opts: BuildServerOptions) {
     const body = (await c.req.json().catch(() => null)) as {
       autoCommit?: boolean;
       autoPush?: boolean;
-      autoPr?: boolean;
     } | null;
     if (
       !body ||
-      (body.autoCommit === undefined &&
-        body.autoPush === undefined &&
-        body.autoPr === undefined)
+      (body.autoCommit === undefined && body.autoPush === undefined)
     ) {
       return c.json(
-        { error: "at least one of autoCommit / autoPush / autoPr required" },
+        { error: "at least one of autoCommit / autoPush required" },
         400,
       );
     }
     const updated = setTaskAutoFlags(db, id, {
       ...(body.autoCommit !== undefined ? { autoCommit: body.autoCommit } : {}),
       ...(body.autoPush !== undefined ? { autoPush: body.autoPush } : {}),
-      ...(body.autoPr !== undefined ? { autoPr: body.autoPr } : {}),
     });
     if (updated) pubTaskChanged(id);
     return c.json({ task: updated });
@@ -2006,7 +2001,6 @@ export function buildServer(opts: BuildServerOptions) {
       baseBranch: parsed.data.baseBranch,
       promptTemplate: parsed.data.promptTemplate,
       autoPush: parsed.data.autoPush,
-      autoPr: parsed.data.autoPr,
       ...(parsed.data.permissionMode
         ? { permissionMode: parsed.data.permissionMode }
         : {}),
@@ -2062,7 +2056,6 @@ export function buildServer(opts: BuildServerOptions) {
         prompt,
         title: parsed.data.titleOverride ?? tpl.name,
         autoPush: parsed.data.autoPush ?? tpl.autoPush,
-        autoPr: parsed.data.autoPr ?? tpl.autoPr,
         templateId: tpl.id,
         permissionMode: parsed.data.permissionMode ?? tpl.permissionMode,
         thinkingLevel: parsed.data.thinkingLevel ?? tpl.thinkingLevel,
@@ -3405,6 +3398,19 @@ export function buildServer(opts: BuildServerOptions) {
       });
       const out = (await new Response(proc.stdout).text()).trim();
       await proc.exited;
+      // Count uncommitted entries in `git status --porcelain` so the UI
+      // can show a "dirty" badge alongside ahead/behind.
+      const statusProc = Bun.spawn({
+        cmd: ["git", "status", "--porcelain"],
+        cwd: project.path,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const statusOut = (await new Response(statusProc.stdout).text()).trim();
+      await statusProc.exited;
+      const dirty = statusOut.length === 0
+        ? 0
+        : statusOut.split("\n").filter((l) => l.length > 0).length;
       const m = out.match(/^(\d+)\s+(\d+)/);
       if (proc.exitCode !== 0 || !m) {
         return c.json({
@@ -3412,6 +3418,7 @@ export function buildServer(opts: BuildServerOptions) {
           ahead: 0,
           behind: 0,
           hasUpstream: false,
+          dirty,
           fetched,
           ...(fetchError ? { fetchError } : {}),
         });
@@ -3421,6 +3428,7 @@ export function buildServer(opts: BuildServerOptions) {
         behind: parseInt(m[1]!, 10),
         ahead: parseInt(m[2]!, 10),
         hasUpstream: true,
+        dirty,
         fetched,
         ...(fetchError ? { fetchError } : {}),
       });

@@ -1,16 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
   ArrowUpRight,
   BookText,
+  Check,
   CheckCircle2,
   ChevronDown,
+  CircleDot,
   Copy,
   CornerDownLeft,
   ExternalLink,
   FileText,
   FolderGit2,
+  GitBranch,
   Hash,
   Lightbulb,
   Loader2,
@@ -54,6 +59,8 @@ import {
   usePatchPrefs,
   usePrefs,
   useProject,
+  useProjectGitState,
+  usePullProject,
   useSkills,
   useTasks,
   useUpdateProject,
@@ -219,9 +226,7 @@ export function ProjectDetail() {
         <code className="font-mono text-[11px] text-ink-700 dark:text-ink-200 truncate flex-1">
           {project.path}
         </code>
-        <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 shrink-0">
-          paired {formatTs(project.createdAt)}
-        </span>
+        <RepoStatusChip slug={project.slug} />
         <span className="text-ink-300 dark:text-ink-600">·</span>
         <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 shrink-0">
           last active {formatTs(project.lastActiveAt)}
@@ -298,6 +303,101 @@ export function ProjectDetail() {
         </aside>
       </div>
     </div>
+  );
+}
+
+/* ── Repo sync chip ─────────────────────────────────────────────── */
+
+/**
+ * Compact summary of where the project's working tree sits relative to
+ * its origin remote. Shows current branch, ahead/behind counts, and a
+ * dirty-files badge. Click → triggers a fresh `git fetch` so the user
+ * gets a manual refresh on demand without waiting for the 60s tick.
+ */
+function RepoStatusChip({ slug }: { slug: string }) {
+  const stateQ = useProjectGitState(slug);
+  const pull = usePullProject();
+  const { toast } = useApp();
+  const s = stateQ.data;
+
+  if (stateQ.isLoading || !s) {
+    return (
+      <span className="inline-flex items-center gap-1.5 font-mono text-[10px] text-ink-400 dark:text-ink-500 shrink-0">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        syncing
+      </span>
+    );
+  }
+
+  const synced =
+    s.hasUpstream && s.ahead === 0 && s.behind === 0 && s.dirty === 0;
+  const canPull = s.hasUpstream && s.behind > 0 && s.dirty === 0;
+
+  return (
+    <span className="inline-flex items-center gap-2 font-mono text-[10px] shrink-0">
+      <span className="inline-flex items-center gap-1 text-ink-500 dark:text-ink-400">
+        <GitBranch className="h-3 w-3" />
+        {s.branch || "(detached)"}
+      </span>
+      {!s.hasUpstream ? (
+        <span className="inline-flex items-center gap-1 px-1 rounded text-amber-700 dark:text-amber-400 bg-amber-500/10">
+          no upstream
+        </span>
+      ) : synced ? (
+        <span className="inline-flex items-center gap-1 px-1 rounded text-emerald-700 dark:text-emerald-400 bg-emerald-500/10">
+          <Check className="h-3 w-3" />
+          synced
+        </span>
+      ) : (
+        <span className="inline-flex items-center gap-1.5">
+          {s.ahead > 0 && (
+            <span
+              className="inline-flex items-center gap-0.5 px-1 rounded text-sky-700 dark:text-sky-400 bg-sky-500/10"
+              title={`${s.ahead} commit(s) not pushed to origin/${s.branch}`}
+            >
+              <ArrowUp className="h-3 w-3" />
+              {s.ahead}
+            </span>
+          )}
+          {s.behind > 0 && (
+            <span
+              className="inline-flex items-center gap-0.5 px-1 rounded text-ember-700 dark:text-ember-300 bg-ember-500/10"
+              title={`origin/${s.branch} is ${s.behind} commit(s) ahead — pull to catch up`}
+            >
+              <ArrowDown className="h-3 w-3" />
+              {s.behind}
+            </span>
+          )}
+          {s.dirty > 0 && (
+            <span
+              className="inline-flex items-center gap-0.5 px-1 rounded text-amber-700 dark:text-amber-400 bg-amber-500/10"
+              title={`${s.dirty} uncommitted file(s) in the worktree`}
+            >
+              <CircleDot className="h-3 w-3" />
+              {s.dirty} dirty
+            </span>
+          )}
+        </span>
+      )}
+      {canPull && (
+        <button
+          type="button"
+          disabled={pull.isPending}
+          onClick={async () => {
+            try {
+              const r = await pull.mutateAsync(slug);
+              if (r.error) toast(r.error, true);
+              else if (r.message) toast(r.message);
+            } catch (e) {
+              toast((e as Error).message, true);
+            }
+          }}
+          className="text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-ink-900 dark:hover:text-ink-50 underline-offset-2 hover:underline disabled:opacity-50"
+        >
+          {pull.isPending ? "pulling…" : "pull"}
+        </button>
+      )}
+    </span>
   );
 }
 

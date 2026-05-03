@@ -25,7 +25,6 @@ export interface CreateTaskInput {
   projectId?: string | null;
   autoCommit?: boolean;
   autoPush?: boolean;
-  autoPr?: boolean;
   skills?: string[];
   permissionMode?: PermissionMode;
   workspaceMode?: WorkspaceMode;
@@ -80,7 +79,6 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     projectId: row.projectId ?? null,
     autoCommit: row.autoCommit !== 0,
     autoPush: row.autoPush === 1,
-    autoPr: row.autoPr === 1,
     prUrl: row.prUrl ?? null,
     totalInputTokens: row.totalInputTokens ?? 0,
     totalOutputTokens: row.totalOutputTokens ?? 0,
@@ -189,7 +187,7 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       projectId: input.projectId ?? null,
       autoCommit: input.autoCommit === false ? 0 : 1,
       autoPush: input.autoPush ? 1 : 0,
-      autoPr: input.autoPr ? 1 : 0,
+      autoPr: 0,
       prUrl: null,
       totalInputTokens: 0,
       totalOutputTokens: 0,
@@ -243,13 +241,12 @@ export function setTaskThinkingLevel(
 export function setTaskAutoFlags(
   db: Db,
   id: string,
-  patch: { autoCommit?: boolean; autoPush?: boolean; autoPr?: boolean },
+  patch: { autoCommit?: boolean; autoPush?: boolean },
 ): Task | null {
   const next: Record<string, unknown> = { updatedAt: Date.now() };
   if (patch.autoCommit !== undefined)
     next.autoCommit = patch.autoCommit ? 1 : 0;
   if (patch.autoPush !== undefined) next.autoPush = patch.autoPush ? 1 : 0;
-  if (patch.autoPr !== undefined) next.autoPr = patch.autoPr ? 1 : 0;
   if (Object.keys(next).length === 1) return getTask(db, id);
   db.update(tasks).set(next).where(eq(tasks.id, id)).run();
   return getTask(db, id);

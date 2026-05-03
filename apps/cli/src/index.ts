@@ -110,7 +110,6 @@ async function cmdNew(argv: string[]) {
       base: { type: "string" },
       title: { type: "string" },
       push: { type: "boolean" },
-      pr: { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -132,15 +131,14 @@ async function cmdNew(argv: string[]) {
     prompt,
     ...(values.title ? { title: String(values.title) } : {}),
     ...(values.push ? { autoPush: true } : {}),
-    ...(values.pr ? { autoPush: true, autoPr: true } : {}),
   };
   const { task } = await client().createTask(req);
   console.log(`created task ${task.id}`);
   console.log(`branch:   ${task.branch}`);
   console.log(`worktree: ${task.worktreePath}`);
   console.log(`status:   ${task.status}`);
-  if (req.autoPush || req.autoPr) {
-    console.log(`hooks:    ${req.autoPr ? "auto-push + auto-PR" : "auto-push"}`);
+  if (req.autoPush) {
+    console.log(`hooks:    auto-push`);
   }
   console.log("");
   console.log(`attach: agentd attach ${task.id}`);
@@ -376,7 +374,7 @@ async function cmdTemplate(argv: string[]) {
     const { templates } = await c.listTemplates();
     if (templates.length === 0) return console.log("(no templates)");
     for (const t of templates) {
-      const flags = `${t.autoPush ? " push" : ""}${t.autoPr ? " pr" : ""}`.trim();
+      const flags = t.autoPush ? "push" : "";
       console.log(`${t.name.padEnd(20)} ${t.agent.padEnd(7)} ${t.repoPath} ${flags ? "[" + flags + "]" : ""}`);
       console.log(`                     base=${t.baseBranch}  prompt: ${t.promptTemplate.slice(0, 80)}${t.promptTemplate.length > 80 ? "…" : ""}`);
     }
@@ -406,7 +404,6 @@ async function cmdTemplate(argv: string[]) {
         agent: { type: "string" },
         base: { type: "string" },
         push: { type: "boolean" },
-        pr: { type: "boolean" },
       },
       allowPositionals: true,
     });
@@ -418,8 +415,7 @@ async function cmdTemplate(argv: string[]) {
       repoPath: resolve(String(values.repo)),
       baseBranch: values.base ? String(values.base) : "main",
       promptTemplate: positionals.join(" "),
-      autoPush: !!values.push || !!values.pr,
-      autoPr: !!values.pr,
+      autoPush: !!values.push,
     };
     const { template } = await c.createTemplate(req);
     console.log(`created template '${template.name}' (${template.id})`);

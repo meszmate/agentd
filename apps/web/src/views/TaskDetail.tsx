@@ -661,9 +661,7 @@ function ThinkingLevelChip({ task }: { task: Task }) {
  * Mid-flight toggles for auto-commit + auto-push. The post-turn
  * hook re-reads them on every agent exit so flipping them changes
  * the behavior of the NEXT completed turn — current in-flight turn
- * is unchanged. Auto-PR isn't here on purpose; opening a PR is a
- * one-shot decision the operator makes from the Ship menu, not a
- * recurring per-turn knob.
+ * is unchanged. Pull requests stay manual via the Ship menu.
  */
 function AutoFlagsChip({ task }: { task: Task }) {
   const client = useClient();

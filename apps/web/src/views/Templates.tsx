@@ -212,11 +212,6 @@ function TemplateRow({
               push
             </span>
           )}
-          {t.autoPr && (
-            <span className="inline-flex items-center h-4 px-1 rounded text-[9px] font-medium uppercase tracking-[0.08em] bg-ember-500/10 text-ember-700 dark:text-ember-300">
-              pr
-            </span>
-          )}
         </div>
         <p className="mt-0.5 font-mono text-[11px] text-ink-500 dark:text-ink-400 line-clamp-2 leading-relaxed">
           {t.promptTemplate}
@@ -309,7 +304,6 @@ function CreateTemplateSheet({
   const [projectId, setProjectId] = useState("");
   const [baseBranch, setBaseBranch] = useState("main");
   const [autoPush, setAutoPush] = useState(false);
-  const [autoPr, setAutoPr] = useState(false);
   const [promptTemplate, setPromptTemplate] = useState("");
   const [permissionMode, setPermissionMode] = useState<
     "bypassPermissions" | "acceptEdits" | "plan"
@@ -335,8 +329,7 @@ function CreateTemplateSheet({
         promptTemplate,
         // Ideation templates never spawn an agent task themselves —
         // they propose options. Auto flags don't apply to them.
-        autoPush: kind === "ideation" ? false : autoPush || autoPr,
-        autoPr: kind === "ideation" ? false : autoPr,
+        autoPush: kind === "ideation" ? false : autoPush,
         permissionMode,
         thinkingLevel,
         ...(model.trim() ? { model: model.trim() } : {}),
@@ -346,7 +339,6 @@ function CreateTemplateSheet({
       setProjectId("");
       setPromptTemplate("");
       setAutoPush(false);
-      setAutoPr(false);
       onClose();
     } catch (e) {
       toast((e as Error).message, true);
@@ -549,14 +541,6 @@ function CreateTemplateSheet({
                   label="Auto-push"
                   checked={autoPush}
                   onChange={setAutoPush}
-                />
-                <Toggle
-                  label="Auto-PR"
-                  checked={autoPr}
-                  onChange={(v) => {
-                    setAutoPr(v);
-                    if (v) setAutoPush(true);
-                  }}
                 />
               </div>
             </section>

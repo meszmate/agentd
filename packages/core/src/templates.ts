@@ -19,7 +19,6 @@ export interface CreateTemplateInput {
   baseBranch: string;
   promptTemplate: string;
   autoPush: boolean;
-  autoPr: boolean;
   permissionMode?: PermissionMode;
   thinkingLevel?: ThinkingLevel;
   model?: string;
@@ -52,7 +51,6 @@ function rowToTemplate(row: typeof templates.$inferSelect): Template {
     baseBranch: row.baseBranch,
     promptTemplate: row.promptTemplate,
     autoPush: row.autoPush === 1,
-    autoPr: row.autoPr === 1,
     permissionMode: (row.permissionMode as PermissionMode) ?? "bypassPermissions",
     thinkingLevel: (row.thinkingLevel as ThinkingLevel) ?? "high",
     model: row.model ?? "",
@@ -79,7 +77,7 @@ export function createTemplate(db: Db, input: CreateTemplateInput): Template {
       baseBranch: input.baseBranch,
       promptTemplate: input.promptTemplate,
       autoPush: input.autoPush ? 1 : 0,
-      autoPr: input.autoPr ? 1 : 0,
+      autoPr: 0,
       permissionMode: input.permissionMode ?? "bypassPermissions",
       thinkingLevel: input.thinkingLevel ?? "high",
       model: input.model ?? "",

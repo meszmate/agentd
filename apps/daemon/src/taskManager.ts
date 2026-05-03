@@ -16,7 +16,6 @@ import {
   addTaskUsage,
   appendMessage,
   autoCommit,
-  createPr,
   createTask,
   detectDefaultBranch,
   EventBus,
@@ -38,7 +37,6 @@ import {
   runJudge,
   setCouncilStatus,
   setCouncilWinner,
-  streamPrMessage,
   loadConfig,
   resolveModelInRegistry,
   newId,
@@ -48,7 +46,6 @@ import {
   touchProject,
   pushBranch,
   removeWorktree,
-  setTaskPrUrl,
   syncAgentPlan,
   updateTaskStatus,
   createWorktree,
@@ -73,7 +70,6 @@ export interface CreateTaskParams {
   prompt: string;
   title?: string;
   autoPush?: boolean;
-  autoPr?: boolean;
   templateId?: string | null;
   scheduleId?: string | null;
   skills?: string[];
@@ -325,10 +321,9 @@ export class TaskManager {
       scheduleId: params.scheduleId ?? null,
       projectId: project.id,
       // Default ON: the agent commits + pushes when done; the post-hook
-      // is a safety net. Auto-PR stays OFF — that's a deliberate manual
-      // step from the Ship menu.
+      // is a safety net. Pull requests are always opened manually from
+      // the Ship menu.
       autoPush: params.autoPush ?? true,
-      autoPr: params.autoPr ?? false,
       skills: params.skills ?? [],
       permissionMode: params.permissionMode ?? "bypassPermissions",
       workspaceMode,
@@ -801,16 +796,11 @@ export class TaskManager {
     if (!task) return;
     // Operator can disable auto-commit per-task — when off, leave the
     // worktree dirty so they can hand-craft the commit themselves.
-    // Push/PR also become no-ops because they need a clean tree.
+    // Push also becomes a no-op because it needs a clean tree.
     if (task.autoCommit === false) return;
     const committed = await this.maybeAutoCommit(taskId, task);
-    if (committed) {
-      if (task.autoPush || task.autoPr) {
-        await this.maybePush(taskId, task);
-      }
-      if (task.autoPr) {
-        await this.maybeOpenPr(taskId, task);
-      }
+    if (committed && task.autoPush) {
+      await this.maybePush(taskId, task);
     }
     // Drain any messages the user queued mid-turn. Re-fetch the task so we
     // pick up any thinking-level change made while the previous turn ran.
@@ -1163,10 +1153,9 @@ export class TaskManager {
         branch,
         baseBranch,
         projectId,
-        // Council members never auto-PR — we only PR the winner via the
-        // operator's manual Ship action.
+        // Council members default to no auto-push — the operator picks
+        // a winner via the manual Ship action.
         autoPush: false,
-        autoPr: false,
         permissionMode: "bypassPermissions",
         thinkingLevel:
           m.thinkingLevel ?? cfg.defaultThinking[m.agent],
@@ -1308,48 +1297,6 @@ export class TaskManager {
     }
   }
 
-  private async maybeOpenPr(taskId: string, task: Task): Promise<void> {
-    try {
-      const lastUserMsg = findLastUserMessage(this.db, taskId);
-      const cfg = loadConfig(this.paths.root);
-      // Try the AI helper first — it gets a clean title + body from the
-      // diff with the user's prInstructions appended. Falls back to the
-      // task title + last user message when the helper is unreachable.
-      const it = streamPrMessage(task.worktreePath, {
-        baseRef: task.baseBranch,
-        helper: cfg.aiHelpers,
-        taskPrompt: lastUserMsg ?? "",
-        taskTitle: task.title,
-        ...(cfg.prInstructions
-          ? { extraInstructions: cfg.prInstructions }
-          : {}),
-      });
-      let final: { title: string; body: string; source: string } | null = null;
-      while (true) {
-        const next = await it.next();
-        if (next.done) {
-          final = next.value as { title: string; body: string; source: string };
-          break;
-        }
-      }
-      const title = (final?.title || task.title).slice(0, 200);
-      const body = final?.body || lastUserMsg || "";
-      const r = await createPr({
-        cwd: task.worktreePath,
-        title,
-        body,
-        baseBranch: task.baseBranch,
-      });
-      if (r.url) {
-        setTaskPrUrl(this.db, taskId, r.url);
-        appendMessage(this.db, taskId, "system", `opened PR: ${r.url}`);
-      } else {
-        appendMessage(this.db, taskId, "system", `gh pr create succeeded but no URL parsed: ${r.output.slice(0, 200)}`);
-      }
-    } catch (e) {
-      appendMessage(this.db, taskId, "system", `auto-PR failed: ${(e as Error).message}`);
-    }
-  }
 }
 
 function findLastUserMessage(db: Db, taskId: string): string | null {

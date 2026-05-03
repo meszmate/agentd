@@ -300,7 +300,6 @@ export const UserPrefs = z.object({
   lastRepo: z.string().default(""),
   lastProjectId: z.string().default(""),
   lastAutoPush: z.boolean().default(true),
-  lastAutoPr: z.boolean().default(false),
   lastPermissionMode: z
     .enum(["bypassPermissions", "acceptEdits", "plan"])
     .default("bypassPermissions"),

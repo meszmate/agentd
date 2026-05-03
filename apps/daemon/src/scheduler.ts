@@ -89,7 +89,6 @@ export class Scheduler {
             prompt,
             title: `${sch.name}: ${tpl.name}`,
             autoPush: tpl.autoPush,
-            autoPr: tpl.autoPr,
             templateId: tpl.id,
             scheduleId: sch.id,
           });

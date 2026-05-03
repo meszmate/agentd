@@ -158,7 +158,6 @@ export const Task = z.object({
    */
   autoCommit: z.boolean().optional(),
   autoPush: z.boolean().optional(),
-  autoPr: z.boolean().optional(),
   prUrl: z.string().nullable().optional(),
   totalInputTokens: z.number().optional(),
   totalOutputTokens: z.number().optional(),
@@ -254,7 +253,6 @@ export const Template = z.object({
    */
   autoCommit: z.boolean().optional(),
   autoPush: z.boolean(),
-  autoPr: z.boolean(),
   /** All these knobs propagate into the spawned task — overridable per-run. */
   permissionMode: PermissionMode.default("bypassPermissions"),
   thinkingLevel: ThinkingLevel.default("high"),
@@ -416,7 +414,6 @@ export const CreateTaskRequest = z.object({
   prompt: z.string().min(1),
   title: z.string().optional(),
   autoPush: z.boolean().optional(),
-  autoPr: z.boolean().optional(),
   // Skill ids of the form `scope:slug` to activate on spawn.
   skills: z.array(z.string()).optional(),
   permissionMode: PermissionMode.optional(),
@@ -440,7 +437,6 @@ export const CreateTemplateRequest = z.object({
   baseBranch: z.string().default("main"),
   promptTemplate: z.string().min(1),
   autoPush: z.boolean().default(false),
-  autoPr: z.boolean().default(false),
   permissionMode: PermissionMode.optional(),
   thinkingLevel: ThinkingLevel.optional(),
   model: z.string().optional(),
@@ -776,7 +772,6 @@ export const RunTemplateRequest = z.object({
   branchName: z.string().optional(),
   pullLatest: z.boolean().optional(),
   autoPush: z.boolean().optional(),
-  autoPr: z.boolean().optional(),
 });
 export type RunTemplateRequest = z.infer<typeof RunTemplateRequest>;
 
