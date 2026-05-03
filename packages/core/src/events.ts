@@ -86,7 +86,15 @@ export type SystemEvent =
       platform: "telegram" | "discord";
     }
   /** Discord subprocess re-reported its guild/channel snapshot. */
-  | { kind: "discord_channels_updated" };
+  | { kind: "discord_channels_updated" }
+  /**
+   * Codex's `~/.codex/models_cache.json` was rewritten — codex talked
+   * to its API and got a fresh model list. Or the operator edited
+   * `cfg.models.*` in `~/.agentd/config.json`. Web invalidates its
+   * cached model registry so the next picker open shows the new
+   * roster automatically. No polling.
+   */
+  | { kind: "models_changed" };
 
 export type SystemEventEnvelope = {
   event: SystemEvent;

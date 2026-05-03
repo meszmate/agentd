@@ -556,6 +556,17 @@ export function useProjectSuggestions(projectId: string | null | undefined) {
   });
 }
 
+export function useClearProjectBrainstorm() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (idOrSlug: string) => client.clearProjectBrainstorm(idOrSlug),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["project-suggestions"] });
+    },
+  });
+}
+
 export function useIdeateForProject() {
   const client = useClient();
   const qc = useQueryClient();
@@ -600,6 +611,23 @@ export function useDismissSuggestion() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => client.dismissSuggestion(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["project-suggestions"] });
+    },
+  });
+}
+
+export function useValidateSuggestion() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      ...body
+    }: {
+      id: string;
+    } & Parameters<AgentdClient["validateSuggestion"]>[1]) =>
+      client.validateSuggestion(id, body),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["project-suggestions"] });
     },
@@ -839,7 +867,47 @@ export function useModels() {
   return useQuery({
     queryKey: ["models"] as const,
     queryFn: () => client.getModels(),
-    staleTime: 5 * 60_000,
+    // Realtime invalidation does the work — the daemon watches
+    // ~/.codex/models_cache.json and ~/.agentd/config.json, pushes a
+    // `models_changed` WS event when either changes, and `realtime.tsx`
+    // invalidates this query. So stale data lives at most a frame after
+    // the source file is rewritten — no polling, no refetchOnFocus
+    // needed. The Infinity staleTime keeps idle pages quiet.
+    staleTime: Infinity,
+  });
+}
+
+/**
+ * Project-level git ahead/behind counts vs `origin/<branch>`. Drives
+ * the "N commits behind — Pull" pill on the project topbar. The
+ * mount-time fetch hits the network (`?fetch=1`) so the counts
+ * reflect the real remote, not whatever stale fetch state was on
+ * disk; subsequent re-renders read the local refs only.
+ */
+export function useProjectGitState(idOrSlug: string | null | undefined) {
+  const client = useClient();
+  return useQuery({
+    queryKey: ["projects", idOrSlug, "git-state"] as const,
+    queryFn: () => client.getProjectGitState(idOrSlug!, { fetch: true }),
+    enabled: !!idOrSlug,
+    // Refresh against the remote every 60s so a colleague pushing
+    // upstream during the brainstorm session shows up automatically.
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+    staleTime: 30_000,
+  });
+}
+
+export function usePullProject() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (idOrSlug: string) => client.pullProject(idOrSlug),
+    onSuccess: (_, idOrSlug) => {
+      void qc.invalidateQueries({
+        queryKey: ["projects", idOrSlug, "git-state"],
+      });
+    },
   });
 }
 

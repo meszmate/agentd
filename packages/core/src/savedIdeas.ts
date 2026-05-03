@@ -193,35 +193,72 @@ export function markSavedIdeaSpawned(
 
 /* ── idea messages (the refinement conversation) ─────────────── */
 
+export interface IdeaMessageEventRow {
+  kind: "tool_use" | "tool_result" | "text" | "raw";
+  [k: string]: unknown;
+}
+
 export interface IdeaMessageRow {
   id: string;
   ideaId: string;
   role: "user" | "agent" | "system";
   content: string;
+  events?: IdeaMessageEventRow[];
   createdAt: number;
 }
 
+function parseEvents(raw: string | null | undefined): IdeaMessageEventRow[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return undefined;
+    return arr as IdeaMessageEventRow[];
+  } catch {
+    return undefined;
+  }
+}
+
 export function listIdeaMessages(db: Db, ideaId: string): IdeaMessageRow[] {
-  return db
+  const rows = db
     .select()
     .from(ideaMessages)
     .where(eq(ideaMessages.ideaId, ideaId))
     .orderBy(ideaMessages.createdAt)
-    .all() as IdeaMessageRow[];
+    .all();
+  return rows.map((r) => ({
+    id: r.id,
+    ideaId: r.ideaId,
+    role: r.role as "user" | "agent" | "system",
+    content: r.content,
+    createdAt: r.createdAt,
+    ...(parseEvents(r.eventsJson) ? { events: parseEvents(r.eventsJson) } : {}),
+  }));
 }
 
 export function appendIdeaMessage(
   db: Db,
-  input: { ideaId: string; role: "user" | "agent" | "system"; content: string },
+  input: {
+    ideaId: string;
+    role: "user" | "agent" | "system";
+    content: string;
+    events?: IdeaMessageEventRow[];
+  },
 ): IdeaMessageRow {
   const id = newId("imsg");
   const now = Date.now();
+  // Drop transient text deltas — only persist tool calls + their
+  // results. The full reply lives in `content`; deltas would just
+  // bloat storage and re-render the whole message on every chunk.
+  const persistable = (input.events ?? []).filter(
+    (e) => e.kind === "tool_use" || e.kind === "tool_result",
+  );
   db.insert(ideaMessages)
     .values({
       id,
       ideaId: input.ideaId,
       role: input.role,
       content: input.content,
+      eventsJson: persistable.length > 0 ? JSON.stringify(persistable) : null,
       createdAt: now,
     })
     .run();
@@ -230,5 +267,12 @@ export function appendIdeaMessage(
     .set({ updatedAt: now })
     .where(eq(savedIdeas.id, input.ideaId))
     .run();
-  return { id, ideaId: input.ideaId, role: input.role, content: input.content, createdAt: now };
+  return {
+    id,
+    ideaId: input.ideaId,
+    role: input.role,
+    content: input.content,
+    createdAt: now,
+    ...(persistable.length > 0 ? { events: persistable } : {}),
+  };
 }

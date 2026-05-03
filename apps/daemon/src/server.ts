@@ -32,7 +32,13 @@ import {
   type WsServerEvent,
 } from "@agentd/contracts";
 import { join, normalize, relative, resolve } from "node:path";
-import { existsSync, statSync, readFileSync, readdirSync } from "node:fs";
+import {
+  existsSync,
+  statSync,
+  readFileSync,
+  readdirSync,
+  watch,
+} from "node:fs";
 import { homedir } from "node:os";
 import {
   startPty,
@@ -72,9 +78,11 @@ import {
   appendIdeaMessage,
   createSavedIdea,
   createSuggestion,
+  deleteProjectSuggestions,
   deleteSavedIdea,
   getSavedIdea,
   getSuggestion,
+  addSuggestionValidation,
   listCouncils,
   listIdeaMessages,
   listSavedIdeas,
@@ -83,6 +91,7 @@ import {
   runIdeation,
   streamIdeaConversation,
   streamIdeation,
+  validateIdeas,
   updateSavedIdea,
   updateSavedIdeaPlan,
   listTodos,
@@ -94,7 +103,9 @@ import {
   updateTodo,
   resolveSession,
   loadConfig,
-  loadCodexModelsFromCache,
+  loadCodexCache,
+  mergeModelLists,
+  DEFAULT_MODEL_REGISTRY,
   saveConfig,
   AiHelperConfig,
   TelegramPluginConfig,
@@ -204,6 +215,62 @@ export function buildServer(opts: BuildServerOptions) {
   function pubProjectRemoved(projectId: string): void {
     bus.publishSystem({ kind: "project_removed", projectId });
   }
+
+  /**
+   * File-watching for the model registry. Two sources can change
+   * the visible model list:
+   *
+   *   1. `~/.codex/models_cache.json` — codex itself rewrites this
+   *      whenever it talks to the API and gets a fresh roster (new
+   *      release, pricing change, etc).
+   *   2. `~/.agentd/config.json` — operator edits cfg.models.* by
+   *      hand to add a private fine-tune, early-access pin, etc.
+   *
+   * When either changes we publish `models_changed`, the WS bus
+   * fans it out, and the web invalidates its `["models"]` cache so
+   * the next picker open shows the fresh list. No polling on either
+   * side.
+   *
+   * Watchers are cheap (one inotify handle each) and can be torn
+   * down safely on process exit — `Bun.serve()` doesn't pin them.
+   */
+  function watchModelSources(): () => void {
+    const codexCachePath = join(homedir(), ".codex", "models_cache.json");
+    const agentdConfigPath = join(paths.root, "config.json");
+    const closers: Array<() => void> = [];
+    let lastFire = 0;
+    function fire() {
+      // Coalesce — fs writes often land as multiple events (rename
+      // + create + write). 200ms is enough to dedupe without making
+      // the operator wait noticeably.
+      const now = Date.now();
+      if (now - lastFire < 200) return;
+      lastFire = now;
+      bus.publishSystem({ kind: "models_changed" });
+    }
+    for (const p of [codexCachePath, agentdConfigPath]) {
+      try {
+        // `persistent: false` keeps the watcher from holding the
+        // process open after the daemon shuts down.
+        const w = watch(p, { persistent: false }, fire);
+        closers.push(() => {
+          try {
+            w.close();
+          } catch {
+            // already closed
+          }
+        });
+      } catch {
+        // File doesn't exist yet — that's fine. Codex creates the
+        // cache on first run, and the operator may not have a
+        // config.json. The watcher just doesn't fire until it does.
+      }
+    }
+    return () => {
+      for (const c of closers) c();
+    };
+  }
+  const stopModelWatchers = watchModelSources();
 
   /**
    * Chat-bridge admin state.
@@ -462,19 +529,32 @@ export function buildServer(opts: BuildServerOptions) {
   api.get("/models", (c) => {
     const cfg = loadConfig(paths.root);
     // Codex maintains its own up-to-date model list at
-    // ~/.codex/models_cache.json. Use it when present so new
-    // releases (gpt-5.4, gpt-5.5, etc.) appear in the dropdown
-    // without an agentd update. The user's config.json still wins
-    // if they explicitly customized cfg.models.codex.
-    const cachedCodex = loadCodexModelsFromCache();
-    const codex =
-      cachedCodex.length > 0 ? cachedCodex : cfg.models.codex;
+    // ~/.codex/models_cache.json. Read it fresh on every request
+    // (no in-memory caching) so newly released models appear without
+    // an agentd restart. Operator entries from cfg.models.codex are
+    // unioned in front so they keep their custom label/tier.
+    const codexCache = loadCodexCache();
+    const codex = mergeModelLists(cfg.models.codex, codexCache.models);
+    // Same union for claude — operator overrides for early-access
+    // version pins, then the family aliases (opus/sonnet/haiku).
+    const claude = mergeModelLists(
+      cfg.models.claude,
+      DEFAULT_MODEL_REGISTRY.claude,
+    );
     return c.json({
-      models: { ...cfg.models, codex },
-      // Surface the configured defaults so the web's model chip can
-      // resolve "(default)" to the actual model id the runner will
-      // pass — claude-code / codex both show this in their UIs.
+      models: { claude, codex },
       defaults: cfg.defaultModel,
+      // Source-of-truth metadata so the UI can show a freshness hint
+      // and a one-click refresh affordance ("Codex list updated 3
+      // min ago — Refresh"). Helps when a brand-new model lands and
+      // the operator wants to confirm agentd sees it.
+      sources: {
+        codex: {
+          available: codexCache.models.length > 0,
+          fetchedAt: codexCache.fetchedAt,
+          path: "~/.codex/models_cache.json",
+        },
+      },
     });
   });
 
@@ -1627,6 +1707,71 @@ export function buildServer(opts: BuildServerOptions) {
   });
 
   /**
+   * Re-score every option on a suggestion with a different agent /
+   * model. Used by the brainstorm view's "Validate with…" dropdown
+   * so the operator can triangulate across raters before saving an
+   * idea. Adds (or replaces) one validation entry on the suggestion
+   * and broadcasts `suggestion_updated` so every connected surface
+   * shows the new badges.
+   */
+  api.post("/suggestions/:id/validate", async (c) => {
+    const id = c.req.param("id");
+    const sug = getSuggestion(db, id);
+    if (!sug) return c.json({ error: "not found" }, 404);
+    if (sug.options.length === 0) {
+      return c.json({ error: "nothing to validate" }, 400);
+    }
+    const body = (await c.req.json().catch(() => null)) as {
+      agent?: import("@agentd/contracts").AgentKind;
+      model?: string;
+      effort?: import("@agentd/contracts").ThinkingLevel;
+    } | null;
+    const cfg = loadConfig(paths.root);
+    const helper = {
+      ...cfg.aiHelpers,
+      ...(body?.agent ? { agent: body.agent } : {}),
+      ...(body?.model ? { model: body.model } : {}),
+      ...(body?.effort ? { effort: body.effort } : {}),
+    };
+    // Validation needs the project repo for grounding. Project-scoped
+    // suggestions read from `projects.path`; orphan suggestions fall
+    // back to the daemon's working dir.
+    let cwd = process.cwd();
+    if (sug.projectId) {
+      const project = getProjectById(db, sug.projectId);
+      if (project) cwd = project.path;
+    }
+    try {
+      const r = await validateIdeas({
+        cwd,
+        brief: sug.prompt,
+        ideas: sug.options,
+        helper,
+      });
+      if (r.scores.length === 0) {
+        return c.json(
+          { error: r.error ?? "the rater returned no scores" },
+          400,
+        );
+      }
+      const updated = addSuggestionValidation(db, id, {
+        agent: helper.agent ?? "claude",
+        model: helper.model ?? "",
+        scores: r.scores,
+        validatedAt: Date.now(),
+      });
+      if (!updated) return c.json({ error: "vanished" }, 404);
+      bus.publishSystem({
+        kind: "suggestion_updated",
+        suggestion: updated,
+      });
+      return c.json({ suggestion: updated });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 500);
+    }
+  });
+
+  /**
    * Conversational reply — operator types whatever they want, the
    * router (heuristic + AI) decides what to do. Used by the Telegram
    * bot, the web inbox, and anywhere else that lets the operator
@@ -2563,6 +2708,21 @@ export function buildServer(opts: BuildServerOptions) {
    * Wire shape: each option arrives as `\x1f<text>\n`, then a final
    * `\x1e<JSON>` envelope contains the persisted suggestion.
    */
+  /**
+   * Reset the brainstorm thread — purges every suggestion (and its
+   * options) tied to this project. Saved ideas survive because the
+   * `saved_ideas` table is decoupled. Operator's escape hatch when
+   * the conversation has piled up and they want a clean canvas.
+   */
+  api.delete("/projects/:idOrSlug/suggestions", (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const removed = deleteProjectSuggestions(db, project.id);
+    return c.json({ ok: true, removed });
+  });
+
   api.post("/projects/:idOrSlug/ideate/stream", async (c) => {
     const key = c.req.param("idOrSlug");
     const project =
@@ -2587,6 +2747,14 @@ export function buildServer(opts: BuildServerOptions) {
       async start(controller) {
         const enc = new TextEncoder();
         const collected: string[] = [];
+        // Tool-call events accumulated so they can be persisted on
+        // the suggestion. The brainstorm thread renders these as
+        // `<ToolLine>` rows so the operator sees what the agent
+        // actually read / ran during the draft, even after reload.
+        const accumulatedEvents: Array<{
+          kind: "tool_use" | "tool_result";
+          [k: string]: unknown;
+        }> = [];
         try {
           const it = streamIdeation(project.path, parsed.data.prompt, {
             helper,
@@ -2619,6 +2787,13 @@ export function buildServer(opts: BuildServerOptions) {
                   title,
                   prompt: parsed.data.prompt,
                   options: collected,
+                  ...(accumulatedEvents.length > 0
+                    ? {
+                        events: accumulatedEvents as Array<
+                          import("@agentd/contracts").IdeaMessageEvent
+                        >,
+                      }
+                    : {}),
                 });
                 bus.publishSystem({
                   kind: "suggestion_created",
@@ -2636,11 +2811,17 @@ export function buildServer(opts: BuildServerOptions) {
               }
               break;
             }
-            collected.push(next.value);
-            // \x1f (unit separator) prefixes each streamed option so the
-            // client can split cleanly. A bare newline could collide
-            // with newlines inside the option text in theory.
-            controller.enqueue(enc.encode(`\x1f${next.value}\n`));
+            const ev = next.value;
+            if (ev.kind === "option") {
+              collected.push(ev.text);
+            } else if (ev.kind === "tool_use" || ev.kind === "tool_result") {
+              accumulatedEvents.push(
+                ev as { kind: "tool_use" | "tool_result"; [k: string]: unknown },
+              );
+            }
+            // Each event lands as `\x1f<json>\n` so the web can render
+            // tool_use / tool_result rows live alongside the options.
+            controller.enqueue(enc.encode(`\x1f${JSON.stringify(ev)}\n`));
           }
         } catch (e) {
           controller.enqueue(
@@ -2805,6 +2986,16 @@ export function buildServer(opts: BuildServerOptions) {
         role: "system",
         content: "Operator asked the agent to challenge the idea.",
       });
+    } else if (mode === "plan") {
+      appendIdeaMessage(db, {
+        ideaId: id,
+        role: "system",
+        content: userMessage
+          ? `Operator asked the agent to draft a plan: ${userMessage}`
+          : idea.planDraft
+            ? "Operator asked the agent to refine the plan."
+            : "Operator asked the agent to draft a plan.",
+      });
     }
     const cfg = loadConfig(paths.root);
     const helper = {
@@ -2820,7 +3011,13 @@ export function buildServer(opts: BuildServerOptions) {
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         const enc = new TextEncoder();
-        let raw = "";
+        // We accumulate the agent's tool-call events so they can
+        // be persisted on the agent message — the workshop replays
+        // the activity timeline from this on reload, like task pages.
+        const accumulatedEvents: Array<{
+          kind: string;
+          [k: string]: unknown;
+        }> = [];
         try {
           const it = streamIdeaConversation(project.path, {
             title: idea.text,
@@ -2846,11 +3043,6 @@ export function buildServer(opts: BuildServerOptions) {
                   ),
                 );
               } else {
-                const persisted = appendIdeaMessage(db, {
-                  ideaId: id,
-                  role: "agent",
-                  content: result.reply,
-                });
                 // First conversation turn promotes draft → refining.
                 let nextStatus = idea.status;
                 if (idea.status === "draft") {
@@ -2859,20 +3051,89 @@ export function buildServer(opts: BuildServerOptions) {
                   });
                   if (promoted) nextStatus = promoted.status;
                 }
+                let persisted;
+                let nextPlanDraft = idea.planDraft;
+                if (mode === "plan") {
+                  // Plan mode: the agent's reply IS the new plan. Stash
+                  // it on the idea (the right-side plan panel shows
+                  // this) and write a short system marker in the
+                  // thread instead of bloating the chat with the full
+                  // plan body. Tool-call events go on the marker so
+                  // the activity history still survives reload.
+                  const planned = updateSavedIdeaPlan(db, id, result.reply);
+                  if (planned) nextPlanDraft = planned.planDraft;
+                  persisted = appendIdeaMessage(db, {
+                    ideaId: id,
+                    role: "system",
+                    content: idea.planDraft
+                      ? "Plan refined — see the right panel."
+                      : "Plan drafted — see the right panel.",
+                    ...(accumulatedEvents.length > 0
+                      ? {
+                          events: accumulatedEvents as Array<{
+                            kind: "tool_use" | "tool_result" | "text" | "raw";
+                            [k: string]: unknown;
+                          }>,
+                        }
+                      : {}),
+                  });
+                } else {
+                  persisted = appendIdeaMessage(db, {
+                    ideaId: id,
+                    role: "agent",
+                    content: result.reply,
+                    ...(accumulatedEvents.length > 0
+                      ? {
+                          events: accumulatedEvents as Array<{
+                            kind: "tool_use" | "tool_result" | "text" | "raw";
+                            [k: string]: unknown;
+                          }>,
+                        }
+                      : {}),
+                  });
+                  // Chat / challenge mode: if the agent decided to
+                  // update the plan in this turn (via a <plan-update>
+                  // block), persist the new plan and drop a system
+                  // marker into the thread so the timeline reflects
+                  // the change.
+                  if (result.planContent) {
+                    const planned = updateSavedIdeaPlan(
+                      db,
+                      id,
+                      result.planContent,
+                    );
+                    if (planned) nextPlanDraft = planned.planDraft;
+                    appendIdeaMessage(db, {
+                      ideaId: id,
+                      role: "system",
+                      content: idea.planDraft
+                        ? "Plan updated — see the right panel."
+                        : "Plan drafted — see the right panel.",
+                    });
+                  }
+                }
                 controller.enqueue(
                   enc.encode(
                     `\x1e${JSON.stringify({
                       ok: true,
                       message: persisted,
                       ideaStatus: nextStatus,
+                      planDraft: nextPlanDraft,
                     })}`,
                   ),
                 );
               }
               break;
             }
-            raw += next.value;
-            controller.enqueue(enc.encode(next.value));
+            // streamIdeaConversation now yields HelperStreamEvent —
+            // we forward each as `\x1f<json>\n` so the web can render
+            // tool_use / tool_result rows live + persist them on the
+            // agent message at the end so history survives reload.
+            const ev = next.value;
+            if (ev.kind === "tool_use" || ev.kind === "tool_result") {
+              accumulatedEvents.push(ev);
+            }
+            controller.enqueue(enc.encode(`\x1f${JSON.stringify(ev)}\n`));
           }
         } catch (e) {
           controller.enqueue(
@@ -2967,6 +3228,153 @@ export function buildServer(opts: BuildServerOptions) {
       return c.json(branches);
     } catch (e) {
       return c.json({ error: (e as Error).message }, 500);
+    }
+  });
+
+  /**
+   * Project-level git state — current branch + commits ahead/behind
+   * `origin/<branch>`. Drives the "N commits behind, click to pull"
+   * pill on the project brainstorm topbar so the operator never
+   * brainstorms against stale code. `?fetch=1` runs `git fetch
+   * --prune` first so the counts reflect the real remote state;
+   * default is cheap (just rev-list of what's already fetched).
+   */
+  api.get("/projects/:idOrSlug/git-state", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const wantFetch = c.req.query("fetch") === "1";
+    try {
+      const branchProc = Bun.spawn({
+        cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd: project.path,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const branch = (await new Response(branchProc.stdout).text()).trim();
+      await branchProc.exited;
+      let fetched = false;
+      let fetchError: string | null = null;
+      if (wantFetch) {
+        const fp = Bun.spawn({
+          cmd: ["git", "fetch", "--prune", "origin"],
+          cwd: project.path,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        await fp.exited;
+        if (fp.exitCode === 0) fetched = true;
+        else
+          fetchError = (await new Response(fp.stderr).text()).trim() || null;
+      }
+      const proc = Bun.spawn({
+        cmd: [
+          "git",
+          "rev-list",
+          "--left-right",
+          "--count",
+          `origin/${branch}...HEAD`,
+        ],
+        cwd: project.path,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const out = (await new Response(proc.stdout).text()).trim();
+      await proc.exited;
+      const m = out.match(/^(\d+)\s+(\d+)/);
+      if (proc.exitCode !== 0 || !m) {
+        return c.json({
+          branch,
+          ahead: 0,
+          behind: 0,
+          hasUpstream: false,
+          fetched,
+          ...(fetchError ? { fetchError } : {}),
+        });
+      }
+      return c.json({
+        branch,
+        behind: parseInt(m[1]!, 10),
+        ahead: parseInt(m[2]!, 10),
+        hasUpstream: true,
+        fetched,
+        ...(fetchError ? { fetchError } : {}),
+      });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 500);
+    }
+  });
+
+  /**
+   * Pull origin into the project's working tree. Fast-forward only —
+   * if the operator has local commits the pull is rejected and the
+   * UI surfaces the error instead of silently merging. Returns the
+   * new git-state so the UI can update the "N behind" pill in one
+   * round-trip.
+   */
+  api.post("/projects/:idOrSlug/pull", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    try {
+      const branchProc = Bun.spawn({
+        cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd: project.path,
+        stdout: "pipe",
+      });
+      const branch = (await new Response(branchProc.stdout).text()).trim();
+      await branchProc.exited;
+      const pull = Bun.spawn({
+        cmd: ["git", "pull", "--ff-only", "origin", branch],
+        cwd: project.path,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const stdout = (await new Response(pull.stdout).text()).trim();
+      const stderr = (await new Response(pull.stderr).text()).trim();
+      await pull.exited;
+      if (pull.exitCode !== 0) {
+        return c.json(
+          {
+            ok: false,
+            error: stderr || stdout || "git pull failed",
+            branch,
+          },
+          400,
+        );
+      }
+      const after = Bun.spawn({
+        cmd: [
+          "git",
+          "rev-list",
+          "--left-right",
+          "--count",
+          `origin/${branch}...HEAD`,
+        ],
+        cwd: project.path,
+        stdout: "pipe",
+      });
+      const out = (await new Response(after.stdout).text()).trim();
+      await after.exited;
+      const m = out.match(/^(\d+)\s+(\d+)/);
+      const behind = m ? parseInt(m[1]!, 10) : 0;
+      const ahead = m ? parseInt(m[2]!, 10) : 0;
+      // Project's underlying tree changed — bump the project row so
+      // any view that derives from the worktree (file tree, etc.)
+      // can refresh on the next render.
+      pubProjectChanged(project.id);
+      return c.json({
+        ok: true,
+        branch,
+        ahead,
+        behind,
+        hasUpstream: true,
+        message: stdout || "fast-forward complete",
+      });
+    } catch (e) {
+      return c.json({ ok: false, error: (e as Error).message }, 500);
     }
   });
 
@@ -3428,6 +3836,11 @@ export function buildServer(opts: BuildServerOptions) {
               type: "discord_channels_updated",
               ts: env.ts,
             });
+          } else if (env.event.kind === "models_changed") {
+            send({
+              type: "models_changed",
+              ts: env.ts,
+            });
           }
         };
         evData.unsubscribeSystem = bus.subscribeSystem(onSys);
@@ -3516,7 +3929,16 @@ export function buildServer(opts: BuildServerOptions) {
     return undefined;
   }
 
-  return { app, wsHandler, upgradeRequest, bearerOrHeader };
+  return {
+    app,
+    wsHandler,
+    upgradeRequest,
+    bearerOrHeader,
+    /** Tear down file watchers when the daemon shuts down. */
+    stop: () => {
+      stopModelWatchers();
+    },
+  };
 }
 
 function resolveSafePath(root: string, requested: string): string | null {

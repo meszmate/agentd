@@ -98,6 +98,36 @@ export interface AgentdDiff {
   headRef: string;
 }
 
+/**
+ * One event from the helper's stream. `text` is a streaming token
+ * delta; `tool_use` / `tool_result` mirror the agent's tool calls
+ * during the turn (Read / Glob / Grep / Bash / etc.) so the UI can
+ * render activity live instead of just a spinner.
+ */
+export type IdeaChatEvent =
+  | { kind: "tool_use"; name: string; input: unknown }
+  | { kind: "tool_result"; ok: boolean; preview?: string }
+  | { kind: "text"; delta: string }
+  /**
+   * Plan content the agent decided to write — extracted out of a
+   * `<plan-update>…</plan-update>` block in the streaming reply by
+   * the daemon. The web app accumulates these deltas into the live
+   * plan panel; the daemon also persists the final content to
+   * `idea.planDraft` once the turn completes.
+   */
+  | { kind: "plan_delta"; delta: string }
+  | { kind: "raw"; text: string };
+
+/**
+ * Brainstorm streaming event. `option` arrives once per extracted
+ * idea line; `tool_use` / `tool_result` mirror the agent's repo
+ * exploration so the UI can render activity rows beside the options.
+ */
+export type IdeationEvent =
+  | { kind: "option"; text: string }
+  | { kind: "tool_use"; name: string; input: unknown }
+  | { kind: "tool_result"; ok: boolean; preview?: string };
+
 export type PluginName = "telegram" | "discord";
 
 export interface PluginStatus {
@@ -213,6 +243,19 @@ export class AgentdClient {
   async getModels(): Promise<{
     models: AgentdModelRegistry;
     defaults?: { claude?: string; codex?: string };
+    /**
+     * Where each agent's model list was sourced from, so the UI can
+     * surface "list pulled from codex 3 min ago" with a refresh
+     * affordance. `fetchedAt` is the ISO date the cache file was
+     * written, parsed to ms-since-epoch (or null when unavailable).
+     */
+    sources?: {
+      codex?: {
+        available: boolean;
+        fetchedAt: number | null;
+        path: string;
+      };
+    };
   }> {
     return this.req("/api/models");
   }
@@ -236,6 +279,14 @@ export class AgentdClient {
    * persisted Suggestion, or `{ ok: false, error }` if the helper
    * returned nothing useful.
    */
+  async clearProjectBrainstorm(
+    idOrSlug: string,
+  ): Promise<{ ok: true; removed: number }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/suggestions`,
+      { method: "DELETE" },
+    );
+  }
   async ideateForProject(
     idOrSlug: string,
     body: {
@@ -259,10 +310,14 @@ export class AgentdClient {
     );
   }
   /**
-   * Streams brainstorm options as they arrive, calling `onOption`
-   * for each. Resolves with the persisted suggestion once the
-   * helper finishes. Wire shape: each option arrives prefixed by
-   * `\x1f`, then a final `\x1e<JSON>` envelope.
+   * Streams brainstorm events as they arrive — `option` lines and
+   * the agent's `tool_use` / `tool_result` activity (so the UI can
+   * show what the agent's actually doing in the repo while drafting,
+   * same vibe as the workshop). Resolves with the persisted
+   * suggestion once the helper finishes.
+   *
+   * Wire shape: each event arrives as `\x1f<json>\n`, then a final
+   * `\x1e<JSON>` envelope.
    */
   async streamIdeateForProject(
     idOrSlug: string,
@@ -274,7 +329,7 @@ export class AgentdClient {
       model?: string;
       effort?: ThinkingLevel;
     },
-    onOption: (text: string) => void,
+    onEvent: (event: IdeationEvent) => void,
     signal?: AbortSignal,
   ): Promise<
     | { ok: true; suggestion: Suggestion; source: string }
@@ -306,7 +361,6 @@ export class AgentdClient {
       while (!sawSentinel) {
         const sIdx = buffer.indexOf("\x1e");
         const oIdx = buffer.indexOf("\x1f");
-        // Final envelope first if present.
         if (sIdx >= 0 && (oIdx < 0 || sIdx < oIdx)) {
           envelope += buffer.slice(sIdx + 1);
           buffer = "";
@@ -314,12 +368,15 @@ export class AgentdClient {
           break;
         }
         if (oIdx < 0) break;
-        // option line: \x1f<text>\n
         const eol = buffer.indexOf("\n", oIdx + 1);
         if (eol < 0) break;
-        const line = buffer.slice(oIdx + 1, eol);
-        if (line.trim()) onOption(line);
+        const json = buffer.slice(oIdx + 1, eol);
         buffer = buffer.slice(eol + 1);
+        try {
+          onEvent(JSON.parse(json));
+        } catch {
+          // bad event — skip
+        }
       }
       if (sawSentinel) envelope += buffer.length ? buffer : "";
       if (sawSentinel) buffer = "";
@@ -391,21 +448,29 @@ export class AgentdClient {
   }
   /**
    * Stream a workshop chat reply. `mode: "challenge"` flips the
-   * directive so the agent self-critiques the idea.
+   * directive so the agent self-critiques the idea. Events arrive
+   * as typed `IdeaChatEvent`s — text deltas, tool_use, tool_result —
+   * so the UI can render the agent's tool calls live like the task
+   * timeline does.
    */
   async streamIdeaChat(
     id: string,
     body: {
       text?: string;
-      mode?: "chat" | "challenge";
+      mode?: "chat" | "challenge" | "plan";
       agent?: "claude" | "codex";
       model?: string;
       effort?: ThinkingLevel;
     },
-    onChunk: (chunk: string) => void,
+    onEvent: (event: IdeaChatEvent) => void,
     signal?: AbortSignal,
   ): Promise<
-    | { ok: true; message: IdeaMessage; ideaStatus: IdeaStatus }
+    | {
+        ok: true;
+        message: IdeaMessage;
+        ideaStatus: IdeaStatus;
+        planDraft?: string | null;
+      }
     | { ok: false; source: string; error: string }
   > {
     const r = await fetch(
@@ -423,24 +488,36 @@ export class AgentdClient {
     }
     const reader = r.body.getReader();
     const decoder = new TextDecoder();
+    let buffer = "";
     let envelope = "";
     let sawSentinel = false;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      if (!sawSentinel) {
-        const sIdx = chunk.indexOf("\x1e");
-        if (sIdx >= 0) {
-          const before = chunk.slice(0, sIdx);
-          if (before) onChunk(before);
-          envelope += chunk.slice(sIdx + 1);
+      buffer += decoder.decode(value, { stream: true });
+      while (!sawSentinel) {
+        const sIdx = buffer.indexOf("\x1e");
+        const oIdx = buffer.indexOf("\x1f");
+        if (sIdx >= 0 && (oIdx < 0 || sIdx < oIdx)) {
+          envelope += buffer.slice(sIdx + 1);
+          buffer = "";
           sawSentinel = true;
-          continue;
+          break;
         }
-        onChunk(chunk);
-      } else {
-        envelope += chunk;
+        if (oIdx < 0) break;
+        const eol = buffer.indexOf("\n", oIdx + 1);
+        if (eol < 0) break;
+        const json = buffer.slice(oIdx + 1, eol);
+        buffer = buffer.slice(eol + 1);
+        try {
+          onEvent(JSON.parse(json));
+        } catch {
+          // bad event — skip
+        }
+      }
+      if (sawSentinel && buffer) {
+        envelope += buffer;
+        buffer = "";
       }
     }
     try {
@@ -567,6 +644,26 @@ export class AgentdClient {
   async dismissSuggestion(id: string): Promise<{ suggestion: Suggestion }> {
     return this.req(`/api/suggestions/${encodeURIComponent(id)}/dismiss`, {
       method: "POST",
+    });
+  }
+  /**
+   * Re-score every option on a suggestion with the given agent + model.
+   * Adds (or replaces) one validation entry on the suggestion, returns
+   * the updated row so the UI can render the new score badges
+   * immediately. Realtime bus also fires `suggestion_updated` for
+   * other connected surfaces.
+   */
+  async validateSuggestion(
+    id: string,
+    body: {
+      agent: "claude" | "codex";
+      model?: string;
+      effort?: ThinkingLevel;
+    },
+  ): Promise<{ suggestion: Suggestion }> {
+    return this.req(`/api/suggestions/${encodeURIComponent(id)}/validate`, {
+      method: "POST",
+      body: JSON.stringify(body),
     });
   }
   /**
@@ -1342,6 +1439,37 @@ export class AgentdClient {
     return this.req(
       `/api/projects/${encodeURIComponent(idOrSlug)}/branches`,
     );
+  }
+
+  async getProjectGitState(
+    idOrSlug: string,
+    opts: { fetch?: boolean } = {},
+  ): Promise<{
+    branch: string;
+    ahead: number;
+    behind: number;
+    hasUpstream: boolean;
+    fetched?: boolean;
+    fetchError?: string;
+  }> {
+    const qs = opts.fetch ? "?fetch=1" : "";
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/git-state${qs}`,
+    );
+  }
+
+  async pullProject(idOrSlug: string): Promise<{
+    ok: boolean;
+    branch: string;
+    ahead?: number;
+    behind?: number;
+    hasUpstream?: boolean;
+    message?: string;
+    error?: string;
+  }> {
+    return this.req(`/api/projects/${encodeURIComponent(idOrSlug)}/pull`, {
+      method: "POST",
+    });
   }
 
   async getTaskContext(id: string): Promise<{

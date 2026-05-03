@@ -137,44 +137,97 @@ export const DEFAULT_MODEL_REGISTRY: ModelRegistry = {
  * priority. Empty array on any error (missing file, bad JSON, etc.).
  */
 export function loadCodexModelsFromCache(): ModelEntry[] {
+  return loadCodexCache().models;
+}
+
+/**
+ * Same source data as `loadCodexModelsFromCache` but also returns the
+ * cache's `fetched_at` timestamp so callers can surface staleness in
+ * the UI ("model list pulled from codex 3 min ago"). When the file is
+ * missing or unreadable the timestamp is null.
+ */
+export interface CodexCache {
+  models: ModelEntry[];
+  fetchedAt: number | null;
+}
+
+export function loadCodexCache(): CodexCache {
   const path = join(homedir(), ".codex", "models_cache.json");
-  if (!existsSync(path)) return [];
+  if (!existsSync(path)) return { models: [], fetchedAt: null };
   try {
     interface CachedModel {
       slug?: string;
       display_name?: string;
+      description?: string;
       visibility?: string;
       priority?: number;
     }
     const data = JSON.parse(readFileSync(path, "utf8")) as {
       models?: CachedModel[];
+      fetched_at?: string;
     };
+    const fetchedAt = data.fetched_at
+      ? Date.parse(data.fetched_at) || null
+      : null;
     const models = data.models ?? [];
     const visible = models
       .filter(
-        (m) => typeof m.slug === "string" && (m.visibility === "list" || !m.visibility),
+        (m) =>
+          typeof m.slug === "string" &&
+          (m.visibility === "list" || !m.visibility),
       )
       .sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
-    return visible.map((m): ModelEntry => {
-      const slug = m.slug!;
-      const lower = slug.toLowerCase();
-      // Best-effort tier guess from the slug. Operators can override
-      // via cfg.models.codex in config.json if they care.
-      const tier: "fast" | "balanced" | "deep" = lower.includes("mini")
-        ? "fast"
-        : lower.includes("codex")
-          ? "balanced"
-          : "deep";
-      return {
-        id: slug,
-        label: m.display_name ?? slug,
-        aliases: [lower],
-        tier,
-      };
-    });
+    return {
+      models: visible.map((m): ModelEntry => {
+        const slug = m.slug!;
+        const lower = slug.toLowerCase();
+        // Best-effort tier guess from the slug. Operators can override
+        // via cfg.models.codex in config.json if they care.
+        const tier: "fast" | "balanced" | "deep" = lower.includes("mini")
+          ? "fast"
+          : lower.includes("codex")
+            ? "balanced"
+            : "deep";
+        return {
+          id: slug,
+          label: m.display_name ?? slug,
+          aliases: [lower],
+          tier,
+        };
+      }),
+      fetchedAt,
+    };
   } catch {
-    return [];
+    return { models: [], fetchedAt: null };
   }
+}
+
+/**
+ * Merge two `ModelEntry` lists. Operator overrides come first (their
+ * label / tier metadata wins) and any registry entries that aren't
+ * already covered are appended after. Dedup is by `id`,
+ * case-insensitive — so an override for `"GPT-5.5"` masks the cache's
+ * `"gpt-5.5"` row instead of double-listing the same model.
+ */
+export function mergeModelLists(
+  overrides: ModelEntry[],
+  registry: ModelEntry[],
+): ModelEntry[] {
+  const seen = new Set<string>();
+  const out: ModelEntry[] = [];
+  for (const m of overrides) {
+    const key = m.id.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(m);
+  }
+  for (const m of registry) {
+    const key = m.id.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(m);
+  }
+  return out;
 }
 
 /**

@@ -321,6 +321,14 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           void qc.invalidateQueries({ queryKey: qk.bridgeSummary() });
           return;
         }
+        if (msg.type === "models_changed") {
+          // Codex's cache file or the operator's config.json was
+          // rewritten. Drop the registry cache so the next picker
+          // open re-pulls from the daemon (which re-reads the
+          // sources fresh). No polling, no buttons.
+          void qc.invalidateQueries({ queryKey: ["models"] });
+          return;
+        }
         if (
           msg.type === "discord_test_send" ||
           msg.type === "discord_create_thread" ||

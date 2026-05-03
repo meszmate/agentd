@@ -1,20 +1,27 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import type { IdeaChatEvent } from "@agentd/client";
 import {
   ArrowUpRight,
-  Bookmark,
   CheckCircle2,
+  ClipboardList,
   Loader2,
-  MessageSquare,
   MoreHorizontal,
+  PanelRightClose,
+  PanelRightOpen,
+  Pencil,
   Send,
   Shuffle,
   Sparkles,
   Trash2,
-  Wand2,
+  User2,
+  X,
   Zap,
 } from "lucide-react";
-import type { IdeaMessage, IdeaStatus } from "@agentd/contracts";
+import type { AgentKind, IdeaMessage, IdeaStatus, ThinkingLevel } from "@agentd/contracts";
 import {
   Kicker,
   PageTopbar,
@@ -26,6 +33,21 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -33,11 +55,21 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { CodeBlock } from "@/components/code-block";
+import { ToolLine } from "@/components/tool-line";
+import {
+  ShimmerText,
+  TransitioningText,
+  useRotatingLabel,
+  formatElapsed,
+  type ThinkingPhase,
+} from "@/components/thinking";
 import { useApp, useClient } from "@/AppContext";
 import {
   qk,
   useDeleteSavedIdea,
   useIdea,
+  useModels,
   useProject,
   useResolveSuggestion,
   useUpdateIdea,
@@ -48,11 +80,11 @@ import { cn, formatTs } from "@/lib/utils";
 /**
  * `/projects/:slug/ideas/:id` — single-page workshop for one idea.
  *
- * Mirrors the TaskDetail layout: PageTopbar with title + status pill
- * + actions, sub-strip with meta (status, tags, plan-ready, message
- * count, timestamps), then a full-height conversation thread with a
- * composer at the bottom. The agent reads the project repo and
- * answers questions; "Challenge" makes it self-critique.
+ * Layout mirrors TaskDetail: PageTopbar + sub-strip, then a body that
+ * shows the live plan above a TaskTimeline-style conversation thread.
+ * The agent reads the project repo, refines the idea, drafts plans, and
+ * eventually a real task is spawned with the operator's choice of agent
+ * + model.
  */
 export function IdeaWorkshop() {
   const { slug, id } = useParams<{ slug: string; id: string }>();
@@ -68,23 +100,67 @@ export function IdeaWorkshop() {
 
   const [draft, setDraft] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const [streamingMode, setStreamingMode] = useState<
+    "chat" | "challenge" | "plan" | null
+  >(null);
   const [streamingReply, setStreamingReply] = useState("");
+  const [streamingTools, setStreamingTools] = useState<IdeaChatEvent[]>([]);
+  /**
+   * The plan content the agent is writing right now — populated by
+   * `plan_delta` events. While non-empty (or while plan mode is
+   * running), this is what the right panel shows instead of the
+   * persisted `idea.planDraft`. Cleared when the turn ends + the
+   * idea query refetches with the new plan baked in.
+   */
+  const [streamingPlan, setStreamingPlan] = useState("");
+  /**
+   * Wall-clock the agent's turn began. Used to render an elapsed
+   * counter next to the shimmer label so the operator can tell at a
+   * glance how long the agent's been working.
+   */
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
+  /**
+   * Tick the elapsed-time display once per second while a turn is in
+   * flight — without this, the counter is stuck on whatever it was at
+   * the last token / tool event.
+   */
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    if (!streaming) return;
+    const id = setInterval(() => setNowTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [streaming]);
+  const [pendingUser, setPendingUser] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [editingDescription, setEditingDescription] = useState(false);
   const [descriptionDraft, setDescriptionDraft] = useState("");
+  const [editingPlan, setEditingPlan] = useState(false);
   const [planDraftEditor, setPlanDraftEditor] = useState("");
-  const [showPlan, setShowPlan] = useState(false);
+  const [planPanelOpen, setPlanPanelOpen] = useState(true);
+  const [spawnOpen, setSpawnOpen] = useState(false);
+  // Mobile collapses the plan into a stacked panel. The split layout
+  // only kicks in at >= lg (1024px) so the chat doesn't get cramped.
+  const [isWide, setIsWide] = useState<boolean>(() =>
+    typeof window === "undefined"
+      ? true
+      : window.matchMedia("(min-width: 1024px)").matches,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const handler = (e: MediaQueryListEvent) => setIsWide(e.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
   const abortRef = useRef<AbortController | null>(null);
-  const threadRef = useRef<HTMLDivElement | null>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
+  const planScrollRef = useRef<HTMLDivElement>(null);
 
   const idea = ideaQ.data?.idea ?? null;
   const messages = ideaQ.data?.messages ?? [];
   const project = projectQ.data?.project ?? null;
 
-  // Sync local editor state with the server's truth on idea load /
-  // refresh — keeps the workshop coherent if a different surface
-  // (chat plugin) updated the idea.
   useEffect(() => {
     if (idea) {
       setTitleDraft(idea.text);
@@ -93,13 +169,32 @@ export function IdeaWorkshop() {
     }
   }, [idea?.id, idea?.text, idea?.description, idea?.planDraft]);
 
-  // Auto-scroll the thread to the bottom on new messages / streaming
-  // updates so the operator always sees the latest reply.
   useEffect(() => {
     const el = threadRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [messages.length, streamingReply]);
+  }, [
+    messages.length,
+    streamingReply,
+    streamingTools.length,
+    pendingUser,
+  ]);
+
+  // While the plan is being drafted/refined, the right panel renders
+  // streamingReply (plan mode) or streamingPlan (chat-mode plan
+  // update) live. Keep it pinned to the bottom so the operator
+  // watches the plan grow instead of having to scroll manually.
+  useEffect(() => {
+    const el = planScrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [streamingMode, streamingReply, streamingPlan]);
+
+  // Auto-open the right panel the moment plan-mode kicks off so the
+  // operator can see the plan generate in real time.
+  useEffect(() => {
+    if (streamingMode === "plan") setPlanPanelOpen(true);
+  }, [streamingMode]);
 
   if (projectQ.isLoading || ideaQ.isLoading || !idea || !project) {
     return (
@@ -122,38 +217,75 @@ export function IdeaWorkshop() {
     );
   }
 
-  const send = async (mode: "chat" | "challenge") => {
+  const send = async (mode: "chat" | "challenge" | "plan") => {
     if (!id) return;
     if (mode === "chat" && !draft.trim()) return;
+    const userText = draft.trim();
+    if (mode === "chat") {
+      setPendingUser(userText);
+      setDraft("");
+    } else if (mode === "plan" && userText) {
+      // Plan mode treats the operator's text as a refinement note. We
+      // don't show it as a user bubble — it's rolled into the system
+      // marker the daemon writes ("Operator asked the agent to refine
+      // the plan: <text>") so the thread stays clean.
+      setDraft("");
+    }
     setStreaming(true);
+    setStreamingMode(mode);
     setStreamingReply("");
+    setStreamingTools([]);
+    setStreamingPlan("");
+    setTurnStartedAt(Date.now());
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-    const userText = draft.trim();
     try {
       const r = await client.streamIdeaChat(
         id,
         {
           mode,
-          ...(mode === "chat" ? { text: userText } : {}),
+          ...(mode === "chat" || mode === "plan"
+            ? userText
+              ? { text: userText }
+              : {}
+            : {}),
         },
-        (chunk) => setStreamingReply((p) => p + chunk),
+        (event) => {
+          if (event.kind === "text") {
+            setStreamingReply((p) => p + event.delta);
+          } else if (event.kind === "plan_delta") {
+            // Live plan content streaming into the right panel —
+            // either because the operator hit Plan, or because the
+            // agent decided to update the plan during chat.
+            setStreamingPlan((p) => p + event.delta);
+            setPlanPanelOpen(true);
+          } else {
+            setStreamingTools((prev) => [...prev, event]);
+          }
+        },
         ctrl.signal,
       );
       if (r.ok === false) {
         toast(r.error || "agent didn't respond", true);
-      } else {
-        setDraft("");
+        if (userText) setDraft(userText);
+      } else if (mode === "plan") {
+        setPlanPanelOpen(true);
       }
       void qc.invalidateQueries({ queryKey: qk.idea(id) });
       void qc.invalidateQueries({ queryKey: ["saved-ideas"] });
     } catch (e) {
       if ((e as { name?: string }).name !== "AbortError") {
         toast((e as Error).message, true);
+        if (userText) setDraft(userText);
       }
     } finally {
       setStreaming(false);
+      setStreamingMode(null);
       setStreamingReply("");
+      setStreamingTools([]);
+      setStreamingPlan("");
+      setTurnStartedAt(null);
+      setPendingUser(null);
       abortRef.current = null;
     }
   };
@@ -199,9 +331,13 @@ export function IdeaWorkshop() {
   const savePlan = async () => {
     if (!id) return;
     const t = planDraftEditor.trim() || null;
-    if (t === (idea.planDraft ?? null)) return;
+    if (t === (idea.planDraft ?? null)) {
+      setEditingPlan(false);
+      return;
+    }
     try {
       await update.mutateAsync({ id, planDraft: t });
+      setEditingPlan(false);
       toast("plan stashed");
     } catch (e) {
       toast((e as Error).message, true);
@@ -226,52 +362,45 @@ export function IdeaWorkshop() {
     }
   };
 
-  const onSpawn = async () => {
-    if (!id) return;
-    const prompt =
-      planDraftEditor.trim() ||
-      idea.description?.trim() ||
-      idea.text.trim();
-    try {
-      if (idea.suggestionId && idea.optionIndex != null) {
-        const r = await resolve.mutateAsync({
-          id: idea.suggestionId,
-          pick: {
-            index: idea.optionIndex,
-            text: prompt,
-            title: idea.text.split("\n")[0]!.slice(0, 80),
-          },
-        });
-        await update.mutateAsync({ id, status: "spawned" });
-        toast(`spawned ${r.task.id.slice(-8)}`);
-        navigate(`/tasks/${r.task.id}`);
-      } else {
-        const r = await client.spawnFromSavedIdea(id, {
-          prompt,
-          title: idea.text.split("\n")[0]!.slice(0, 80),
-        });
-        toast(`spawned ${r.task.id.slice(-8)}`);
-        navigate(`/tasks/${r.task.id}`);
-      }
-    } catch (e) {
-      toast((e as Error).message, true);
-    }
-  };
+  const elapsedMs =
+    streaming && turnStartedAt ? Date.now() - turnStartedAt : 0;
 
-  const allMessages: (IdeaMessage & { live?: boolean })[] =
-    streaming && streamingReply
+  const lastPersistedUser = [...messages]
+    .reverse()
+    .find((m) => m.role === "user");
+  const showPendingUser =
+    pendingUser != null &&
+    pendingUser.length > 0 &&
+    lastPersistedUser?.content !== pendingUser;
+
+  const allMessages: (IdeaMessage & { live?: boolean })[] = [
+    ...messages,
+    ...(showPendingUser
       ? [
-          ...messages,
           {
-            id: "live",
+            id: "pending-user",
             ideaId: id ?? "",
-            role: "agent",
-            content: streamingReply,
+            role: "user" as const,
+            content: pendingUser!,
             createdAt: Date.now(),
             live: true,
           },
         ]
-      : messages;
+      : []),
+    ...(streaming && streamingReply && streamingMode !== "plan"
+      ? [
+          {
+            id: "live",
+            ideaId: id ?? "",
+            role: "agent" as const,
+            content: streamingReply,
+            createdAt: Date.now(),
+            live: true,
+            events: streamingTools as unknown as IdeaMessage["events"],
+          },
+        ]
+      : []),
+  ];
 
   return (
     <div className="flex h-full flex-col">
@@ -284,77 +413,35 @@ export function IdeaWorkshop() {
         </Link>
         <VRule />
         <Kicker>idea</Kicker>
-        {editingTitle ? (
-          <Input
-            value={titleDraft}
-            autoFocus
-            onChange={(e) => setTitleDraft(e.target.value)}
-            onBlur={() => void saveTitle()}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                void saveTitle();
-              }
-              if (e.key === "Escape") {
-                setTitleDraft(idea.text);
-                setEditingTitle(false);
-              }
-            }}
-            className="h-7 text-[13px] font-medium"
-          />
-        ) : (
-          <button
-            type="button"
-            onClick={() => setEditingTitle(true)}
-            className="text-[13px] text-ink-900 dark:text-ink-50 font-medium truncate max-w-[44ch] text-left hover:underline decoration-dotted underline-offset-2"
-            title="Click to edit"
-          >
-            {idea.text}
-          </button>
-        )}
+        <span className="text-[13px] text-ink-900 dark:text-ink-50 font-medium truncate max-w-[44ch]">
+          {idea.text}
+        </span>
         <StatusPill status={idea.status} />
-        {(idea.messageCount ?? messages.length) > 0 && (
-          <span className="shrink-0 inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] font-medium tabular-nums bg-ink-900/[0.05] text-ink-500 dark:bg-ink-50/[0.05] dark:text-ink-400">
-            <MessageSquare className="h-2.5 w-2.5" />
-            {messages.length}
-          </span>
-        )}
         <Spacer />
-
-        <Button
-          size="xs"
-          variant="outline"
-          onClick={() => setShowPlan((v) => !v)}
-        >
-          <Bookmark className="h-3 w-3" />
-          Plan
-          {idea.planDraft && (
-            <span className="font-mono text-[9px] uppercase tracking-[0.1em] text-amber-700 dark:text-amber-300">
-              ready
-            </span>
-          )}
-        </Button>
-        {idea.status !== "validated" && idea.status !== "spawned" && idea.status !== "archived" && (
-          <Button
-            size="xs"
-            variant="outline"
-            onClick={() => void setStatus("validated")}
-          >
-            <CheckCircle2 className="h-3 w-3" />
-            Validate
-          </Button>
-        )}
         {idea.spawnedTaskId ? (
-          <Button asChild size="xs" variant="outline">
+          <Button asChild variant="outline" size="xs">
             <Link to={`/tasks/${idea.spawnedTaskId}`}>
-              <ArrowUpRight className="h-3 w-3" />
-              Open task
+              <ArrowUpRight className="h-3 w-3" /> Task
             </Link>
           </Button>
         ) : (
-          <Button size="xs" onClick={() => void onSpawn()}>
-            <Zap className="h-3 w-3" />
-            Spawn task
+          <Button size="xs" onClick={() => setSpawnOpen(true)}>
+            <Zap className="h-3 w-3" /> Spawn task
+          </Button>
+        )}
+        {isWide && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => setPlanPanelOpen((v) => !v)}
+            aria-label={planPanelOpen ? "Hide plan panel" : "Show plan panel"}
+            title={planPanelOpen ? "Hide plan panel" : "Show plan panel"}
+          >
+            {planPanelOpen ? (
+              <PanelRightClose className="h-3.5 w-3.5" />
+            ) : (
+              <PanelRightOpen className="h-3.5 w-3.5" />
+            )}
           </Button>
         )}
         <DropdownMenu>
@@ -366,6 +453,13 @@ export function IdeaWorkshop() {
           <DropdownMenuContent align="end" className="min-w-[14rem]">
             <DropdownMenuLabel>Idea</DropdownMenuLabel>
             <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => setEditingTitle(true)}>
+              Edit title
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setEditingDescription(true)}>
+              Edit description
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => void setStatus("draft")}>
               Mark draft
             </DropdownMenuItem>
@@ -373,7 +467,7 @@ export function IdeaWorkshop() {
               Mark refining
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => void setStatus("validated")}>
-              Mark validated
+              <CheckCircle2 /> Validate
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => void onArchive()}>
@@ -389,7 +483,7 @@ export function IdeaWorkshop() {
         </DropdownMenu>
       </PageTopbar>
 
-      {/* Sub-strip: meta (matches TaskDetail's branch/repo strip) */}
+      {/* Sub-strip — minimal meta, mirrors TaskDetail's branch/repo row */}
       <div className="flex h-9 items-center gap-3 px-5 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900 shrink-0 overflow-x-auto">
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500 shrink-0">
           {project.name}
@@ -406,159 +500,185 @@ export function IdeaWorkshop() {
             </span>
           </>
         )}
-        {idea.tags.length > 0 && (
-          <>
-            <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
-            <div className="flex items-center gap-1 shrink-0">
-              {idea.tags.map((t) => (
-                <span
-                  key={t}
-                  className="inline-flex items-center h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] bg-ember-500/10 text-ember-700 dark:text-ember-300 border border-ember-500/20"
-                >
-                  ◆ {t}
-                </span>
-              ))}
-            </div>
-          </>
-        )}
-        {idea.suggestionId != null && idea.optionIndex != null && (
-          <>
-            <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
-            <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 shrink-0">
-              from brainstorm option {idea.optionIndex + 1}
-            </span>
-          </>
+        {idea.planDraft && (
+          <span className="shrink-0 inline-flex items-center h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] bg-amber-500/10 text-amber-700 dark:text-amber-300">
+            plan ready
+          </span>
         )}
       </div>
 
-      {/* Plan drawer (collapsed by default) */}
-      {showPlan && (
-        <div className="border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900 px-5 py-3 shrink-0">
-          <div className="flex items-baseline gap-2 mb-1.5">
-            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-amber-700 dark:text-amber-300">
-              Plan draft
-            </span>
-            <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
-              · becomes the spawned task's prompt
-            </span>
+      {editingTitle && (
+        <div className="px-5 py-3 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900 shrink-0">
+          <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400 mb-1.5">
+            Edit title
           </div>
-          <Textarea
-            value={planDraftEditor}
-            onChange={(e) => setPlanDraftEditor(e.target.value)}
-            onBlur={() => void savePlan()}
-            rows={6}
-            placeholder="Hand-drafted plan, or paste one from the planner."
-            className="text-[12px] font-mono leading-relaxed resize-y"
+          <Input
+            value={titleDraft}
+            autoFocus
+            onChange={(e) => setTitleDraft(e.target.value)}
+            onBlur={() => void saveTitle()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void saveTitle();
+              }
+              if (e.key === "Escape") {
+                setTitleDraft(idea.text);
+                setEditingTitle(false);
+              }
+            }}
+            className="text-[13px]"
           />
         </div>
       )}
-
-      {/* Body — description (editable) + conversation thread */}
-      <div className="flex-1 min-h-0 grid grid-rows-[auto_1fr_auto]">
-        <div className="px-5 py-3 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50/40 dark:bg-ink-900/40">
-          {editingDescription ? (
-            <Textarea
-              value={descriptionDraft}
-              autoFocus
-              onChange={(e) => setDescriptionDraft(e.target.value)}
-              onBlur={() => void saveDescription()}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  setDescriptionDraft(idea.description ?? "");
-                  setEditingDescription(false);
-                }
-              }}
-              rows={3}
-              placeholder="Add a longer description / context for the agent…"
-              className="text-[12.5px] resize-none"
-            />
-          ) : (
-            <button
-              type="button"
-              onClick={() => setEditingDescription(true)}
-              className={cn(
-                "block w-full text-left text-[12.5px] leading-relaxed rounded -mx-1 px-1 hover:bg-ink-900/[0.02] dark:hover:bg-ink-50/[0.02]",
-                idea.description
-                  ? "text-ink-700 dark:text-ink-200"
-                  : "text-ink-400 dark:text-ink-500 italic",
-              )}
-              title="Click to edit"
-            >
-              {idea.description?.trim() ||
-                "Add a description for context — the agent reads it when refining."}
-            </button>
-          )}
-        </div>
-
-        <div ref={threadRef} className="overflow-y-auto px-5 py-4 space-y-3">
-          {allMessages.length === 0 && (
-            <div className="rounded-md border border-dashed border-ink-900/15 dark:border-ink-50/15 px-4 py-8 text-center">
-              <Sparkles className="h-4 w-4 mx-auto mb-2 text-ink-400 dark:text-ink-500" />
-              <p className="text-[12px] text-ink-600 dark:text-ink-300">
-                No messages yet. Ask a question, or hit{" "}
-                <span className="font-mono text-ember-700 dark:text-ember-300">
-                  Challenge
-                </span>{" "}
-                to have the agent critique its own idea.
-              </p>
-            </div>
-          )}
-          {allMessages.map((m) => (
-            <MessageBubble key={m.id} message={m} />
-          ))}
-          {streaming && !streamingReply && (
-            <div className="flex items-center gap-2 text-[11.5px] text-ember-700 dark:text-ember-300">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              agent is reading the repo…
-            </div>
-          )}
-        </div>
-
-        <footer className="px-5 py-3 border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] space-y-2 bg-paper-50 dark:bg-ink-900">
+      {editingDescription && (
+        <div className="px-5 py-3 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900 shrink-0">
+          <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400 mb-1.5">
+            Edit description · context for the agent
+          </div>
           <Textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            value={descriptionDraft}
+            autoFocus
+            onChange={(e) => setDescriptionDraft(e.target.value)}
+            onBlur={() => void saveDescription()}
             onKeyDown={(e) => {
-              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-                e.preventDefault();
-                void send("chat");
+              if (e.key === "Escape") {
+                setDescriptionDraft(idea.description ?? "");
+                setEditingDescription(false);
               }
             }}
-            rows={2}
-            disabled={streaming}
-            placeholder="Ask the agent — risks? alternatives? scope? edge cases?"
-            className="text-[13px] leading-relaxed resize-none"
+            rows={3}
+            placeholder="Add a longer description / context for the agent…"
+            className="text-[12.5px] resize-none"
           />
-          <div className="flex items-center gap-1.5">
-            <Button
-              size="xs"
-              variant="outline"
-              onClick={() => void send("challenge")}
-              disabled={streaming}
-              title="Have the agent critique this idea"
-            >
-              <Shuffle className="h-3 w-3" />
-              Challenge
-            </Button>
-            <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 hidden md:inline ml-1">
-              ⌘↵ to send
-            </span>
-            <span className="ml-auto" />
-            <Button
-              size="sm"
-              onClick={() => void send("chat")}
-              disabled={streaming || !draft.trim()}
-            >
-              {streaming ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <Send className="h-3 w-3" />
-              )}
-              Send
-            </Button>
+        </div>
+      )}
+      {/* Body — chat (left) + plan panel (right). On mobile the panel
+          stacks below the chat as a collapsible drawer. */}
+      <div className="flex-1 min-h-0">
+        {isWide && planPanelOpen ? (
+          <PanelGroup direction="horizontal" className="h-full">
+            <Panel id="workshop-chat" defaultSize={55} minSize={40}>
+              <ChatColumn
+                threadRef={threadRef}
+                allMessages={allMessages}
+                streaming={streaming}
+                streamingMode={streamingMode}
+                streamingTools={streamingTools}
+                streamingReply={streamingReply}
+                elapsedMs={elapsedMs}
+                draft={draft}
+                setDraft={setDraft}
+                onSend={send}
+                onStop={() => abortRef.current?.abort()}
+                hasPlan={!!idea.planDraft}
+              />
+            </Panel>
+            <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-ember-500/40 transition-colors dark:bg-ink-50/10" />
+            <Panel id="workshop-plan" defaultSize={45} minSize={28}>
+              <PlanColumn
+                planDraft={idea.planDraft}
+                streaming={streaming}
+                streamingMode={streamingMode}
+                streamingReply={streamingReply}
+                streamingPlan={streamingPlan}
+                streamingTools={streamingTools}
+                elapsedMs={elapsedMs}
+                editingPlan={editingPlan}
+                planDraftEditor={planDraftEditor}
+                setPlanDraftEditor={setPlanDraftEditor}
+                onStartEdit={() => {
+                  setPlanDraftEditor(idea.planDraft ?? "");
+                  setEditingPlan(true);
+                }}
+                onCancelEdit={() => {
+                  setPlanDraftEditor(idea.planDraft ?? "");
+                  setEditingPlan(false);
+                }}
+                onSaveEdit={() => void savePlan()}
+                onPlan={() => void send("plan")}
+                onClose={() => setPlanPanelOpen(false)}
+                planScrollRef={planScrollRef}
+                onSpawn={() => setSpawnOpen(true)}
+                spawned={!!idea.spawnedTaskId}
+              />
+            </Panel>
+          </PanelGroup>
+        ) : (
+          <div className="grid h-full grid-rows-[1fr_auto]">
+            <ChatColumn
+              threadRef={threadRef}
+              allMessages={allMessages}
+              streaming={streaming}
+              streamingMode={streamingMode}
+              streamingTools={streamingTools}
+              streamingReply={streamingReply}
+              elapsedMs={elapsedMs}
+              draft={draft}
+              setDraft={setDraft}
+              onSend={send}
+              onStop={() => abortRef.current?.abort()}
+              hasPlan={!!idea.planDraft}
+              embedded
+            />
+            {!isWide && idea.planDraft && (
+              <details className="border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900">
+                <summary className="cursor-pointer select-none px-5 py-2 font-mono text-[10px] uppercase tracking-[0.14em] text-amber-700 dark:text-amber-300">
+                  Plan ready · tap to view
+                </summary>
+                <div className="px-5 py-3 border-t border-amber-500/15 max-h-[60vh] overflow-y-auto">
+                  <Markdown text={idea.planDraft} />
+                </div>
+              </details>
+            )}
           </div>
-        </footer>
+        )}
       </div>
+
+      <SpawnDialog
+        open={spawnOpen}
+        onOpenChange={setSpawnOpen}
+        idea={idea}
+        onSpawn={async ({ agent, model, thinkingLevel }) => {
+          if (!id) return;
+          const prompt =
+            (idea.planDraft?.trim() ||
+              idea.description?.trim() ||
+              idea.text.trim());
+          try {
+            if (idea.suggestionId && idea.optionIndex != null) {
+              const r = await resolve.mutateAsync({
+                id: idea.suggestionId,
+                pick: {
+                  index: idea.optionIndex,
+                  text: prompt,
+                  title: idea.text.split("\n")[0]!.slice(0, 80),
+                  agent,
+                  ...(model ? { model } : {}),
+                  ...(thinkingLevel ? { thinkingLevel } : {}),
+                },
+              });
+              await update.mutateAsync({ id, status: "spawned" });
+              toast(`spawned ${r.task.id.slice(-8)}`);
+              setSpawnOpen(false);
+              navigate(`/tasks/${r.task.id}`);
+            } else {
+              const r = await client.spawnFromSavedIdea(id, {
+                prompt,
+                title: idea.text.split("\n")[0]!.slice(0, 80),
+                agent,
+                ...(model ? { model } : {}),
+                ...(thinkingLevel ? { thinkingLevel } : {}),
+              });
+              toast(`spawned ${r.task.id.slice(-8)}`);
+              setSpawnOpen(false);
+              navigate(`/tasks/${r.task.id}`);
+            }
+          } catch (e) {
+            toast((e as Error).message, true);
+          }
+        }}
+      />
     </div>
   );
 }
@@ -585,43 +705,1034 @@ function StatusPill({ status }: { status: IdeaStatus }) {
   );
 }
 
-function MessageBubble({
+/**
+ * Timeline item — same vertical-spine layout the task page uses.
+ *
+ * - `system` rows are a thin divider with caption (status changes,
+ *   "operator asked for a plan" markers).
+ * - `user` and `agent` rows render as flat content next to a small
+ *   avatar circle anchored on the spine. No bubble, no background.
+ *   Markdown for agent replies; whitespace-pre-wrap for operator text.
+ * - Persisted tool-call activity renders inline ABOVE the agent's
+ *   reply text using <ToolLine>, identical to how the task timeline
+ *   shows tool rows.
+ */
+function TimelineItem({
   message,
 }: {
   message: IdeaMessage & { live?: boolean };
 }) {
-  const role = message.role;
-  if (role === "system") {
+  if (message.role === "system") {
+    // System rows carry plan-mode tool activity — render those rows
+    // ABOVE the marker so the operator can scroll back through what
+    // the agent did during a plan draft / refine even after it ends.
+    const sysEvents = (message.events ?? []) as IdeaChatEvent[];
+    const sysToolUses = sysEvents.filter((e) => e.kind === "tool_use") as Array<
+      Extract<IdeaChatEvent, { kind: "tool_use" }>
+    >;
     return (
-      <div className="flex items-center gap-2 my-1">
-        <span className="flex-1 h-px bg-ink-900/[0.06] dark:bg-ink-50/[0.06]" />
-        <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500">
-          {message.content}
-        </span>
-        <span className="flex-1 h-px bg-ink-900/[0.06] dark:bg-ink-50/[0.06]" />
-      </div>
+      <li className="relative my-3">
+        {sysToolUses.length > 0 && (
+          <ul className="mb-2 space-y-1.5">
+            {sysToolUses.map((ev, i) => (
+              <li key={i}>
+                <ToolLine
+                  content={`[call ${ev.name}] ${JSON.stringify(ev.input ?? {})}`}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="flex items-center gap-2">
+          <span className="absolute -left-7 top-1.5 size-2 rounded-full bg-ink-900/15 dark:bg-ink-50/15" />
+          <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+            {message.content}
+          </span>
+        </div>
+      </li>
     );
   }
-  const isUser = role === "user";
+
+  const isUser = message.role === "user";
+  const body = isUser
+    ? message.content
+    : message.content
+        .replace(
+          /^(?:[\*]{0,2}(?:agent|assistant)[\*]{0,2}\s*[:>—-]\s*)/i,
+          "",
+        )
+        .replace(/^(?:\[(?:agent|assistant)\]\s*)/i, "")
+        .trim();
+
+  // Agent's tool calls during this turn — replays the activity exactly
+  // like the task timeline (flat ToolLine rows, no border, no toggle).
+  const events = (message.events ?? []) as IdeaChatEvent[];
+  const toolUses = events.filter((e) => e.kind === "tool_use") as Array<
+    Extract<IdeaChatEvent, { kind: "tool_use" }>
+  >;
+
   return (
-    <div className={cn("flex gap-2", isUser ? "justify-end" : "justify-start")}>
-      <div
+    <li className="relative">
+      <span
         className={cn(
-          "max-w-[85%] rounded-lg px-3 py-2 text-[12.5px] leading-relaxed whitespace-pre-wrap",
-          isUser
-            ? "bg-ember-500/10 text-ink-900 dark:text-ink-50"
-            : "bg-paper-100 dark:bg-ink-900/40 text-ink-700 dark:text-ink-200 border border-ink-900/[0.06] dark:border-ink-50/[0.06]",
-          message.live && "border-l-2 border-ember-500",
+          "absolute -left-9 top-0 flex h-6 w-6 items-center justify-center rounded-full border",
+          isUser &&
+            "border-sky-500/30 bg-sky-500/15 text-sky-700 dark:text-sky-300",
+          !isUser &&
+            "border-ember-500/30 bg-ember-500/15 text-ember-700 dark:text-ember-300",
+          message.live && "ring-2 ring-ember-500/30",
         )}
       >
-        {!isUser && (
-          <div className="mb-1 inline-flex items-center gap-1 font-mono text-[9px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
-            <Sparkles className="h-2.5 w-2.5" />
-            agent
-          </div>
+        {isUser ? (
+          <User2 className="h-3 w-3" />
+        ) : (
+          <span className="font-display italic font-medium">a</span>
         )}
-        {message.content}
+      </span>
+      <div>
+        <div className="flex items-baseline gap-2 mb-1">
+          <span
+            className={cn(
+              "font-mono text-[10px] font-medium uppercase tracking-[0.08em]",
+              isUser && "text-sky-700 dark:text-sky-300",
+              !isUser && "text-ember-700 dark:text-ember-300",
+            )}
+          >
+            {isUser ? "you" : "agent"}
+          </span>
+          <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+            {formatTs(message.createdAt)}
+          </span>
+          {message.live && (
+            <span className="font-mono text-[10px] text-ember-600 dark:text-ember-400 animate-blink">
+              ●
+            </span>
+          )}
+        </div>
+        {!isUser && toolUses.length > 0 && (
+          <ul className="mb-2 space-y-1.5">
+            {toolUses.map((ev, i) => (
+              <li key={i}>
+                <ToolLine
+                  content={`[call ${ev.name}] ${JSON.stringify(ev.input ?? {})}`}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+        {isUser ? (
+          <div className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink-900 dark:text-ink-50">
+            {body}
+          </div>
+        ) : (
+          <Markdown text={body} />
+        )}
+      </div>
+    </li>
+  );
+}
+
+/**
+ * In-flight indicator while the agent is still streaming. Shows the
+ * tool-call rows live (so the operator can see what the agent's
+ * actually doing) plus a shimmer label tuned to the current mode.
+ *
+ * If the agent is already writing its reply (`showReply` true), the
+ * streaming bubble is rendered separately by the caller — we just show
+ * any new tool calls happening in the background.
+ */
+function ThinkingItem({
+  events,
+  showReply,
+  mode,
+  elapsedMs,
+  hasPlan,
+}: {
+  events: IdeaChatEvent[];
+  showReply: boolean;
+  mode: "chat" | "challenge" | "plan" | null;
+  elapsedMs: number;
+  hasPlan: boolean;
+}) {
+  const toolUses = events.filter((e) => e.kind === "tool_use") as Array<
+    Extract<IdeaChatEvent, { kind: "tool_use" }>
+  >;
+
+  // Once the agent starts streaming text, the live message bubble
+  // already renders the tool rows above its body (via TimelineItem).
+  // Suppress this thinking row to avoid duplicates.
+  if (showReply) return null;
+
+  // Pick the rotating-label phase based on what the agent's actually
+  // doing right now, not just the operator's button choice.
+  const phase: ThinkingPhase =
+    toolUses.length === 0
+      ? "scouting"
+      : mode === "plan"
+        ? hasPlan
+          ? "planRefining"
+          : "planDrafting"
+        : mode === "challenge"
+          ? "challenging"
+          : "chatting";
+  const label = useRotatingLabel(phase);
+
+  return (
+    <li className="relative">
+      <span className="absolute -left-9 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-ember-500/30 bg-ember-500/15">
+        <span className="h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink" />
+      </span>
+      <div>
+        <div className="flex items-baseline gap-2 mb-1.5 flex-wrap">
+          <ShimmerText className="text-[12.5px] font-medium">
+            <TransitioningText>{label}</TransitioningText>
+          </ShimmerText>
+          <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
+            {formatElapsed(elapsedMs)}
+          </span>
+          {toolUses.length > 0 && (
+            <>
+              <span className="text-ink-300 dark:text-ink-600 font-mono text-[10px]">
+                ·
+              </span>
+              <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
+                {toolUses.length} step{toolUses.length === 1 ? "" : "s"}
+              </span>
+            </>
+          )}
+        </div>
+        {toolUses.length > 0 && (
+          <ul className="space-y-1.5">
+            {toolUses.map((ev, i) => (
+              <li key={i}>
+                <ToolLine
+                  content={`[call ${ev.name}] ${JSON.stringify(ev.input ?? {})}`}
+                  running={i === toolUses.length - 1 && !showReply}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </li>
+  );
+}
+
+/**
+ * Markdown renderer used for agent replies and the plan panel. Same
+ * component table the task timeline uses so prose feels consistent
+ * across the dashboard — code fences highlight, lists/tables render,
+ * file paths render as inline chips.
+ */
+function Markdown({ text }: { text: string }) {
+  return (
+    <div className="prose prose-sm max-w-none dark:prose-invert text-[13px] leading-relaxed text-ink-900 dark:text-ink-50 break-words">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          p: ({ children }) => (
+            <p className="my-1.5 first:mt-0 last:mb-0">{children}</p>
+          ),
+          ul: ({ children }) => (
+            <ul className="my-1.5 ml-4 list-disc space-y-1">{children}</ul>
+          ),
+          ol: ({ children }) => (
+            <ol className="my-1.5 ml-4 list-decimal space-y-1">{children}</ol>
+          ),
+          li: ({ children }) => <li className="leading-snug">{children}</li>,
+          h1: ({ children }) => (
+            <h1 className="mt-3 mb-1.5 text-[14px] font-semibold tracking-tight">
+              {children}
+            </h1>
+          ),
+          h2: ({ children }) => (
+            <h2 className="mt-3 mb-1.5 text-[13px] font-semibold tracking-tight">
+              {children}
+            </h2>
+          ),
+          h3: ({ children }) => (
+            <h3 className="mt-3 mb-1 text-[13px] font-semibold tracking-tight">
+              {children}
+            </h3>
+          ),
+          strong: ({ children }) => (
+            <strong className="font-semibold text-ink-900 dark:text-ink-50">
+              {children}
+            </strong>
+          ),
+          em: ({ children }) => <em className="italic">{children}</em>,
+          a: ({ children, href }) => (
+            <a
+              href={href}
+              target="_blank"
+              rel="noreferrer"
+              className="text-ember-700 underline-offset-2 hover:underline dark:text-ember-300"
+            >
+              {children}
+            </a>
+          ),
+          code: (props) => {
+            const { children, className } = props as {
+              children?: React.ReactNode;
+              className?: string;
+            };
+            const isFenced = (className ?? "").includes("language-");
+            if (isFenced) {
+              const lang = (className ?? "")
+                .replace(/^language-/, "")
+                .trim();
+              const text =
+                typeof children === "string"
+                  ? children
+                  : Array.isArray(children)
+                    ? children.join("")
+                    : String(children ?? "");
+              return <CodeBlock code={text} language={lang} />;
+            }
+            return (
+              <code className="rounded bg-ink-900/[0.06] px-1 py-0.5 font-mono text-[12px] text-ink-900 dark:bg-ink-50/[0.08] dark:text-ink-50">
+                {children}
+              </code>
+            );
+          },
+          pre: ({ children }) => <>{children}</>,
+          blockquote: ({ children }) => (
+            <blockquote className="my-1.5 border-l-2 border-ember-500/40 pl-3 text-ink-700 dark:text-ink-200">
+              {children}
+            </blockquote>
+          ),
+          hr: () => (
+            <hr className="my-3 border-ink-900/[0.08] dark:border-ink-50/[0.08]" />
+          ),
+          table: ({ children }) => (
+            <div className="my-2 overflow-x-auto">
+              <table className="border-collapse text-[12px]">{children}</table>
+            </div>
+          ),
+          th: ({ children }) => (
+            <th className="border border-ink-900/[0.08] px-2 py-1 text-left font-semibold dark:border-ink-50/[0.08]">
+              {children}
+            </th>
+          ),
+          td: ({ children }) => (
+            <td className="border border-ink-900/[0.08] px-2 py-1 dark:border-ink-50/[0.08]">
+              {children}
+            </td>
+          ),
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+/**
+ * Left column — the conversation thread plus the composer. Lives next
+ * to the plan panel in the split layout. Same TaskTimeline-style spine
+ * we used before: tool calls inline above each agent reply, no bubble
+ * borders, persisted activity replays on reload.
+ */
+function ChatColumn({
+  threadRef,
+  allMessages,
+  streaming,
+  streamingMode,
+  streamingTools,
+  streamingReply,
+  elapsedMs,
+  draft,
+  setDraft,
+  onSend,
+  onStop,
+  hasPlan,
+  embedded = false,
+}: {
+  threadRef: React.RefObject<HTMLDivElement>;
+  allMessages: (IdeaMessage & { live?: boolean })[];
+  streaming: boolean;
+  streamingMode: "chat" | "challenge" | "plan" | null;
+  streamingTools: IdeaChatEvent[];
+  streamingReply: string;
+  elapsedMs: number;
+  draft: string;
+  setDraft: (v: string) => void;
+  onSend: (mode: "chat" | "challenge" | "plan") => Promise<void>;
+  onStop: () => void;
+  hasPlan: boolean;
+  embedded?: boolean;
+}) {
+  return (
+    <div className={cn("grid h-full grid-rows-[1fr_auto]", embedded && "h-full")}>
+      <div ref={threadRef} className="overflow-y-auto">
+        <div className="px-6 py-6 lg:py-8">
+          {allMessages.length === 0 && !streaming && (
+            <div className="rounded-md border border-dashed border-ink-900/15 dark:border-ink-50/15 px-4 py-10 text-center">
+              <Sparkles className="h-4 w-4 mx-auto mb-2 text-ink-400 dark:text-ink-500" />
+              <p className="text-[12.5px] text-ink-600 dark:text-ink-300">
+                No conversation yet. Ask the agent a question, hit{" "}
+                <span className="font-mono text-ember-700 dark:text-ember-300">
+                  Plan
+                </span>{" "}
+                to draft an executable spec on the right, or{" "}
+                <span className="font-mono text-ember-700 dark:text-ember-300">
+                  Challenge
+                </span>{" "}
+                for self-critique.
+              </p>
+            </div>
+          )}
+          {(allMessages.length > 0 || streaming) && (
+            <ol className="relative space-y-2 pl-9 before:absolute before:left-3 before:top-2 before:bottom-2 before:w-px before:bg-ink-900/10 dark:before:bg-ink-50/10">
+              {allMessages.map((m) => (
+                <TimelineItem key={m.id} message={m} />
+              ))}
+              {streaming && (
+                <ThinkingItem
+                  events={streamingTools}
+                  showReply={!!streamingReply && streamingMode !== "plan"}
+                  mode={streamingMode}
+                  elapsedMs={elapsedMs}
+                  hasPlan={hasPlan}
+                />
+              )}
+            </ol>
+          )}
+        </div>
+      </div>
+
+      <footer className="px-5 py-3 border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] space-y-2 bg-paper-50 dark:bg-ink-900">
+        <Textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+              e.preventDefault();
+              void onSend("chat");
+            }
+          }}
+          rows={2}
+          disabled={streaming}
+          placeholder={
+            hasPlan
+              ? "Talk to the agent — point at files, suggest approaches, fix mistakes. The plan updates as you discuss."
+              : "Ask risks, alternatives, scope. Mention file paths or approaches to draft a plan together."
+          }
+          className="text-[13px] leading-relaxed resize-none"
+        />
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {!hasPlan && (
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() => void onSend("plan")}
+              disabled={streaming}
+              title="Have the agent draft a full plan in the right panel"
+            >
+              <ClipboardList className="h-3 w-3" />
+              Plan
+            </Button>
+          )}
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() => void onSend("challenge")}
+            disabled={streaming}
+            title="Have the agent critique this idea"
+          >
+            <Shuffle className="h-3 w-3" />
+            Challenge
+          </Button>
+          <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 hidden md:inline ml-1">
+            ⌘↵ to send
+          </span>
+          <span className="ml-auto" />
+          {streaming ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onStop}
+              title="Stop the agent"
+            >
+              <X className="h-3 w-3" />
+              Stop
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              onClick={() => void onSend("chat")}
+              disabled={!draft.trim()}
+            >
+              <Send className="h-3 w-3" />
+              Send
+            </Button>
+          )}
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+/**
+ * Right column — the plan workspace. Three states:
+ *   - empty: prompt the operator to draft a plan, with a one-click
+ *     button that fires plan mode.
+ *   - streaming (plan mode): the agent's reply lands here token-by-token
+ *     so the operator watches the spec materialize. The chat thread
+ *     shows the tool-call activity that's powering it.
+ *   - settled: the persisted plan draft renders as full markdown with
+ *     Refine / Edit by hand / Spawn task actions.
+ */
+function PlanColumn({
+  planDraft,
+  streaming,
+  streamingMode,
+  streamingReply,
+  streamingPlan,
+  streamingTools,
+  elapsedMs,
+  editingPlan,
+  planDraftEditor,
+  setPlanDraftEditor,
+  onStartEdit,
+  onCancelEdit,
+  onSaveEdit,
+  onPlan,
+  onClose,
+  planScrollRef,
+  onSpawn,
+  spawned,
+}: {
+  planDraft: string | null;
+  streaming: boolean;
+  streamingMode: "chat" | "challenge" | "plan" | null;
+  streamingReply: string;
+  streamingPlan: string;
+  streamingTools: IdeaChatEvent[];
+  elapsedMs: number;
+  editingPlan: boolean;
+  planDraftEditor: string;
+  setPlanDraftEditor: (v: string) => void;
+  onStartEdit: () => void;
+  onCancelEdit: () => void;
+  onSaveEdit: () => void;
+  onPlan: () => void;
+  onClose: () => void;
+  planScrollRef: React.RefObject<HTMLDivElement>;
+  onSpawn: () => void;
+  spawned: boolean;
+}) {
+  // What to show in the body, in priority order:
+  //   1. The agent is mid-stream and has emitted plan content → show
+  //      that live, with a typing caret. Plan mode uses streamingReply
+  //      (whole body is the plan); chat mode uses streamingPlan (only
+  //      the <plan-update> block content).
+  //   2. The persisted plan draft if one exists.
+  //   3. Empty-state CTA.
+  const liveBody =
+    streamingMode === "plan"
+      ? streamingReply
+      : streamingPlan;
+  const isLive = streaming && liveBody.length > 0;
+  const isPlanning = streaming && streamingMode === "plan" && !isLive;
+  const statusLabel =
+    streamingMode === "plan"
+      ? planDraft
+        ? "redrafting"
+        : "drafting"
+      : streamingPlan.length > 0
+        ? planDraft
+          ? "updating"
+          : "drafting"
+        : null;
+  return (
+    <div className="flex h-full flex-col bg-paper-50 dark:bg-ink-900/40">
+      <header className="flex items-center gap-2 px-4 h-9 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] shrink-0">
+        <ClipboardList className="h-3.5 w-3.5 text-amber-700 dark:text-amber-300 shrink-0" />
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] font-semibold text-amber-700 dark:text-amber-300">
+          Plan
+        </span>
+        {statusLabel && (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="size-1.5 rounded-full bg-ember-500 animate-blink" />
+            <ShimmerText className="font-mono text-[10px] uppercase tracking-[0.14em]">
+              {statusLabel}
+            </ShimmerText>
+          </span>
+        )}
+        <span className="ml-auto flex items-center gap-1">
+          {planDraft && !editingPlan && !streaming && (
+            <>
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={onStartEdit}
+                title="Edit the plan by hand"
+              >
+                <Pencil className="h-3 w-3" />
+                Edit
+              </Button>
+              {!spawned && (
+                <Button
+                  size="xs"
+                  onClick={onSpawn}
+                  title="Spawn a task using this plan as the prompt"
+                >
+                  <Zap className="h-3 w-3" />
+                  Spawn
+                </Button>
+              )}
+            </>
+          )}
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            onClick={onClose}
+            aria-label="Hide plan panel"
+            title="Hide plan panel"
+          >
+            <PanelRightClose className="h-3.5 w-3.5" />
+          </Button>
+        </span>
+      </header>
+
+      {editingPlan ? (
+        <div className="flex flex-col flex-1 min-h-0 px-5 py-4 gap-3">
+          <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+            Editing by hand · saved as the spawned task's prompt
+          </div>
+          <Textarea
+            value={planDraftEditor}
+            autoFocus
+            onChange={(e) => setPlanDraftEditor(e.target.value)}
+            placeholder="Write the plan markdown by hand. Goal / Approach / Files / Steps / Edge cases / Acceptance / Test plan."
+            className="flex-1 text-[12px] font-mono leading-relaxed resize-none"
+          />
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={onSaveEdit}>
+              Save plan
+            </Button>
+            <Button size="sm" variant="ghost" onClick={onCancelEdit}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div
+          ref={planScrollRef}
+          className="flex-1 min-h-0 overflow-y-auto px-5 py-4"
+        >
+          {isLive ? (
+            <div>
+              <Markdown text={liveBody} />
+              <span className="inline-block w-1.5 h-4 align-text-bottom bg-ember-500/70 ml-0.5 animate-blink" />
+            </div>
+          ) : isPlanning ? (
+            <PlanWaitingFeed
+              events={streamingTools}
+              hasPlan={!!planDraft}
+              elapsedMs={elapsedMs}
+            />
+          ) : planDraft ? (
+            <Markdown text={planDraft} />
+          ) : (
+            <div className="flex flex-col items-center justify-center h-full text-center gap-4 max-w-sm mx-auto">
+              <ClipboardList className="h-6 w-6 text-amber-700/50 dark:text-amber-300/50" />
+              <p className="text-[12.5px] text-ink-600 dark:text-ink-300">
+                No plan yet. Talk to the agent in the chat — point at
+                files, suggest approaches, ask questions — and it'll
+                update this panel as the plan takes shape. Or hit{" "}
+                <span className="font-mono text-amber-700 dark:text-amber-300">
+                  Plan
+                </span>{" "}
+                in the composer to ask for a full structured spec right
+                away (Goal · Approach · Files · Steps · Edge cases ·
+                Acceptance · Test plan).
+              </p>
+              <div className="flex items-center gap-2">
+                <Button size="xs" onClick={onPlan} disabled={streaming}>
+                  <ClipboardList className="h-3 w-3" />
+                  Draft a plan
+                </Button>
+                <Button size="xs" variant="ghost" onClick={onStartEdit}>
+                  <Pencil className="h-3 w-3" />
+                  Write by hand
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Status-only feed for the plan panel — no actual tool rows (those
+ * stream into the chat thread, where they belong). Just the rotating
+ * label, an elapsed counter, and a step counter, so the operator can
+ * tell at a glance: how long, how busy, what flavor of work.
+ */
+function PlanWaitingFeed({
+  events,
+  hasPlan,
+  elapsedMs,
+}: {
+  events: IdeaChatEvent[];
+  hasPlan: boolean;
+  elapsedMs: number;
+}) {
+  const tools = events.filter((e) => e.kind === "tool_use") as Array<
+    Extract<IdeaChatEvent, { kind: "tool_use" }>
+  >;
+  const lastTool = tools[tools.length - 1];
+  const phase: ThinkingPhase =
+    tools.length === 0
+      ? "scouting"
+      : hasPlan
+        ? "planRefining"
+        : "planDrafting";
+  const label = useRotatingLabel(phase);
+  return (
+    <div className="space-y-4 max-w-md">
+      <div className="flex items-center gap-2.5 flex-wrap">
+        <span className="relative inline-flex h-2 w-2">
+          <span className="absolute inline-flex h-full w-full rounded-full bg-ember-500 opacity-60 animate-ping" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-ember-500" />
+        </span>
+        <ShimmerText className="text-[12.5px] font-medium">
+          <TransitioningText>{label}</TransitioningText>
+        </ShimmerText>
+      </div>
+      <div className="flex items-center gap-3 font-mono text-[10.5px] tabular-nums text-ink-500 dark:text-ink-400 pl-4">
+        <span>{formatElapsed(elapsedMs)}</span>
+        <span className="text-ink-300 dark:text-ink-600">·</span>
+        <span>
+          {tools.length} step{tools.length === 1 ? "" : "s"}
+        </span>
+        {lastTool && (
+          <>
+            <span className="text-ink-300 dark:text-ink-600">·</span>
+            <span className="truncate min-w-0">
+              {summariseTool(lastTool)}
+            </span>
+          </>
+        )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Concise one-liner for a tool_use event — used as the "what's the
+ * agent doing right this second" hint in the plan panel.
+ */
+function summariseTool(
+  ev: Extract<IdeaChatEvent, { kind: "tool_use" }>,
+): string {
+  const inp = (ev.input ?? {}) as Record<string, unknown>;
+  const get = (k: string) =>
+    typeof inp[k] === "string" ? (inp[k] as string) : "";
+  if (ev.name === "Read" || ev.name === "Write" || ev.name === "Edit") {
+    return `${ev.name} ${get("file_path") || get("path")}`;
+  }
+  if (ev.name === "Glob") return `Glob ${get("pattern")}`;
+  if (ev.name === "Grep") {
+    const path = get("path");
+    return `Grep ${get("pattern")}${path ? ` in ${path}` : ""}`;
+  }
+  if (ev.name === "Bash") {
+    const cmd = get("command");
+    return `Bash ${cmd.length > 60 ? cmd.slice(0, 60) + "…" : cmd}`;
+  }
+  if (ev.name === "WebFetch") return `WebFetch ${get("url")}`;
+  return ev.name;
+}
+
+/**
+ * Tiny "where did this model list come from" hint that sits next to
+ * the Model label. The list itself stays fresh automatically — the
+ * daemon watches `~/.codex/models_cache.json` and `~/.agentd/config.json`,
+ * pushes a `models_changed` WS event when either changes, and the
+ * realtime handler invalidates the cached query. So no refresh
+ * button — the picker is always up-to-date by the time it opens.
+ */
+function ModelSourceHint({
+  agent,
+  sources,
+}: {
+  agent: AgentKind;
+  sources:
+    | { codex?: { available: boolean; fetchedAt: number | null } }
+    | undefined;
+}) {
+  const codex = sources?.codex;
+  const text =
+    agent === "claude"
+      ? "claude family aliases · always latest"
+      : codex && codex.fetchedAt
+        ? `~/.codex/models_cache.json · ${formatRelativeAge(codex.fetchedAt)}`
+        : "~/.codex/models_cache.json";
+  return (
+    <span className="ml-auto font-mono text-[10px] text-ink-400 dark:text-ink-500">
+      {text}
+    </span>
+  );
+}
+
+function formatRelativeAge(ts: number): string {
+  const ms = Date.now() - ts;
+  if (ms < 60_000) return "just now";
+  const m = Math.floor(ms / 60_000);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+/**
+ * Spawn dialog — picks the coding agent + model + thinking level for
+ * the spawned task. The plan draft (or description, or title) becomes
+ * the task prompt. We don't surface workspace mode / branch knobs here —
+ * the operator can tune those on the task page once it's running.
+ */
+function SpawnDialog({
+  open,
+  onOpenChange,
+  idea,
+  onSpawn,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  idea: { planDraft: string | null; description: string | null; text: string };
+  onSpawn: (opts: {
+    agent: AgentKind;
+    model?: string;
+    thinkingLevel?: ThinkingLevel;
+  }) => Promise<void>;
+}) {
+  const modelsQ = useModels();
+  const [agent, setAgent] = useState<AgentKind>("claude");
+  const [model, setModel] = useState<string>("");
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | "">("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const models = modelsQ.data?.models;
+  const defaults = modelsQ.data?.defaults;
+  const agentModels = models ? models[agent] : [];
+
+  // When the agent selection changes, snap the model to either the
+  // server-side default for that agent, or the first model available.
+  useEffect(() => {
+    if (!agentModels) return;
+    if (model && agentModels.some((m) => m.id === model)) return;
+    const def = defaults?.[agent];
+    setModel(
+      def && agentModels.some((m) => m.id === def)
+        ? def
+        : agentModels[0]?.id ?? "",
+    );
+  }, [agent, agentModels?.length]);
+
+  const promptPreview =
+    idea.planDraft?.trim() || idea.description?.trim() || idea.text.trim();
+
+  const summary = useMemo(() => {
+    if (idea.planDraft) return "uses the plan draft as the task prompt";
+    if (idea.description) return "uses the description (no plan drafted yet)";
+    return "uses the idea title (consider drafting a plan first)";
+  }, [idea.planDraft, idea.description]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Spawn task from idea</DialogTitle>
+          <p className="text-[12px] text-ink-500 dark:text-ink-400">
+            {summary}
+          </p>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label className="text-[11px] uppercase tracking-[0.1em] font-mono text-ink-500 dark:text-ink-400">
+              Coding agent
+            </Label>
+            <div className="flex gap-2">
+              {(["claude", "codex"] as const).map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => setAgent(k)}
+                  className={cn(
+                    "flex-1 rounded-md border px-3 py-2 text-left transition-colors",
+                    agent === k
+                      ? "border-ember-500/60 bg-ember-500/10"
+                      : "border-ink-900/15 hover:bg-ink-900/[0.03] dark:border-ink-50/15 dark:hover:bg-ink-50/[0.03]",
+                  )}
+                >
+                  <div className="font-mono text-[10px] uppercase tracking-[0.1em] text-ink-500 dark:text-ink-400">
+                    {k}
+                  </div>
+                  <div className="text-[12.5px] font-medium text-ink-900 dark:text-ink-50">
+                    {k === "claude" ? "Claude Code" : "Codex CLI"}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex items-baseline gap-2">
+              <Label
+                htmlFor="spawn-model"
+                className="text-[11px] uppercase tracking-[0.1em] font-mono text-ink-500 dark:text-ink-400"
+              >
+                Model
+              </Label>
+              <ModelSourceHint
+                agent={agent}
+                sources={modelsQ.data?.sources}
+              />
+            </div>
+            <Select
+              value={
+                model && agentModels?.some((m) => m.id === model)
+                  ? model
+                  : model
+                    ? "__custom"
+                    : ""
+              }
+              onValueChange={(v) => {
+                if (v === "__custom") {
+                  // Switch to free-text mode — keep whatever's there.
+                  setModel(model || "");
+                } else {
+                  setModel(v);
+                }
+              }}
+            >
+              <SelectTrigger id="spawn-model" className="text-[12.5px]">
+                <SelectValue placeholder="pick a model" />
+              </SelectTrigger>
+              <SelectContent>
+                {(agentModels ?? []).map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    <span className="flex items-baseline gap-2">
+                      <span className="font-medium">{m.label}</span>
+                      <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+                        {m.id}
+                      </span>
+                      {m.tier && (
+                        <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-ember-700 dark:text-ember-300">
+                          {m.tier}
+                        </span>
+                      )}
+                    </span>
+                  </SelectItem>
+                ))}
+                <SelectItem value="__custom">
+                  <span className="flex items-baseline gap-2">
+                    <span className="font-medium">Custom…</span>
+                    <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+                      type any model id below
+                    </span>
+                  </span>
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            {model && !agentModels?.some((m) => m.id === model) && (
+              <Input
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="model id (e.g. gpt-5.5, claude-sonnet-4-7)"
+                className="text-[12.5px] font-mono"
+              />
+            )}
+            {agent === "codex" &&
+              modelsQ.data?.sources?.codex?.available === false && (
+                <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                  No codex models found at{" "}
+                  <code className="font-mono">~/.codex/models_cache.json</code>.
+                  Run any <code className="font-mono">codex</code> command once
+                  to populate the cache, then hit refresh.
+                </p>
+              )}
+          </div>
+
+          <div className="space-y-1.5">
+            <Label
+              htmlFor="spawn-thinking"
+              className="text-[11px] uppercase tracking-[0.1em] font-mono text-ink-500 dark:text-ink-400"
+            >
+              Thinking effort
+              <span className="ml-1 text-ink-400 dark:text-ink-500">
+                · optional
+              </span>
+            </Label>
+            <Select
+              value={thinkingLevel || "default"}
+              onValueChange={(v) =>
+                setThinkingLevel(v === "default" ? "" : (v as ThinkingLevel))
+              }
+            >
+              <SelectTrigger id="spawn-thinking" className="text-[12.5px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">use server default</SelectItem>
+                <SelectItem value="low">low</SelectItem>
+                <SelectItem value="medium">medium</SelectItem>
+                <SelectItem value="high">high</SelectItem>
+                <SelectItem value="max">max</SelectItem>
+                <SelectItem value="xhigh">xhigh</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-[11px] uppercase tracking-[0.1em] font-mono text-ink-500 dark:text-ink-400">
+              Prompt preview
+            </Label>
+            <pre className="max-h-44 overflow-y-auto rounded-md border border-ink-900/10 bg-paper-50 px-3 py-2 font-mono text-[11px] leading-relaxed text-ink-700 whitespace-pre-wrap dark:border-ink-50/10 dark:bg-ink-900 dark:text-ink-200">
+              {promptPreview}
+            </pre>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+            disabled={submitting}
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={async () => {
+              setSubmitting(true);
+              try {
+                await onSpawn({
+                  agent,
+                  ...(model ? { model } : {}),
+                  ...(thinkingLevel
+                    ? { thinkingLevel: thinkingLevel as ThinkingLevel }
+                    : {}),
+                });
+              } finally {
+                setSubmitting(false);
+              }
+            }}
+            disabled={submitting}
+          >
+            {submitting ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Zap className="h-3.5 w-3.5" />
+            )}
+            Spawn task
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

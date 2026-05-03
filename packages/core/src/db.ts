@@ -112,6 +112,13 @@ export const ideaMessages = sqliteTable("idea_messages", {
   ideaId: text("idea_id").notNull(),
   role: text("role").notNull(), // "user" | "agent" | "system"
   content: text("content").notNull(),
+  /**
+   * Tool-call events captured during the agent's turn — persisted as
+   * a JSON array of `HelperStreamEvent`. Lets the workshop replay
+   * the activity timeline (Read/Glob/Grep/Bash) even after a reload,
+   * matching how task timelines show their history.
+   */
+  eventsJson: text("events_json"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -141,6 +148,20 @@ export const suggestions = sqliteTable("suggestions", {
   chosenIndex: integer("chosen_index"),
   chosenText: text("chosen_text"),
   spawnedTaskId: text("spawned_task_id"),
+  /**
+   * Tool-call events the agent fired while drafting these options
+   * (Read / Glob / Grep / Bash). Persisted so the brainstorm view
+   * can replay "what the agent did" after reload, not just during
+   * the live stream. Same shape as `idea_messages.events_json`.
+   */
+  eventsJson: text("events_json"),
+  /**
+   * Second-opinion scores from other AI raters. Each entry: agent +
+   * model + index-aligned scores. Lets the operator triangulate
+   * across raters; the workshop sorts / filters using the average
+   * across all available raters (original + validations).
+   */
+  validationsJson: text("validations_json"),
 });
 
 export const councils = sqliteTable("councils", {
@@ -383,6 +404,7 @@ CREATE TABLE IF NOT EXISTS idea_messages (
   idea_id TEXT NOT NULL,
   role TEXT NOT NULL,
   content TEXT NOT NULL,
+  events_json TEXT,
   created_at INTEGER NOT NULL
 );
 
@@ -506,10 +528,13 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE projects ADD COLUMN discord_channel_id TEXT",
   "ALTER TABLE projects ADD COLUMN auto_task_thread INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE tasks ADD COLUMN discord_thread_id TEXT",
+  "ALTER TABLE idea_messages ADD COLUMN events_json TEXT",
   "ALTER TABLE saved_ideas ADD COLUMN description TEXT",
   "ALTER TABLE saved_ideas ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'",
   "ALTER TABLE saved_ideas ADD COLUMN tags_csv TEXT",
   "ALTER TABLE saved_ideas ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE suggestions ADD COLUMN events_json TEXT",
+  "ALTER TABLE suggestions ADD COLUMN validations_json TEXT",
 ];
 
 function migrate(sqlite: Database): void {

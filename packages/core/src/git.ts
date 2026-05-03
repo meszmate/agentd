@@ -51,10 +51,55 @@ export interface AiHelperOptions {
  * Honors AGENTD_CLAUDE_BIN / AGENTD_CODEX_BIN as legacy binary
  * overrides so existing installs keep working.
  */
+/**
+ * Stream events the helper produces while it's running. Lets the UI
+ * render the agent's tool calls in real time (Read/Glob/Grep/Bash)
+ * instead of just showing a spinner. `text` carries assistant prose
+ * deltas; `tool_use` and `tool_result` mirror the Claude stream-json
+ * shape so the web's existing tool-line rendering plugs in cleanly.
+ */
+export type HelperStreamEvent =
+  | { kind: "tool_use"; name: string; input: unknown }
+  | { kind: "tool_result"; ok: boolean; preview?: string }
+  | { kind: "text"; delta: string }
+  /**
+   * A chunk of plan content the agent is currently writing into a
+   * `<plan-update>…</plan-update>` block. Routed to the right-side
+   * plan panel in the workshop UI; never persisted as a chat token.
+   */
+  | { kind: "plan_delta"; delta: string }
+  | { kind: "raw"; text: string };
+
+interface ClaudeJsonLine {
+  type?: string;
+  subtype?: string;
+  message?: {
+    role?: string;
+    content?: Array<{
+      type?: string;
+      text?: string;
+      name?: string;
+      input?: unknown;
+      tool_use_id?: string;
+      content?: unknown;
+      is_error?: boolean;
+    }>;
+  };
+  result?: string;
+  is_error?: boolean;
+  event?: {
+    type?: string;
+    delta?: { type?: string; text?: string };
+  };
+  content?: unknown;
+  tool_use_id?: string;
+}
+
 function buildAiHelperArgv(
   opts: AiHelperOptions,
   prompt: string,
   cwd?: string,
+  format: "text" | "stream-json" = "text",
 ): string[] {
   if (opts.agent === "codex") {
     const binary =
@@ -89,8 +134,189 @@ function buildAiHelperArgv(
     argv.push("--model", opts.model.trim());
   }
   if (cwd) argv.push("--add-dir", cwd);
+  if (format === "stream-json") {
+    argv.push(
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+    );
+  }
   argv.push("-p", prompt);
   return argv;
+}
+
+/**
+ * Spawn the claude helper in stream-json mode and yield typed events
+ * (text deltas + tool_use + tool_result) as they arrive. Returns the
+ * accumulated assistant text + a `source` flag at the end.
+ *
+ * Codex doesn't support the same stream-json format as claude — for
+ * codex helpers we fall back to plain stdout streaming and emit
+ * everything as `text` events.
+ */
+async function* runHelperWithEvents(
+  cwd: string,
+  prompt: string,
+  opts: AiHelperOptions = {},
+): AsyncGenerator<
+  HelperStreamEvent,
+  { text: string; source: "claude" | "codex" | "fallback-empty" | "fallback-error"; error?: string },
+  void
+> {
+  const useJson = (opts.agent ?? "claude") === "claude";
+  const argv = buildAiHelperArgv(
+    opts,
+    prompt,
+    cwd,
+    useJson ? "stream-json" : "text",
+  );
+  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn({
+      cmd: argv,
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+  } catch (e) {
+    return {
+      text: "",
+      source: "fallback-error",
+      error: (e as Error).message,
+    };
+  }
+
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let acc = "";
+  const pendingEvents: HelperStreamEvent[] = [];
+
+  const handleClaudeLine = (line: string): void => {
+    if (!line.trim()) return;
+    let parsed: ClaudeJsonLine;
+    try {
+      parsed = JSON.parse(line) as ClaudeJsonLine;
+    } catch {
+      return;
+    }
+    // Streaming text delta from --include-partial-messages.
+    if (
+      parsed.type === "stream_event" &&
+      parsed.event?.type === "content_block_delta" &&
+      parsed.event.delta?.type === "text_delta" &&
+      typeof parsed.event.delta.text === "string"
+    ) {
+      const delta = parsed.event.delta.text;
+      if (delta) {
+        acc += delta;
+        pendingEvents.push({ kind: "text", delta });
+      }
+      return;
+    }
+    // Final assembled assistant message — surface tool_use blocks.
+    if (parsed.type === "assistant" && parsed.message?.content) {
+      for (const block of parsed.message.content) {
+        if (block.type === "tool_use" && block.name) {
+          pendingEvents.push({
+            kind: "tool_use",
+            name: block.name,
+            input: block.input ?? {},
+          });
+        }
+      }
+      return;
+    }
+    // Tool results land as user-role content blocks.
+    if (parsed.type === "user" && parsed.message?.content) {
+      for (const block of parsed.message.content) {
+        if (block.type === "tool_result") {
+          let preview: string | undefined;
+          if (typeof block.content === "string") {
+            preview = block.content.slice(0, 240);
+          } else if (Array.isArray(block.content)) {
+            const txt = (block.content as Array<{ type?: string; text?: string }>)
+              .filter((c) => c.type === "text" && typeof c.text === "string")
+              .map((c) => c.text!)
+              .join("\n");
+            if (txt) preview = txt.slice(0, 240);
+          }
+          pendingEvents.push({
+            kind: "tool_result",
+            ok: !block.is_error,
+            ...(preview ? { preview } : {}),
+          });
+        }
+      }
+      return;
+    }
+    // Final result envelope from claude — overrides accumulated text
+    // with the canonical reply.
+    if (parsed.type === "result" && typeof parsed.result === "string") {
+      acc = parsed.result;
+    }
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      if (useJson) {
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 1);
+          handleClaudeLine(line);
+          while (pendingEvents.length > 0) yield pendingEvents.shift()!;
+        }
+      } else {
+        // Codex / text mode — pass chunks through as text events.
+        const chunk = buffer;
+        buffer = "";
+        if (chunk) {
+          acc += chunk;
+          yield { kind: "text", delta: chunk };
+        }
+      }
+    }
+    if (useJson && buffer.trim()) {
+      handleClaudeLine(buffer);
+      while (pendingEvents.length > 0) yield pendingEvents.shift()!;
+    } else if (!useJson && buffer) {
+      acc += buffer;
+      yield { kind: "text", delta: buffer };
+    }
+  } catch {
+    // stream cancelled
+  }
+  await proc.exited;
+  if (!acc.trim()) {
+    return { text: "", source: "fallback-empty" };
+  }
+  return {
+    text: acc,
+    source: opts.agent === "codex" ? "codex" : "claude",
+  };
+}
+
+/**
+ * Tidy a final assistant reply: strip any "Agent:" / "[agent]" /
+ * "**Agent:**" prefix the model leaks despite instructions, drop
+ * code-fence wrappers around the whole reply.
+ */
+function cleanAssistantText(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^```[a-z]*\n?|```\s*$/g, "")
+    .replace(
+      /^(?:[\*]{0,2}(?:agent|assistant)[\*]{0,2}\s*[:>—-]\s*)/i,
+      "",
+    )
+    .replace(/^(?:\[(?:agent|assistant)\]\s*)/i, "")
+    .trim();
 }
 
 export async function hasChanges(cwd: string): Promise<boolean> {
@@ -829,13 +1055,40 @@ export interface IdeationResult {
  */
 function buildIdeationPrompt(prompt: string, max: number): string {
   return [
-    `You are brainstorming actionable ideas for the operator's project.`,
-    `Look at the repo (read files if needed) and return ${max} short, actionable options.`,
-    `Output rules:`,
-    `- One option per line.`,
-    `- Each line is a complete imperative directive the operator could hand back to a coding agent (e.g. "Add unit tests for the streaming pipeline in apps/web/src/views/TaskTimeline.tsx").`,
-    `- No numbering, bullets, or markdown — just the lines.`,
-    `- No preamble, no closing summary, no commentary.`,
+    `You are brainstorming high-leverage ideas for the operator's project. Each idea is a SHORT directional pitch — what to build and why it's worth doing — not a full implementation spec. The plan tool will name files and steps later when the operator picks one to refine.`,
+    "",
+    `RECON STEP (mandatory, do this BEFORE generating any options):`,
+    `Use your tools to actually look at the project so your ideas are grounded in what it really is. At minimum:`,
+    `  1. Glob the top-level layout (\`*\` and \`*/*\` is enough to see the shape).`,
+    `  2. Read the README (or equivalent — look for README.md, README, docs/index.md).`,
+    `  3. Read whatever the project's manifest is (package.json, Cargo.toml, pyproject.toml, go.mod, etc) so you know the language, deps, and stated purpose.`,
+    `  4. Skim 1-2 key source dirs only if needed to understand the domain.`,
+    `Don't generate options before doing this. Don't guess what the project is from the brief alone.`,
+    `Don't quote specific file paths or symbols in the FINAL options — keep those for the plan tool. The recon is for YOUR grounding, not the output.`,
+    "",
+    `Return up to ${max} options.`,
+    "",
+    `Clarify-first rule (IMPORTANT):`,
+    `If the operator's brief is too vague to commit to a coherent direction — single words like "ads", "ideas", "make it better", "improvements", or anything you can't ground in what the project actually is — DO NOT generate options. Generating speculative ideas wastes the operator's time. Instead, output ONE clarifying question.`,
+    `Output the question as a single line starting with the literal prefix "?? " (two question marks + space). Examples:`,
+    `?? "ads" is ambiguous — do you mean billing/conversion features, marketing pages, in-app announcements, or something else?`,
+    `?? "make it better" is too broad — which area (workshop, brainstorm, task page) and what dimension (perf, UX, code quality)?`,
+    `Stop after the question. No options, no preamble, no second line.`,
+    "",
+    `Output format when the brief is concrete enough — strictly one option per line:`,
+    `  [score: NN] <directional pitch> — <1-line critique>`,
+    "",
+    `Examples:`,
+    `[score: 88] Ship a one-tap "share this task" surface so completed runs become organic distribution — strong growth lever, hinges on a tasteful redaction layer to not leak private repos.`,
+    `[score: 72] Add lightweight per-project usage analytics (turns, tokens, time-to-PR) — useful for the operator's own retro, low risk, but easy to over-build if it tries to be a dashboard.`,
+    `[score: 45] Build a public "ideas changelog" generator from completed tasks — nice flex, but probably premature; nobody's reading changelogs of a brand-new tool.`,
+    "",
+    `Rules for the option list:`,
+    `- Start every line with "[score: NN] " where NN is a 0-100 estimate of value-vs-effort for THIS project at its current stage. Calibrate honestly: 90+ = ship-now obvious wins, 70-85 = strong, 50-65 = worth considering, <50 = mention only if the brief specifically asked for that direction. Spread the scores; don't bunch everything in 80-90.`,
+    `- The directional pitch (after the score) is one tight sentence: WHAT we'd build and the angle that makes it interesting. Don't name specific files, modules, or functions — that's the plan tool's job.`,
+    `- The critique (after " — ") is candid: why this matters now, the main risk, or what would make it shippable. Don't praise. Surface the load-bearing concern.`,
+    `- Use exactly the em dash separator " — " between pitch and critique.`,
+    `- One line per option. No numbering, no bullets, no markdown headers, no preamble.`,
     "",
     `Operator's brief:`,
     prompt.slice(0, 2000),
@@ -862,35 +1115,27 @@ function cleanIdeationLine(raw: string): string {
  * lets the UI tick options in one-by-one with a fade-in animation
  * instead of waiting 10–30s for the whole batch.
  */
+/**
+ * Events the brainstorm helper emits. `option` arrives once per
+ * extracted idea line; `tool_use` / `tool_result` mirror the agent's
+ * Read / Glob / Grep / Bash calls so the brainstorm UI can show live
+ * activity (same shape as the workshop's `IdeaChatEvent`).
+ */
+export type IdeationStreamEvent =
+  | { kind: "option"; text: string }
+  | { kind: "tool_use"; name: string; input: unknown }
+  | { kind: "tool_result"; ok: boolean; preview?: string };
+
 export async function* streamIdeation(
   cwd: string,
   prompt: string,
   opts: { helper?: AiHelperOptions; max?: number } = {},
-): AsyncGenerator<string, IdeationResult, void> {
+): AsyncGenerator<IdeationStreamEvent, IdeationResult, void> {
   const max = Math.max(2, Math.min(9, opts.max ?? 5));
   const ask = buildIdeationPrompt(prompt, max);
-  const argv = buildAiHelperArgv(opts.helper ?? {}, ask, cwd);
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
-  try {
-    proc = Bun.spawn({
-      cmd: argv,
-      cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: process.env as Record<string, string>,
-    });
-  } catch (e) {
-    return {
-      options: [],
-      source: "fallback-error",
-      error: (e as Error).message,
-    };
-  }
-  const reader = proc.stdout.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
   const collected: string[] = [];
   const seen = new Set<string>();
+  let buffer = "";
 
   const tryEmit = (raw: string): string | null => {
     if (collected.length >= max) return null;
@@ -902,32 +1147,58 @@ export async function* streamIdeation(
     return line;
   };
 
+  // Flush any complete lines from the running text buffer. Lets the
+  // UI show options the moment the agent finishes a line, rather
+  // than waiting for the whole batch.
+  function* drainLines(): Generator<IdeationStreamEvent> {
+    let idx: number;
+    while ((idx = buffer.indexOf("\n")) !== -1) {
+      const raw = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 1);
+      const emitted = tryEmit(raw);
+      if (emitted) yield { kind: "option", text: emitted };
+    }
+  }
+
+  const it = runHelperWithEvents(cwd, ask, opts.helper ?? {});
+  let final: { text: string; source: string; error?: string } | null = null;
   try {
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buffer.indexOf("\n")) !== -1) {
-        const raw = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 1);
-        const emitted = tryEmit(raw);
-        if (emitted) yield emitted;
+      const next = await it.next();
+      if (next.done) {
+        final = next.value;
+        break;
+      }
+      const ev = next.value;
+      if (ev.kind === "text") {
+        buffer += ev.delta;
+        for (const line of drainLines()) yield line;
+      } else if (ev.kind === "tool_use") {
+        yield { kind: "tool_use", name: ev.name, input: ev.input };
+      } else if (ev.kind === "tool_result") {
+        yield {
+          kind: "tool_result",
+          ok: ev.ok,
+          ...(ev.preview ? { preview: ev.preview } : {}),
+        };
       }
       if (collected.length >= max) break;
     }
-    // Flush whatever is in the trailing buffer (helper output without a
-    // final newline).
+    // Flush any trailing line that didn't end with a newline.
     if (buffer.trim()) {
       const emitted = tryEmit(buffer);
-      if (emitted) yield emitted;
+      if (emitted) yield { kind: "option", text: emitted };
+      buffer = "";
     }
   } catch {
-    // stream aborted
+    // stream aborted / cancelled
   }
-  await proc.exited;
   if (collected.length === 0) {
-    return { options: [], source: "fallback-empty" };
+    return {
+      options: [],
+      source: (final?.source as IdeationResult["source"]) ?? "fallback-empty",
+      ...(final?.error ? { error: final.error } : {}),
+    };
   }
   return { options: collected, source: "claude" };
 }
@@ -947,6 +1218,97 @@ export async function runIdeation(
     const next = await it.next();
     if (next.done) return next.value;
   }
+}
+
+/* ── Idea validator (second-opinion scoring) ──────────────────────── */
+
+export interface ValidateIdeasResult {
+  scores: number[];
+  source: "claude" | "codex" | "fallback-empty" | "fallback-error";
+  error?: string;
+}
+
+/**
+ * Re-score a set of brainstorm ideas with a fresh AI helper — usually
+ * a different agent / model than the one that produced them — to get
+ * a second opinion on value vs. effort. Returns one 0-100 score per
+ * idea, in the same order as the input. Lets the operator triangulate
+ * across raters instead of trusting a single model's calibration.
+ *
+ * The output is a tight space-separated number list (e.g. "82 71 45")
+ * because that survives transport better than json from CLIs that
+ * sometimes wrap output in markdown fences.
+ */
+export async function validateIdeas(args: {
+  cwd: string;
+  brief: string;
+  ideas: string[];
+  helper?: AiHelperOptions;
+}): Promise<ValidateIdeasResult> {
+  if (args.ideas.length === 0) {
+    return { scores: [], source: "fallback-empty" };
+  }
+  const numbered = args.ideas
+    .map((opt, i) => `${i + 1}. ${opt}`)
+    .join("\n");
+  const ask = [
+    `You are evaluating brainstorm ideas for a project. The operator wants a second opinion on each idea's value-vs-effort.`,
+    "",
+    `Look at the project (read README / manifest / glob top-level dirs) so your scoring is grounded in what the project actually is — don't score from the brief alone.`,
+    "",
+    `Then for each numbered idea below, give a single integer 0-100 where:`,
+    `  90+  ship-now obvious win`,
+    `  70-89  strong, worth doing soon`,
+    `  50-69  worth considering`,
+    `  <50  niche / risky / off-strategy`,
+    `Calibrate honestly. Spread the scores; don't bunch everything in 80-90.`,
+    "",
+    `Output format: ONE LINE only — exactly N space-separated integers in the same order as the ideas, where N is the number of ideas. NO preamble, NO commentary, NO numbering, NO markdown. Just the numbers.`,
+    `Example for 3 ideas: "82 64 41"`,
+    "",
+    `Operator's original brief:`,
+    args.brief,
+    "",
+    `Ideas (${args.ideas.length}):`,
+    numbered,
+  ].join("\n");
+  const argv = buildAiHelperArgv(args.helper ?? {}, ask, args.cwd);
+  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn({
+      cmd: argv,
+      cwd: args.cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+  } catch (e) {
+    return { scores: [], source: "fallback-error", error: (e as Error).message };
+  }
+  const out = (await new Response(proc.stdout).text()).trim();
+  await proc.exited;
+  // Pull the longest run of "<int> <int> ..." we can find — guards
+  // against helpers that wrap with stray prose despite the prompt.
+  const numLine = (out.match(/\b\d{1,3}(?:\s+\d{1,3}){1,}\b/g) ?? [])
+    .sort((a, b) => b.length - a.length)[0];
+  if (!numLine) {
+    return {
+      scores: [],
+      source: "fallback-empty",
+      ...(out ? { error: `unparseable response: ${out.slice(0, 200)}` } : {}),
+    };
+  }
+  const parsed = numLine
+    .split(/\s+/)
+    .map((s) => parseInt(s, 10))
+    .filter((n) => Number.isFinite(n) && n >= 0 && n <= 100);
+  // Pad / trim to match the input length so the index alignment
+  // contract holds even when the helper returned the wrong count.
+  const scores: number[] = [];
+  for (let i = 0; i < args.ideas.length; i++) {
+    scores.push(parsed[i] ?? 0);
+  }
+  return { scores, source: (args.helper?.agent ?? "claude") };
 }
 
 /* ── Suggestion → plan generator ───────────────────────────────────── */
@@ -1060,6 +1422,13 @@ export interface IdeaChatResult {
   reply: string;
   source: "claude" | "fallback-empty" | "fallback-error";
   error?: string;
+  /**
+   * Content of a `<plan-update>…</plan-update>` block the agent
+   * emitted in chat/challenge mode — meaning: "update the plan to
+   * this". The daemon writes it to `idea.planDraft` and the workshop
+   * UI shows it in the right panel. Null when no block was emitted.
+   */
+  planContent?: string | null;
 }
 
 export async function* streamIdeaConversation(
@@ -1070,15 +1439,47 @@ export async function* streamIdeaConversation(
     planDraft?: string | null;
     history: IdeaChatTurn[];
     userMessage?: string;
-    mode?: "chat" | "challenge";
+    mode?: "chat" | "challenge" | "plan";
     helper?: AiHelperOptions;
   },
-): AsyncGenerator<string, IdeaChatResult, void> {
+): AsyncGenerator<HelperStreamEvent, IdeaChatResult, void> {
   const mode = args.mode ?? "chat";
   const directive =
     mode === "challenge"
       ? `Challenge this idea. Question its assumptions, point out edge cases or risks, suggest where it might be the wrong scope, and propose 1-2 alternatives if you see better paths. Be candid and specific. Reference real files / patterns from the repo when relevant. Keep it under 250 words.`
-      : `Refine this idea with the operator. Be candid, concise, and specific — reference real files/patterns from the repo when relevant. Question assumptions when you spot them. Don't restate the operator; respond to them. Keep replies under 250 words.`;
+      : mode === "plan"
+        ? [
+            `Produce a thorough, executable implementation plan for this idea — the kind a senior engineer would write before opening a PR.`,
+            `Read the repo first: skim the relevant directories, open the files you'd actually touch, and pin specific functions/lines you'd modify.`,
+            ``,
+            `Format strictly as markdown with these headings, in this exact order:`,
+            ``,
+            `## Goal`,
+            `One paragraph. What we're shipping and why it matters here.`,
+            ``,
+            `## Approach`,
+            `2-5 bullets covering the core design choices and the reasoning behind each. Call out the alternatives you considered and rejected.`,
+            ``,
+            `## Files`,
+            `Bulleted list of every file you'd touch. For each: \`path/to/file.ts\` — what changes there (one line). Group by package/app.`,
+            ``,
+            `## Steps`,
+            `Numbered, ordered steps an agent can execute top-to-bottom. Each step is one atomic change with the file it touches and the symbol/function it adds or modifies. Be concrete: "Add \`fooBar()\` to packages/core/src/x.ts that does Y" — not "implement X".`,
+            ``,
+            `## Edge cases & risks`,
+            `Bulleted. Concurrency, error paths, migration safety, backwards compat, performance traps. What can go wrong and how the plan handles it.`,
+            ``,
+            `## Acceptance`,
+            `Bulleted, observable outcomes — "running \`X\` shows Y", "the UI now does Z". No vague "works correctly".`,
+            ``,
+            `## Test plan`,
+            `Bulleted. Manual checks the operator should run end-to-end, plus any unit/integration test coverage that should land with the change.`,
+            ``,
+            `Be specific. Reference real files/symbols/lines. Avoid filler. If a section truly has nothing to say, write "n/a — <one-line reason>".`,
+            ``,
+            `If the prior plan draft already exists, refine and extend it instead of rewriting from scratch — keep what's right, fix what's wrong, fill in what's missing. The operator's latest message (if any) is the diff to apply.`,
+          ].join("\n")
+        : `Refine this idea with the operator. Be candid, concise, and specific — reference real files/patterns from the repo when relevant. Question assumptions when you spot them. Don't restate the operator; respond to them. Keep replies under 250 words.`;
 
   const transcript = args.history
     .filter((m) => m.role !== "system")
@@ -1095,9 +1496,29 @@ export async function* streamIdeaConversation(
     .filter(Boolean)
     .join("\n\n");
 
+  // Plan-update protocol — only relevant in chat/challenge modes.
+  // Plan mode already returns the entire reply as the plan body, so
+  // teaching it the tag would just be confusing.
+  const planProtocol =
+    mode === "plan"
+      ? ""
+      : [
+          `Plan update protocol:`,
+          args.planDraft
+            ? `The current plan draft is shown above. When this conversation produces a substantive change to the plan — the operator gave you a new file location, suggested a different approach, fixed a misunderstanding, requested a section change, or anything else that should land in the spec — emit the FULL updated plan inside <plan-update>...</plan-update> tags. Then continue your conversational reply explaining what changed and why.`
+            : `When the conversation has produced enough clarity to draft a plan (operator asked for one, or you've reached a clear approach), emit the full plan markdown inside <plan-update>...</plan-update> tags, then continue your conversational reply. Otherwise, keep chatting normally without the tags.`,
+          `Inside the tags, write the plan as full markdown with these headings: ## Goal, ## Approach, ## Files, ## Steps, ## Edge cases & risks, ## Acceptance, ## Test plan. Reference real files/symbols. Be specific.`,
+          `Only emit one <plan-update> block per reply. Do NOT emit it for trivial chatter or when the operator is just asking a question — emit only when the plan should change.`,
+        ].join("\n");
+
   const ask = [
     `You are the operator's thinking partner for a project idea.`,
     directive,
+    "",
+    `Format: Reply directly. NEVER prefix with "Agent:", "Assistant:", "[agent]", or any role label — the UI handles attribution.`,
+    `Use markdown for structure when it helps (bold, lists, inline code for file paths and symbols).`,
+    "",
+    planProtocol,
     "",
     `The idea:`,
     idea,
@@ -1105,45 +1526,131 @@ export async function* streamIdeaConversation(
     transcript ? `Conversation so far:\n${transcript}` : "",
     args.userMessage ? `\nOperator's latest message:\n${args.userMessage}` : "",
     "",
-    `Respond now (no "Agent:" prefix, no preamble).`,
+    `Respond now.`,
   ]
     .filter(Boolean)
     .join("\n");
 
-  const argv = buildAiHelperArgv(args.helper ?? {}, ask, cwd);
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
-  try {
-    proc = Bun.spawn({
-      cmd: argv,
-      cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: process.env as Record<string, string>,
-    });
-  } catch (e) {
-    return { reply: "", source: "fallback-error", error: (e as Error).message };
-  }
-  const reader = proc.stdout.getReader();
-  const decoder = new TextDecoder();
-  let raw = "";
+  const it = runHelperWithEvents(cwd, ask, args.helper ?? {});
+  let final: { text: string; source: string; error?: string } | null = null;
+
+  // Streaming filter for the plan-update protocol — splits text deltas
+  // into chat tokens and plan tokens so the workshop can update the
+  // right panel live as the agent writes the plan, while the chat
+  // thread keeps showing only the conversational reply.
+  const splitter = makePlanSplitter();
+
   try {
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      raw += chunk;
-      yield chunk;
+      const next = await it.next();
+      if (next.done) {
+        final = next.value;
+        break;
+      }
+      const ev = next.value;
+      if (ev.kind === "text" && mode !== "plan") {
+        for (const out of splitter.feed(ev.delta)) yield out;
+      } else {
+        yield ev;
+      }
     }
+    for (const out of splitter.flush()) yield out;
   } catch {
     // stream cancelled
   }
-  await proc.exited;
-  const cleaned = raw
-    .trim()
-    .replace(/^```[a-z]*\n?|```$/g, "")
-    .trim();
-  if (!cleaned) return { reply: "", source: "fallback-empty" };
-  return { reply: cleaned, source: "claude" };
+  if (!final || !final.text.trim()) {
+    return {
+      reply: "",
+      source: (final?.source as IdeaChatResult["source"]) ?? "fallback-empty",
+      ...(final?.error ? { error: final.error } : {}),
+    };
+  }
+  // Pull the plan-update block out of the final assistant text — that
+  // body is what gets persisted as the chat message, so the chat
+  // thread should never see the plan markup.
+  let planContent: string | null = null;
+  let body = final.text;
+  if (mode !== "plan") {
+    const m = body.match(/<plan-update>([\s\S]*?)<\/plan-update>/);
+    if (m) {
+      planContent = m[1]!.trim() || null;
+      body = body.replace(/<plan-update>[\s\S]*?<\/plan-update>/g, "").trim();
+    }
+  }
+  const cleaned = cleanAssistantText(body);
+  return {
+    reply: cleaned,
+    source: "claude",
+    ...(planContent ? { planContent } : {}),
+  };
+}
+
+/**
+ * Streaming-safe splitter for `<plan-update>…</plan-update>` blocks.
+ * Feeds in text deltas and yields a sequence of `text` and
+ * `plan_delta` events with the tags themselves stripped. Tolerates
+ * tag boundaries that span multiple deltas — buffers up to N-1
+ * trailing chars where N is the longest tag length so it can match
+ * a partial tag once more chars arrive.
+ */
+function makePlanSplitter() {
+  const START = "<plan-update>";
+  const END = "</plan-update>";
+  const KEEP = Math.max(START.length, END.length) - 1;
+  let buf = "";
+  let inPlan = false;
+
+  function* drain(): Generator<HelperStreamEvent> {
+    while (true) {
+      if (!inPlan) {
+        const i = buf.indexOf(START);
+        if (i >= 0) {
+          if (i > 0) yield { kind: "text", delta: buf.slice(0, i) };
+          buf = buf.slice(i + START.length);
+          inPlan = true;
+          continue;
+        }
+        const safe = Math.max(0, buf.length - KEEP);
+        if (safe > 0) {
+          yield { kind: "text", delta: buf.slice(0, safe) };
+          buf = buf.slice(safe);
+        }
+        return;
+      }
+      const j = buf.indexOf(END);
+      if (j >= 0) {
+        if (j > 0) yield { kind: "plan_delta", delta: buf.slice(0, j) };
+        buf = buf.slice(j + END.length);
+        inPlan = false;
+        continue;
+      }
+      const safe = Math.max(0, buf.length - KEEP);
+      if (safe > 0) {
+        yield { kind: "plan_delta", delta: buf.slice(0, safe) };
+        buf = buf.slice(safe);
+      }
+      return;
+    }
+  }
+
+  return {
+    *feed(delta: string): Generator<HelperStreamEvent> {
+      buf += delta;
+      yield* drain();
+    },
+    *flush(): Generator<HelperStreamEvent> {
+      // Drain whatever's left. If we're still in-plan with no closing
+      // tag, treat the remainder as plan content (safer than dropping).
+      if (buf.length > 0) {
+        if (inPlan) {
+          yield { kind: "plan_delta", delta: buf };
+        } else {
+          yield { kind: "text", delta: buf };
+        }
+        buf = "";
+      }
+    },
+  };
 }
 
 /* ── Suggestion reply router ───────────────────────────────────────── */

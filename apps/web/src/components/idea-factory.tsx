@@ -172,7 +172,10 @@ export function IdeaFactory({
           ...(brainstormChoice.agent ? { agent: brainstormChoice.agent } : {}),
           ...(brainstormChoice.model ? { model: brainstormChoice.model } : {}),
         },
-        (line) => setLiveOptions((opts) => [...opts, line]),
+        (event) => {
+          if (event.kind === "option")
+            setLiveOptions((opts) => [...opts, event.text]);
+        },
         ctrl.signal,
       );
       if (r.ok === false) {

@@ -659,7 +659,11 @@ async function main() {
         "",
         numbered.length > 0 ? escape(numbered) : "",
         "",
-        `_Reply with a number, "skip", or just say what you want — e.g. "do option 2 with opus"._`,
+        // Italic delimiters (`_`) frame the prose, but everything
+        // INSIDE the italic still has to escape MarkdownV2 reserved
+        // chars (`.`, `,`, `(`, `)`, `"`, em-dash, etc) or Telegram
+        // rejects the message with "Character '.' is reserved".
+        `_${escape(`Reply with a number, "skip", or just say what you want — e.g. "do option 2 with opus".`)}_`,
       ]
         .filter((s) => s.length > 0)
         .join("\n");
@@ -688,17 +692,47 @@ async function main() {
         chatId: number,
         sender: Bot,
       ): Promise<void> => {
+        // Try MarkdownV2 first (preserves bold + italic). If telegram
+        // rejects it (usually a stray reserved char that slipped past
+        // escape()), retry as plain text by stripping the markup so
+        // the operator still gets the suggestion. Better than dropping
+        // it on the floor and spamming stderr.
+        const tryWithMode = async (
+          text: string,
+          mode: "MarkdownV2" | "plain",
+        ) => {
+          return mode === "plain"
+            ? sender.api.sendMessage(chatId, text)
+            : sender.api.sendMessage(chatId, text, { parse_mode: "MarkdownV2" });
+        };
         try {
-          const sent = await sender.api.sendMessage(chatId, body, {
-            parse_mode: "MarkdownV2",
-          });
+          const sent = await tryWithMode(body, "MarkdownV2");
           suggestionReplyMap.set(replyKey(chatId, sent.message_id), sug.id);
           lastSuggestionByChat.set(chatId, sug.id);
           void client
             .reportDelivery(sug.projectId ?? null, "telegram")
             .catch(() => {});
         } catch (e) {
-          console.error("suggestion notify failed:", (e as Error).message);
+          // Strip every MarkdownV2 escape (`\X` → `X`) and then any
+          // leftover delimiters so the plain-text fallback reads
+          // naturally. Won't recover styling but at least delivers.
+          const plain = body
+            .replace(/\\([_*\[\]()~`>#+=|{}.!\-\\])/g, "$1")
+            .replace(/[*_`]/g, "");
+          try {
+            const sent = await tryWithMode(plain, "plain");
+            suggestionReplyMap.set(replyKey(chatId, sent.message_id), sug.id);
+            lastSuggestionByChat.set(chatId, sug.id);
+            void client
+              .reportDelivery(sug.projectId ?? null, "telegram")
+              .catch(() => {});
+          } catch (e2) {
+            // Both modes failed — likely auth / network / chat gone.
+            // Log once with enough context to debug.
+            console.warn(
+              `[telegram] suggestion notify dropped chat=${chatId}: ${(e2 as Error).message} (markdown try: ${(e as Error).message})`,
+            );
+          }
         }
       };
 

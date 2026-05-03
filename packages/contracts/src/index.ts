@@ -528,10 +528,33 @@ export const UpdateIdeaRequest = z.object({
 export type UpdateIdeaRequest = z.infer<typeof UpdateIdeaRequest>;
 
 /**
+ * Tool-call activity captured during the agent's turn — persisted
+ * with the agent message so the workshop can replay the exploration
+ * timeline after reload, matching how task pages show their history.
+ */
+export const IdeaMessageEvent = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("tool_use"),
+    name: z.string(),
+    input: z.unknown(),
+  }),
+  z.object({
+    kind: z.literal("tool_result"),
+    ok: z.boolean(),
+    preview: z.string().optional(),
+  }),
+  z.object({ kind: z.literal("text"), delta: z.string() }),
+  z.object({ kind: z.literal("raw"), text: z.string() }),
+]);
+export type IdeaMessageEvent = z.infer<typeof IdeaMessageEvent>;
+
+/**
  * One message in an idea's refinement conversation. The thread is
  * append-only; both operator turns and agent turns are persisted so
  * the conversation survives a reload. `system` messages capture
- * inline events (status changes, plan stashed) for context.
+ * inline events (status changes, plan stashed) for context. Agent
+ * messages also carry their tool-call `events` so the activity
+ * timeline replays after reload.
  */
 export const IdeaMessage = z.object({
   id: z.string(),
@@ -539,6 +562,7 @@ export const IdeaMessage = z.object({
   role: z.enum(["user", "agent", "system"]),
   content: z.string(),
   createdAt: z.number(),
+  events: z.array(IdeaMessageEvent).optional(),
 });
 export type IdeaMessage = z.infer<typeof IdeaMessage>;
 
@@ -550,12 +574,27 @@ export type IdeaMessage = z.infer<typeof IdeaMessage>;
  */
 export const IdeaChatRequest = z.object({
   text: z.string().optional(),
-  mode: z.enum(["chat", "challenge"]).optional(),
+  mode: z.enum(["chat", "challenge", "plan"]).optional(),
   agent: AgentKind.optional(),
   model: z.string().optional(),
   effort: ThinkingLevel.optional(),
 });
 export type IdeaChatRequest = z.infer<typeof IdeaChatRequest>;
+
+/**
+ * One rater's second-opinion scoring of a Suggestion's options.
+ * `scores[i]` is the 0-100 score this rater gave for `options[i]`.
+ * Multiple validations can stack on the same suggestion so the
+ * operator can triangulate across raters before saving an idea.
+ */
+export const SuggestionValidation = z.object({
+  agent: AgentKind,
+  /** Model id used for the validation. Empty string = inherited default. */
+  model: z.string(),
+  scores: z.array(z.number().int().min(0).max(100)),
+  validatedAt: z.number(),
+});
+export type SuggestionValidation = z.infer<typeof SuggestionValidation>;
 
 export const Suggestion = z.object({
   id: z.string(),
@@ -576,6 +615,19 @@ export const Suggestion = z.object({
   chosenText: z.string().nullable(),
   /** Task spawned from the resolved choice (null when dismissed). */
   spawnedTaskId: z.string().nullable(),
+  /**
+   * Tool-call activity the agent fired while drafting these options
+   * (Read / Glob / Grep / Bash). Optional — older suggestions persisted
+   * before the events column existed simply omit it. Same shape as
+   * `IdeaMessageEvent[]` so the UI uses the same `<ToolLine>` rendering.
+   */
+  events: z.array(IdeaMessageEvent).optional(),
+  /**
+   * Second-opinion scorings from additional raters. Each entry is
+   * one rater (agent + model) with index-aligned scores. The UI
+   * shows these as extra badges next to each option.
+   */
+  validations: z.array(SuggestionValidation).optional(),
 });
 export type Suggestion = z.infer<typeof Suggestion>;
 
@@ -1050,6 +1102,15 @@ export const WsServerEvent = z.discriminatedUnion("type", [
   // list (on Ready, on guildCreate, on channelCreate/Delete).
   z.object({
     type: z.literal("discord_channels_updated"),
+    ts: z.number(),
+  }),
+  // Pushed when the underlying model registry shifts — codex's
+  // ~/.codex/models_cache.json was rewritten, or the operator
+  // edited cfg.models.* in ~/.agentd/config.json. The web invalidates
+  // its `["models"]` query so the next picker open shows the fresh
+  // list. Watcher sits in the daemon; no polling on either side.
+  z.object({
+    type: z.literal("models_changed"),
     ts: z.number(),
   }),
 ]);
