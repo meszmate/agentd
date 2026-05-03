@@ -44,6 +44,52 @@ export interface CodexRunnerOptions {
   env?: Record<string, string | undefined>;
 }
 
+/**
+ * Probe `codex exec --help` once per binary to learn which flags this
+ * version actually supports. Codex versions ship different surfaces
+ * for the approval/sandbox knobs; auto-detecting saves us from the
+ * "unknown option --dangerously-bypass-approvals-and-sandbox" failure
+ * mode on older builds.
+ */
+interface CodexRunnerCaps {
+  supportsBypass: boolean;
+  supportsSandboxFlag: boolean;
+  supportsSkipGitRepoCheck: boolean;
+  supportsFullAuto: boolean;
+}
+const RUNNER_CAPS_CACHE = new Map<string, CodexRunnerCaps>();
+function detectCodexRunnerCaps(binary: string): CodexRunnerCaps {
+  const hit = RUNNER_CAPS_CACHE.get(binary);
+  if (hit) return hit;
+  let caps: CodexRunnerCaps = {
+    supportsBypass: false,
+    supportsSandboxFlag: false,
+    supportsSkipGitRepoCheck: false,
+    supportsFullAuto: false,
+  };
+  try {
+    const out = Bun.spawnSync({
+      cmd: [binary, "exec", "--help"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+    const text =
+      new TextDecoder().decode(out.stdout) +
+      new TextDecoder().decode(out.stderr);
+    caps = {
+      supportsBypass: text.includes("--dangerously-bypass-approvals-and-sandbox"),
+      supportsSandboxFlag: /-s,\s*--sandbox\b/.test(text) || /\s--sandbox\b/.test(text),
+      supportsSkipGitRepoCheck: text.includes("--skip-git-repo-check"),
+      supportsFullAuto: text.includes("--full-auto"),
+    };
+  } catch {
+    // probe failed — keep conservative defaults
+  }
+  RUNNER_CAPS_CACHE.set(binary, caps);
+  return caps;
+}
+
 export class CodexRunner implements AgentRunner {
   readonly kind = "codex" as const;
   // Codex's `exec` subcommand is single-shot: each user input is a
@@ -86,13 +132,30 @@ export class CodexRunner implements AgentRunner {
 
     // Build args. Note that `exec resume <id>` is its own subcommand and the
     // prompt comes after; `exec` (no resume) takes the prompt as a positional.
-    // `--skip-git-repo-check` was added in newer codex builds; older installs
-    // reject it with "unknown option". Project worktrees are always git
-    // repos so we just don't pass it.
+    // Probe the codex binary at runtime so we use the right approval/sandbox
+    // flag combo for this version (the bypass flag was added in newer
+    // builds and may be renamed/missing in others).
+    const caps = detectCodexRunnerCaps(binary);
     const args: string[] = ["exec", "--json"];
+    if (caps.supportsSkipGitRepoCheck) {
+      args.push("--skip-git-repo-check");
+    }
     if (mode === "bypassPermissions" || mode === "acceptEdits") {
-      args.push("--dangerously-bypass-approvals-and-sandbox");
-    } else {
+      const forced = process.env.AGENTD_CODEX_APPROVAL_MODE;
+      if (forced !== "off") {
+        const wantConfig = forced === "config" || !caps.supportsBypass;
+        if (forced === "bypass" || (!wantConfig && caps.supportsBypass)) {
+          args.push("--dangerously-bypass-approvals-and-sandbox");
+        } else {
+          if (caps.supportsSandboxFlag) {
+            args.push("--sandbox", "danger-full-access");
+          } else {
+            args.push("--config", 'sandbox_mode="danger-full-access"');
+          }
+          args.push("--config", 'approval_policy="never"');
+        }
+      }
+    } else if (caps.supportsFullAuto) {
       args.push("--full-auto");
     }
     const model = (opts.model && opts.model.trim()) || this.opts.model;

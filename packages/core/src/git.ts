@@ -120,6 +120,53 @@ interface ClaudeUsage {
   cache_read_input_tokens?: number;
 }
 
+/**
+ * Probe `codex exec --help` once per binary to learn which approval/
+ * sandbox flags this install actually supports. Different codex
+ * versions ship different surfaces:
+ *   - newer:  --dangerously-bypass-approvals-and-sandbox  (one flag)
+ *   - older:  --sandbox <mode> + relies on `-c` for approvals
+ *   - oldest: only `-c` config overrides
+ * We cache the result keyed by binary so we only shell out once.
+ */
+interface CodexCaps {
+  supportsBypass: boolean;
+  supportsSandboxFlag: boolean;
+  supportsSkipGitRepoCheck: boolean;
+}
+const CODEX_CAPS_CACHE = new Map<string, CodexCaps>();
+function detectCodexCaps(binary: string): CodexCaps {
+  const hit = CODEX_CAPS_CACHE.get(binary);
+  if (hit) return hit;
+  // Pessimistic default — `-c` overrides only, which all codex
+  // versions support.
+  let caps: CodexCaps = {
+    supportsBypass: false,
+    supportsSandboxFlag: false,
+    supportsSkipGitRepoCheck: false,
+  };
+  try {
+    const out = Bun.spawnSync({
+      cmd: [binary, "exec", "--help"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+    const text =
+      new TextDecoder().decode(out.stdout) +
+      new TextDecoder().decode(out.stderr);
+    caps = {
+      supportsBypass: text.includes("--dangerously-bypass-approvals-and-sandbox"),
+      supportsSandboxFlag: /--sandbox\b/.test(text) || /-s,\s*--sandbox/.test(text),
+      supportsSkipGitRepoCheck: text.includes("--skip-git-repo-check"),
+    };
+  } catch {
+    // probe failed — keep conservative defaults
+  }
+  CODEX_CAPS_CACHE.set(binary, caps);
+  return caps;
+}
+
 function buildAiHelperArgv(
   opts: AiHelperOptions,
   prompt: string,
@@ -129,15 +176,32 @@ function buildAiHelperArgv(
   if (opts.agent === "codex") {
     const binary =
       opts.binary?.trim() || process.env.AGENTD_CODEX_BIN || "codex";
-    // Build the codex argv conservatively. `--skip-git-repo-check`
-    // was added in newer codex builds — older installs reject it
-    // with "unknown option". Drop it: every project path in agentd
-    // is already a git repo, so codex doesn't need the override.
-    // Approvals/sandbox bypass is gated by `AGENTD_CODEX_BYPASS=0`
-    // for the rare case where it's also missing.
+    const caps = detectCodexCaps(binary);
     const argv: string[] = [binary, "exec"];
-    if (process.env.AGENTD_CODEX_BYPASS !== "0") {
-      argv.push("--dangerously-bypass-approvals-and-sandbox");
+    if (caps.supportsSkipGitRepoCheck) {
+      argv.push("--skip-git-repo-check");
+    }
+    // Pick the flag combo this codex version actually understands.
+    // The bypass flag is the cleanest one-shot; otherwise fall back
+    // to a sandbox flag + a `-c` override for approvals; the very
+    // oldest codex needs both knobs via `-c`. The operator can force
+    // a specific path via `AGENTD_CODEX_APPROVAL_MODE`:
+    //   - "bypass"  → use the bypass flag (will fail loudly if old)
+    //   - "config"  → only `-c` overrides
+    //   - "off"     → no bypass at all (will block on first prompt)
+    const forced = process.env.AGENTD_CODEX_APPROVAL_MODE;
+    if (forced !== "off") {
+      const wantConfig = forced === "config" || !caps.supportsBypass;
+      if (forced === "bypass" || (!wantConfig && caps.supportsBypass)) {
+        argv.push("--dangerously-bypass-approvals-and-sandbox");
+      } else {
+        if (caps.supportsSandboxFlag) {
+          argv.push("--sandbox", "danger-full-access");
+        } else {
+          argv.push("--config", 'sandbox_mode="danger-full-access"');
+        }
+        argv.push("--config", 'approval_policy="never"');
+      }
     }
     if (opts.model && opts.model.trim()) {
       argv.push("--model", opts.model.trim());
