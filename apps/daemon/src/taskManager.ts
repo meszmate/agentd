@@ -17,6 +17,7 @@ import {
   appendMessage,
   autoCommit,
   createTask,
+  deleteTask,
   detectDefaultBranch,
   EventBus,
   getTask,
@@ -579,6 +580,7 @@ export class TaskManager {
         // best-effort
       }
     }
+    deleteTask(this.db, taskId);
   }
 
   private async spawnRunner(
