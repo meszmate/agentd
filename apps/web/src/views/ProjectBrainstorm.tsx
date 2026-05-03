@@ -817,8 +817,11 @@ export function ProjectBrainstorm() {
           variant="outline"
           size="xs"
           onClick={() => void onResetChat()}
-          disabled={clear.isPending || sessions.length === 0}
-          title="Clear the conversation. Saved ideas survive."
+          disabled={
+            clear.isPending ||
+            (sessions.length === 0 && draftIdeas.length === 0)
+          }
+          title="Clear the conversation + active idea drafts. Saved-library ideas survive."
         >
           <Trash2 className="h-3 w-3" />
           Reset
