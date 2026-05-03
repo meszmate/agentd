@@ -282,62 +282,71 @@ export function ProjectBrainstorm() {
     }
   };
 
-  // "I have an idea" — full agentic flow. The agent reads the repo
-  // (live tool activity visible in the thread), drafts a critique +
-  // sketch + suggested title, and finishes. The operator then clicks
-  // Save (button labeled with the suggested title) to land it as a
-  // SavedIdea — or Discard. Nothing is persisted until the explicit
-  // save. Same realtime feel as a normal brainstorm session.
-  interface InlineIdeaTurn {
-    id: string;
+  // "I have an idea" — full agentic conversation. Each idea-mode
+  // submission appends to a multi-turn conversation. Renders inline
+  // in the brainstorm thread as `›`/`λ` rows (no boxes), with live
+  // tool activity above each agent reply. Nothing is persisted until
+  // the operator explicitly hits Save.
+  interface IdeaConvoTurn {
+    role: "user" | "agent";
     text: string;
-    /** Streaming critique body — accumulated text deltas. */
-    body: string;
-    /** Live tool activity (tool_use + tool_result events). */
-    events: IdeaChatEvent[];
-    /** Set when the helper finishes — drives the action row. */
-    finished: boolean;
-    suggestedTitle: string;
-    error: string | null;
-    /** Once the operator hits Save, the resulting SavedIdea id. */
-    savedIdeaId: string | null;
-    saving: boolean;
-    discarded: boolean;
+    /** Tool events — only set on agent turns. */
+    events?: IdeaChatEvent[];
+    finished?: boolean;
+    error?: string | null;
     ts: number;
   }
-  const [localIdeas, setLocalIdeas] = useState<InlineIdeaTurn[]>([]);
+  interface IdeaConvo {
+    id: string;
+    turns: IdeaConvoTurn[];
+    suggestedTitle: string;
+    savedIdeaId: string | null;
+    saving: boolean;
+    ts: number;
+  }
+  const [localIdeas, setLocalIdeas] = useState<IdeaConvo[]>([]);
   const [savingIdea, setSavingIdea] = useState(false);
   const ideaAbortRefs = useRef(new Map<string, AbortController>());
 
-  const removeLocalIdea = (turnId: string) => {
-    const ctrl = ideaAbortRefs.current.get(turnId);
+  const removeLocalIdea = (convoId: string) => {
+    const ctrl = ideaAbortRefs.current.get(convoId);
     if (ctrl) {
       ctrl.abort();
-      ideaAbortRefs.current.delete(turnId);
+      ideaAbortRefs.current.delete(convoId);
     }
-    setLocalIdeas((cur) => cur.filter((p) => p.id !== turnId));
+    setLocalIdeas((cur) => cur.filter((p) => p.id !== convoId));
   };
 
-  const cancelIdea = (turnId: string) => {
-    const ctrl = ideaAbortRefs.current.get(turnId);
+  const cancelIdea = (convoId: string) => {
+    const ctrl = ideaAbortRefs.current.get(convoId);
     if (ctrl) ctrl.abort();
   };
 
-  const saveLocalIdea = async (turnId: string, title: string) => {
+  const saveLocalIdea = async (convoId: string, title: string) => {
+    const convo = localIdeas.find((p) => p.id === convoId);
+    if (!convo) return;
     setLocalIdeas((cur) =>
-      cur.map((p) => (p.id === turnId ? { ...p, saving: true } : p)),
+      cur.map((p) => (p.id === convoId ? { ...p, saving: true } : p)),
     );
     try {
-      const turn = localIdeas.find((p) => p.id === turnId);
-      if (!turn) return;
+      const lastAgent = [...convo.turns]
+        .reverse()
+        .find((t) => t.role === "agent");
+      const firstUser = convo.turns.find((t) => t.role === "user");
+      const description =
+        lastAgent?.text || firstUser?.text || convo.suggestedTitle;
       const r = await save.mutateAsync({
         projectSlug: project.slug,
-        text: title.trim() || turn.suggestedTitle || turn.text.slice(0, 60),
-        description: turn.body || turn.text,
+        text:
+          title.trim() ||
+          convo.suggestedTitle ||
+          firstUser?.text.slice(0, 60) ||
+          "idea",
+        description,
       });
       setLocalIdeas((cur) =>
         cur.map((p) =>
-          p.id === turnId
+          p.id === convoId
             ? { ...p, saving: false, savedIdeaId: r.idea.id }
             : p,
         ),
@@ -346,9 +355,136 @@ export function ProjectBrainstorm() {
       toast("idea saved");
     } catch (e) {
       setLocalIdeas((cur) =>
-        cur.map((p) => (p.id === turnId ? { ...p, saving: false } : p)),
+        cur.map((p) => (p.id === convoId ? { ...p, saving: false } : p)),
       );
       toast((e as Error).message, true);
+    }
+  };
+
+  /** Run the validate-idea stream against an existing convo (or create
+   *  a new one). Appends a user + agent turn pair, streams agent output
+   *  into the agent turn, updates the suggestedTitle on completion. */
+  const runIdeaTurn = async (
+    convoId: string | null,
+    text: string,
+  ): Promise<void> => {
+    const id = convoId ?? `idea-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const ctrl = new AbortController();
+    ideaAbortRefs.current.set(id, ctrl);
+
+    const userTurn: IdeaConvoTurn = {
+      role: "user",
+      text,
+      ts: Date.now(),
+    };
+    const agentTurn: IdeaConvoTurn = {
+      role: "agent",
+      text: "",
+      events: [],
+      finished: false,
+      ts: Date.now(),
+    };
+
+    let history: Array<{ role: "user" | "agent"; content: string }> = [];
+
+    setLocalIdeas((cur) => {
+      const existing = cur.find((p) => p.id === id);
+      if (existing) {
+        history = existing.turns.map((t) => ({ role: t.role, content: t.text }));
+        return cur.map((p) =>
+          p.id === id
+            ? { ...p, turns: [...p.turns, userTurn, agentTurn] }
+            : p,
+        );
+      }
+      return [
+        ...cur,
+        {
+          id,
+          turns: [userTurn, agentTurn],
+          suggestedTitle: "",
+          savedIdeaId: null,
+          saving: false,
+          ts: Date.now(),
+        },
+      ];
+    });
+
+    setSavingIdea(true);
+    try {
+      const r = await client.streamValidateIdea(
+        project.id,
+        { text, history },
+        (event) => {
+          setLocalIdeas((cur) =>
+            cur.map((p) => {
+              if (p.id !== id) return p;
+              const last = p.turns[p.turns.length - 1];
+              if (!last || last.role !== "agent") return p;
+              const updated = { ...last };
+              if (event.kind === "text") {
+                updated.text = (updated.text ?? "") + event.delta;
+              } else if (event.kind === "tool_use" || event.kind === "tool_result") {
+                updated.events = [...(updated.events ?? []), event];
+              } else {
+                return p;
+              }
+              return {
+                ...p,
+                turns: [...p.turns.slice(0, -1), updated],
+              };
+            }),
+          );
+        },
+        ctrl.signal,
+      );
+      setLocalIdeas((cur) =>
+        cur.map((p) => {
+          if (p.id !== id) return p;
+          const last = p.turns[p.turns.length - 1];
+          if (!last || last.role !== "agent") return p;
+          if (r.ok === false) {
+            return {
+              ...p,
+              turns: [
+                ...p.turns.slice(0, -1),
+                { ...last, finished: true, error: r.error || "no response" },
+              ],
+            };
+          }
+          return {
+            ...p,
+            suggestedTitle: r.suggestedTitle || p.suggestedTitle,
+            turns: [
+              ...p.turns.slice(0, -1),
+              { ...last, finished: true, text: r.critique || last.text },
+            ],
+          };
+        }),
+      );
+    } catch (e) {
+      const aborted = (e as { name?: string }).name === "AbortError";
+      setLocalIdeas((cur) =>
+        cur.map((p) => {
+          if (p.id !== id) return p;
+          const last = p.turns[p.turns.length - 1];
+          if (!last || last.role !== "agent") return p;
+          return {
+            ...p,
+            turns: [
+              ...p.turns.slice(0, -1),
+              {
+                ...last,
+                finished: true,
+                error: aborted ? "stopped" : (e as Error).message,
+              },
+            ],
+          };
+        }),
+      );
+    } finally {
+      setSavingIdea(false);
+      ideaAbortRefs.current.delete(id);
     }
   };
 
@@ -358,86 +494,13 @@ export function ProjectBrainstorm() {
       toast("type your idea first", true);
       return;
     }
-    const turnId = `idea-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const ctrl = new AbortController();
-    ideaAbortRefs.current.set(turnId, ctrl);
-    setLocalIdeas((cur) => [
-      ...cur,
-      {
-        id: turnId,
-        text,
-        body: "",
-        events: [],
-        finished: false,
-        suggestedTitle: "",
-        error: null,
-        savedIdeaId: null,
-        saving: false,
-        discarded: false,
-        ts: Date.now(),
-      },
-    ]);
     setBrief("");
-    setSavingIdea(true);
-    try {
-      const r = await client.streamValidateIdea(
-        project.id,
-        { text },
-        (event) => {
-          setLocalIdeas((cur) =>
-            cur.map((p) => {
-              if (p.id !== turnId) return p;
-              if (event.kind === "text") {
-                return { ...p, body: p.body + event.delta };
-              }
-              if (event.kind === "tool_use" || event.kind === "tool_result") {
-                return { ...p, events: [...p.events, event] };
-              }
-              return p;
-            }),
-          );
-        },
-        ctrl.signal,
-      );
-      if (r.ok === false) {
-        setLocalIdeas((cur) =>
-          cur.map((p) =>
-            p.id === turnId
-              ? { ...p, finished: true, error: r.error || "agent returned no response" }
-              : p,
-          ),
-        );
-      } else {
-        setLocalIdeas((cur) =>
-          cur.map((p) =>
-            p.id === turnId
-              ? {
-                  ...p,
-                  finished: true,
-                  body: r.critique || p.body,
-                  suggestedTitle: r.suggestedTitle,
-                }
-              : p,
-          ),
-        );
-      }
-    } catch (e) {
-      const aborted = (e as { name?: string }).name === "AbortError";
-      setLocalIdeas((cur) =>
-        cur.map((p) =>
-          p.id === turnId
-            ? {
-                ...p,
-                finished: true,
-                error: aborted ? "stopped" : (e as Error).message,
-              }
-            : p,
-        ),
-      );
-    } finally {
-      setSavingIdea(false);
-      ideaAbortRefs.current.delete(turnId);
-    }
+    await runIdeaTurn(null, text);
+  };
+
+  const sendIdeaFollowup = async (convoId: string, text: string) => {
+    if (!text.trim()) return;
+    await runIdeaTurn(convoId, text.trim());
   };
 
   /**
@@ -615,11 +678,12 @@ export function ProjectBrainstorm() {
                   />
                 ))}
                 {localIdeas.map((p) => (
-                  <IdeaValidationTurn
+                  <IdeaConvoBlock
                     key={p.id}
-                    turn={p}
+                    convo={p}
                     projectSlug={project.slug}
                     onCancel={() => cancelIdea(p.id)}
+                    onFollowup={(t) => void sendIdeaFollowup(p.id, t)}
                     onSave={(title) => void saveLocalIdea(p.id, title)}
                     onDismiss={() => removeLocalIdea(p.id)}
                     onOpenIdea={openIdea}
@@ -1634,64 +1698,72 @@ function StatusBadgeSm({ status }: { status: IdeaStatus }) {
   );
 }
 
-/* ── Idea validation turn ────────────────────────────────────────── */
+/* ── Idea conversation block ─────────────────────────────────────── */
 
 /**
- * Renders an "I have an idea" agentic turn. While streaming: shows
- * the operator's idea text + live tool activity (Read/Glob/Grep/Bash
- * cards as the agent reads the repo) + the streaming critique body.
- * When finished: action row appears with [Save with suggested title]
- * + [Discard]. After save: card flips to "saved" state with a
- * workshop link so the user can keep refining the idea there.
+ * Renders a multi-turn "I have an idea" conversation inline in the
+ * brainstorm thread. No outer box — turns flow as TimelineItem-style
+ * `›` (you) / `λ` (agent) rows so it reads like the regular chat.
+ * Live tool activity shows above each agent reply; markdown body
+ * streams in. Operator can keep replying via the inline composer at
+ * the bottom; once they're happy they hit Save (label is the
+ * agent-suggested title, editable).
  */
-function IdeaValidationTurn({
-  turn,
+function IdeaConvoBlock({
+  convo,
   projectSlug,
   onCancel,
+  onFollowup,
   onSave,
   onDismiss,
   onOpenIdea,
 }: {
-  turn: {
+  convo: {
     id: string;
-    text: string;
-    body: string;
-    events: IdeaChatEvent[];
-    finished: boolean;
+    turns: Array<{
+      role: "user" | "agent";
+      text: string;
+      events?: IdeaChatEvent[];
+      finished?: boolean;
+      error?: string | null;
+      ts: number;
+    }>;
     suggestedTitle: string;
-    error: string | null;
     savedIdeaId: string | null;
     saving: boolean;
-    discarded: boolean;
     ts: number;
   };
   projectSlug: string;
   onCancel: () => void;
+  onFollowup: (text: string) => void;
   onSave: (title: string) => void;
   onDismiss: () => void;
   onOpenIdea: (id: string) => void;
 }) {
   const unsave = useDeleteSavedIdea();
   const { toast } = useApp();
-  const streaming = !turn.finished;
-  const tools = pairToolEvents(turn.events);
+  const lastTurn = convo.turns[convo.turns.length - 1];
+  const streaming = !!(lastTurn?.role === "agent" && !lastTurn.finished);
+  const hasFinishedAgentReply = convo.turns.some(
+    (t) => t.role === "agent" && t.finished && !t.error,
+  );
 
   const [titleDraft, setTitleDraft] = useState("");
-  // Sync the title draft to the suggested title once it lands. The
-  // user can still edit it before saving.
   useEffect(() => {
-    if (turn.suggestedTitle && !titleDraft) {
-      setTitleDraft(turn.suggestedTitle);
+    if (convo.suggestedTitle && !titleDraft) {
+      setTitleDraft(convo.suggestedTitle);
     }
-  }, [turn.suggestedTitle, titleDraft]);
+  }, [convo.suggestedTitle, titleDraft]);
+
+  const [reply, setReply] = useState("");
 
   const removeSaved = async () => {
-    if (!turn.savedIdeaId) {
+    if (!convo.savedIdeaId) {
       onDismiss();
       return;
     }
     try {
-      await unsave.mutateAsync(turn.savedIdeaId);
+      await unsave.mutateAsync(convo.savedIdeaId);
       onDismiss();
     } catch (e) {
       toast((e as Error).message, true);
@@ -1699,164 +1771,211 @@ function IdeaValidationTurn({
   };
 
   return (
-    <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.04] dark:bg-amber-500/[0.06] px-4 py-3 animate-fade-in">
-      {/* Header */}
-      <div className="flex items-baseline gap-2 mb-2">
-        <Lightbulb
-          className={cn(
-            "h-3 w-3 self-center text-amber-500",
-            streaming && "animate-blink",
-          )}
-        />
-        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-amber-700 dark:text-amber-300">
-          your idea
-        </span>
-        <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-          {formatTs(turn.ts)}
-        </span>
-        {streaming ? (
-          <span className="font-mono text-[10px] text-amber-700/80 dark:text-amber-300/80 inline-flex items-center gap-1">
-            <Loader2 className="h-2.5 w-2.5 animate-spin" />
-            agent is reading the repo…
+    <div className="space-y-5">
+      {convo.turns.map((turn, i) => (
+        <IdeaTurnRow key={i} turn={turn} streaming={streaming && i === convo.turns.length - 1} onStop={onCancel} />
+      ))}
+
+      {/* Inline follow-up composer — hidden while streaming or after
+          save. Always available between turns so the user can keep
+          chatting about their idea. */}
+      {!streaming && !convo.savedIdeaId && hasFinishedAgentReply && (
+        <div className="flex items-start gap-2.5">
+          <span className="shrink-0 mt-1.5 font-mono text-[14px] font-semibold leading-none text-sky-700 dark:text-sky-300 select-none">
+            ›
           </span>
-        ) : turn.savedIdeaId ? (
-          <span className="font-mono text-[10px] text-emerald-700 dark:text-emerald-300 inline-flex items-center gap-1">
-            <CheckCircle2 className="h-2.5 w-2.5" />
-            saved
-          </span>
-        ) : turn.error ? (
-          <span className="font-mono text-[10px] text-red-700 dark:text-red-400">
-            {turn.error}
-          </span>
-        ) : (
-          <span className="font-mono text-[10px] text-amber-700/80 dark:text-amber-300/80">
-            ready
-          </span>
-        )}
-        {streaming && (
+          <Textarea
+            value={reply}
+            onChange={(e) => setReply(e.target.value)}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                e.preventDefault();
+                if (reply.trim()) {
+                  const t = reply.trim();
+                  setReply("");
+                  onFollowup(t);
+                }
+              }
+            }}
+            placeholder="reply — push back, ask for more, refine the scope"
+            rows={1}
+            className="flex-1 resize-none border-none shadow-none bg-transparent focus-visible:ring-0 px-0 py-1 font-mono text-[12.5px] leading-snug placeholder:text-ink-400/60 dark:placeholder:text-ink-500/60"
+          />
           <button
             type="button"
-            onClick={onCancel}
-            className="ml-auto font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400"
-            title="stop the agent"
+            onClick={() => {
+              if (!reply.trim()) return;
+              const t = reply.trim();
+              setReply("");
+              onFollowup(t);
+            }}
+            disabled={!reply.trim()}
+            className="shrink-0 mt-0.5 inline-flex items-center justify-center h-7 w-7 rounded border border-ink-900/10 dark:border-ink-50/10 hover:border-sky-500/40 hover:text-sky-700 dark:hover:text-sky-300 text-ink-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            title="send (⌘↵)"
           >
-            stop
+            <Send className="h-3 w-3" />
           </button>
-        )}
-      </div>
-
-      {/* Operator's typed idea — quoted so it reads like a chat turn. */}
-      <div className="mb-3 pl-2 border-l-2 border-amber-500/40">
-        <p className="font-mono text-[12px] text-ink-700 dark:text-ink-200 leading-relaxed whitespace-pre-wrap">
-          {turn.text}
-        </p>
-      </div>
-
-      {/* Tool activity (live or replayed). */}
-      {tools.length > 0 && (
-        <WorkCard pairs={tools} liveTrailing={streaming} className="mb-3" />
-      )}
-
-      {/* Agent body — streaming markdown. */}
-      {turn.body ? (
-        <div className="rounded-md border border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-800/40 px-3 py-2 mb-3">
-          <Markdown text={turn.body} />
-          {streaming && (
-            <span className="inline-block w-1.5 h-3 bg-amber-500/70 animate-pulse ml-0.5 align-baseline" />
-          )}
-        </div>
-      ) : streaming ? (
-        <div className="font-mono text-[11px] text-amber-700/70 dark:text-amber-300/70 italic mb-3">
-          thinking…
-        </div>
-      ) : null}
-
-      {/* Action row — only after the agent finishes. */}
-      {!streaming && !turn.error && (
-        <div className="space-y-2">
-          {!turn.savedIdeaId && (
-            <div className="flex items-center gap-2">
-              <Lightbulb className="h-3 w-3 text-amber-500 shrink-0" />
-              <Input
-                value={titleDraft}
-                onChange={(e) => setTitleDraft(e.target.value)}
-                placeholder={turn.suggestedTitle || "title for this idea"}
-                disabled={turn.saving}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    onSave(titleDraft);
-                  }
-                }}
-                className="h-7 text-[12px] font-mono"
-              />
-              <button
-                type="button"
-                onClick={() => onSave(titleDraft)}
-                disabled={turn.saving}
-                className="shrink-0 inline-flex items-center gap-1 h-7 px-2.5 rounded text-[11px] font-medium border border-amber-500/40 bg-amber-500 text-amber-50 hover:bg-amber-500/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                {turn.saving ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : (
-                  <BookmarkCheck className="h-3 w-3" />
-                )}
-                Save to library
-              </button>
-              <button
-                type="button"
-                onClick={onDismiss}
-                disabled={turn.saving}
-                className="shrink-0 inline-flex items-center gap-1 h-7 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
-                title="discard this turn"
-              >
-                <X className="h-2.5 w-2.5" />
-                discard
-              </button>
-            </div>
-          )}
-          {turn.savedIdeaId && (
-            <div className="flex items-center gap-2">
-              <Link
-                to={`/projects/${encodeURIComponent(projectSlug)}/ideas/${turn.savedIdeaId}`}
-                className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/15 transition-colors"
-                onClick={() => turn.savedIdeaId && onOpenIdea(turn.savedIdeaId)}
-              >
-                <ArrowUpRight className="h-2.5 w-2.5" />
-                open in workshop
-              </Link>
-              <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
-                plan, challenge, refine — all in the workshop
-              </span>
-              <button
-                type="button"
-                onClick={() => void removeSaved()}
-                disabled={unsave.isPending}
-                className="ml-auto inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
-              >
-                {unsave.isPending ? (
-                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                ) : (
-                  <Trash2 className="h-2.5 w-2.5" />
-                )}
-                remove
-              </button>
-            </div>
-          )}
         </div>
       )}
-      {!streaming && turn.error && (
-        <div className="flex items-center gap-2">
+
+      {/* Save / dismiss action row — appears once any agent reply has
+          landed. Title editable, defaults to the agent's suggestion. */}
+      {hasFinishedAgentReply && !convo.savedIdeaId && (
+        <div className="flex items-center gap-2 ml-5 pl-0.5">
+          <Lightbulb className="h-3 w-3 text-amber-500 shrink-0" />
+          <Input
+            value={titleDraft}
+            onChange={(e) => setTitleDraft(e.target.value)}
+            placeholder={convo.suggestedTitle || "title for this idea"}
+            disabled={convo.saving || streaming}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                onSave(titleDraft);
+              }
+            }}
+            className="h-7 text-[12px] font-mono max-w-md"
+          />
+          <button
+            type="button"
+            onClick={() => onSave(titleDraft)}
+            disabled={convo.saving || streaming}
+            className="shrink-0 inline-flex items-center gap-1 h-7 px-2.5 rounded text-[11px] font-medium border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            {convo.saving ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <BookmarkCheck className="h-3 w-3" />
+            )}
+            save to library
+          </button>
           <button
             type="button"
             onClick={onDismiss}
-            className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400"
+            disabled={convo.saving || streaming}
+            className="shrink-0 inline-flex items-center gap-1 h-7 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
+            title="discard this conversation"
           >
             <X className="h-2.5 w-2.5" />
-            dismiss
+            discard
           </button>
         </div>
       )}
+
+      {/* Saved state — link to workshop + remove. */}
+      {convo.savedIdeaId && (
+        <div className="flex items-center gap-2 ml-5 pl-0.5">
+          <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />
+          <span className="font-mono text-[11px] text-emerald-700 dark:text-emerald-300">
+            saved
+          </span>
+          <Link
+            to={`/projects/${encodeURIComponent(projectSlug)}/ideas/${convo.savedIdeaId}`}
+            className="inline-flex items-center gap-1 font-mono text-[10.5px] uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300 hover:underline"
+            onClick={() => convo.savedIdeaId && onOpenIdea(convo.savedIdeaId)}
+          >
+            <ArrowUpRight className="h-2.5 w-2.5" />
+            open in workshop
+          </Link>
+          <button
+            type="button"
+            onClick={() => void removeSaved()}
+            disabled={unsave.isPending}
+            className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
+          >
+            {unsave.isPending ? (
+              <Loader2 className="h-2.5 w-2.5 animate-spin" />
+            ) : (
+              <Trash2 className="h-2.5 w-2.5" />
+            )}
+            remove
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One row in an idea conversation — TimelineItem-style. No box.
+ *  User: `›` glyph + their text. Agent: `λ` glyph + tool activity
+ *  (when present) above streaming markdown body. */
+function IdeaTurnRow({
+  turn,
+  streaming,
+  onStop,
+}: {
+  turn: {
+    role: "user" | "agent";
+    text: string;
+    events?: IdeaChatEvent[];
+    finished?: boolean;
+    error?: string | null;
+    ts: number;
+  };
+  streaming: boolean;
+  onStop: () => void;
+}) {
+  const isUser = turn.role === "user";
+  const tools = pairToolEvents(turn.events ?? []);
+  return (
+    <div className="flex items-start gap-2.5">
+      <span
+        className={cn(
+          "shrink-0 mt-0.5 font-mono text-[14px] font-semibold leading-none select-none",
+          isUser
+            ? "text-sky-700 dark:text-sky-300"
+            : streaming
+              ? "text-ember-500 animate-blink"
+              : "text-ember-700 dark:text-ember-300",
+        )}
+      >
+        {isUser ? "›" : "λ"}
+      </span>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline gap-2 mb-1.5">
+          <span
+            className={cn(
+              "font-mono text-[10px] uppercase tracking-[0.1em]",
+              isUser
+                ? "text-sky-700 dark:text-sky-300"
+                : "text-ember-700 dark:text-ember-300",
+            )}
+          >
+            {isUser ? "you" : "agent"}
+          </span>
+          <span className="font-mono text-[10px] tabular-nums text-ink-300 dark:text-ink-600">
+            {formatTs(turn.ts)}
+          </span>
+          {streaming && !isUser && (
+            <button
+              type="button"
+              onClick={onStop}
+              className="ml-auto font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400"
+              title="stop the agent"
+            >
+              stop
+            </button>
+          )}
+        </div>
+        {!isUser && tools.length > 0 && (
+          <WorkCard pairs={tools} liveTrailing={streaming} className="mb-3" />
+        )}
+        {isUser ? (
+          <p className="font-mono whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink-800 dark:text-ink-100">
+            {turn.text}
+          </p>
+        ) : turn.error ? (
+          <p className="font-mono text-[12px] text-red-700 dark:text-red-400">
+            {turn.error}
+          </p>
+        ) : turn.text ? (
+          <Markdown text={turn.text} />
+        ) : streaming ? (
+          <p className="font-mono text-[11.5px] text-ink-400 dark:text-ink-500 italic">
+            thinking…
+          </p>
+        ) : null}
+      </div>
     </div>
   );
 }

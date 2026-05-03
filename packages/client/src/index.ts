@@ -598,7 +598,10 @@ export class AgentdClient {
    */
   async streamValidateIdea(
     idOrSlug: string,
-    body: { text: string },
+    body: {
+      text: string;
+      history?: Array<{ role: "user" | "agent"; content: string }>;
+    },
     onEvent: (event: IdeaChatEvent) => void,
     signal?: AbortSignal,
   ): Promise<

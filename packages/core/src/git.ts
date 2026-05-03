@@ -1952,9 +1952,18 @@ export interface ValidateIdeaResult {
   error?: string;
 }
 
+export interface ValidateIdeaTurn {
+  role: "user" | "agent";
+  content: string;
+}
+
 export async function* streamValidateIdea(
   cwd: string,
-  args: { text: string; helper?: AiHelperOptions },
+  args: {
+    text: string;
+    history?: ValidateIdeaTurn[];
+    helper?: AiHelperOptions;
+  },
 ): AsyncGenerator<HelperStreamEvent, ValidateIdeaResult, void> {
   const text = args.text.trim();
   if (!text) {
@@ -1966,27 +1975,35 @@ export async function* streamValidateIdea(
       error: "no idea text provided",
     };
   }
+
+  const isFirstTurn = !args.history || args.history.length === 0;
+  const transcript = (args.history ?? [])
+    .map((m) =>
+      m.role === "user" ? `[operator] ${m.content}` : `[agent] ${m.content}`,
+    )
+    .join("\n\n");
+
+  // Tight, no-fluff prompt. The operator wants a thinking partner,
+  // not a structured report. Use tools when grounding helps; reply
+  // direct, short, no headings unless they're load-bearing.
+  const directive = isFirstTurn
+    ? `The operator has an idea for THIS project. Use Read/Glob/Grep/Bash to ground yourself in the actual code when it'd sharpen your reply. Respond directly: how would this look here? what's the real shape of it? what's worth flagging? Cite specific files when you do. Keep it tight — under 200 words. No mandatory headings, no preamble.`
+    : `Continue the conversation. Reply directly to what they just said. Use tools when grounding helps. Keep it short — under 150 words. No headings.`;
+
   const ask = [
-    `The operator has an idea for THIS project. Use your tools to look`,
-    `at the actual codebase first — Read/Glob/Grep/Bash whatever's`,
-    `relevant. Then reply with:`,
+    directive,
     ``,
-    `1. **What I understood** — restate the idea in your own words so`,
-    `   the operator can correct any misread.`,
-    `2. **How it would look here** — concrete sketch grounded in the`,
-    `   actual repo: which files would change, what shape the new code`,
-    `   would take, where it'd plug in. Cite real paths/symbols.`,
-    `3. **Honest take** — risks, gaps, alternatives, edge cases worth`,
-    `   considering. Be specific, not generic.`,
+    `End your reply with this line, exactly:`,
+    `TITLE: <3-6 word title for this idea>`,
     ``,
-    `Format: tight markdown prose, max ~400 words total. Don't pad.`,
+    `Never prefix your reply with "Agent:", "Assistant:", or "[agent]" — the UI handles attribution.`,
     ``,
-    `Then on a final line, EXACTLY:`,
-    `TITLE: <a clean, specific 3-6 word title for this idea>`,
-    ``,
-    `The operator's idea:`,
+    transcript ? `Conversation so far:\n${transcript}\n` : "",
+    `Operator's latest message:`,
     text,
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   const it = runHelperWithEvents(cwd, ask, args.helper ?? {});
   let final: { text: string; source: string; error?: string } | null = null;

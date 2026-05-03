@@ -3207,9 +3207,17 @@ export function buildServer(opts: BuildServerOptions) {
     if (!project) return c.json({ error: "not found" }, 404);
     const body = (await c.req.json().catch(() => null)) as {
       text?: string;
+      history?: Array<{ role?: string; content?: string }>;
     } | null;
     const text = (body?.text ?? "").trim();
     if (!text) return c.json({ error: "text required" }, 400);
+    const history = (body?.history ?? [])
+      .map((m) => ({
+        role: m.role === "agent" ? ("agent" as const) : ("user" as const),
+        content: String(m.content ?? "").slice(0, 4000),
+      }))
+      .filter((m) => m.content.trim().length > 0)
+      .slice(-12);
     const cfg = loadConfig(paths.root);
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -3217,6 +3225,7 @@ export function buildServer(opts: BuildServerOptions) {
         try {
           const it = streamValidateIdea(project.path, {
             text,
+            history,
             helper: cfg.aiHelpers,
           });
           let result: {
