@@ -23,7 +23,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { useApp, useClient } from "@/AppContext";
 import { cn, formatTokens, formatTs } from "@/lib/utils";
 import { CodeBlock } from "@/components/code-block";
-import { ToolLine } from "@/components/tool-line";
+import { ToolLine, WorkCard, pairToolEvents } from "@/components/tool-line";
 import type { TaskPlanItem } from "@/views/TaskPlan";
 import {
   useFireQueuedSteer,
@@ -314,107 +314,76 @@ export function TaskTimeline({
               </div>
             </div>
           ) : (
-            <ol className="relative space-y-2 pl-9 before:absolute before:left-3 before:top-2 before:bottom-2 before:w-px before:bg-ink-900/10 dark:before:bg-ink-50/10">
-              {messages.map((m, i) => {
-                // Insert a compact divider before the first message
-                // whose ts falls after the most recent /compact —
-                // visually separates "summarized out of agent memory"
-                // from "still in working memory."
+            <ol className="space-y-5">
+              {groupTaskMessages(messages).map((g, gi) => {
+                // /compact divider sits above the first message in
+                // the group whose ts falls after the watermark.
+                const firstTs = g.firstTs;
+                const prevGroup = groupTaskMessages(messages)[gi - 1];
                 const showDivider =
                   compactedAt != null &&
-                  m.ts >= compactedAt &&
-                  (i === 0 || messages[i - 1]!.ts < compactedAt);
-                // Pair `[call X]` rows with the immediately-following
-                // `[result X ok|err] ...` row so the timeline shows
-                // each tool with its output preview underneath. The
-                // result message is then suppressed (merged into the
-                // call above).
-                if (m.role === "tool") {
-                  const prev = messages[i - 1];
-                  const parsedResult = parseToolResultMessage(m.content);
-                  if (
-                    parsedResult &&
-                    prev &&
-                    prev.role === "tool" &&
-                    prev.content.startsWith(`[call ${parsedResult.tool}]`)
-                  ) {
-                    // already merged into the call render
-                    return null;
-                  }
-                }
-                const next = messages[i + 1];
-                const callMatch =
-                  m.role === "tool" &&
-                  m.content.startsWith("[call ")
-                    ? m.content.match(/^\[call ([^\]]+)\]/)
-                    : null;
-                const callTool = callMatch?.[1];
-                const pairedResult =
-                  callTool && next && next.role === "tool"
-                    ? parseToolResultMessage(next.content)
-                    : null;
-                const matchedResult =
-                  pairedResult && pairedResult.tool === callTool
-                    ? pairedResult
-                    : null;
+                  firstTs >= compactedAt &&
+                  (!prevGroup || prevGroup.firstTs < compactedAt);
                 return (
-                  <Fragment key={m.id}>
+                  <Fragment key={g.key}>
                     {showDivider && <CompactDivider ts={compactedAt!} />}
-                    <TimelineItem
-                      message={m}
-                      output={matchedResult?.output}
-                      outputOk={matchedResult?.ok}
-                    />
+                    {g.kind === "tools" ? (
+                      <li>
+                        <WorkCard pairs={g.pairs} />
+                      </li>
+                    ) : (
+                      <TimelineItem message={g.message} />
+                    )}
                   </Fragment>
                 );
               })}
-              {/* In-flight streaming bubbles. Each delta growing here will
-                  vanish when its message_end arrives — the final text lands
-                  via the regular message event right after. */}
+              {/* In-flight streaming bubbles — same prefix style as
+                  the persisted agent rows, with a blinking λ. */}
               {streamEntries.map(([streamId, text]) => (
-                <li key={`stream:${streamId}`} className="relative">
-                  <span className="absolute -left-9 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-ember-500/30 bg-ember-500/15 text-ember-700 dark:text-ember-300">
-                    <span className="font-display italic font-medium">a</span>
-                  </span>
-                  <div>
-                    <div className="flex items-baseline gap-2 mb-1">
-                      <span className="text-[11px] uppercase tracking-[0.08em] text-ember-700 dark:text-ember-300 font-medium">
-                        agent
-                      </span>
-                      <span className="font-mono text-[10px] text-ember-600 dark:text-ember-400 animate-blink">
-                        ●
-                      </span>
-                      <ShimmerText className="font-mono text-[10px] uppercase tracking-[0.06em]">
-                        streaming
-                      </ShimmerText>
-                    </div>
-                    <div className="relative">
-                      <Markdown text={text} />
-                      <span className="inline-block w-1.5 h-4 align-text-bottom bg-ember-500/70 ml-0.5 animate-blink" />
+                <li key={`stream:${streamId}`}>
+                  <div className="flex items-start gap-2.5">
+                    <span className="shrink-0 mt-0.5 font-mono text-[14px] font-semibold leading-none text-ember-500 animate-blink select-none">
+                      λ
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-baseline gap-2 mb-1.5">
+                        <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-ember-700 dark:text-ember-300">
+                          agent
+                        </span>
+                        <ShimmerText className="font-mono text-[10px] uppercase tracking-[0.06em]">
+                          streaming
+                        </ShimmerText>
+                      </div>
+                      <div className="relative">
+                        <Markdown text={text} />
+                        <span className="inline-block w-1.5 h-4 align-text-bottom bg-ember-500/70 ml-0.5 animate-blink" />
+                      </div>
                     </div>
                   </div>
                 </li>
               ))}
               {disabled && streamEntries.length === 0 && (
-                <li className="relative">
-                  <span className="absolute -left-9 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-ember-500/30 bg-ember-500/15">
-                    <span className="h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink" />
-                  </span>
-                  <div className="flex items-baseline gap-2 flex-wrap">
-                    <ShimmerText className="text-[12.5px] font-medium">
-                      agent is thinking
-                    </ShimmerText>
-                    {turn?.startedAt && (
-                      <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
-                        {formatElapsed(elapsedMs)}
-                        {turn.tokens > 0
-                          ? ` · ${formatTokens(turn.tokens)} tok`
-                          : ""}
-                      </span>
-                    )}
-                    <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate">
-                      {lastToolHint ?? "…"}
+                <li>
+                  <div className="flex items-start gap-2.5">
+                    <span className="shrink-0 mt-0.5 font-mono text-[14px] font-semibold leading-none text-ember-500 animate-blink select-none">
+                      λ
                     </span>
+                    <div className="flex items-baseline gap-2 flex-wrap">
+                      <ShimmerText className="text-[12.5px] font-medium">
+                        agent is thinking
+                      </ShimmerText>
+                      {turn?.startedAt && (
+                        <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
+                          {formatElapsed(elapsedMs)}
+                          {turn.tokens > 0
+                            ? ` · ${formatTokens(turn.tokens)} tok`
+                            : ""}
+                        </span>
+                      )}
+                      <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate">
+                        {lastToolHint ?? "…"}
+                      </span>
+                    </div>
                   </div>
                 </li>
               )}
@@ -506,7 +475,17 @@ export function TaskTimeline({
             </div>
           )}
 
-          <div className="relative">
+          <div className="flex items-start gap-2.5">
+            <span
+              className={cn(
+                "shrink-0 mt-1.5 font-mono text-[14px] font-semibold leading-none transition-colors select-none",
+                disabled
+                  ? "text-violet-500 animate-blink"
+                  : "text-sky-700 dark:text-sky-300",
+              )}
+            >
+              ›
+            </span>
             <Textarea
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -518,18 +497,17 @@ export function TaskTimeline({
               }}
               placeholder={
                 disabled
-                  ? "Type to queue — click Steer on a row to fire it…"
-                  : "Send input to the agent…"
+                  ? "type to queue — agent fires it after the next tool call"
+                  : "send input to the agent"
               }
               rows={3}
               data-shortcut-target="chat-input"
               className={cn(
-                "resize-none pr-28 text-sm transition",
-                disabled && "ring-1 ring-violet-500/30",
+                "flex-1 resize-none border-none shadow-none bg-transparent focus-visible:ring-0 px-0 py-1 font-mono text-[13px] leading-snug placeholder:text-ink-400/60 dark:placeholder:text-ink-500/60",
               )}
               aria-label="Message"
             />
-            <div className="absolute right-2 bottom-2 flex items-center gap-2">
+            <div className="shrink-0 mt-0.5 flex items-center gap-1.5">
               <span className="hidden sm:flex items-center gap-1 text-2xs text-ink-400 dark:text-ink-500">
                 <Kbd>⌘</Kbd>
                 <Kbd>↵</Kbd>
@@ -573,89 +551,157 @@ function parseToolResultMessage(
   };
 }
 
-function TimelineItem({
-  message: m,
-  output,
-  outputOk,
-}: {
-  message: Message;
-  output?: string;
-  outputOk?: boolean;
-}) {
-  // Structured system messages — `agentd-progress`, `agentd-share`,
-  // `agentd-ask` — get pulled into a styled chip so the operator's
-  // eye reads them as "agent told me X" instead of generic sys text.
+type TaskGroup =
+  | {
+      kind: "message";
+      key: string;
+      firstTs: number;
+      message: Message;
+    }
+  | {
+      kind: "tools";
+      key: string;
+      firstTs: number;
+      pairs: ReturnType<typeof pairToolEvents>;
+    };
+
+/**
+ * Walk the flat message stream and bundle consecutive tool messages
+ * (`[call X]` followed by `[result X ok|err] …`) into a single
+ * group so the timeline renders one `<WorkCard>` per agent turn,
+ * not one row per tool. Non-tool messages stay as their own groups.
+ */
+function groupTaskMessages(messages: Message[]): TaskGroup[] {
+  const out: TaskGroup[] = [];
+  let buf: Array<{
+    kind: "tool_use" | "tool_result";
+    name?: string;
+    input?: unknown;
+    ok?: boolean;
+    preview?: string;
+  }> = [];
+  let bufFirstTs = 0;
+  let bufKey = "";
+  const flushTools = () => {
+    if (buf.length === 0) return;
+    const pairs = pairToolEvents(buf);
+    if (pairs.length > 0) {
+      out.push({ kind: "tools", key: bufKey, firstTs: bufFirstTs, pairs });
+    }
+    buf = [];
+    bufKey = "";
+    bufFirstTs = 0;
+  };
+  for (const m of messages) {
+    if (m.role !== "tool") {
+      flushTools();
+      out.push({ kind: "message", key: m.id, firstTs: m.ts, message: m });
+      continue;
+    }
+    const result = parseToolResultMessage(m.content);
+    if (result) {
+      buf.push({
+        kind: "tool_result",
+        name: result.tool,
+        ok: result.ok,
+        preview: result.output,
+      });
+      continue;
+    }
+    const callMatch = m.content.match(/^\[call ([^\]]+)\]\s*([\s\S]*)$/);
+    if (!callMatch) {
+      // Unknown tool message shape — flush + render as its own
+      // single-row group via TimelineItem fallback.
+      flushTools();
+      out.push({ kind: "message", key: m.id, firstTs: m.ts, message: m });
+      continue;
+    }
+    let input: unknown = {};
+    try {
+      input = JSON.parse(callMatch[2]!);
+    } catch {
+      // bad json in args — keep raw
+    }
+    if (buf.length === 0) {
+      bufFirstTs = m.ts;
+      bufKey = `tools:${m.id}`;
+    }
+    buf.push({ kind: "tool_use", name: callMatch[1]!.trim(), input });
+  }
+  flushTools();
+  return out;
+}
+
+function TimelineItem({ message: m }: { message: Message }) {
+  // Structured system messages (`agentd-progress`, `agentd-share`,
+  // `agentd-ask`) keep their styled-chip render — they carry
+  // semantic meaning the operator scans for.
   if (m.role === "system") {
     const meta = parseSystemMessage(m.content);
     if (meta) return <StructuredItem ts={m.ts} {...meta} />;
-  }
-
-  // Tool rows are dense: just a tiny spine dot + the ToolLine. No
-  // role label, no timestamp header, no chunky avatar circle. The
-  // tool's own icon and summary inside ToolLine carry the meaning.
-  if (m.role === "tool") {
+    // Plain system rows (raw stderr, etc.) — single line, low key.
     return (
-      <li className="relative">
-        <span className="absolute -left-7 top-1.5 size-2 rounded-full bg-ink-900/20 dark:bg-ink-50/20" />
-        <ToolLine
-          content={m.content}
-          {...(output !== undefined ? { output } : {})}
-          {...(outputOk !== undefined ? { outputOk } : {})}
-        />
-      </li>
-    );
-  }
-
-  // Plain system rows (raw stderr, etc.) — also dense single-line
-  // form. They're rare after the noise filter; when they do show up
-  // they shouldn't claim a whole bubble.
-  if (m.role === "system") {
-    return (
-      <li className="relative">
-        <span className="absolute -left-7 top-1.5 size-2 rounded-full bg-ink-900/15 dark:bg-ink-50/15" />
-        <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-snug text-ink-500 dark:text-ink-400">
+      <li className="flex items-start gap-2">
+        <span className="font-mono text-[12px] text-ink-400 dark:text-ink-500 leading-none select-none mt-1">
+          ·
+        </span>
+        <pre className="flex-1 whitespace-pre-wrap break-words font-mono text-[11px] leading-snug text-ink-500 dark:text-ink-400">
           {m.content}
         </pre>
       </li>
     );
   }
 
-  // User + agent rows are the actual conversation — they breathe.
+  // Tool messages should never reach this branch — `groupTaskMessages`
+  // bundles them into a `<WorkCard>` group ahead of the render.
+  // Fallback rendering for any orphan tool message that slipped past.
+  if (m.role === "tool") {
+    return (
+      <li>
+        <ToolLine content={m.content} />
+      </li>
+    );
+  }
+
+  // User + agent rows — terminal-style prefix matches brainstorm + workshop.
+  const isUser = m.role === "user";
   return (
-    <li className="relative">
-      <span
-        className={cn(
-          "absolute -left-9 top-0 flex h-6 w-6 items-center justify-center rounded-full border",
-          m.role === "user" &&
-            "border-sky-500/30 bg-sky-500/15 text-sky-700 dark:text-sky-300",
-          m.role === "agent" &&
-            "border-ember-500/30 bg-ember-500/15 text-ember-700 dark:text-ember-300",
-        )}
-      >
-        {ROLE_GLYPH[m.role]}
-      </span>
-      <div>
-        <div className="flex items-baseline gap-2 mb-1">
-          <span
-            className={cn(
-              "font-mono text-2xs font-medium uppercase tracking-[0.08em]",
-              m.role === "user" && "text-sky-700 dark:text-sky-300",
-              m.role === "agent" && "text-ember-700 dark:text-ember-300",
-            )}
-          >
-            {ROLE_LABEL[m.role]}
-          </span>
-          <span className="font-mono text-2xs text-ink-400 dark:text-ink-500">
-            {formatTs(m.ts)}
-          </span>
-        </div>
-        {m.role === "user" ? (
-          <div className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-900 dark:text-ink-50">
-            {m.content}
+    <li>
+      <div className="flex items-start gap-2.5">
+        <span
+          className={cn(
+            "shrink-0 mt-0.5 font-mono text-[14px] font-semibold leading-none select-none",
+            isUser
+              ? "text-sky-700 dark:text-sky-300"
+              : "text-ember-700 dark:text-ember-300",
+          )}
+        >
+          {isUser ? "›" : "λ"}
+        </span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline gap-2 mb-1.5">
+            <span
+              className={cn(
+                "font-mono text-[10px] uppercase tracking-[0.1em]",
+                isUser
+                  ? "text-sky-700 dark:text-sky-300"
+                  : "text-ember-700 dark:text-ember-300",
+              )}
+            >
+              {isUser ? "you" : "agent"}
+            </span>
+            <span className="font-mono text-[10px] tabular-nums text-ink-300 dark:text-ink-600">
+              {formatTs(m.ts)}
+            </span>
           </div>
-        ) : (
-          <Markdown text={m.content} />
-        )}
+          {isUser ? (
+            <div className="font-mono whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink-800 dark:text-ink-100">
+              {m.content}
+            </div>
+          ) : (
+            <Markdown text={m.content} />
+          )}
+        </div>
       </div>
     </li>
   );
