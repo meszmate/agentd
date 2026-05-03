@@ -20,7 +20,6 @@ import {
   Lightbulb,
   Loader2,
   MessageCircle,
-  Pencil,
   Plus,
   Rocket,
   Settings2,
@@ -28,7 +27,6 @@ import {
   Sparkles,
   TerminalSquare,
   Trash2,
-  X,
   XCircle,
 } from "lucide-react";
 import type {
@@ -932,46 +930,18 @@ const PRESET_RULES: Array<{ label: string; line: string }> = [
 
 function ProjectInstructionsPanel({ project }: { project: Project }) {
   const update = useUpdateProject();
-  const client = useClient();
-  const { toast } = useApp();
-  const [draft, setDraft] = useState(project.instructions ?? "");
-  const [savedSnapshot, setSavedSnapshot] = useState(
-    project.instructions ?? "",
-  );
-  const [editing, setEditing] = useState(false);
   // Agentic workshop modal — full two-pane editor with codebase access.
+  // This is the ONLY way to edit the instructions; presets in the
+  // empty state are quick-adds, not editing.
   const [workshopOpen, setWorkshopOpen] = useState(false);
-  // AI draft / improve panel state. `aiOpen` toggles the inline form;
-  // `aiBusy` reflects the streaming generation.
-  const [aiOpen, setAiOpen] = useState(false);
-  const [aiDesc, setAiDesc] = useState("");
-  const [aiBusy, setAiBusy] = useState(false);
-  const [aiPreview, setAiPreview] = useState("");
 
-  // Re-sync local draft if the project's instructions change from
-  // outside (e.g. the agent ran `agentd-instructions write`).
-  useEffect(() => {
-    const next = project.instructions ?? "";
-    setDraft(next);
-    setSavedSnapshot(next);
-  }, [project.instructions]);
-
+  const draft = project.instructions ?? "";
   const enabled = project.instructionsEnabled !== false;
-  const dirty = draft !== savedSnapshot;
   const isEmpty = !draft.trim();
   const ruleCount = draft
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length > 0).length;
-
-  const save = async () => {
-    if (!dirty) return;
-    await update.mutateAsync({
-      idOrSlug: project.id,
-      patch: { instructions: draft.trim() ? draft : null },
-    });
-    setSavedSnapshot(draft);
-  };
 
   const setEnabled = (next: boolean) => {
     void update.mutateAsync({
@@ -983,57 +953,14 @@ function ProjectInstructionsPanel({ project }: { project: Project }) {
   const addPreset = (line: string) => {
     const sep = draft.trim() ? "\n" : "";
     const next = `${draft.trimEnd()}${sep}- ${line}`;
-    setDraft(next);
     void update.mutateAsync({
       idOrSlug: project.id,
       patch: { instructions: next },
     });
-    setSavedSnapshot(next);
   };
 
-  const runDraft = async (mode: "draft" | "improve") => {
-    if (aiBusy) return;
-    if (mode === "draft" && !aiDesc.trim()) {
-      toast("describe what's important about this project first", true);
-      return;
-    }
-    setAiBusy(true);
-    setAiPreview("");
-    try {
-      const res = await client.streamProjectInstructionsDraft(
-        project.id,
-        {
-          description: aiDesc,
-          ...(mode === "improve" ? { existing: draft } : {}),
-        },
-        (chunk) => setAiPreview((cur) => cur + chunk),
-      );
-      const finalText = (res.text || aiPreview).trim();
-      if (!finalText) {
-        toast(res.error || "no draft returned — check your AI helper config", true);
-        return;
-      }
-      setDraft(finalText);
-      setEditing(true);
-      setAiOpen(false);
-      setAiPreview("");
-      setAiDesc("");
-      // Auto-save the draft so it persists even if the user navigates.
-      await update.mutateAsync({
-        idOrSlug: project.id,
-        patch: { instructions: finalText },
-      });
-      setSavedSnapshot(finalText);
-      toast(mode === "improve" ? "instructions revised" : "draft ready — review and tweak");
-    } catch (e) {
-      toast((e as Error).message, true);
-    } finally {
-      setAiBusy(false);
-    }
-  };
-
-  // Pretty-print: render lines starting with `- ` as bullets, others as
-  // plain paragraphs. Read-mode only — edit mode keeps raw textarea.
+  // Render lines starting with `- ` as bullets, others as plain
+  // paragraphs.
   const renderedRules = draft
     .split("\n")
     .map((line, i) => ({ raw: line, i }))
@@ -1090,8 +1017,8 @@ function ProjectInstructionsPanel({ project }: { project: Project }) {
             )}
           </p>
         </div>
-      ) : isEmpty && !aiOpen ? (
-        /* Empty state — onboarding with presets + AI draft */
+      ) : isEmpty ? (
+        /* Empty state — preset chips + workshop launcher */
         <div className="space-y-3">
           <div className="rounded-md border border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-800/50 px-3 py-2.5">
             <div className="flex items-baseline gap-2 mb-1.5">
@@ -1128,139 +1055,13 @@ function ProjectInstructionsPanel({ project }: { project: Project }) {
               <Sparkles className="h-3 w-3" />
               Open workshop
             </button>
-            <button
-              type="button"
-              onClick={() => setAiOpen(true)}
-              className="font-mono text-[10.5px] text-ink-500 hover:text-ember-700 dark:hover:text-ember-300 underline-offset-2 hover:underline"
-              title="single-prompt draft, no chat"
-            >
-              quick draft
-            </button>
-            <button
-              type="button"
-              onClick={() => setEditing(true)}
-              className="font-mono text-[10.5px] text-ink-500 hover:text-ink-900 dark:hover:text-ink-50 underline-offset-2 hover:underline"
-            >
-              or write your own →
-            </button>
             <span className="ml-auto font-mono text-[9.5px] text-ink-400 dark:text-ink-500">
               skip — agents do fine without
             </span>
           </div>
         </div>
-      ) : aiOpen ? (
-        /* AI draft / improve form */
-        <div className="space-y-2">
-          <div className="flex items-baseline gap-2 mb-1">
-            <Sparkles className="h-3 w-3 text-ember-500" />
-            <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
-              {isEmpty ? "draft from scratch" : "improve current draft"}
-            </span>
-            <button
-              type="button"
-              onClick={() => {
-                setAiOpen(false);
-                setAiPreview("");
-                setAiDesc("");
-              }}
-              className="ml-auto text-ink-400 hover:text-ink-900 dark:hover:text-ink-50"
-              title="cancel"
-            >
-              <X className="h-3 w-3" />
-            </button>
-          </div>
-          <Textarea
-            value={aiDesc}
-            onChange={(e) => setAiDesc(e.target.value)}
-            placeholder={
-              isEmpty
-                ? "What kind of project is this? What should agents know? e.g. 'Bun monorepo with React frontend, prefer terse code, never run migrations without asking, use bun not npm'"
-                : "What should change? e.g. 'add a rule about always running typecheck', 'tighten the testing line', 'remove the bit about migrations'"
-            }
-            rows={3}
-            className="text-[12px] font-mono leading-relaxed resize-y min-h-[5rem]"
-            disabled={aiBusy}
-          />
-          {aiPreview && (
-            <div className="rounded-md border border-ember-500/20 bg-ember-500/5 dark:bg-ember-500/[0.05] px-3 py-2 max-h-48 overflow-y-auto">
-              <pre className="font-mono text-[11px] leading-relaxed text-ink-700 dark:text-ink-200 whitespace-pre-wrap">
-                {aiPreview}
-                {aiBusy && (
-                  <span className="inline-block w-1.5 h-3 bg-ember-500 animate-pulse ml-0.5" />
-                )}
-              </pre>
-            </div>
-          )}
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => runDraft(isEmpty ? "draft" : "improve")}
-              disabled={aiBusy || (isEmpty && !aiDesc.trim())}
-              className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded text-[11px] font-medium border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300 hover:bg-ember-500/15 disabled:opacity-40 transition-colors"
-            >
-              {aiBusy ? (
-                <>
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  drafting…
-                </>
-              ) : (
-                <>
-                  <Sparkles className="h-3 w-3" />
-                  {isEmpty ? "generate" : "rewrite"}
-                </>
-              )}
-            </button>
-            <span className="font-mono text-[9.5px] text-ink-400 dark:text-ink-500">
-              uses your configured AI helper (Settings → AI helpers)
-            </span>
-          </div>
-        </div>
-      ) : editing ? (
-        /* Edit mode — raw textarea */
-        <div className="space-y-2">
-          <Textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="One rule per line. Tip: bullet with `- ` for clean rendering."
-            rows={Math.max(6, Math.min(14, ruleCount + 2))}
-            className="text-[12px] font-mono leading-relaxed resize-y min-h-[7rem]"
-          />
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={async () => {
-                await save();
-                setEditing(false);
-              }}
-              disabled={update.isPending}
-              className="h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300 disabled:opacity-40"
-            >
-              {update.isPending ? "saving…" : dirty ? "save" : "done"}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setDraft(savedSnapshot);
-                setEditing(false);
-              }}
-              className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-ink-900 dark:hover:text-ink-50"
-            >
-              cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => setAiOpen(true)}
-              disabled={aiBusy}
-              className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ember-700 dark:text-ember-300 hover:underline disabled:opacity-40"
-              title="re-run AI helper to revise this draft"
-            >
-              <Sparkles className="h-2.5 w-2.5" />
-              improve
-            </button>
-          </div>
-        </div>
       ) : (
-        /* Read mode — formatted bullet preview */
+        /* Read mode — formatted bullet preview + workshop launcher */
         <div className="space-y-2">
           <ul className="rounded-md border border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-800/40 px-3 py-2 space-y-1 max-h-72 overflow-y-auto">
             {renderedRules.map(({ raw, i }) => {
@@ -1296,24 +1097,6 @@ function ProjectInstructionsPanel({ project }: { project: Project }) {
             >
               <Sparkles className="h-2.5 w-2.5" />
               workshop
-            </button>
-            <button
-              type="button"
-              onClick={() => setEditing(true)}
-              className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-ink-900/10 dark:border-ink-50/10 hover:border-ember-500/40 hover:text-ember-700 dark:hover:text-ember-300 transition-colors"
-            >
-              <Pencil className="h-2.5 w-2.5" />
-              edit
-            </button>
-            <button
-              type="button"
-              onClick={() => setAiOpen(true)}
-              disabled={aiBusy}
-              className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-ember-700 dark:hover:text-ember-300 hover:underline disabled:opacity-40 transition-colors"
-              title="quick draft — single prompt, no chat"
-            >
-              <Sparkles className="h-2.5 w-2.5" />
-              quick
             </button>
             <span className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] text-emerald-700 dark:text-emerald-300">
               <CheckCircle2 className="h-2.5 w-2.5" />
