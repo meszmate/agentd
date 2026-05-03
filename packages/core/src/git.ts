@@ -270,11 +270,16 @@ async function* runHelperWithEvents(
     cwd,
     useJson ? "stream-json" : "text",
   );
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  // stdin: "ignore" so codex's `exec` doesn't block on the
+  // "Reading additional input from stdin..." path when stdin is a
+  // pipe with no writer (see packages/agent-runner/src/codex.ts).
+  // Helpers always pass the prompt on argv, never via stdin.
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
       cmd: argv,
       cwd,
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -964,6 +969,7 @@ export async function generateCommitMessage(
       argv,
       {
         cwd,
+        stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
         env: process.env as Record<string, string>,
@@ -1021,12 +1027,12 @@ export async function* streamCommitMessage(
   }
   const prompt = buildCommitPrompt(diff, opts, opts.extraInstructions);
   const argv = buildAiHelperArgv(opts.helper ?? {}, prompt);
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
       cmd: argv,
       cwd,
-      stdin: "pipe",
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -1149,12 +1155,12 @@ export async function* streamPrMessage(
   }
   const prompt = buildPrPrompt(diff, opts, opts.extraInstructions);
   const argv = buildAiHelperArgv(opts.helper ?? {}, prompt);
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
       cmd: argv,
       cwd,
-      stdin: "pipe",
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -1819,12 +1825,12 @@ export async function* streamSuggestionPlan(
 
   const argv = buildAiHelperArgv(opts.helper ?? {}, ask, cwd);
 
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
       cmd: argv,
       cwd,
-      stdin: "pipe",
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -2574,6 +2580,7 @@ export async function interpretSuggestionReply(args: {
     const proc = Bun.spawn({
       cmd: argv,
       cwd: process.cwd(),
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -2754,6 +2761,7 @@ export async function runJudge(
     const proc = Bun.spawn({
       cmd: argv,
       cwd: process.cwd(),
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -2864,12 +2872,12 @@ export async function* streamProjectInstructionsDraft(
   ];
   const ask = lines.filter(Boolean).join("\n");
   const argv = buildAiHelperArgv(opts.helper ?? {}, ask);
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
       cmd: argv,
       cwd,
-      stdin: "pipe",
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -2925,6 +2933,7 @@ export async function generateBranchName(
     const proc = Bun.spawn({
       cmd: argv,
       cwd: process.cwd(),
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,

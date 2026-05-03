@@ -96,7 +96,7 @@ export class CodexRunner implements AgentRunner {
   // fresh process. Mid-turn steering falls back to the queue path.
   readonly supportsLiveInput = false;
   private listeners = new Set<RunnerEventListener>();
-  private proc: Bun.Subprocess<"pipe", "pipe", "pipe"> | null = null;
+  private proc: Bun.Subprocess<"ignore", "pipe", "pipe"> | null = null;
   private streamTask: Promise<void> | null = null;
   private exitTask: Promise<void> | null = null;
   private threadId: string | null = null;
@@ -191,10 +191,20 @@ export class CodexRunner implements AgentRunner {
     // directory, and resume reuses the original session's cwd anyway.
     args.push(opts.prompt);
 
+    // Critical: stdin must be `"ignore"` (i.e. /dev/null) here — NOT
+    // `"pipe"`. Codex's `exec` subcommand checks whether stdin is a
+    // tty; when stdin is piped it prints "Reading additional input
+    // from stdin..." and blocks waiting for EOF before processing the
+    // prompt. Bun never writes to or closes the pipe, so the process
+    // hangs forever and the UI shows "Agent is thinking…" with no
+    // events. Pointing stdin at /dev/null makes codex skip the stdin
+    // read and proceed straight to the argv prompt. (Claude uses
+    // stdin: "pipe" because its stream-json mode legitimately drives
+    // the conversation through stdin — codex `exec` does not.)
     const proc = Bun.spawn({
       cmd: [binary, ...args],
       cwd: opts.cwd,
-      stdin: "pipe",
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: {
@@ -223,6 +233,10 @@ export class CodexRunner implements AgentRunner {
     const stderrTask = (async () => {
       try {
         for await (const line of readLines(proc.stderr)) {
+          // Codex prints this banner whenever stdin isn't a tty — it's
+          // harmless (we point stdin at /dev/null on purpose) and just
+          // pollutes the timeline. Real errors still flow through.
+          if (line.includes("Reading additional input from stdin")) continue;
           this.emit({ kind: "raw", stream: "stderr", text: line });
         }
       } catch {
