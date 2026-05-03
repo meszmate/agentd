@@ -82,13 +82,14 @@ export function TransitioningText({
 }
 
 function Letters({ text, kind }: { text: string; kind: "in" | "out" }) {
+  const safe = text ?? "";
   // Tighter stagger so the letters move as a soft wave instead of
   // a rolling banner. Capped to keep total animation under ~half a
   // second on long phrases.
-  const stagger = Math.min(16, Math.max(6, 180 / Math.max(text.length, 1)));
+  const stagger = Math.min(16, Math.max(6, 180 / Math.max(safe.length, 1)));
   return (
     <span className="inline-flex whitespace-pre" aria-hidden={kind === "out"}>
-      {[...text].map((c, i) => (
+      {[...safe].map((c, i) => (
         <span
           key={i}
           className={cn(
@@ -202,7 +203,11 @@ export function useRotatingLabel(
     }, intervalMs);
     return () => clearInterval(id);
   }, [phase, intervalMs, pool.length]);
-  return pool[idx]!;
+  // Defensive modulo: when `phase` changes to a pool with fewer
+  // entries than the current `idx`, the setIdx in the effect above
+  // hasn't fired yet for this render — so a raw pool[idx] would
+  // return undefined and crash <TransitioningText>'s letter loop.
+  return pool[idx % pool.length] ?? pool[0]!;
 }
 
 /**
