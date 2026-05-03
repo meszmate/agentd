@@ -88,8 +88,12 @@ function spawnWorkerArgs(data: PtyAttachData): {
   if (data.mode === "task") {
     if (!data.task) return null;
     const cwd = data.task.worktreePath;
+    // Per-task tmux session — name is stable across reload/reconnect
+    // so the user's scrollback, splits, and any in-flight commands
+    // survive. Pattern: `agentd-task-<short-id>` (last 8 chars).
+    const sessionName = `agentd-task-${data.task.id.slice(-8)}`;
     return {
-      args: ["task", cwd, cwd, "100", "30"],
+      args: ["task", sessionName, cwd, "100", "30"],
       cwd,
       label: `task ${data.task.title}`,
     };

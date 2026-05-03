@@ -71,12 +71,16 @@ let args;
 let cwd = cwdArg && cwdArg !== "" ? cwdArg : process.env.HOME || "/";
 
 if (mode === "task") {
-  // Spawn the user's shell rooted at the worktree.
-  cmd = process.env.SHELL || "/bin/bash";
-  args = ["-i"];
-  cwd = spec;
+  // Per-task tmux session. `spec` is the session name (set by the
+  // daemon as `agentd-task-<short-id>`); `cwd` is the worktree path.
+  // tmux's `-A` attaches if the session exists, creates it
+  // otherwise — so reload + re-attach restores scrollback, splits,
+  // and any commands the user left running.
+  cmd = "tmux";
+  args = ["new-session", "-A", "-s", spec, "-c", cwd];
 } else if (mode === "term") {
-  // Attach to (or create) a named tmux session. -A creates if missing.
+  // Standalone tmux session, named by the operator from the
+  // /terminal page. Same `-A` semantics as task mode.
   cmd = "tmux";
   args = ["new-session", "-A", "-s", spec];
 } else {

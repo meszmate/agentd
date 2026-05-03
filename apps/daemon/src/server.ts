@@ -867,6 +867,9 @@ export function buildServer(opts: BuildServerOptions) {
 
   api.delete("/tasks/:id", async (c) => {
     const id = c.req.param("id");
+    // Best-effort: kill the per-task tmux session so it doesn't pile
+    // up. Same name pattern the PTY layer attaches to.
+    void killTmuxSession(`agentd-task-${id.slice(-8)}`).catch(() => {});
     await tasks.remove(id);
     pubTaskRemoved(id);
     return c.json({ ok: true });
