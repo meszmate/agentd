@@ -246,7 +246,6 @@ function HighlightedPre({
           className={cn(
             className,
             "whitespace-pre overflow-x-auto m-0 px-2 py-1 rounded",
-            isDark ? "bg-ink-50/[0.035]" : "bg-ink-900/[0.035]",
             tone === "fail" && "text-red-700 dark:text-red-300",
             // Thin scrollbar so it doesn't eat vertical space when the
             // line overflows horizontally.
@@ -256,7 +255,11 @@ function HighlightedPre({
           )}
           style={{
             ...style,
-            background: "transparent",
+            // Inline-style override is the only way to win against
+            // the prism theme's own `backgroundColor` (also inline).
+            backgroundColor: isDark
+              ? "rgba(255,255,255,0.035)"
+              : "rgba(0,0,0,0.035)",
             scrollbarWidth: "thin",
             scrollbarColor: "rgba(127,127,127,0.2) transparent",
           }}
