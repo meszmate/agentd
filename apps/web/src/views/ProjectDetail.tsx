@@ -275,6 +275,7 @@ export function ProjectDetail() {
             projectSlug={project.slug}
             projectName={project.name}
           />
+          <PlanIdeaCard project={project} />
           <QuickTaskRow project={project} />
 
           {tasksForProject.length === 0 ? (
@@ -555,6 +556,114 @@ function StatCell({
  */
 function QuickTaskRow({ project }: { project: Project }) {
   return <ProjectComposer project={project} />;
+}
+
+/**
+ * "I have an idea, help me plan it." Single-input composer that
+ * calls the synchronous plan-mode helper end-to-end: the agent
+ * reads the repo, drafts a structured implementation plan
+ * (Goal / Approach / Files / Steps / Edge cases / Acceptance /
+ * Test plan), persists it as a SavedIdea, and we navigate the
+ * operator straight into the workshop where they can keep
+ * refining or spawn a real task from it.
+ */
+function PlanIdeaCard({ project }: { project: Project }) {
+  const navigate = useNavigate();
+  const client = useClient();
+  const { toast } = useApp();
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    const t = text.trim();
+    if (!t || busy) return;
+    setBusy(true);
+    try {
+      const r = await client.planIdea(project.id, { text: t });
+      if (!r.ok) {
+        toast(
+          (r as { error: string }).error ||
+            "the helper returned an empty plan — try a sharper brief",
+          true,
+        );
+        return;
+      }
+      setText("");
+      toast(`plan ready — opening workshop`);
+      navigate(`/projects/${project.slug}/ideas/${r.idea.id}`);
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="rounded-md border border-ink-900/[0.08] dark:border-ink-50/[0.08] bg-paper-50 dark:bg-ink-800/40 px-4 py-3.5">
+      <div className="flex items-baseline gap-2 mb-2">
+        <Sparkles className="h-3.5 w-3.5 text-ember-500 self-center" />
+        <span className="text-[13px] font-medium text-ink-900 dark:text-ink-50">
+          Plan an idea
+        </span>
+        <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+          fuzzy → spec
+        </span>
+        <span className="ml-auto font-mono text-[10px] text-ink-400 dark:text-ink-500">
+          agent reads the repo · saves to your idea library
+        </span>
+      </div>
+      <div className="flex items-start gap-2">
+        <span
+          className={cn(
+            "shrink-0 mt-1.5 font-mono text-[14px] font-semibold leading-none transition-colors select-none",
+            busy
+              ? "text-ember-500 animate-blink"
+              : "text-sky-700 dark:text-sky-300",
+          )}
+        >
+          ›
+        </span>
+        <Textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+              e.preventDefault();
+              void submit();
+            }
+          }}
+          placeholder={
+            busy
+              ? "agent is reading the repo and drafting your plan…"
+              : "Describe what you want — e.g. 'add per-task discord threads with auto-archive on done'"
+          }
+          rows={2}
+          disabled={busy}
+          className="flex-1 resize-none border-none shadow-none bg-transparent focus-visible:ring-0 px-0 py-1 font-mono text-[13px] leading-snug placeholder:text-ink-400/60 dark:placeholder:text-ink-500/60"
+        />
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={busy || !text.trim()}
+          className="shrink-0 inline-flex items-center gap-1 h-7 px-2.5 rounded text-[11px] font-medium border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300 hover:bg-ember-500/15 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          {busy ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <Sparkles className="h-3 w-3" />
+          )}
+          {busy ? "drafting" : "plan it"}
+        </button>
+      </div>
+      <div className="flex items-center gap-2 mt-1.5 ml-5 font-mono text-[9.5px] text-ink-400 dark:text-ink-500">
+        Streams a full Goal / Approach / Files / Steps / Edge-cases / Acceptance /
+        Test-plan spec, then opens it in the workshop.
+        <kbd className="ml-auto px-1 py-0.5 rounded border border-ink-900/10 dark:border-ink-50/10 text-[9px]">
+          ⌘↵
+        </kbd>
+      </div>
+    </section>
+  );
 }
 
 /* ── Inline composer rooted at this project ────────────────────── */
@@ -1151,19 +1260,37 @@ function ConnectChatPanel({ project }: { project: Project }) {
     (project.telegramBotToken && project.telegramChatId ? 1 : 0) +
     (project.discordChannelId ? 1 : 0);
 
+  const tgMirrored = !!project.telegramChatId;
+  const dcMirrored = !!project.discordChannelId;
+  const anyMirror = tgMirrored || dcMirrored;
+
   return (
     <div className="border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] px-4 py-4">
-      <div className="flex items-baseline gap-2 mb-3">
+      <div className="flex items-baseline gap-2 mb-2">
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
-          Connect chat
+          Brainstorm mirror
         </span>
         <span className="font-mono text-[9px] text-ink-400 dark:text-ink-500">
           per project
         </span>
-        <span className="ml-auto font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-          {connectedCount}/2
+        <span className="ml-auto inline-flex items-center gap-1 font-mono text-[10px]">
+          {anyMirror ? (
+            <>
+              <span className="size-1.5 rounded-full bg-emerald-500 inline-block animate-blink" />
+              <span className="text-emerald-700 dark:text-emerald-400">
+                live
+              </span>
+            </>
+          ) : (
+            <span className="text-ink-400 dark:text-ink-500">not mirrored</span>
+          )}
         </span>
       </div>
+      <p className="text-[11px] text-ink-500 dark:text-ink-400 leading-relaxed mb-3">
+        Connect a chat target and brainstorm flows there bidirectionally —
+        suggestions land in chat, your replies (number, text, "skip") feed back
+        into the same thread. Same for tasks: progress notes, asks, shares.
+      </p>
 
       <div className="grid grid-cols-1 gap-2">
         <BridgeCard
