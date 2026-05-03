@@ -304,7 +304,40 @@ export function ProjectBrainstorm() {
     saving: boolean;
     ts: number;
   }
-  const [localIdeas, setLocalIdeas] = useState<IdeaConvo[]>([]);
+  const ideaStorageKey = `agentd-idea-convos:${project.id}`;
+  const [localIdeas, setLocalIdeas] = useState<IdeaConvo[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = window.localStorage.getItem(ideaStorageKey);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as IdeaConvo[];
+      // Drop any convos whose last turn was mid-stream — those got
+      // orphaned by the reload (the daemon doesn't know about the
+      // client's stream so we can't resume). Save-state survives.
+      return parsed
+        .map((c) => ({
+          ...c,
+          saving: false,
+          turns: c.turns.filter(
+            (t, i, arr) =>
+              !(t.role === "agent" && !t.finished && i === arr.length - 1),
+          ),
+        }))
+        .filter((c) => c.turns.length > 0);
+    } catch {
+      return [];
+    }
+  });
+  // Persist on every change so refreshing the page keeps the
+  // user's idea conversations + saved-state intact.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(ideaStorageKey, JSON.stringify(localIdeas));
+    } catch {
+      // storage full / disabled — silent
+    }
+  }, [localIdeas, ideaStorageKey]);
   const [savingIdea, setSavingIdea] = useState(false);
   const ideaAbortRefs = useRef(new Map<string, AbortController>());
 
@@ -629,18 +662,25 @@ export function ProjectBrainstorm() {
   const isEmpty = sessions.length === 0 && !streaming;
 
   const onResetChat = async () => {
-    if (sessions.length === 0) {
+    const totalConvos = sessions.length + localIdeas.length;
+    if (totalConvos === 0) {
       toast("nothing to clear");
       return;
     }
     if (
       !confirm(
-        `Clear ${sessions.length} brainstorm session${sessions.length === 1 ? "" : "s"} for ${project.name}? Saved ideas survive.`,
+        `Clear ${totalConvos} brainstorm session${totalConvos === 1 ? "" : "s"} for ${project.name}? Saved ideas survive.`,
       )
     )
       return;
     try {
-      await clear.mutateAsync(project.slug);
+      // Cancel any in-flight idea conversations + drop local state.
+      for (const ctrl of ideaAbortRefs.current.values()) ctrl.abort();
+      ideaAbortRefs.current.clear();
+      setLocalIdeas([]);
+      if (sessions.length > 0) {
+        await clear.mutateAsync(project.slug);
+      }
       toast("conversation cleared");
     } catch (e) {
       toast((e as Error).message, true);
@@ -1770,15 +1810,137 @@ function IdeaConvoBlock({
     }
   };
 
+  // Inline title-edit popover — hidden by default, opens when the
+  // user clicks the save chip. Keeps the convo footer clean (one
+  // small chip instead of a full title input bar).
+  const [titleEditing, setTitleEditing] = useState(false);
+
   return (
     <div className="space-y-5">
       {convo.turns.map((turn, i) => (
-        <IdeaTurnRow key={i} turn={turn} streaming={streaming && i === convo.turns.length - 1} onStop={onCancel} />
+        <IdeaTurnRow
+          key={i}
+          turn={turn}
+          streaming={streaming && i === convo.turns.length - 1}
+          onStop={onCancel}
+        />
       ))}
 
-      {/* Inline follow-up composer — hidden while streaming or after
-          save. Always available between turns so the user can keep
-          chatting about their idea. */}
+      {/* Footer toolbar — one row, all the convo-level actions live
+          here. Save stays compact: a chip showing the suggested
+          title; click → expands inline title input. Reply composer
+          shares the same row. */}
+      {hasFinishedAgentReply && (
+        <div className="ml-5 pl-0.5 flex flex-wrap items-center gap-2">
+          {convo.savedIdeaId ? (
+            <>
+              <span className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.08em] text-emerald-700 dark:text-emerald-300">
+                <CheckCircle2 className="h-2.5 w-2.5" />
+                saved
+              </span>
+              <Link
+                to={`/projects/${encodeURIComponent(projectSlug)}/ideas/${convo.savedIdeaId}`}
+                className="inline-flex items-center gap-1 font-mono text-[10.5px] uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300 hover:underline"
+                onClick={() =>
+                  convo.savedIdeaId && onOpenIdea(convo.savedIdeaId)
+                }
+              >
+                <ArrowUpRight className="h-2.5 w-2.5" />
+                open in workshop
+              </Link>
+              <button
+                type="button"
+                onClick={() => void removeSaved()}
+                disabled={unsave.isPending}
+                className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
+              >
+                {unsave.isPending ? (
+                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                ) : (
+                  <Trash2 className="h-2.5 w-2.5" />
+                )}
+                remove
+              </button>
+            </>
+          ) : titleEditing ? (
+            // Expanded inline title input with save/cancel.
+            <>
+              <Lightbulb className="h-3 w-3 text-amber-500 shrink-0" />
+              <Input
+                autoFocus
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                placeholder={convo.suggestedTitle || "title for this idea"}
+                disabled={convo.saving || streaming}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    onSave(titleDraft);
+                    setTitleEditing(false);
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setTitleEditing(false);
+                  }
+                }}
+                className="h-7 text-[12px] font-mono max-w-md"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  onSave(titleDraft);
+                  setTitleEditing(false);
+                }}
+                disabled={convo.saving || streaming}
+                className="shrink-0 inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 disabled:opacity-40"
+              >
+                {convo.saving ? (
+                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                ) : (
+                  <BookmarkCheck className="h-2.5 w-2.5" />
+                )}
+                save
+              </button>
+              <button
+                type="button"
+                onClick={() => setTitleEditing(false)}
+                className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-ink-900 dark:hover:text-ink-50"
+              >
+                cancel
+              </button>
+            </>
+          ) : (
+            // Compact chip — shows suggested title, click to edit + save.
+            <button
+              type="button"
+              onClick={() => setTitleEditing(true)}
+              disabled={streaming || convo.saving}
+              className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10.5px] border border-amber-500/40 bg-amber-500/[0.06] text-amber-700 dark:text-amber-300 hover:bg-amber-500/[0.12] disabled:opacity-40 transition-colors max-w-md"
+              title="save this idea to your library"
+            >
+              <BookmarkCheck className="h-3 w-3 shrink-0" />
+              <span className="truncate">
+                save as · {convo.suggestedTitle || "this idea"}
+              </span>
+            </button>
+          )}
+          {!convo.savedIdeaId && !titleEditing && (
+            <button
+              type="button"
+              onClick={onDismiss}
+              disabled={convo.saving || streaming}
+              className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
+              title="discard this conversation"
+            >
+              <X className="h-2.5 w-2.5" />
+              discard
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Inline follow-up composer — only between turns, never while
+          streaming. Lives below the action row so the convo reads
+          chronologically: agent reply → save chip → my next turn. */}
       {!streaming && !convo.savedIdeaId && hasFinishedAgentReply && (
         <div className="flex items-start gap-2.5">
           <span className="shrink-0 mt-1.5 font-mono text-[14px] font-semibold leading-none text-sky-700 dark:text-sky-300 select-none">
@@ -1817,88 +1979,16 @@ function IdeaConvoBlock({
           </button>
         </div>
       )}
-
-      {/* Save / dismiss action row — appears once any agent reply has
-          landed. Title editable, defaults to the agent's suggestion. */}
-      {hasFinishedAgentReply && !convo.savedIdeaId && (
-        <div className="flex items-center gap-2 ml-5 pl-0.5">
-          <Lightbulb className="h-3 w-3 text-amber-500 shrink-0" />
-          <Input
-            value={titleDraft}
-            onChange={(e) => setTitleDraft(e.target.value)}
-            placeholder={convo.suggestedTitle || "title for this idea"}
-            disabled={convo.saving || streaming}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                onSave(titleDraft);
-              }
-            }}
-            className="h-7 text-[12px] font-mono max-w-md"
-          />
-          <button
-            type="button"
-            onClick={() => onSave(titleDraft)}
-            disabled={convo.saving || streaming}
-            className="shrink-0 inline-flex items-center gap-1 h-7 px-2.5 rounded text-[11px] font-medium border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            {convo.saving ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <BookmarkCheck className="h-3 w-3" />
-            )}
-            save to library
-          </button>
-          <button
-            type="button"
-            onClick={onDismiss}
-            disabled={convo.saving || streaming}
-            className="shrink-0 inline-flex items-center gap-1 h-7 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
-            title="discard this conversation"
-          >
-            <X className="h-2.5 w-2.5" />
-            discard
-          </button>
-        </div>
-      )}
-
-      {/* Saved state — link to workshop + remove. */}
-      {convo.savedIdeaId && (
-        <div className="flex items-center gap-2 ml-5 pl-0.5">
-          <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />
-          <span className="font-mono text-[11px] text-emerald-700 dark:text-emerald-300">
-            saved
-          </span>
-          <Link
-            to={`/projects/${encodeURIComponent(projectSlug)}/ideas/${convo.savedIdeaId}`}
-            className="inline-flex items-center gap-1 font-mono text-[10.5px] uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300 hover:underline"
-            onClick={() => convo.savedIdeaId && onOpenIdea(convo.savedIdeaId)}
-          >
-            <ArrowUpRight className="h-2.5 w-2.5" />
-            open in workshop
-          </Link>
-          <button
-            type="button"
-            onClick={() => void removeSaved()}
-            disabled={unsave.isPending}
-            className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
-          >
-            {unsave.isPending ? (
-              <Loader2 className="h-2.5 w-2.5 animate-spin" />
-            ) : (
-              <Trash2 className="h-2.5 w-2.5" />
-            )}
-            remove
-          </button>
-        </div>
-      )}
     </div>
   );
 }
 
 /** One row in an idea conversation — TimelineItem-style. No box.
  *  User: `›` glyph + their text. Agent: `λ` glyph + tool activity
- *  (when present) above streaming markdown body. */
+ *  + streaming markdown. While streaming with no body text yet,
+ *  shows the same ShimmerText + rotating label + elapsed timer
+ *  the brainstorm and task surfaces use, so the thinking state
+ *  feels consistent. */
 function IdeaTurnRow({
   turn,
   streaming,
@@ -1917,6 +2007,16 @@ function IdeaTurnRow({
 }) {
   const isUser = turn.role === "user";
   const tools = pairToolEvents(turn.events ?? []);
+  const elapsedMs = useElapsedMs(streaming);
+  // Rotating phase label — if the agent has tools running, frame
+  // it as scouting; once it starts replying, "chatting".
+  const phase: ThinkingPhase =
+    streaming && tools.length === 0 ? "scouting" : "chatting";
+  const label = useRotatingLabel(phase);
+  // Hide the shimmer header once the agent has started typing —
+  // the live cursor below is enough indication.
+  const showShimmerHeader = streaming && !isUser && !turn.text.trim();
+
   return (
     <div className="flex items-start gap-2.5">
       <span
@@ -1932,20 +2032,42 @@ function IdeaTurnRow({
         {isUser ? "›" : "λ"}
       </span>
       <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2 mb-1.5">
-          <span
-            className={cn(
-              "font-mono text-[10px] uppercase tracking-[0.1em]",
-              isUser
-                ? "text-sky-700 dark:text-sky-300"
-                : "text-ember-700 dark:text-ember-300",
-            )}
-          >
-            {isUser ? "you" : "agent"}
-          </span>
-          <span className="font-mono text-[10px] tabular-nums text-ink-300 dark:text-ink-600">
-            {formatTs(turn.ts)}
-          </span>
+        <div className="flex items-baseline gap-2 mb-1.5 flex-wrap">
+          {showShimmerHeader ? (
+            <ShimmerText className="text-[12.5px] font-medium">
+              <TransitioningText>{label}</TransitioningText>
+            </ShimmerText>
+          ) : (
+            <span
+              className={cn(
+                "font-mono text-[10px] uppercase tracking-[0.1em]",
+                isUser
+                  ? "text-sky-700 dark:text-sky-300"
+                  : "text-ember-700 dark:text-ember-300",
+              )}
+            >
+              {isUser ? "you" : "agent"}
+            </span>
+          )}
+          {streaming && !isUser ? (
+            <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
+              {formatElapsed(elapsedMs)}
+            </span>
+          ) : (
+            <span className="font-mono text-[10px] tabular-nums text-ink-300 dark:text-ink-600">
+              {formatTs(turn.ts)}
+            </span>
+          )}
+          {streaming && !isUser && tools.length > 0 && (
+            <>
+              <span className="text-ink-300 dark:text-ink-600 font-mono text-[10px]">
+                ·
+              </span>
+              <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
+                {tools.length} step{tools.length === 1 ? "" : "s"}
+              </span>
+            </>
+          )}
           {streaming && !isUser && (
             <button
               type="button"
@@ -1969,11 +2091,12 @@ function IdeaTurnRow({
             {turn.error}
           </p>
         ) : turn.text ? (
-          <Markdown text={turn.text} />
-        ) : streaming ? (
-          <p className="font-mono text-[11.5px] text-ink-400 dark:text-ink-500 italic">
-            thinking…
-          </p>
+          <>
+            <Markdown text={turn.text} />
+            {streaming && (
+              <span className="inline-block w-1.5 h-3 bg-ember-500/70 animate-pulse ml-0.5 align-baseline" />
+            )}
+          </>
         ) : null}
       </div>
     </div>
