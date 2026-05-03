@@ -408,7 +408,7 @@ export function ProjectBrainstorm() {
     <div className="flex flex-col h-full min-h-0">
       <div className="flex-1 min-h-0 relative">
         <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
-          <div className="px-5 lg:px-6 py-6 space-y-6">
+          <div className="px-5 lg:px-6 py-4 space-y-4">
             {isEmpty ? (
               <EmptyChat
                 projectName={project.name}
@@ -446,11 +446,21 @@ export function ProjectBrainstorm() {
         </div>
       </div>
 
-      {/* Composer — matches TaskTimeline shape: plain Textarea, action
-          buttons absolutely positioned at the bottom-right. */}
+      {/* Composer — terminal-style. `›` prompt prefix, mono input,
+          actions on the same line. Frames the chat as a REPL session. */}
       <div className="border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900 shrink-0">
-        <div className="px-5 lg:px-6 py-3">
-          <div className="relative">
+        <div className="px-5 lg:px-6 py-2">
+          <div className="flex items-start gap-2">
+            <span
+              className={cn(
+                "shrink-0 mt-1.5 font-mono text-[14px] font-semibold leading-none transition-colors",
+                streaming
+                  ? "text-ember-500 animate-blink"
+                  : "text-sky-700 dark:text-sky-300",
+              )}
+            >
+              ›
+            </span>
             <Textarea
               value={brief}
               onChange={(e) => setBrief(e.target.value)}
@@ -460,12 +470,16 @@ export function ProjectBrainstorm() {
                   void submit();
                 }
               }}
-              placeholder={`What should we brainstorm in ${project.name}?`}
+              placeholder={
+                streaming
+                  ? "agent is thinking…"
+                  : `brainstorm something for ${project.name}`
+              }
               rows={2}
               disabled={streaming}
-              className="resize-none pr-28 text-sm transition"
+              className="flex-1 resize-none border-none shadow-none bg-transparent focus-visible:ring-0 px-0 py-1 font-mono text-[12.5px] leading-snug placeholder:text-ink-400/60 dark:placeholder:text-ink-500/60"
             />
-            <div className="absolute right-2 bottom-2 flex items-center gap-2">
+            <div className="shrink-0 flex items-center gap-1.5 mt-0.5">
               <span className="hidden sm:flex items-center gap-1 text-2xs text-ink-400 dark:text-ink-500">
                 <Kbd>⌘</Kbd>
                 <Kbd>↵</Kbd>
@@ -483,7 +497,7 @@ export function ProjectBrainstorm() {
               </Button>
             </div>
           </div>
-          <div className="mt-2 flex items-center gap-1">
+          <div className="mt-1 ml-5 flex items-center gap-1">
             <ToolbarPick
               label={`with · ${choiceLabel}`}
               options={buildModelOptions(claudeModels, codexModels)}
@@ -643,13 +657,13 @@ function ChatTurn({
 function PromptHeading({ text, ts }: { text: string; ts: number }) {
   return (
     <div className="mb-2 flex items-start gap-2">
-      <span className="grid place-items-center shrink-0 mt-0.5 size-4 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300">
-        <User2 className="h-2.5 w-2.5" />
+      <span className="shrink-0 mt-px font-mono text-[12px] font-semibold text-sky-700 dark:text-sky-300 select-none">
+        ›
       </span>
-      <p className="flex-1 text-[13px] leading-snug text-ink-800 dark:text-ink-100 whitespace-pre-wrap">
+      <p className="flex-1 font-mono text-[12.5px] leading-snug text-ink-800 dark:text-ink-100 whitespace-pre-wrap">
         {text}
       </p>
-      <span className="shrink-0 mt-1 font-mono text-[9.5px] tabular-nums text-ink-300 dark:text-ink-600">
+      <span className="shrink-0 mt-0.5 font-mono text-[9.5px] tabular-nums text-ink-300 dark:text-ink-600">
         {formatTs(ts)}
       </span>
     </div>
@@ -708,25 +722,17 @@ function PersistedActivity({
   const pairs = pairToolEvents(events);
   if (pairs.length === 0) return null;
   return (
-    <div className="mb-2">
-      <div className="flex items-center gap-1.5 mb-1 font-mono text-[9.5px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
-        <span>
-          {pairs.length} {pairs.length === 1 ? "step" : "steps"} · what the
-          agent did
-        </span>
-      </div>
-      <ul className="space-y-0.5">
-        {pairs.map((p, i) => (
-          <li key={i}>
-            <ToolLine
-              content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
-              output={p.output}
-              outputOk={p.ok}
-            />
-          </li>
-        ))}
-      </ul>
-    </div>
+    <ul className="mb-2 space-y-0.5">
+      {pairs.map((p, i) => (
+        <li key={i}>
+          <ToolLine
+            content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
+            output={p.output}
+            outputOk={p.ok}
+          />
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -1029,24 +1035,26 @@ function AgentCluster({
   const validations = suggestion.validations ?? [];
   return (
     <section>
-      <div className="flex items-center gap-1.5 mb-2 text-[10px] font-mono">
-        <Lightbulb className="h-3 w-3 text-ember-700 dark:text-ember-300 shrink-0" />
-        <span className="tabular-nums text-ink-500 dark:text-ink-400">
-          {suggestion.options.length}
+      <div className="flex items-center gap-2 mb-2">
+        <span className="shrink-0 font-mono text-[12px] font-semibold text-ember-700 dark:text-ember-300 leading-none select-none">
+          λ
         </span>
-        {topScore !== null && (
-          <span className="text-ink-400 dark:text-ink-500">
-            · top {topScore}
-          </span>
-        )}
-        {validations.length > 0 && (
-          <span className="text-ink-400 dark:text-ink-500">
-            · {1 + validations.length} raters
-          </span>
-        )}
+        <span className="font-mono text-[10px] tabular-nums text-ink-500 dark:text-ink-400">
+          {suggestion.options.length} ideas
+          {topScore !== null && (
+            <span className="text-ink-400 dark:text-ink-500">
+              {" "}· top {topScore}
+            </span>
+          )}
+          {validations.length > 0 && (
+            <span className="text-ink-400 dark:text-ink-500">
+              {" "}· {1 + validations.length} raters
+            </span>
+          )}
+        </span>
         {savedHere > 0 && (
-          <span className="inline-flex items-center gap-0.5 text-amber-700 dark:text-amber-300">
-            · <BookmarkCheck className="h-2.5 w-2.5 fill-current" />{" "}
+          <span className="inline-flex items-center gap-0.5 font-mono text-[10px] text-amber-700 dark:text-amber-300">
+            <BookmarkCheck className="h-2.5 w-2.5 fill-current" />
             {savedHere}
           </span>
         )}

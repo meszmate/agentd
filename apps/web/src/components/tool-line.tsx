@@ -13,8 +13,10 @@ import {
   Folder,
   Wrench,
 } from "lucide-react";
+import { Highlight, themes } from "prism-react-renderer";
+import { useTheme } from "@/components/theme-provider";
 import { cn } from "@/lib/utils";
-import { CodeBlock } from "@/components/code-block";
+import { CodeBlock, normalizeLanguage } from "@/components/code-block";
 
 /**
  * Compact one-line render for an agent tool call. Mirrors the realtime
@@ -123,6 +125,7 @@ export function ToolLine({
           ok={outputOk !== false}
           expanded={outputExpanded}
           onToggle={() => setOutputExpanded((v) => !v)}
+          language={inferOutputLanguage(parsed)}
         />
       )}
     </div>
@@ -142,11 +145,14 @@ function ToolOutput({
   ok,
   expanded,
   onToggle,
+  language,
 }: {
   text: string;
   ok: boolean;
   expanded: boolean;
   onToggle: () => void;
+  /** Optional language hint — when set, output is prism-highlighted. */
+  language?: string;
 }) {
   // Strip control chars + ANSI so the preview is readable. Trim any
   // trailing whitespace so blank tail-lines don't pad the preview.
@@ -160,7 +166,7 @@ function ToolOutput({
   const overflow = allLines.length - previewLineCount;
   const visible = expanded ? allLines : allLines.slice(0, previewLineCount);
   return (
-    <div className="mt-0.5 ml-5 flex items-stretch text-[10.5px] font-mono leading-tight">
+    <div className="mt-0.5 flex items-stretch text-[10.5px] font-mono leading-tight">
       <span
         className={cn(
           "shrink-0 w-0.5 self-stretch rounded-full mr-2",
@@ -170,16 +176,24 @@ function ToolOutput({
         )}
       />
       <div className="flex-1 min-w-0">
-        <pre
-          className={cn(
-            "whitespace-pre-wrap break-words m-0",
-            ok
-              ? "text-ink-500 dark:text-ink-400"
-              : "text-red-700 dark:text-red-300",
-          )}
-        >
-          {visible.join("\n")}
-        </pre>
+        {language ? (
+          <HighlightedPre
+            code={visible.join("\n")}
+            language={language}
+            tone={ok ? "ok" : "fail"}
+          />
+        ) : (
+          <pre
+            className={cn(
+              "whitespace-pre-wrap break-words m-0",
+              ok
+                ? "text-ink-500 dark:text-ink-400"
+                : "text-red-700 dark:text-red-300",
+            )}
+          >
+            {visible.join("\n")}
+          </pre>
+        )}
         {overflow > 0 && (
           <button
             type="button"
@@ -202,6 +216,68 @@ function ToolOutput({
       </div>
     </div>
   );
+}
+
+/**
+ * Headerless prism-highlighted block — same theme as `<CodeBlock>`
+ * but no chrome (no border, no header, no line numbers). Used inside
+ * `<ToolOutput>` so the bash / file content preview gets proper
+ * syntax highlighting without the heavy code-block frame.
+ */
+function HighlightedPre({
+  code,
+  language,
+  tone,
+}: {
+  code: string;
+  language: string;
+  tone: "ok" | "fail";
+}) {
+  const { resolved } = useTheme();
+  const isDark = resolved === "dark";
+  return (
+    <Highlight
+      code={code}
+      language={normalizeLanguage(language)}
+      theme={isDark ? themes.vsDark : themes.github}
+    >
+      {({ className, style, tokens, getLineProps, getTokenProps }) => (
+        <pre
+          className={cn(
+            className,
+            "whitespace-pre-wrap break-words m-0 bg-transparent",
+            tone === "fail" && "text-red-700 dark:text-red-300",
+          )}
+          style={{ ...style, background: "transparent" }}
+        >
+          {tokens.map((line, i) => (
+            <div key={i} {...getLineProps({ line, key: i })}>
+              {line.map((token, j) => (
+                <span key={j} {...getTokenProps({ token, key: j })} />
+              ))}
+            </div>
+          ))}
+        </pre>
+      )}
+    </Highlight>
+  );
+}
+
+/**
+ * Pick a prism language for a tool's output preview based on what the
+ * tool is. Read on a TS file → tsx; Bash → shell-like; Grep → no
+ * highlighting (text). Returns undefined to opt out of highlighting.
+ */
+function inferOutputLanguage(parsed: ParsedTool): string | undefined {
+  if (parsed.kind === "bash") return "bash";
+  if (parsed.kind === "read" || parsed.kind === "edit" || parsed.kind === "write") {
+    // detailLanguage is set by the parser when it recognized the
+    // file extension. Reuse it for the output preview too.
+    if (parsed.detailLanguage) return parsed.detailLanguage;
+    if (parsed.detailFilename) return langFromPath(parsed.detailFilename);
+    return undefined;
+  }
+  return undefined;
 }
 
 /**

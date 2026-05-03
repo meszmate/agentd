@@ -210,7 +210,7 @@ export function CodeBlock({
  * recognize. prism-react-renderer ships a small set; everything else
  * falls back to plain text (still monospaced + line-numbered).
  */
-function normalizeLanguage(raw: string): Language {
+export function normalizeLanguage(raw: string): Language {
   switch (raw) {
     case "ts":
     case "tsx":
