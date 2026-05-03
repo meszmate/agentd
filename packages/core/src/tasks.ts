@@ -23,6 +23,7 @@ export interface CreateTaskInput {
   templateId?: string | null;
   scheduleId?: string | null;
   projectId?: string | null;
+  autoCommit?: boolean;
   autoPush?: boolean;
   autoPr?: boolean;
   skills?: string[];
@@ -77,6 +78,7 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     templateId: row.templateId ?? null,
     scheduleId: row.scheduleId ?? null,
     projectId: row.projectId ?? null,
+    autoCommit: row.autoCommit !== 0,
     autoPush: row.autoPush === 1,
     autoPr: row.autoPr === 1,
     prUrl: row.prUrl ?? null,
@@ -185,6 +187,7 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       templateId: input.templateId ?? null,
       scheduleId: input.scheduleId ?? null,
       projectId: input.projectId ?? null,
+      autoCommit: input.autoCommit === false ? 0 : 1,
       autoPush: input.autoPush ? 1 : 0,
       autoPr: input.autoPr ? 1 : 0,
       prUrl: null,
@@ -232,18 +235,19 @@ export function setTaskThinkingLevel(
 }
 
 /**
- * Toggle the task's auto-push / auto-PR flags mid-flight. The
- * post-turn hook reads these on every agent exit, so flipping them
- * mid-task changes whether the next completed turn pushes / opens
- * a PR. Operator-driven only — there's no UI to flip them off
- * silently from the agent.
+ * Toggle the task's auto-commit / auto-push / auto-PR flags
+ * mid-flight. The post-turn hook reads these on every agent exit,
+ * so flipping them changes the behavior of the NEXT completed turn.
+ * Operator-driven only — there's no agent-facing knob.
  */
 export function setTaskAutoFlags(
   db: Db,
   id: string,
-  patch: { autoPush?: boolean; autoPr?: boolean },
+  patch: { autoCommit?: boolean; autoPush?: boolean; autoPr?: boolean },
 ): Task | null {
   const next: Record<string, unknown> = { updatedAt: Date.now() };
+  if (patch.autoCommit !== undefined)
+    next.autoCommit = patch.autoCommit ? 1 : 0;
   if (patch.autoPush !== undefined) next.autoPush = patch.autoPush ? 1 : 0;
   if (patch.autoPr !== undefined) next.autoPr = patch.autoPr ? 1 : 0;
   if (Object.keys(next).length === 1) return getTask(db, id);

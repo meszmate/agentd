@@ -22,6 +22,13 @@ export const tasks = sqliteTable("tasks", {
   projectId: text("project_id"),
   autoPush: integer("auto_push").notNull().default(0),
   autoPr: integer("auto_pr").notNull().default(0),
+  /**
+   * Whether the post-turn hook should auto-commit any uncommitted
+   * work at the end of every agent turn. Defaults to 1 (true) to
+   * preserve historical behavior — disable when the operator wants
+   * to hand-craft the commit themselves.
+   */
+  autoCommit: integer("auto_commit").notNull().default(1),
   prUrl: text("pr_url"),
   totalInputTokens: integer("total_input_tokens").notNull().default(0),
   totalOutputTokens: integer("total_output_tokens").notNull().default(0),
@@ -551,6 +558,7 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE suggestions ADD COLUMN duration_ms INTEGER",
   "ALTER TABLE suggestions ADD COLUMN input_tokens INTEGER",
   "ALTER TABLE suggestions ADD COLUMN output_tokens INTEGER",
+  "ALTER TABLE tasks ADD COLUMN auto_commit INTEGER NOT NULL DEFAULT 1",
 ];
 
 function migrate(sqlite: Database): void {

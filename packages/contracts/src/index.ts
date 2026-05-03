@@ -151,6 +151,12 @@ export const Task = z.object({
   templateId: z.string().nullable().optional(),
   scheduleId: z.string().nullable().optional(),
   projectId: z.string().nullable().optional(),
+  /**
+   * Auto-commit any uncommitted work at the end of every turn. When
+   * false, the daemon's post-hook leaves the worktree dirty so the
+   * operator can hand-craft the commit. Defaults to true.
+   */
+  autoCommit: z.boolean().optional(),
   autoPush: z.boolean().optional(),
   autoPr: z.boolean().optional(),
   prUrl: z.string().nullable().optional(),
@@ -240,6 +246,13 @@ export const Template = z.object({
   repoPath: z.string(),
   baseBranch: z.string(),
   promptTemplate: z.string(),
+  /**
+   * Auto-commit any uncommitted work at the end of every turn.
+   * Optional / defaults to true (the historical behavior). Disable
+   * when the operator wants to inspect / hand-craft the commit
+   * themselves after the agent finishes.
+   */
+  autoCommit: z.boolean().optional(),
   autoPush: z.boolean(),
   autoPr: z.boolean(),
   /** All these knobs propagate into the spawned task — overridable per-run. */

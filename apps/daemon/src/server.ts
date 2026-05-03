@@ -1272,19 +1272,23 @@ export function buildServer(opts: BuildServerOptions) {
     const task = tasks.get(id);
     if (!task) return c.json({ error: "not found" }, 404);
     const body = (await c.req.json().catch(() => null)) as {
+      autoCommit?: boolean;
       autoPush?: boolean;
       autoPr?: boolean;
     } | null;
     if (
       !body ||
-      (body.autoPush === undefined && body.autoPr === undefined)
+      (body.autoCommit === undefined &&
+        body.autoPush === undefined &&
+        body.autoPr === undefined)
     ) {
       return c.json(
-        { error: "at least one of autoPush / autoPr required" },
+        { error: "at least one of autoCommit / autoPush / autoPr required" },
         400,
       );
     }
     const updated = setTaskAutoFlags(db, id, {
+      ...(body.autoCommit !== undefined ? { autoCommit: body.autoCommit } : {}),
       ...(body.autoPush !== undefined ? { autoPush: body.autoPush } : {}),
       ...(body.autoPr !== undefined ? { autoPr: body.autoPr } : {}),
     });

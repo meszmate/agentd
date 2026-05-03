@@ -658,81 +658,86 @@ function ThinkingLevelChip({ task }: { task: Task }) {
 }
 
 /**
- * Mid-flight toggle for the task's auto-push / auto-PR flags. The
- * post-turn hook re-reads them on every agent exit, so flipping
- * either changes the behavior of the NEXT completed turn.
- *
- * When neither is on, the chip reads `auto: off` in muted ink. When
- * one or both are on it goes emerald + lists which (`auto: push`,
- * `auto: pr`, `auto: push+pr`).
+ * Mid-flight toggles for auto-commit + auto-push. The post-turn
+ * hook re-reads them on every agent exit so flipping them changes
+ * the behavior of the NEXT completed turn — current in-flight turn
+ * is unchanged. Auto-PR isn't here on purpose; opening a PR is a
+ * one-shot decision the operator makes from the Ship menu, not a
+ * recurring per-turn knob.
  */
 function AutoFlagsChip({ task }: { task: Task }) {
   const client = useClient();
   const qc = useQueryClient();
   const { toast } = useApp();
-  const set = async (patch: { autoPush?: boolean; autoPr?: boolean }) => {
+  const set = async (patch: { autoCommit?: boolean; autoPush?: boolean }) => {
     try {
       const res = await client.setTaskAutoFlags(task.id, patch);
       if (res.task) qc.setQueryData(qk.task(task.id), { task: res.task });
       const labels: string[] = [];
+      if (patch.autoCommit !== undefined)
+        labels.push(`auto-commit ${patch.autoCommit ? "on" : "off"}`);
       if (patch.autoPush !== undefined)
         labels.push(`auto-push ${patch.autoPush ? "on" : "off"}`);
-      if (patch.autoPr !== undefined)
-        labels.push(`auto-pr ${patch.autoPr ? "on" : "off"}`);
       toast(labels.join(" · "));
     } catch (e) {
       toast((e as Error).message, true);
     }
   };
-  const onLabel =
-    task.autoPush && task.autoPr
-      ? "push+pr"
-      : task.autoPush
-        ? "push"
-        : task.autoPr
-          ? "pr"
+  // Compact label of what's on. Defaults to true for autoCommit
+  // (legacy behavior) so undefined === on.
+  const commitOn = task.autoCommit !== false;
+  const summary =
+    commitOn && task.autoPush
+      ? "commit+push"
+      : commitOn
+        ? "commit"
+        : task.autoPush
+          ? "push only"
           : "off";
-  const isOn = task.autoPush || task.autoPr;
+  const isAnyOn = commitOn || task.autoPush;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          title="Toggle auto-push / auto-PR for the next turn"
+          title="Toggle auto-commit / auto-push for the next turn"
           className={cn(
             "inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] border transition-colors shrink-0",
-            isOn
+            isAnyOn
               ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20 hover:bg-emerald-500/20"
               : "bg-ink-900/[0.04] text-ink-500 dark:text-ink-400 border-ink-900/10 dark:border-ink-50/10 hover:bg-ink-900/[0.08]",
           )}
         >
-          auto:{onLabel}
+          auto:{summary}
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-52">
+      <DropdownMenuContent align="start" className="w-60">
         <DropdownMenuLabel className="text-[10px] uppercase tracking-[0.12em]">
           On agent exit · next turn
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuCheckboxItem
-          checked={!!task.autoPush}
-          onCheckedChange={(v) => void set({ autoPush: !!v })}
+          checked={commitOn}
+          onCheckedChange={(v) => void set({ autoCommit: !!v })}
         >
           <div className="flex flex-col">
-            <span className="text-[12px]">Auto-push</span>
+            <span className="text-[12px]">Auto-commit</span>
             <span className="text-[10px] text-ink-400 dark:text-ink-500">
-              push the branch upstream after each turn
+              commit any uncommitted work after each turn
             </span>
           </div>
         </DropdownMenuCheckboxItem>
         <DropdownMenuCheckboxItem
-          checked={!!task.autoPr}
-          onCheckedChange={(v) => void set({ autoPr: !!v })}
+          checked={!!task.autoPush}
+          onCheckedChange={(v) => void set({ autoPush: !!v })}
+          disabled={!commitOn}
         >
           <div className="flex flex-col">
-            <span className="text-[12px]">Auto-PR</span>
+            <span className="text-[12px]">Auto-push</span>
             <span className="text-[10px] text-ink-400 dark:text-ink-500">
-              open a pull request after the first push
+              {commitOn
+                ? "push the branch upstream after each commit"
+                : "needs auto-commit to be on"}
             </span>
           </div>
         </DropdownMenuCheckboxItem>

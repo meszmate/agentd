@@ -840,7 +840,7 @@ export class AgentdClient {
    */
   async setTaskAutoFlags(
     id: string,
-    patch: { autoPush?: boolean; autoPr?: boolean },
+    patch: { autoCommit?: boolean; autoPush?: boolean; autoPr?: boolean },
   ): Promise<{ task: Task | null }> {
     return this.req(`/api/tasks/${encodeURIComponent(id)}/auto-flags`, {
       method: "PATCH",

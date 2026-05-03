@@ -799,6 +799,10 @@ export class TaskManager {
   private async runCompletionHooks(taskId: string): Promise<void> {
     const task = getTask(this.db, taskId);
     if (!task) return;
+    // Operator can disable auto-commit per-task — when off, leave the
+    // worktree dirty so they can hand-craft the commit themselves.
+    // Push/PR also become no-ops because they need a clean tree.
+    if (task.autoCommit === false) return;
     const committed = await this.maybeAutoCommit(taskId, task);
     if (committed) {
       if (task.autoPush || task.autoPr) {
