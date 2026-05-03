@@ -266,21 +266,25 @@ export function ProjectBrainstorm() {
 
   /**
    * Shared brainstorm runner. Used by the composer's Send and the
-   * per-session "More" button (which fires the same brief again so
-   * the agent — already deduped against the prior options via the
-   * server-side context block — has to produce different angles).
+   * per-session "More" button. When a `nudge` is passed (from the
+   * "more like these" / "completely different" / "go wild"
+   * dropdown) we send ONLY the nudge as the prompt — the original
+   * brief is already represented by the prior options in the dedup
+   * context block, so re-sending it just bloats the prompt and
+   * shows duplicate text in the new suggestion's heading.
    */
   const runBrainstorm = async (
     briefText: string,
     opts: { clearComposer?: boolean; nudge?: string } = {},
   ) => {
-    const finalBrief = opts.nudge
-      ? `${briefText}\n\n${opts.nudge}`
-      : briefText;
+    const finalBrief = opts.nudge ? opts.nudge : briefText;
     setStreaming(true);
     setLiveOptions([]);
     setLiveTools([]);
-    setLiveBrief(briefText);
+    // Show what the agent will actually see, not the original brief —
+    // otherwise the live PromptHeading and the persisted suggestion
+    // PromptHeading flip-flop on first render.
+    setLiveBrief(finalBrief);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     try {
