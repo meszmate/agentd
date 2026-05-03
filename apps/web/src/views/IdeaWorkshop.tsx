@@ -729,7 +729,7 @@ function TimelineItem({
     const sysEvents = (message.events ?? []) as IdeaChatEvent[];
     const sysToolPairs = pairToolEvents(sysEvents);
     return (
-      <li className="relative my-3">
+      <li className="my-2">
         {sysToolPairs.length > 0 && (
           <ul className="mb-2 space-y-1.5">
             {sysToolPairs.map((p, i) => (
@@ -744,7 +744,9 @@ function TimelineItem({
           </ul>
         )}
         <div className="flex items-center gap-2">
-          <span className="absolute -left-7 top-1.5 size-2 rounded-full bg-ink-900/15 dark:bg-ink-50/15" />
+          <span className="font-mono text-[12px] text-ink-400 dark:text-ink-500 leading-none select-none">
+            ·
+          </span>
           <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
             {message.content}
           </span>
@@ -764,69 +766,67 @@ function TimelineItem({
         .replace(/^(?:\[(?:agent|assistant)\]\s*)/i, "")
         .trim();
 
-  // Agent's tool calls during this turn — replays the activity exactly
-  // like the task timeline (flat ToolLine rows with output preview).
+  // Agent's tool calls during this turn — replays the activity with
+  // claude-code-style tool rows + output previews.
   const events = (message.events ?? []) as IdeaChatEvent[];
   const toolPairs = pairToolEvents(events);
 
   return (
-    <li className="relative">
-      <span
-        className={cn(
-          "absolute -left-9 top-0 flex h-6 w-6 items-center justify-center rounded-full border",
-          isUser &&
-            "border-sky-500/30 bg-sky-500/15 text-sky-700 dark:text-sky-300",
-          !isUser &&
-            "border-ember-500/30 bg-ember-500/15 text-ember-700 dark:text-ember-300",
-          message.live && "ring-2 ring-ember-500/30",
-        )}
-      >
-        {isUser ? (
-          <User2 className="h-3 w-3" />
-        ) : (
-          <span className="font-display italic font-medium">a</span>
-        )}
-      </span>
-      <div>
-        <div className="flex items-baseline gap-2 mb-1">
-          <span
-            className={cn(
-              "font-mono text-[10px] font-medium uppercase tracking-[0.08em]",
-              isUser && "text-sky-700 dark:text-sky-300",
-              !isUser && "text-ember-700 dark:text-ember-300",
-            )}
-          >
-            {isUser ? "you" : "agent"}
-          </span>
-          <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
-            {formatTs(message.createdAt)}
-          </span>
-          {message.live && (
-            <span className="font-mono text-[10px] text-ember-600 dark:text-ember-400 animate-blink">
-              ●
+    <li>
+      <div className="flex items-start gap-2.5">
+        <span
+          className={cn(
+            "shrink-0 mt-0.5 font-mono text-[14px] font-semibold leading-none select-none",
+            isUser
+              ? "text-sky-700 dark:text-sky-300"
+              : "text-ember-700 dark:text-ember-300",
+            message.live && "animate-blink",
+          )}
+        >
+          {isUser ? "›" : "λ"}
+        </span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline gap-2 mb-2">
+            <span
+              className={cn(
+                "font-mono text-[10px] uppercase tracking-[0.1em]",
+                isUser
+                  ? "text-sky-700 dark:text-sky-300"
+                  : "text-ember-700 dark:text-ember-300",
+              )}
+            >
+              {isUser ? "you" : "agent"}
             </span>
+            <span className="font-mono text-[10px] tabular-nums text-ink-300 dark:text-ink-600">
+              {formatTs(message.createdAt)}
+            </span>
+            {message.live && (
+              <span className="font-mono text-[10px] text-ember-600 dark:text-ember-400 animate-blink">
+                ●
+              </span>
+            )}
+          </div>
+          {!isUser && toolPairs.length > 0 && (
+            <ul className="mb-3 space-y-1.5">
+              {toolPairs.map((p, i) => (
+                <li key={i}>
+                  <ToolLine
+                    content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
+                    output={p.output}
+                    outputOk={p.ok}
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
+          {isUser ? (
+            <div className="font-mono whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink-800 dark:text-ink-100">
+              {body}
+            </div>
+          ) : (
+            <Markdown text={body} />
           )}
         </div>
-        {!isUser && toolPairs.length > 0 && (
-          <ul className="mb-2 space-y-1.5">
-            {toolPairs.map((p, i) => (
-              <li key={i}>
-                <ToolLine
-                  content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
-                  output={p.output}
-                  outputOk={p.ok}
-                />
-              </li>
-            ))}
-          </ul>
-        )}
-        {isUser ? (
-          <div className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink-900 dark:text-ink-50">
-            {body}
-          </div>
-        ) : (
-          <Markdown text={body} />
-        )}
       </div>
     </li>
   );
@@ -876,43 +876,45 @@ function ThinkingItem({
   const label = useRotatingLabel(phase);
 
   return (
-    <li className="relative">
-      <span className="absolute -left-9 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-ember-500/30 bg-ember-500/15">
-        <span className="h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink" />
-      </span>
-      <div>
-        <div className="flex items-baseline gap-2 mb-1.5 flex-wrap">
-          <ShimmerText className="text-[12.5px] font-medium">
-            <TransitioningText>{label}</TransitioningText>
-          </ShimmerText>
-          <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
-            {formatElapsed(elapsedMs)}
-          </span>
+    <li>
+      <div className="flex items-start gap-2.5">
+        <span className="shrink-0 mt-0.5 font-mono text-[14px] font-semibold leading-none text-ember-500 animate-blink select-none">
+          λ
+        </span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline gap-2 mb-2 flex-wrap">
+            <ShimmerText className="text-[12.5px] font-medium">
+              <TransitioningText>{label}</TransitioningText>
+            </ShimmerText>
+            <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
+              {formatElapsed(elapsedMs)}
+            </span>
+            {toolPairs.length > 0 && (
+              <>
+                <span className="text-ink-300 dark:text-ink-600 font-mono text-[10px]">
+                  ·
+                </span>
+                <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
+                  {toolPairs.length} step{toolPairs.length === 1 ? "" : "s"}
+                </span>
+              </>
+            )}
+          </div>
           {toolPairs.length > 0 && (
-            <>
-              <span className="text-ink-300 dark:text-ink-600 font-mono text-[10px]">
-                ·
-              </span>
-              <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
-                {toolPairs.length} step{toolPairs.length === 1 ? "" : "s"}
-              </span>
-            </>
+            <ul className="space-y-1.5">
+              {toolPairs.map((p, i) => (
+                <li key={i}>
+                  <ToolLine
+                    content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
+                    running={p.running && !showReply}
+                    output={p.output}
+                    outputOk={p.ok}
+                  />
+                </li>
+              ))}
+            </ul>
           )}
         </div>
-        {toolPairs.length > 0 && (
-          <ul className="space-y-1.5">
-            {toolPairs.map((p, i) => (
-              <li key={i}>
-                <ToolLine
-                  content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
-                  running={p.running && !showReply}
-                  output={p.output}
-                  outputOk={p.ok}
-                />
-              </li>
-            ))}
-          </ul>
-        )}
       </div>
     </li>
   );
@@ -1083,7 +1085,7 @@ function ChatColumn({
             </div>
           )}
           {(allMessages.length > 0 || streaming) && (
-            <ol className="relative space-y-2 pl-9 before:absolute before:left-3 before:top-2 before:bottom-2 before:w-px before:bg-ink-900/10 dark:before:bg-ink-50/10">
+            <ol className="space-y-6">
               {allMessages.map((m) => (
                 <TimelineItem key={m.id} message={m} />
               ))}
@@ -1102,25 +1104,39 @@ function ChatColumn({
       </div>
 
       <footer className="px-5 py-3 border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] space-y-2 bg-paper-50 dark:bg-ink-900">
-        <Textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-              e.preventDefault();
-              void onSend("chat");
+        <div className="flex items-start gap-2.5">
+          <span
+            className={cn(
+              "shrink-0 mt-1.5 font-mono text-[14px] font-semibold leading-none transition-colors select-none",
+              streaming
+                ? "text-ember-500 animate-blink"
+                : "text-sky-700 dark:text-sky-300",
+            )}
+          >
+            ›
+          </span>
+          <Textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                e.preventDefault();
+                void onSend("chat");
+              }
+            }}
+            rows={2}
+            disabled={streaming}
+            placeholder={
+              streaming
+                ? "agent is thinking…"
+                : hasPlan
+                  ? "talk to the agent — the plan updates as you discuss"
+                  : "ask risks, alternatives, scope, or anything else"
             }
-          }}
-          rows={2}
-          disabled={streaming}
-          placeholder={
-            hasPlan
-              ? "Talk to the agent — point at files, suggest approaches, fix mistakes. The plan updates as you discuss."
-              : "Ask risks, alternatives, scope. Mention file paths or approaches to draft a plan together."
-          }
-          className="text-[13px] leading-relaxed resize-none"
-        />
-        <div className="flex items-center gap-1.5 flex-wrap">
+            className="flex-1 resize-none border-none shadow-none bg-transparent focus-visible:ring-0 px-0 py-1 font-mono text-[13px] leading-snug placeholder:text-ink-400/60 dark:placeholder:text-ink-500/60"
+          />
+        </div>
+        <div className="flex items-center gap-1.5 flex-wrap pl-5">
           {!hasPlan && (
             <Button
               size="xs"

@@ -408,7 +408,7 @@ export function ProjectBrainstorm() {
     <div className="flex flex-col h-full min-h-0">
       <div className="flex-1 min-h-0 relative">
         <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
-          <div className="px-5 lg:px-6 py-4 space-y-4">
+          <div className="px-5 lg:px-7 py-6 space-y-7">
             {isEmpty ? (
               <EmptyChat
                 projectName={project.name}
@@ -656,14 +656,14 @@ function ChatTurn({
  */
 function PromptHeading({ text, ts }: { text: string; ts: number }) {
   return (
-    <div className="mb-2 flex items-start gap-2">
-      <span className="shrink-0 mt-px font-mono text-[12px] font-semibold text-sky-700 dark:text-sky-300 select-none">
+    <div className="mb-4 flex items-start gap-2.5">
+      <span className="shrink-0 mt-0.5 font-mono text-[14px] font-semibold text-sky-700 dark:text-sky-300 leading-none select-none">
         ›
       </span>
-      <p className="flex-1 font-mono text-[12.5px] leading-snug text-ink-800 dark:text-ink-100 whitespace-pre-wrap">
+      <p className="flex-1 font-mono text-[13px] leading-relaxed text-ink-800 dark:text-ink-100 whitespace-pre-wrap">
         {text}
       </p>
-      <span className="shrink-0 mt-0.5 font-mono text-[9.5px] tabular-nums text-ink-300 dark:text-ink-600">
+      <span className="shrink-0 mt-1 font-mono text-[10px] tabular-nums text-ink-300 dark:text-ink-600">
         {formatTs(ts)}
       </span>
     </div>
@@ -1035,11 +1035,11 @@ function AgentCluster({
   const validations = suggestion.validations ?? [];
   return (
     <section>
-      <div className="flex items-center gap-2 mb-2">
-        <span className="shrink-0 font-mono text-[12px] font-semibold text-ember-700 dark:text-ember-300 leading-none select-none">
+      <div className="flex items-center gap-2 mb-3">
+        <span className="shrink-0 font-mono text-[14px] font-semibold text-ember-700 dark:text-ember-300 leading-none select-none">
           λ
         </span>
-        <span className="font-mono text-[10px] tabular-nums text-ink-500 dark:text-ink-400">
+        <span className="font-mono text-[10.5px] tabular-nums text-ink-500 dark:text-ink-400">
           {suggestion.options.length} ideas
           {topScore !== null && (
             <span className="text-ink-400 dark:text-ink-500">
@@ -1071,7 +1071,7 @@ function AgentCluster({
       {validating && (
         <ValidatingFeed label={validateLabel} tools={validateTools} />
       )}
-      <ol className="space-y-0.5">
+      <ol className="space-y-1.5">
         {sorted.map(({ raw: opt, index: i, parsed }) => {
           const savedId = savedKeys.get(`${suggestion.id}:${i}`);
           const saved = !!savedId;
@@ -1090,7 +1090,7 @@ function AgentCluster({
             <li
               key={i}
               className={cn(
-                "group relative -mx-1.5 px-1.5 py-1 rounded transition-colors",
+                "group relative -mx-2 px-2 py-2 rounded-md transition-colors",
                 saved
                   ? "bg-amber-500/[0.05] dark:bg-amber-500/[0.07]"
                   : "hover:bg-ink-900/[0.025] dark:hover:bg-ink-50/[0.03]",
