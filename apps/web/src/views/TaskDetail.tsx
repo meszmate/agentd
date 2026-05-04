@@ -365,6 +365,26 @@ export function TaskDetail({ task }: { task: Task }) {
     task.status === "waiting_input" ||
     task.status === "waiting_perm";
 
+  // Defensive cleanup: when the task moves out of a running state (idle
+  // between turns, done, failed, stopped), clear any leftover streaming
+  // UI driven by per-event state. The runner may not always emit a
+  // `message_end` for every open `message_delta` stream — if claude's
+  // proc gets SIGTERMed mid-stream by `agentd-progress --done`, the WS
+  // reconnects between block_delta and block_stop, or codex exits while
+  // a delta is in flight, the UI's `streams` map keeps rendering the
+  // blinking λ + "streaming" forever (until a tab-switch unmounts the
+  // component and resets local state). Same goes for `turn.startedAt`
+  // and `lastToolHint` — the realtime push of `task.status` is the
+  // authoritative signal that the turn is over, so trust it and reset
+  // the per-turn UI from there instead of relying on every event
+  // landing in order.
+  useEffect(() => {
+    if (isRunning) return;
+    setStreams((prev) => (Object.keys(prev).length ? {} : prev));
+    setTurn((cur) => (cur.startedAt == null ? cur : { startedAt: null, tokens: cur.tokens }));
+    setLastToolHint((cur) => (cur == null ? cur : null));
+  }, [isRunning]);
+
   const onStop = async () => {
     try {
       await stop.mutateAsync();
