@@ -1,4 +1,4 @@
-import { eq, desc } from "drizzle-orm";
+import { and, desc, eq, lt } from "drizzle-orm";
 import type {
   Message,
   MirrorTarget,
@@ -147,6 +147,16 @@ export function markTaskCompacted(db: Db, id: string): Task | null {
     .where(eq(tasks.id, id))
     .run();
   return getTask(db, id);
+}
+
+export function pruneTaskMessagesBefore(
+  db: Db,
+  taskId: string,
+  ts: number,
+): void {
+  db.delete(messages)
+    .where(and(eq(messages.taskId, taskId), lt(messages.ts, ts)))
+    .run();
 }
 
 /** Mark a task as closed with an optional reason ("merged" / "abandoned" / etc.). */
@@ -389,7 +399,7 @@ export function setTaskPrUrl(db: Db, id: string, prUrl: string): void {
 export function setTaskCodexThreadId(
   db: Db,
   id: string,
-  threadId: string,
+  threadId: string | null,
 ): void {
   db.update(tasks)
     .set({ codexThreadId: threadId, updatedAt: Date.now() })

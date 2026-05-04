@@ -165,7 +165,6 @@ import {
   renameTmuxWindow,
   sendTmuxKeys,
   reorderTasks,
-  markTaskCompacted,
 } from "@agentd/core";
 import type { PluginManager } from "./pluginManager.ts";
 import { requireSession, bearerOrHeader } from "./auth.ts";
@@ -1718,21 +1717,8 @@ export function buildServer(opts: BuildServerOptions) {
     const task = tasks.get(id);
     if (!task) return c.json({ error: "not found" }, 404);
     const body = (await c.req.json().catch(() => ({}))) as { focus?: string };
-    const focus = (body.focus ?? "").trim();
-    // Slash commands like `/compact` only work in claude-code's
-    // interactive mode. We're driving claude in stream-json input
-    // mode where everything is treated as a literal user message,
-    // so a textual directive is the only thing that actually
-    // compresses context. Same instruction works for codex too.
-    const directive = focus
-      ? `Please summarize what you've done so far in this conversation in ~200 words, focusing on "${focus}". Drop intermediate scratch work and continue from the compact summary.`
-      : "Please summarize what you've done so far in this conversation in ~200 words. Drop intermediate scratch work and continue from the compact summary.";
     try {
-      await tasks.sendInput(id, directive);
-      // Watermark — the web draws a "context compacted" divider in
-      // the timeline at this ts so the operator can tell which
-      // earlier messages are still in working memory.
-      markTaskCompacted(db, id);
+      const directive = await tasks.compact(id, body.focus);
       pubTaskChanged(id);
       return c.json({ ok: true, agent: task.agent, directive });
     } catch (e) {

@@ -26,6 +26,8 @@ import {
   listTasks,
   listTasksByPlanGroup,
   listMessages,
+  markTaskCompacted,
+  pruneTaskMessagesBefore,
   createCouncil as dbCreateCouncil,
   createSuggestion,
   dismissSuggestion as dbDismissSuggestion,
@@ -118,6 +120,7 @@ export class TaskManager {
    * joined with blank lines so they read like one continuous note.
    */
   private inputQueue = new Map<string, string[]>();
+  private compacting = new Map<string, { startedAt: number }>();
   /**
    * Tasks whose agent signaled clean completion via `agentd-progress
    * --done`. The runner closes stdin in response, but claude's CLI may
@@ -689,6 +692,19 @@ export class TaskManager {
     await this.spawnRunner(task, text, true);
   }
 
+  async compact(taskId: string, focus?: string): Promise<string> {
+    const task = getTask(this.db, taskId);
+    if (!task) throw new Error("task not found");
+    const f = (focus ?? "").trim();
+    const directive = f
+      ? `Please summarize what you've done so far in this conversation in ~200 words, focusing on "${f}". Drop intermediate scratch work and continue from the compact summary.`
+      : "Please summarize what you've done so far in this conversation in ~200 words. Drop intermediate scratch work and continue from the compact summary.";
+    this.compacting.set(taskId, { startedAt: Date.now() });
+    await this.sendInput(taskId, directive);
+    markTaskCompacted(this.db, taskId);
+    return directive;
+  }
+
   /**
    * Steer modes:
    *   queue     — for live-input runners (claude), inject as the next
@@ -863,6 +879,25 @@ export class TaskManager {
     return q.join("\n\n");
   }
 
+  private finalizeCompaction(taskId: string): void {
+    const pending = this.compacting.get(taskId);
+    if (!pending) return;
+    this.compacting.delete(taskId);
+    const msgs = listMessages(this.db, taskId);
+    const summary = [...msgs]
+      .reverse()
+      .find((m) => m.role === "agent" && m.ts >= pending.startedAt);
+    pruneTaskMessagesBefore(this.db, taskId, summary?.ts ?? pending.startedAt);
+    markTaskCompacted(this.db, taskId);
+    setTaskCodexThreadId(this.db, taskId, null);
+    const fresh = getTask(this.db, taskId);
+    if (fresh) this.bus.publishSystem({ kind: "task_changed", task: fresh });
+    const session = this.running.get(taskId);
+    if (session?.runner.supportsLiveInput && session.runner.running) {
+      void session.runner.stop("SIGTERM").catch(() => {});
+    }
+  }
+
   async stop(taskId: string): Promise<void> {
     const session = this.running.get(taskId);
     if (!session) {
@@ -971,6 +1006,16 @@ export class TaskManager {
       if (projectInstructions && enabled) {
         appendParts.push(
           `# Project instructions\n\n${projectInstructions}\n\nYou can update this guidance with \`agentd-instructions write "<text>"\` if you discover something important worth persisting for future runs.`,
+        );
+      }
+    }
+    if (task.lastCompactedAt) {
+      const compactSummary = [...listMessages(this.db, task.id)]
+        .reverse()
+        .find((m) => m.role === "agent" && m.ts >= (task.lastCompactedAt ?? 0));
+      if (compactSummary?.content.trim()) {
+        appendParts.push(
+          `# Compacted conversation summary\n\n${compactSummary.content.trim()}`,
         );
       }
     }
@@ -1180,7 +1225,13 @@ export class TaskManager {
       // message — perfect moment to flush the queue. The per-row
       // Steer button is the manual mid-turn force; if the operator
       // just lets the queue sit, items drain themselves here.
+      if (status === "done" && this.compacting.has(taskId)) {
+        this.finalizeCompaction(taskId);
+      }
       if (status === "idle") {
+        if (this.compacting.has(taskId)) {
+          this.finalizeCompaction(taskId);
+        } else {
         const sess = this.running.get(taskId);
         if (sess?.runner.supportsLiveInput) {
           void this.autoDrainQueue(taskId);
@@ -1207,6 +1258,7 @@ export class TaskManager {
               });
             }
           }
+        }
         }
       }
     } else if (event.kind === "usage") {
