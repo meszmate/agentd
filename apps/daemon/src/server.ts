@@ -577,6 +577,11 @@ export function buildServer(opts: BuildServerOptions) {
     return c.json({
       models: { claude, codex },
       defaults: cfg.defaultModel,
+      // Operator's preferred thinking level per agent, surfaced here so
+      // the spawn UI can pre-fill the dot/picker without an extra
+      // round-trip. Editable via PATCH /api/config; falls back to
+      // claude=xhigh / codex=high if the operator never set it.
+      defaultThinking: cfg.defaultThinking,
       // Source-of-truth metadata so the UI can show a freshness hint
       // and a one-click refresh affordance ("Codex list updated 3
       // min ago — Refresh"). Helps when a brand-new model lands and

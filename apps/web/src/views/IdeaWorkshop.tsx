@@ -1489,18 +1489,26 @@ function SpawnDialog({
     setModel(def && agentModels.some((m) => m.id === def) ? def : "");
   }, [agent, agentModels, model, defaults]);
 
-  // Snap the thinking level off `max` (claude-only) or `minimal`
-  // (codex-only) when the operator switches agents — leave the empty
-  // sentinel ("") alone so the dialog still lets the server default
-  // win.
+  // Seed the picker with the operator's preferred thinking level for
+  // the chosen agent (`cfg.defaultThinking`, surfaced via /api/models).
+  // Falls back to xhigh for claude and high for codex if config hasn't
+  // loaded yet — those match the schema defaults so we're never out of
+  // sync. Also clamps if the operator switches agents while the field
+  // holds an inapplicable value (`max` on codex / `minimal` on claude).
+  const defaultThinking = modelsQ.data?.defaultThinking;
   useEffect(() => {
     setThinkingLevel((cur) => {
-      if (cur === "") return cur;
+      // Clamp any cross-agent value first.
       if (agent === "claude" && cur === "minimal") return "low";
       if (agent === "codex" && cur === "max") return "xhigh";
+      // Empty / unset → snap to the operator's per-agent default so
+      // the picker opens reflecting their preference.
+      if (cur === "") {
+        return defaultThinking?.[agent] ?? (agent === "claude" ? "xhigh" : "high");
+      }
       return cur;
     });
-  }, [agent]);
+  }, [agent, defaultThinking?.claude, defaultThinking?.codex]);
 
   const promptPreview =
     idea.planDraft?.trim() || idea.description?.trim() || idea.text.trim();
@@ -1945,7 +1953,10 @@ function SpawnDialog({
                         }
                         disabled={submitting}
                         items={[
-                          { value: "", label: "default" },
+                          {
+                            value: "",
+                            label: `auto · ${defaultThinking?.[agent] ?? (agent === "claude" ? "xhigh" : "high")}`,
+                          },
                           ...thinkingLevels.map((lvl) => ({
                             value: lvl,
                             label: lvl,

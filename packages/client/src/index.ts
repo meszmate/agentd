@@ -275,6 +275,12 @@ export class AgentdClient {
     models: AgentdModelRegistry;
     defaults?: { claude?: string; codex?: string };
     /**
+     * Operator's preferred thinking level per agent, set in
+     * `cfg.defaultThinking`. Spawn UIs read this so the picker opens
+     * pre-filled with the operator's preference instead of "auto".
+     */
+    defaultThinking?: { claude: ThinkingLevel; codex: ThinkingLevel };
+    /**
      * Where each agent's model list was sourced from, so the UI can
      * surface "list pulled from codex 3 min ago" with a refresh
      * affordance. `fetchedAt` is the ISO date the cache file was
