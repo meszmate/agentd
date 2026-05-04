@@ -5,8 +5,10 @@ import {
   BookText,
   CalendarClock,
   ChevronRight,
+  CircleDot,
   FileTerminal,
   FolderGit2,
+  GitPullRequest,
   Home,
   Inbox,
   Plug,
@@ -602,6 +604,35 @@ function ProjectsTreeSection() {
   );
 }
 
+function ProjectGithubBadges({ project }: { project: Project | null }) {
+  if (!project) return null;
+  const issues = project.openIssueCount ?? 0;
+  const prs = project.openPrCount ?? 0;
+  if (issues === 0 && prs === 0) return null;
+  return (
+    <>
+      {prs > 0 && (
+        <span
+          className="inline-flex items-center gap-0.5 font-mono text-[10px] tabular-nums text-emerald-700 dark:text-emerald-300 shrink-0"
+          title={`${prs} open pull request${prs === 1 ? "" : "s"}`}
+        >
+          <GitPullRequest className="h-3 w-3" />
+          {prs}
+        </span>
+      )}
+      {issues > 0 && (
+        <span
+          className="inline-flex items-center gap-0.5 font-mono text-[10px] tabular-nums text-sky-700 dark:text-sky-300 shrink-0"
+          title={`${issues} open issue${issues === 1 ? "" : "s"}`}
+        >
+          <CircleDot className="h-3 w-3" />
+          {issues}
+        </span>
+      )}
+    </>
+  );
+}
+
 function ProjectGroupRow({
   group,
   open,
@@ -729,6 +760,7 @@ function ProjectGroupRow({
               +{unread}
             </span>
           )}
+          <ProjectGithubBadges project={project} />
           <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 shrink-0">
             {total}
           </span>

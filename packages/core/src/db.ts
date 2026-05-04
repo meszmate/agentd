@@ -289,6 +289,15 @@ export const projects = sqliteTable("projects", {
    * resolved one yet.
    */
   githubRepo: text("github_repo"),
+  /**
+   * Cached open issue / PR counts for the GitHub remote. NULL until the
+   * first `gh` probe. Refreshed on the `github/refresh` endpoint, on PR
+   * actions, on spawn, and lazily when the projects list is fetched.
+   * Surfaced as tiny badges on each sidebar project row.
+   */
+  openIssueCount: integer("open_issue_count"),
+  openPrCount: integer("open_pr_count"),
+  githubCountsAt: integer("github_counts_at"),
 });
 
 export const templates = sqliteTable("templates", {
@@ -643,6 +652,9 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE projects ADD COLUMN github_repo TEXT",
   "ALTER TABLE tasks ADD COLUMN github_issue INTEGER",
   "ALTER TABLE tasks ADD COLUMN github_pr INTEGER",
+  "ALTER TABLE projects ADD COLUMN open_issue_count INTEGER",
+  "ALTER TABLE projects ADD COLUMN open_pr_count INTEGER",
+  "ALTER TABLE projects ADD COLUMN github_counts_at INTEGER",
 ];
 
 function migrate(sqlite: Database): void {

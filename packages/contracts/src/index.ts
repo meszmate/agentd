@@ -1259,6 +1259,18 @@ export const Project = z.object({
    * Null means either no GitHub remote, or `gh` hasn't reported one yet.
    */
   githubRepo: z.string().nullable().optional(),
+  /**
+   * Cached counts of open issues / open PRs for the project's GitHub
+   * remote. Null until the first probe. Refreshed on
+   * `POST /projects/:id/github/refresh`, after PR actions, after spawning
+   * a task from an issue/PR, and lazily on first list. Drives the tiny
+   * badges on the sidebar project rows so operators see the at-a-glance
+   * count without opening the GitHub tab.
+   */
+  openIssueCount: z.number().int().nullable().optional(),
+  openPrCount: z.number().int().nullable().optional(),
+  /** Wall-clock of the last counts refresh. Used for staleness checks. */
+  githubCountsAt: z.number().nullable().optional(),
 });
 export type Project = z.infer<typeof Project>;
 

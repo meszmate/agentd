@@ -177,6 +177,8 @@ import {
   prComment as ghPrComment,
   prReview as ghPrReview,
   prMerge as ghPrMerge,
+  countOpenIssues as ghCountOpenIssues,
+  countOpenPrs as ghCountOpenPrs,
   formatIssueConversation,
   formatPrConversation,
   renderConfigTemplate,
@@ -2762,7 +2764,18 @@ export function buildServer(opts: BuildServerOptions) {
 
   // ── Projects ────────────────────────────────────────────────────────
   api.get("/projects", (c) => {
-    return c.json({ projects: listProjects(db) });
+    const list = listProjects(db);
+    // Lazy first-time fill of sidebar GitHub badges. Any project that
+    // has a known `githubRepo` but no cached counts yet kicks off a
+    // background refresh; the bus event flips badges on without a
+    // poll. Bounded fan-out via Promise.all but capped at the existing
+    // gh process limit (gh handles its own concurrency).
+    for (const p of list) {
+      if (p.githubRepo && p.openIssueCount == null && p.openPrCount == null) {
+        void refreshGithubCounts(p).catch(() => {});
+      }
+    }
+    return c.json({ projects: list });
   });
 
   api.get("/projects/:idOrSlug", (c) => {
@@ -4182,6 +4195,37 @@ export function buildServer(opts: BuildServerOptions) {
     return slug;
   }
 
+  /**
+   * Refresh the cached open-issue/PR counts for a project. Runs both
+   * `gh` calls in parallel and writes the results back to the project
+   * row. Best-effort — a `gh` failure leaves the prior cached count in
+   * place (we only overwrite when the call succeeded). Publishes
+   * `project_changed` so every connected sidebar updates without
+   * polling. Safe to fire-and-forget; callers that need the result
+   * await it.
+   */
+  async function refreshGithubCounts(project: {
+    id: string;
+    path: string;
+    githubRepo?: string | null;
+  }): Promise<void> {
+    const slug = await resolveProjectGithubRepo(project);
+    if (!slug) return;
+    const [issues, prs] = await Promise.all([
+      ghCountOpenIssues(project.path),
+      ghCountOpenPrs(project.path),
+    ]);
+    const patch: {
+      openIssueCount?: number | null;
+      openPrCount?: number | null;
+      githubCountsAt?: number | null;
+    } = { githubCountsAt: Date.now() };
+    if (issues != null) patch.openIssueCount = issues;
+    if (prs != null) patch.openPrCount = prs;
+    const next = updateProject(db, project.id, patch);
+    if (next) pubProjectChanged(next.id);
+  }
+
   api.get("/projects/:idOrSlug/github/repo", async (c) => {
     const key = c.req.param("idOrSlug");
     const project =
@@ -4235,6 +4279,26 @@ export function buildServer(opts: BuildServerOptions) {
     return out;
   }
 
+  /**
+   * True when a `GithubListQuery` is the unfiltered "open" default —
+   * `state=open` (or unset) and no search/label/author/etc filters.
+   * The list endpoints use this to opportunistically update the
+   * cached open-count cache (and therefore the sidebar badges) from
+   * the response length without an extra `gh` round-trip. Filtered
+   * lists would give a misleading count, so we skip them.
+   */
+  function isNaturalOpenView(opts: GithubListQuery): boolean {
+    if (opts.state && opts.state !== "open") return false;
+    if (opts.search?.trim()) return false;
+    if (opts.labels && opts.labels.length > 0) return false;
+    if (opts.author?.trim()) return false;
+    if (opts.assignee?.trim()) return false;
+    if (opts.milestone?.trim()) return false;
+    if (opts.base?.trim()) return false;
+    if (opts.draft) return false;
+    return true;
+  }
+
   api.get("/projects/:idOrSlug/github/issues", async (c) => {
     const key = c.req.param("idOrSlug");
     const project =
@@ -4246,6 +4310,12 @@ export function buildServer(opts: BuildServerOptions) {
     const r = await ghListIssues(project.path, opts);
     if (!r.ok) {
       return c.json({ ok: false, repo: slug, issues: [], error: r.error ?? "gh failed" });
+    }
+    // Operator opened the GitHub tab — kick a background count
+    // refresh so the sidebar badges follow the same view.
+    // Fire-and-forget; the bus event flips badges without polling.
+    if (isNaturalOpenView(opts)) {
+      void refreshGithubCounts(project).catch(() => {});
     }
     return c.json({ ok: true, repo: slug, issues: r.data ?? [], query: opts });
   });
@@ -4261,6 +4331,9 @@ export function buildServer(opts: BuildServerOptions) {
     const r = await ghListPrs(project.path, opts);
     if (!r.ok) {
       return c.json({ ok: false, repo: slug, prs: [], error: r.error ?? "gh failed" });
+    }
+    if (isNaturalOpenView(opts)) {
+      void refreshGithubCounts(project).catch(() => {});
     }
     return c.json({ ok: true, repo: slug, prs: r.data ?? [], query: opts });
   });
@@ -4313,6 +4386,7 @@ export function buildServer(opts: BuildServerOptions) {
     const project =
       getProjectById(db, key) ?? getProjectBySlug(db, key);
     if (!project) return c.json({ error: "not found" }, 404);
+    await refreshGithubCounts(project).catch(() => {});
     pubGithubRefreshed(project.id);
     return c.json({ ok: true });
   });
@@ -4428,6 +4502,7 @@ export function buildServer(opts: BuildServerOptions) {
           : {}),
       });
       pubTaskChanged(task.id);
+      void refreshGithubCounts(project).catch(() => {});
       pubGithubRefreshed(project.id);
       return c.json({ task });
     } catch (e) {
@@ -4470,6 +4545,7 @@ export function buildServer(opts: BuildServerOptions) {
     }
     const r = await ghPrComment(ctx.project.path, ctx.number, commentBody);
     if (!r.ok) return c.json({ error: r.error ?? "gh pr comment failed" }, 400);
+    void refreshGithubCounts(ctx.project).catch(() => {});
     pubGithubRefreshed(ctx.project.id);
     return c.json({ ok: true });
   });
@@ -4490,6 +4566,7 @@ export function buildServer(opts: BuildServerOptions) {
       parsed.data.body,
     );
     if (!r.ok) return c.json({ error: r.error ?? "gh pr review failed" }, 400);
+    void refreshGithubCounts(ctx.project).catch(() => {});
     pubGithubRefreshed(ctx.project.id);
     return c.json({ ok: true });
   });
@@ -4505,6 +4582,7 @@ export function buildServer(opts: BuildServerOptions) {
     const method = parsed.data.method ?? "squash";
     const r = await ghPrMerge(ctx.project.path, ctx.number, method);
     if (!r.ok) return c.json({ error: r.error ?? "gh pr merge failed" }, 400);
+    void refreshGithubCounts(ctx.project).catch(() => {});
     pubGithubRefreshed(ctx.project.id);
     return c.json({ ok: true });
   });

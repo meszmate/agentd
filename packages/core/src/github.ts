@@ -305,6 +305,61 @@ function buildListArgs(
 }
 
 /**
+ * Cheap count fetch — `gh issue list --state open --limit 500 --json
+ * number` and return the array length. Used to populate the sidebar
+ * badges without paying for the full list payload (no labels, body,
+ * comments, etc.). Returns null on any failure so callers can render
+ * "unknown" instead of "0" — the difference matters for first-load UX.
+ */
+export async function countOpenIssues(cwd: string): Promise<number | null> {
+  const r = await run(
+    [
+      "gh",
+      "issue",
+      "list",
+      "--state",
+      "open",
+      "--limit",
+      "500",
+      "--json",
+      "number",
+    ],
+    cwd,
+  );
+  if (r.exitCode !== 0) return null;
+  try {
+    const parsed = JSON.parse(r.stdout);
+    return Array.isArray(parsed) ? parsed.length : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function countOpenPrs(cwd: string): Promise<number | null> {
+  const r = await run(
+    [
+      "gh",
+      "pr",
+      "list",
+      "--state",
+      "open",
+      "--limit",
+      "500",
+      "--json",
+      "number",
+    ],
+    cwd,
+  );
+  if (r.exitCode !== 0) return null;
+  try {
+    const parsed = JSON.parse(r.stdout);
+    return Array.isArray(parsed) ? parsed.length : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * `gh issue list --json …`. Accepts the full `gh issue list` filter
  * vocabulary plus a `search` query that uses github.com's own search
  * syntax (`is:open author:foo label:bug in:title,body`). Default limit

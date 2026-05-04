@@ -50,6 +50,9 @@ function rowToProject(row: typeof projects.$inferSelect): Project {
     autoTaskThread: !!row.autoTaskThread,
     brainstormAuto,
     githubRepo: row.githubRepo ?? null,
+    openIssueCount: row.openIssueCount ?? null,
+    openPrCount: row.openPrCount ?? null,
+    githubCountsAt: row.githubCountsAt ?? null,
   };
 }
 
@@ -130,6 +133,9 @@ export interface UpdateProjectInput {
   autoTaskThread?: boolean;
   brainstormAuto?: BrainstormAuto | null;
   githubRepo?: string | null;
+  openIssueCount?: number | null;
+  openPrCount?: number | null;
+  githubCountsAt?: number | null;
 }
 
 export function updateProject(
@@ -160,6 +166,11 @@ export function updateProject(
       ? JSON.stringify(patch.brainstormAuto)
       : null;
   if (patch.githubRepo !== undefined) next.githubRepo = patch.githubRepo;
+  if (patch.openIssueCount !== undefined)
+    next.openIssueCount = patch.openIssueCount;
+  if (patch.openPrCount !== undefined) next.openPrCount = patch.openPrCount;
+  if (patch.githubCountsAt !== undefined)
+    next.githubCountsAt = patch.githubCountsAt;
   // Drizzle's .set() throws "No values to set" on an empty object —
   // skip the UPDATE entirely when the patch had nothing meaningful.
   if (Object.keys(next).length === 0) return cur;
