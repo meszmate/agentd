@@ -27,6 +27,7 @@ import { ToolLine, WorkCard, pairToolEvents } from "@/components/tool-line";
 import type { TaskPlanItem } from "@/views/TaskPlan";
 import {
   useFireQueuedSteer,
+  useCompactTask,
   useRemoveQueuedSteer,
   useSendInput,
   useTaskSteer,
@@ -87,20 +88,21 @@ export function TaskTimeline({
   compactedAt?: number | null;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const client = useClient();
   const { toast } = useApp();
   const [compacting, setCompacting] = useState(false);
+  const compactTask = useCompactTask(taskId);
 
   const window = contextWindow ?? 200_000;
   const used = totalTokens ?? 0;
   const usagePct = Math.min(100, Math.round((used / window) * 100));
   const overSoftLimit = usagePct >= 80;
+  const busy = disabled || compacting;
 
   const compact = async () => {
     setCompacting(true);
     try {
-      await client.compactTask(taskId);
-      toast("Sent /compact — agent will summarize and continue");
+      await compactTask.mutateAsync("");
+      toast("Compaction sent");
     } catch (e) {
       onError((e as Error).message);
     } finally {
@@ -237,7 +239,7 @@ export function TaskTimeline({
             size="xs"
             variant={usagePct >= 92 ? "default" : "outline"}
             onClick={compact}
-            disabled={compacting || disabled}
+            disabled={busy}
           >
             {compacting ? (
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -300,7 +302,7 @@ export function TaskTimeline({
                         <li>
                           <WorkCard
                             pairs={g.pairs}
-                            liveTrailing={disabled && gi === lastToolsIdx}
+                            liveTrailing={busy && gi === lastToolsIdx}
                           />
                         </li>
                       ) : (
@@ -335,7 +337,7 @@ export function TaskTimeline({
                   </div>
                 </li>
               ))}
-              {disabled && streamEntries.length === 0 && (
+              {busy && streamEntries.length === 0 && (
                 <li>
                   <div className="flex items-start gap-2.5">
                     <span className="shrink-0 mt-0.5 font-mono text-[14px] font-semibold leading-none text-ember-500 animate-blink select-none">
@@ -434,8 +436,7 @@ const TaskComposer = memo(function TaskComposer({
     }
   };
 
-  const fireRow = async (index: number, line: string) => {
-    appendLocal("user", line);
+  const fireRow = async (index: number) => {
     try {
       await fireQueued.mutateAsync(index);
     } catch (e) {
@@ -485,7 +486,7 @@ const TaskComposer = memo(function TaskComposer({
                   <div className="flex items-center gap-1 shrink-0">
                     <button
                       type="button"
-                      onClick={() => void fireRow(i, line)}
+                      onClick={() => void fireRow(i)}
                       disabled={fireQueued.isPending}
                       title="Steer — send to the agent now (lands after the next tool call)"
                       className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md font-mono text-[10px] uppercase tracking-[0.1em] font-semibold bg-gradient-to-b from-violet-500 to-violet-600 text-white shadow-sm shadow-violet-900/20 hover:from-violet-400 hover:to-violet-500 active:from-violet-600 active:to-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"

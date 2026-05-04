@@ -42,6 +42,7 @@ import type {
   UpdateProjectRequest,
   UpdateSkillRequest,
   WsServerEvent,
+  AgentKind,
 } from "@agentd/contracts";
 
 /**
@@ -1561,6 +1562,11 @@ export class AgentdClient {
   /** Suggest a conventional `<prefix>/<slug>` branch name from the task prompt. */
   async suggestBranchName(
     prompt: string,
+    opts: {
+      agent?: AgentKind;
+      model?: string;
+      thinkingLevel?: ThinkingLevel;
+    } = {},
   ): Promise<{
     prefix: "feature" | "fix" | "refactor" | "chore";
     slug: string;
@@ -1569,7 +1575,7 @@ export class AgentdClient {
   }> {
     return this.req("/api/branch-name", {
       method: "POST",
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, ...opts }),
     });
   }
 
@@ -1917,6 +1923,7 @@ export class AgentdClient {
 
   async getTaskContext(id: string): Promise<{
     agentInstructions: string;
+    projectInstructions: string;
     skills: { id: string; displayName: string; body: string }[];
     repoCanonical: { path: string; content: string } | null;
     suffix: {

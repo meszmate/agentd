@@ -32,6 +32,7 @@ import {
   UpdateIdeaRequest,
   CreateTodoRequest,
   UpdateTodoRequest,
+  type Task,
   type WsServerEvent,
 } from "@agentd/contracts";
 import { join, normalize, relative, resolve } from "node:path";
@@ -130,6 +131,7 @@ import {
   getSchedule,
   listSchedules,
   setScheduleEnabled,
+  type AiHelperOptions,
   type AgentdPaths,
   type Db,
   type PluginName,
@@ -143,7 +145,6 @@ import {
   writeSkillFile,
   deleteSkillFile,
   skillDirPath,
-  renderSkillsBudgeted,
   renderSkillsCatalog,
   renderRepoContext,
   getProjectById,
@@ -212,6 +213,17 @@ export function buildServer(opts: BuildServerOptions) {
   }
   function pubTaskRemoved(taskId: string): void {
     bus.publishSystem({ kind: "task_removed", taskId });
+  }
+  function helperForTask(task: Task): AiHelperOptions {
+    const cfg = loadConfig(paths.root);
+    const helper: AiHelperOptions = {
+      agent: task.agent,
+      effort: task.thinkingLevel ?? cfg.aiHelpers.effort,
+    };
+    const selectedModel =
+      task.model?.trim() || cfg.defaultModel?.[task.agent] || "";
+    if (selectedModel) helper.model = selectedModel;
+    return helper;
   }
   function pubProjectChanged(projectId: string): void {
     const p = getProjectById(db, projectId);
@@ -986,7 +998,7 @@ export function buildServer(opts: BuildServerOptions) {
       ...(body.hint ? { hint: body.hint } : {}),
       fallbackHint: task.title,
       baseRef: task.baseBranch,
-      helper: cfg.aiHelpers,
+      helper: helperForTask(task),
       ...(cfg.commitInstructions
         ? { extraInstructions: cfg.commitInstructions }
         : {}),
@@ -1012,7 +1024,7 @@ export function buildServer(opts: BuildServerOptions) {
       ...(body.hint ? { hint: body.hint } : {}),
       fallbackHint: task.title,
       baseRef: task.baseBranch,
-      helper: cfg.aiHelpers,
+      helper: helperForTask(task),
       ...(cfg.commitInstructions
         ? { extraInstructions: cfg.commitInstructions }
         : {}),
@@ -1087,7 +1099,7 @@ export function buildServer(opts: BuildServerOptions) {
       baseRef: task.baseBranch,
       taskPrompt,
       taskTitle: task.title,
-      helper: cfg.aiHelpers,
+      helper: helperForTask(task),
       ...(cfg.prInstructions
         ? { extraInstructions: cfg.prInstructions }
         : {}),
@@ -1152,11 +1164,31 @@ export function buildServer(opts: BuildServerOptions) {
   api.post("/branch-name", async (c) => {
     const body = (await c.req.json().catch(() => null)) as {
       prompt?: string;
+      agent?: string;
+      model?: string;
+      thinkingLevel?: import("@agentd/contracts").ThinkingLevel;
     } | null;
     const prompt = (body?.prompt ?? "").trim();
     if (!prompt) return c.json({ error: "prompt required" }, 400);
     const cfg = loadConfig(paths.root);
-    const r = await generateBranchName(prompt, { helper: cfg.aiHelpers });
+    const agent =
+      body?.agent === "claude" || body?.agent === "codex"
+        ? body.agent
+        : null;
+    const helper: AiHelperOptions = agent
+      ? {
+          agent,
+          effort: body?.thinkingLevel ?? cfg.aiHelpers.effort,
+        }
+      : { ...cfg.aiHelpers };
+    if (agent) {
+      const selectedModel =
+        body?.model?.trim() || cfg.defaultModel?.[agent] || "";
+      if (selectedModel) helper.model = selectedModel;
+    } else if (body?.model?.trim()) {
+      helper.model = body.model.trim();
+    }
+    const r = await generateBranchName(prompt, { helper });
     return c.json(r);
   });
 
@@ -1176,7 +1208,7 @@ export function buildServer(opts: BuildServerOptions) {
       const ai = await generateCommitMessage(task.worktreePath, {
         fallbackHint: task.title,
         baseRef: task.baseBranch,
-        helper: cfg.aiHelpers,
+        helper: helperForTask(task),
         ...(cfg.commitInstructions
           ? { extraInstructions: cfg.commitInstructions }
           : {}),
@@ -1570,13 +1602,6 @@ export function buildServer(opts: BuildServerOptions) {
       });
     }
 
-    // Compute the trim that *would* apply if we re-rendered now.
-    const renderInfo = renderSkillsBudgeted(task.skills ?? [], {
-      agentdRoot: paths.root,
-      repoPath: task.repoPath,
-      maxTokens: cfg.maxContextTokens,
-    });
-
     // Read a repo-canonical instructions file if present.
     const candidateDocs = [
       ".agents/INSTRUCTIONS.md",
@@ -1613,8 +1638,11 @@ export function buildServer(opts: BuildServerOptions) {
         ? (task.latestTurnInputTokens ?? 0) + (task.latestTurnOutputTokens ?? 0)
         : null;
     const cumulativeTokens =
-      (task.totalInputTokens ?? 0) + (task.totalOutputTokens ?? 0);
-    const conversationTokens = liveTurnTokens ?? cumulativeTokens;
+      (task.totalInputTokens ?? 0) +
+      (task.totalOutputTokens ?? 0) +
+      (task.totalCacheReadTokens ?? 0) +
+      (task.totalCacheWriteTokens ?? 0);
+    const conversationTokens = liveTurnTokens ?? 0;
     // Per-agent context window. Claude Sonnet/Opus 4: 200K. Codex
     // (GPT-5 family) defaults to 200K too, though specific models
     // can run higher. Keep a single number for now; future work can
@@ -1630,17 +1658,33 @@ export function buildServer(opts: BuildServerOptions) {
 
     // Repo-context catalog — what we tell the agent about the worktree.
     const repoCtx = renderRepoContext({ worktreePath: task.worktreePath });
+    const project = task.projectId ? getProjectById(db, task.projectId) : null;
+    const projectInstructions =
+      project?.instructionsEnabled !== false
+        ? project?.instructions?.trim() || ""
+        : "";
+    const injectedParts = [
+      cfg.agentInstructions?.trim() || "",
+      projectInstructions
+        ? `# Project instructions\n\n${projectInstructions}`
+        : "",
+      skillsCatalog.text,
+      repoCtx.text,
+    ].filter((part) => part.trim().length > 0);
+    const injectedText = injectedParts.join("\n\n---\n\n");
+    const injectedTokens = Math.ceil(injectedText.length / 4);
 
     return c.json({
       agentInstructions: cfg.agentInstructions ?? "",
+      projectInstructions,
       skills,
       repoCanonical,
       // Suffix-prompt budget (skills + agentInstructions), trim metadata.
       suffix: {
         budget: cfg.maxContextTokens,
-        used: renderInfo.tokens,
-        kept: renderInfo.kept,
-        trimmed: renderInfo.trimmed,
+        used: injectedTokens,
+        kept: skillsCatalog.entries.map((e) => e.id),
+        trimmed: [],
       },
       // Progressive-disclosure catalogs — what the agent actually sees.
       catalogs: {
@@ -1650,10 +1694,9 @@ export function buildServer(opts: BuildServerOptions) {
       conversation: {
         used: conversationTokens,
         window: conversationWindow,
-        // True when we couldn't pin the most recent turn's footprint
-        // and fell back to the lifetime cumulative — the UI shows a
-        // hint so the operator knows the % is a worst-case estimate
-        // until the next turn rewrites the gauge.
+        // True when the current context gauge came from runner usage.
+        // False means there is no live reading yet, not that lifetime
+        // spend should be treated as context.
         liveTurn: liveTurnTokens != null,
         // Separate billing-style total — never decreases. Lets the
         // tab surface "current context" + "lifetime spend" without

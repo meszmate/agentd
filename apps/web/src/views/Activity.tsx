@@ -51,6 +51,7 @@ const KIND_LABEL: Record<Kind, string> = {
   raw: "raw",
   exit: "exit",
   usage: "usage",
+  queue_updated: "queue",
   progress: "step",
   share: "💭 share",
   ask: "❓ ask",
@@ -69,6 +70,7 @@ const KIND_TONE: Record<Kind, string> = {
   raw: "text-ink-500 dark:text-ink-400",
   exit: "text-ink-500 dark:text-ink-400",
   usage: "text-emerald-700 dark:text-emerald-300",
+  queue_updated: "text-violet-700 dark:text-violet-300",
   progress: "text-violet-700 dark:text-violet-300",
   share: "text-violet-700 dark:text-violet-300",
   ask: "text-amber-700 dark:text-amber-300",
@@ -88,6 +90,7 @@ const ALL_KINDS: Kind[] = [
   "status",
   "exit",
   "usage",
+  "queue_updated",
 ];
 
 function renderEvent(ev: AgentEvent): { primary: string; secondary?: string } {
@@ -141,6 +144,8 @@ function renderEvent(ev: AgentEvent): { primary: string; secondary?: string } {
     }
     case "answer":
       return { primary: ev.answer };
+    case "queue_updated":
+      return { primary: `${ev.queue.length} queued` };
     case "todos_updated":
       return { primary: "todos updated" };
   }
@@ -255,6 +260,7 @@ export function Activity() {
       raw: 0,
       exit: 0,
       usage: 0,
+      queue_updated: 0,
       progress: 0,
       share: 0,
       ask: 0,

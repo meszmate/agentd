@@ -440,9 +440,15 @@ export function addTaskUsage(db: Db, id: string, delta: UsageDelta): void {
   // task shows "live context = 44" because the only uncached chunk
   // is the new user prompt — the rest came from the prompt cache.
   // Codex reports the same shape (`cached_input_tokens`).
-  if (delta.inputTokens != null || delta.cacheReadTokens != null) {
+  if (
+    delta.inputTokens != null ||
+    delta.cacheReadTokens != null ||
+    delta.cacheWriteTokens != null
+  ) {
     patch.latestTurnInputTokens =
-      (delta.inputTokens ?? 0) + (delta.cacheReadTokens ?? 0);
+      (delta.inputTokens ?? 0) +
+      (delta.cacheReadTokens ?? 0) +
+      (delta.cacheWriteTokens ?? 0);
   }
   if (delta.outputTokens != null) {
     patch.latestTurnOutputTokens = delta.outputTokens;

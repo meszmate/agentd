@@ -172,6 +172,7 @@ export class CodexRunner implements AgentRunner {
   private streamTask: Promise<void> | null = null;
   private exitTask: Promise<void> | null = null;
   private threadId: string | null = null;
+  private suppressRouterErrorContinuation = false;
 
   constructor(private readonly opts: CodexRunnerOptions = {}) {}
 
@@ -305,11 +306,7 @@ export class CodexRunner implements AgentRunner {
     const stderrTask = (async () => {
       try {
         for await (const line of readLines(proc.stderr)) {
-          // Codex prints this banner whenever stdin isn't a tty — it's
-          // harmless (we point stdin at /dev/null on purpose) and just
-          // pollutes the timeline. Real errors still flow through.
-          if (line.includes("Reading additional input from stdin")) continue;
-          this.emit({ kind: "raw", stream: "stderr", text: line });
+          this.handleStderrLine(line);
         }
       } catch {
         // ignore
@@ -327,6 +324,43 @@ export class CodexRunner implements AgentRunner {
       if (this.proc === proc) this.proc = null;
       void Promise.allSettled([this.streamTask, stderrTask]);
     })();
+  }
+
+  private handleStderrLine(line: string): void {
+    if (line.includes("Reading additional input from stdin")) return;
+
+    const startsLogRecord = /^\d{4}-\d{2}-\d{2}T\S+\s+(ERROR|WARN|INFO|DEBUG|TRACE)\b/.test(
+      line,
+    );
+    if (this.suppressRouterErrorContinuation && !startsLogRecord) {
+      return;
+    }
+    if (startsLogRecord) {
+      this.suppressRouterErrorContinuation = false;
+    }
+
+    const routerError = /\bERROR\s+codex_core::tools::router:\s+error=(.*)$/s.exec(
+      line,
+    );
+    if (routerError) {
+      const detail = (routerError[1] ?? "tool failed").trim();
+      const filePath = / in ([^:\n]+):/.exec(detail)?.[1];
+      this.emit({
+        kind: "tool_call",
+        tool: "Edit",
+        args: filePath ? { file_path: filePath } : { source: "tool-router" },
+      });
+      this.emit({
+        kind: "tool_result",
+        tool: "Edit",
+        ok: false,
+        output: detail.slice(0, 4000),
+      });
+      this.suppressRouterErrorContinuation = true;
+      return;
+    }
+
+    this.emit({ kind: "raw", stream: "stderr", text: line });
   }
 
   /**
@@ -625,10 +659,19 @@ export class CodexRunner implements AgentRunner {
     if (item.type === "error") {
       if (isCompleted) {
         const ie = item as CodexErrorItem;
+        if (itemId && !this.emittedCall.has(itemId)) {
+          this.emittedCall.add(itemId);
+          this.emit({
+            kind: "tool_call",
+            tool: "Error",
+            args: {},
+          });
+        }
         this.emit({
-          kind: "raw",
-          stream: "stderr",
-          text: `[codex] ${ie.message ?? "error"}`,
+          kind: "tool_result",
+          tool: "Error",
+          ok: false,
+          output: ie.message ?? "error",
         });
       }
       return;
