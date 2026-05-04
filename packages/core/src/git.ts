@@ -1717,7 +1717,7 @@ const SLICE_BLOCK_INSTRUCTION = [
   ``,
   `Field rules: \`agent\` is "claude" or "codex". \`model\` is a free-form id ("opus", "sonnet", "haiku", "gpt-5-codex", or any id the operator's registry recognizes). \`thinkingLevel\` is "minimal" (codex-only) | "low" | "medium" | "high" | "xhigh" | "max" (claude-only); mismatches get clamped. \`permissionMode\` is "bypassPermissions" | "acceptEdits" | "plan".`,
   ``,
-  `Generic shape:`,
+  `Generic shape (the closing \`\`\` fence is REQUIRED — never omit it, the parser strips the block by matching open + close):`,
   `\`\`\`json-slices`,
   `[`,
   `  {"title":"<short label>","prompt":"<full self-contained instruction for this step>"},`,

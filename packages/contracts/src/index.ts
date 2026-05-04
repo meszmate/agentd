@@ -563,13 +563,51 @@ export const PlanSlice = z.object({
 export type PlanSlice = z.infer<typeof PlanSlice>;
 
 /**
- * Canonical regex for the `json-slices` block the planner appends
- * after the plan prose. Lenient on inner whitespace and on whether
- * the closing fence sits on its own line — agents emit slightly
- * different shapes and we'd rather strip too eagerly than leave
- * raw JSON in the operator's plan textarea.
+ * Open-fence marker for the planner's `json-slices` block. Agents
+ * occasionally forget to close the fence (especially when truncated
+ * or when the closing backticks fall off the end of the streamed
+ * reply), so the strip logic below handles both fenced and
+ * unfenced trailing JSON.
  */
+const SLICE_OPEN_FENCE_RE = /```json-slices[ \t]*\r?\n/gi;
+
+/** Closed form: open fence + content + close fence. Strict. */
 const SLICE_BLOCK_RE = /```json-slices[ \t]*\r?\n([\s\S]*?)\r?\n?```/gi;
+
+/**
+ * Bracket-balanced scan of a JSON array starting at `from`. Returns
+ * the end index (exclusive of the closing `]`) once the brackets
+ * balance, or -1 if the input ends inside the array. Tracks string
+ * literals so brackets inside JSON strings don't throw the count
+ * off.
+ */
+function scanJsonArrayEnd(text: string, from: number): number {
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = from; i < text.length; i++) {
+    const c = text[i]!;
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (inString) {
+      if (c === "\\") escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === "[" || c === "{") depth++;
+    else if (c === "]" || c === "}") {
+      depth--;
+      if (depth === 0 && c === "]") return i + 1;
+    }
+  }
+  return -1;
+}
 
 /**
  * Strip the trailing `json-slices` block(s) from a plan body and
@@ -578,9 +616,14 @@ const SLICE_BLOCK_RE = /```json-slices[ \t]*\r?\n([\s\S]*?)\r?\n?```/gi;
  * by the web app (defensive strip on display for legacy plans
  * persisted before the parser was wired up).
  *
- * If the block exists but the JSON inside is malformed, the block
- * is still stripped (so the operator never sees the raw markup) and
- * `slices` is returned empty.
+ * Order of attack:
+ *   1. Strict fenced match (open + close fence).
+ *   2. Open-fence-only fallback — bracket-balance the trailing JSON
+ *      array so partially-truncated agent replies still get parsed.
+ *
+ * If the block exists but the JSON is malformed, the block is still
+ * stripped (so the operator never sees raw markup) and slices is
+ * returned empty.
  */
 export function stripPlanSlicesBlock(text: string | null | undefined): {
   plan: string;
@@ -588,10 +631,12 @@ export function stripPlanSlicesBlock(text: string | null | undefined): {
 } {
   if (!text) return { plan: "", slices: [] };
   const slices: PlanSlice[] = [];
+
+  // Pass 1 — strict fenced blocks. Replace in place.
   let cleaned = text;
+  const fencedRe = new RegExp(SLICE_BLOCK_RE.source, SLICE_BLOCK_RE.flags);
   let m: RegExpExecArray | null;
-  const re = new RegExp(SLICE_BLOCK_RE.source, SLICE_BLOCK_RE.flags);
-  while ((m = re.exec(text)) !== null) {
+  while ((m = fencedRe.exec(text)) !== null) {
     const raw = (m[1] ?? "").trim();
     if (!raw) continue;
     try {
@@ -603,10 +648,39 @@ export function stripPlanSlicesBlock(text: string | null | undefined): {
         }
       }
     } catch {
-      // fall through — block still gets stripped below
+      // fall through — block still gets stripped
     }
   }
-  cleaned = text.replace(re, "").trimEnd();
+  cleaned = cleaned.replace(fencedRe, "").trimEnd();
+
+  // Pass 2 — open-fence-only fallback for replies that never closed
+  // the block. Bracket-balance the JSON; if it parses, lift the
+  // slices and snip everything from the open fence onward.
+  const openRe = new RegExp(SLICE_OPEN_FENCE_RE.source, SLICE_OPEN_FENCE_RE.flags);
+  const openMatch = openRe.exec(cleaned);
+  if (openMatch) {
+    const fenceStart = openMatch.index;
+    const arrStart = cleaned.indexOf("[", openMatch.index + openMatch[0].length);
+    if (arrStart !== -1) {
+      let arrEnd = scanJsonArrayEnd(cleaned, arrStart);
+      // Truncated reply: take whatever's there and try to parse.
+      if (arrEnd === -1) arrEnd = cleaned.length;
+      const raw = cleaned.slice(arrStart, arrEnd).trim();
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          for (const r of parsed) {
+            const safe = PlanSlice.safeParse(r);
+            if (safe.success) slices.push(safe.data);
+          }
+        }
+      } catch {
+        // ignore — strip even if parse failed
+      }
+    }
+    cleaned = cleaned.slice(0, fenceStart).trimEnd();
+  }
+
   return { plan: cleaned, slices };
 }
 
