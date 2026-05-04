@@ -94,6 +94,7 @@ import {
   addSuggestionValidation,
   listCouncils,
   listIdeaMessages,
+  listProviderRateLimits,
   listSavedIdeas,
   listSuggestions,
   markSavedIdeaSpawned,
@@ -634,6 +635,17 @@ export function buildServer(opts: BuildServerOptions) {
       },
     });
   });
+
+  /**
+   * Per-provider rate-limit snapshot. Currently populated by claude's
+   * `rate_limit_event` (one window per session at start, plus an
+   * extra one when status flips). The web reads this once on mount
+   * and patches its cache off the `provider_rate_limit_updated`
+   * WS event afterwards.
+   */
+  api.get("/rate-limits", (c) =>
+    c.json({ rateLimits: listProviderRateLimits(db) }),
+  );
 
   /* ── Councils ─────────────────────────────────────────────────────── */
 
@@ -5112,6 +5124,12 @@ export function buildServer(opts: BuildServerOptions) {
               type: "saved_idea_removed",
               ideaId: env.event.ideaId,
               projectId: env.event.projectId,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "provider_rate_limit_updated") {
+            send({
+              type: "provider_rate_limit_updated",
+              rateLimit: env.event.rateLimit,
               ts: env.ts,
             });
           }

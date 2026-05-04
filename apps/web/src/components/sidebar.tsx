@@ -22,6 +22,7 @@ import type { Project, Task } from "@agentd/contracts";
 import { cn, formatTs } from "@/lib/utils";
 import { Wordmark } from "@/components/wordmark";
 import { ServerCard } from "@/components/server-card";
+import { RateLimitChip } from "@/components/rate-limit-chip";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Kbd } from "@/components/ui/kbd";
 import { TaskGithubBadge } from "@/components/ui/task-github-badge";
@@ -119,6 +120,10 @@ export function Sidebar({
 
       <div className="px-3 pt-3 pb-2 shrink-0">
         <ServerCard />
+      </div>
+
+      <div className="px-3 pb-2 shrink-0">
+        <RateLimitChip />
       </div>
 
       <div className="px-3 pb-2 flex flex-col gap-1 shrink-0">

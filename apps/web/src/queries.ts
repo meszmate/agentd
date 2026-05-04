@@ -29,6 +29,7 @@ export const qk = {
   projects: () => ["projects"] as const,
   project: (idOrSlug: string) => ["project", idOrSlug] as const,
   bridgeSummary: () => ["bridge-summary"] as const,
+  rateLimits: () => ["rate-limits"] as const,
   discordChannels: () => ["discord-channels"] as const,
   projectSuggestions: (projectId: string) =>
     ["project-suggestions", projectId] as const,
@@ -218,6 +219,20 @@ export function useSettings() {
   return useQuery({
     queryKey: qk.settings(),
     queryFn: () => client.getSettings(),
+  });
+}
+
+/**
+ * Per-provider rate-limit snapshots — claude only today. Initial fetch
+ * on mount; the realtime bus patches this cache on every
+ * `provider_rate_limit_updated` event so the chip refreshes without
+ * polling.
+ */
+export function useRateLimits() {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.rateLimits(),
+    queryFn: () => client.listRateLimits(),
   });
 }
 
