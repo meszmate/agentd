@@ -1545,23 +1545,6 @@ export class AgentdClient {
     });
   }
 
-  async getToolStats(recent = 50): Promise<{
-    total: number;
-    counts: Record<string, number>;
-    recent: {
-      id: string;
-      taskId: string;
-      taskTitle: string | null;
-      taskAgent: string | null;
-      tool: string;
-      preview: string;
-      ts: number;
-    }[];
-    earliest: number | null;
-  }> {
-    return this.req(`/api/tools/stats?recent=${recent}`);
-  }
-
   /** Per-task model override. Empty string clears it. */
   async setTaskModel(
     id: string,

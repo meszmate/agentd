@@ -80,7 +80,6 @@ import {
   getPrState,
   setTaskDiscordThread,
   setTaskPrUrl,
-  aggregateToolStats,
   closeTask,
   createTodo,
   deleteTodo,
@@ -691,22 +690,6 @@ export function buildServer(opts: BuildServerOptions) {
       (body?.explanation ?? "manual pick").slice(0, 240),
     );
     return c.json({ council: getCouncil(db, id) });
-  });
-
-  /**
-   * Tool usage stats. Reads `role='tool'` messages and aggregates by tool
-   * name (parsed from the `[call <toolName>] ...` prefix the task manager
-   * writes for every `tool_call` event the runner emits).
-   *   ?recent=<n>  newest entries to include in the activity feed (1-500)
-   */
-  api.get("/tools/stats", (c) => {
-    const recentParam = c.req.query("recent");
-    const recentLimit = recentParam ? Number(recentParam) : 50;
-    const stats = aggregateToolStats(db, {
-      recentLimit:
-        Number.isFinite(recentLimit) && recentLimit > 0 ? recentLimit : 50,
-    });
-    return c.json(stats);
   });
 
   /**
