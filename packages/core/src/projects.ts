@@ -49,6 +49,7 @@ function rowToProject(row: typeof projects.$inferSelect): Project {
     discordChannelId: row.discordChannelId ?? null,
     autoTaskThread: !!row.autoTaskThread,
     brainstormAuto,
+    githubRepo: row.githubRepo ?? null,
   };
 }
 
@@ -128,6 +129,7 @@ export interface UpdateProjectInput {
   discordChannelId?: string | null;
   autoTaskThread?: boolean;
   brainstormAuto?: BrainstormAuto | null;
+  githubRepo?: string | null;
 }
 
 export function updateProject(
@@ -157,6 +159,7 @@ export function updateProject(
     next.brainstormAutoJson = patch.brainstormAuto
       ? JSON.stringify(patch.brainstormAuto)
       : null;
+  if (patch.githubRepo !== undefined) next.githubRepo = patch.githubRepo;
   // Drizzle's .set() throws "No values to set" on an empty object —
   // skip the UPDATE entirely when the patch had nothing meaningful.
   if (Object.keys(next).length === 0) return cur;

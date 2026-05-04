@@ -17,3 +17,4 @@ export * from "./councils.ts";
 export * from "./suggestions.ts";
 export * from "./savedIdeas.ts";
 export * from "./todos.ts";
+export * from "./github.ts";

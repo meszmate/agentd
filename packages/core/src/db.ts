@@ -90,6 +90,19 @@ export const tasks = sqliteTable("tasks", {
    */
   latestTurnInputTokens: integer("latest_turn_input_tokens"),
   latestTurnOutputTokens: integer("latest_turn_output_tokens"),
+  /**
+   * When the task came from a GitHub issue, the issue number. Surfaced
+   * in the task header as a deep-link back to the issue and (alongside
+   * `githubPr`) keys the PR action bar visibility.
+   */
+  githubIssue: integer("github_issue"),
+  /**
+   * When the task came from a GitHub PR, the PR number. Triggers a
+   * `gh pr checkout <n>` step during worktree setup so the agent lands
+   * on the PR's branch, and unlocks the PR action bar (Comment /
+   * Approve / Request changes / Merge) on the task detail view.
+   */
+  githubPr: integer("github_pr"),
 });
 
 /**
@@ -268,6 +281,14 @@ export const projects = sqliteTable("projects", {
    * this project. The cron tick reads it once per minute.
    */
   brainstormAutoJson: text("brainstorm_auto_json"),
+  /**
+   * Resolved `owner/repo` from `gh repo view --json nameWithOwner`.
+   * Cached on the row the first time the GitHub status probe runs so
+   * subsequent issue/PR calls don't re-query gh just to learn the slug.
+   * NULL means either the repo has no GitHub remote or `gh` hasn't
+   * resolved one yet.
+   */
+  githubRepo: text("github_repo"),
 });
 
 export const templates = sqliteTable("templates", {
@@ -619,6 +640,9 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE tasks ADD COLUMN plan_group_id TEXT",
   "ALTER TABLE tasks ADD COLUMN latest_turn_input_tokens INTEGER",
   "ALTER TABLE tasks ADD COLUMN latest_turn_output_tokens INTEGER",
+  "ALTER TABLE projects ADD COLUMN github_repo TEXT",
+  "ALTER TABLE tasks ADD COLUMN github_issue INTEGER",
+  "ALTER TABLE tasks ADD COLUMN github_pr INTEGER",
 ];
 
 function migrate(sqlite: Database): void {

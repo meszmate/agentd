@@ -40,6 +40,9 @@ export interface CreateTaskInput {
   dependsOnTaskId?: string | null;
   /** Group key shared by every sibling slice in one plan. */
   planGroupId?: string | null;
+  /** Issue / PR number this task was spawned from, when applicable. */
+  githubIssue?: number | null;
+  githubPr?: number | null;
 }
 
 function parseMirrorTo(raw: string | null): MirrorTarget | null {
@@ -113,6 +116,8 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     discordThreadId: row.discordThreadId ?? null,
     dependsOnTaskId: row.dependsOnTaskId ?? null,
     planGroupId: row.planGroupId ?? null,
+    githubIssue: row.githubIssue ?? null,
+    githubPr: row.githubPr ?? null,
   };
 }
 
@@ -227,6 +232,8 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       councilId: input.councilId ?? null,
       dependsOnTaskId: input.dependsOnTaskId ?? null,
       planGroupId: input.planGroupId ?? null,
+      githubIssue: input.githubIssue ?? null,
+      githubPr: input.githubPr ?? null,
     })
     .run();
   return getTask(db, id)!;

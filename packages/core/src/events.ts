@@ -106,7 +106,14 @@ export type SystemEvent =
       kind: "saved_idea_removed";
       ideaId: string;
       projectId: string | null;
-    };
+    }
+  /**
+   * GitHub state for a project shifted — operator triggered a refresh,
+   * a PR action just completed, the status probe re-ran, etc. Web
+   * invalidates issue/PR list queries on this so every connected
+   * client picks up the new state without polling.
+   */
+  | { kind: "github_refreshed"; projectId: string };
 
 export type SystemEventEnvelope = {
   event: SystemEvent;
