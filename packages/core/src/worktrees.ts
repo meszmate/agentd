@@ -56,12 +56,21 @@ async function run(
   cmd: string[],
   cwd: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn({
-    cmd,
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  let proc;
+  try {
+    proc = Bun.spawn({
+      cmd,
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  } catch (e) {
+    // Treat a missing binary (ENOENT from posix_spawn) as a normal
+    // non-zero exit so callers like isGitRepo / listBranches return
+    // empty/false instead of crashing the daemon.
+    const msg = (e as Error).message || String(e);
+    return { stdout: "", stderr: `${cmd[0]}: ${msg}`, exitCode: 127 };
+  }
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),

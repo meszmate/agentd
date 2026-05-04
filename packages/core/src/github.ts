@@ -24,14 +24,23 @@ async function run(
   cwd: string,
   opts?: { input?: string },
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn({
-    cmd,
-    cwd,
-    stdin: opts?.input ? "pipe" : "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-    env: process.env,
-  });
+  let proc;
+  try {
+    proc = Bun.spawn({
+      cmd,
+      cwd,
+      stdin: opts?.input ? "pipe" : "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env,
+    });
+  } catch (e) {
+    // Missing binary (ENOENT) shows up as a synchronous throw — turn
+    // it into a normal non-zero exit so callers fall back cleanly
+    // (e.g. ghStatus reports "not installed" instead of crashing).
+    const msg = (e as Error).message || String(e);
+    return { stdout: "", stderr: `${cmd[0]}: ${msg}`, exitCode: 127 };
+  }
   if (opts?.input) {
     proc.stdin?.write(opts.input);
     proc.stdin?.end();
