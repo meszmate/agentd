@@ -19,7 +19,14 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import type { AgentKind, IdeaMessage, IdeaStatus, ThinkingLevel } from "@agentd/contracts";
+import type {
+  AgentKind,
+  IdeaMessage,
+  IdeaStatus,
+  PlanSlice,
+  ThinkingLevel,
+} from "@agentd/contracts";
+import { PlanSlicesEditor } from "@/components/plan-slices-editor";
 import {
   Kicker,
   PageTopbar,
@@ -70,6 +77,7 @@ import {
   useModels,
   useProject,
   useResolveSuggestion,
+  useSpawnMultiFromSavedIdea,
   useUpdateIdea,
 } from "@/queries";
 import { useQueryClient } from "@tanstack/react-query";
@@ -92,6 +100,7 @@ export function IdeaWorkshop() {
   const update = useUpdateIdea();
   const remove = useDeleteSavedIdea();
   const resolve = useResolveSuggestion();
+  const spawnMulti = useSpawnMultiFromSavedIdea();
   const client = useClient();
   const qc = useQueryClient();
   const { toast } = useApp();
@@ -637,7 +646,7 @@ export function IdeaWorkshop() {
         open={spawnOpen}
         onOpenChange={setSpawnOpen}
         idea={idea}
-        onSpawn={async ({ agent, model, thinkingLevel }) => {
+        onSpawnSingle={async ({ agent, model, thinkingLevel }) => {
           if (!id) return;
           const prompt =
             (idea.planDraft?.trim() ||
@@ -672,6 +681,23 @@ export function IdeaWorkshop() {
               setSpawnOpen(false);
               navigate(`/tasks/${r.task.id}`);
             }
+          } catch (e) {
+            toast((e as Error).message, true);
+          }
+        }}
+        onSpawnSlices={async ({ slices, shareWorktree }) => {
+          if (!id) return;
+          try {
+            const r = await spawnMulti.mutateAsync({
+              id,
+              slices,
+              shareWorktree,
+              title: idea.text.split("\n")[0]!.slice(0, 80),
+            });
+            const first = r.tasks[0];
+            toast(`spawned ${r.tasks.length} slices`);
+            setSpawnOpen(false);
+            if (first) navigate(`/tasks/${first.id}`);
           } catch (e) {
             toast((e as Error).message, true);
           }
@@ -1379,15 +1405,25 @@ function SpawnDialog({
   open,
   onOpenChange,
   idea,
-  onSpawn,
+  onSpawnSingle,
+  onSpawnSlices,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
-  idea: { planDraft: string | null; description: string | null; text: string };
-  onSpawn: (opts: {
+  idea: {
+    planDraft: string | null;
+    description: string | null;
+    text: string;
+    planSlices?: PlanSlice[];
+  };
+  onSpawnSingle: (opts: {
     agent: AgentKind;
     model?: string;
     thinkingLevel?: ThinkingLevel;
+  }) => Promise<void>;
+  onSpawnSlices: (opts: {
+    slices: PlanSlice[];
+    shareWorktree: boolean;
   }) => Promise<void>;
 }) {
   const modelsQ = useModels();
@@ -1395,6 +1431,22 @@ function SpawnDialog({
   const [model, setModel] = useState<string>("");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | "">("");
   const [submitting, setSubmitting] = useState(false);
+
+  // Slice editor state — seeded from the idea's persisted slices when
+  // the dialog opens. Operator can edit per-slice agent/model/think,
+  // add new slices, remove, reorder. When non-empty, hitting "Spawn"
+  // fans out via the multi endpoint instead of a single task.
+  const [slices, setSlices] = useState<PlanSlice[]>(idea.planSlices ?? []);
+  const [shareWorktree, setShareWorktree] = useState<boolean>(true);
+  const [forceSingle, setForceSingle] = useState<boolean>(false);
+  useEffect(() => {
+    if (open) {
+      setSlices(idea.planSlices ?? []);
+      setForceSingle(false);
+    }
+  }, [open, idea.planSlices]);
+
+  const useSlices = !forceSingle && slices.length > 0;
 
   const models = modelsQ.data?.models;
   const defaults = modelsQ.data?.defaults;
@@ -1430,21 +1482,79 @@ function SpawnDialog({
     idea.planDraft?.trim() || idea.description?.trim() || idea.text.trim();
 
   const summary = useMemo(() => {
+    if (useSlices)
+      return `${slices.length} slice${slices.length === 1 ? "" : "s"} on a shared branch — pick agent / model per slice below`;
     if (idea.planDraft) return "uses the plan draft as the task prompt";
     if (idea.description) return "uses the description (no plan drafted yet)";
     return "uses the idea title (consider drafting a plan first)";
-  }, [idea.planDraft, idea.description]);
+  }, [idea.planDraft, idea.description, useSlices, slices.length]);
+
+  const modelSuggestions = useMemo(
+    () => ({
+      claude: (modelsQ.data?.models?.claude ?? []).map((m) => m.id),
+      codex: (modelsQ.data?.models?.codex ?? []).map((m) => m.id),
+    }),
+    [modelsQ.data?.models],
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Spawn task from idea</DialogTitle>
           <p className="text-[12px] text-ink-500 dark:text-ink-400">
             {summary}
           </p>
         </DialogHeader>
-        <div className="space-y-4">
+        <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
+          {(slices.length > 0 || idea.planSlices?.length) && (
+            <div className="rounded-md border border-ember-500/20 bg-ember-500/[0.04] p-3 space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ember-700 dark:text-ember-300">
+                  Slices
+                </span>
+                <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400">
+                  · split the plan across agents/models · run sequentially on the same branch
+                </span>
+                <span className="ml-auto inline-flex items-center gap-2">
+                  {useSlices && slices.length > 1 && (
+                    <label className="inline-flex items-center gap-1 font-mono text-[10.5px] text-ink-600 dark:text-ink-300">
+                      <input
+                        type="checkbox"
+                        checked={shareWorktree}
+                        onChange={(e) => setShareWorktree(e.target.checked)}
+                        className="h-3 w-3 accent-ember-500"
+                      />
+                      share branch
+                    </label>
+                  )}
+                  <label className="inline-flex items-center gap-1 font-mono text-[10.5px] text-ink-600 dark:text-ink-300">
+                    <input
+                      type="checkbox"
+                      checked={forceSingle}
+                      onChange={(e) => setForceSingle(e.target.checked)}
+                      className="h-3 w-3 accent-ember-500"
+                    />
+                    spawn as single task instead
+                  </label>
+                </span>
+              </div>
+              {useSlices ? (
+                <PlanSlicesEditor
+                  slices={slices}
+                  onChange={setSlices}
+                  modelSuggestions={modelSuggestions}
+                  disabled={submitting}
+                />
+              ) : (
+                <p className="text-[10.5px] text-ink-500 dark:text-ink-400">
+                  Slice mode disabled — using the single-task picks below.
+                </p>
+              )}
+            </div>
+          )}
+
+          {!useSlices && (
           <div className="space-y-1.5">
             <Label className="text-[11px] uppercase tracking-[0.1em] font-mono text-ink-500 dark:text-ink-400">
               Coding agent
@@ -1472,7 +1582,9 @@ function SpawnDialog({
               ))}
             </div>
           </div>
+          )}
 
+          {!useSlices && (
           <div className="space-y-1.5">
             <div className="flex items-baseline gap-2">
               <Label
@@ -1550,7 +1662,9 @@ function SpawnDialog({
                 </p>
               )}
           </div>
+          )}
 
+          {!useSlices && (
           <div className="space-y-1.5">
             <Label
               htmlFor="spawn-thinking"
@@ -1585,7 +1699,9 @@ function SpawnDialog({
               </SelectContent>
             </Select>
           </div>
+          )}
 
+          {!useSlices && (
           <div className="space-y-1.5">
             <Label className="text-[11px] uppercase tracking-[0.1em] font-mono text-ink-500 dark:text-ink-400">
               Prompt preview
@@ -1594,6 +1710,7 @@ function SpawnDialog({
               {promptPreview}
             </pre>
           </div>
+          )}
         </div>
         <DialogFooter>
           <Button
@@ -1607,25 +1724,34 @@ function SpawnDialog({
             onClick={async () => {
               setSubmitting(true);
               try {
-                await onSpawn({
-                  agent,
-                  ...(model ? { model } : {}),
-                  ...(thinkingLevel
-                    ? { thinkingLevel: thinkingLevel as ThinkingLevel }
-                    : {}),
-                });
+                if (useSlices) {
+                  await onSpawnSlices({
+                    slices,
+                    shareWorktree,
+                  });
+                } else {
+                  await onSpawnSingle({
+                    agent,
+                    ...(model ? { model } : {}),
+                    ...(thinkingLevel
+                      ? { thinkingLevel: thinkingLevel as ThinkingLevel }
+                      : {}),
+                  });
+                }
               } finally {
                 setSubmitting(false);
               }
             }}
-            disabled={submitting}
+            disabled={submitting || (useSlices && slices.length === 0)}
           >
             {submitting ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <Zap className="h-3.5 w-3.5" />
             )}
-            Spawn task
+            {useSlices
+              ? `Spawn ${slices.length} slice${slices.length === 1 ? "" : "s"}`
+              : "Spawn task"}
           </Button>
         </DialogFooter>
       </DialogContent>

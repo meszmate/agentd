@@ -563,6 +563,54 @@ export const PlanSlice = z.object({
 export type PlanSlice = z.infer<typeof PlanSlice>;
 
 /**
+ * Canonical regex for the `json-slices` block the planner appends
+ * after the plan prose. Lenient on inner whitespace and on whether
+ * the closing fence sits on its own line — agents emit slightly
+ * different shapes and we'd rather strip too eagerly than leave
+ * raw JSON in the operator's plan textarea.
+ */
+const SLICE_BLOCK_RE = /```json-slices[ \t]*\r?\n([\s\S]*?)\r?\n?```/gi;
+
+/**
+ * Strip the trailing `json-slices` block(s) from a plan body and
+ * return both the cleaned plan + the parsed slices. Used by the
+ * persistence layer (so saved planDrafts never carry raw JSON) and
+ * by the web app (defensive strip on display for legacy plans
+ * persisted before the parser was wired up).
+ *
+ * If the block exists but the JSON inside is malformed, the block
+ * is still stripped (so the operator never sees the raw markup) and
+ * `slices` is returned empty.
+ */
+export function stripPlanSlicesBlock(text: string | null | undefined): {
+  plan: string;
+  slices: PlanSlice[];
+} {
+  if (!text) return { plan: "", slices: [] };
+  const slices: PlanSlice[] = [];
+  let cleaned = text;
+  let m: RegExpExecArray | null;
+  const re = new RegExp(SLICE_BLOCK_RE.source, SLICE_BLOCK_RE.flags);
+  while ((m = re.exec(text)) !== null) {
+    const raw = (m[1] ?? "").trim();
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        for (const r of parsed) {
+          const safe = PlanSlice.safeParse(r);
+          if (safe.success) slices.push(safe.data);
+        }
+      }
+    } catch {
+      // fall through — block still gets stripped below
+    }
+  }
+  cleaned = text.replace(re, "").trimEnd();
+  return { plan: cleaned, slices };
+}
+
+/**
  * First-class project-scoped idea. Has a workflow status, optional
  * extended description, tags, optional plan draft, and an attached
  * conversation thread (`IdeaMessage[]`) where the operator and the

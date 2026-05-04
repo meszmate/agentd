@@ -414,7 +414,7 @@ export function TaskDetail({ task }: { task: Task }) {
           />
         )}
         <ShipMenu task={task} />
-        {!isTerminal && (
+        {isRunning && (
           <Button
             variant="outline"
             size="xs"

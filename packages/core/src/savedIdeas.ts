@@ -1,6 +1,6 @@
 import { eq, desc, and, sql } from "drizzle-orm";
 import type { Idea, IdeaStatus, PlanSlice } from "@agentd/contracts";
-import { PlanSlice as PlanSliceSchema } from "@agentd/contracts";
+import { PlanSlice as PlanSliceSchema, stripPlanSlicesBlock } from "@agentd/contracts";
 import { ideaMessages, savedIdeas, type Db } from "./db.ts";
 import { newId } from "./auth.ts";
 
@@ -32,7 +32,20 @@ function rowToIdea(row: typeof savedIdeas.$inferSelect): Idea {
         .map((s) => s.trim())
         .filter(Boolean)
     : [];
-  const planSlices = parsePlanSlices(row.planSlices ?? null);
+  // Defensive strip on read: legacy rows persisted before slices were
+  // pulled out of the body still carry the raw fence. Strip it from
+  // the returned plan so the operator never sees the raw JSON, and
+  // recover slices from the body when the column is empty.
+  const colSlices = parsePlanSlices(row.planSlices ?? null) ?? [];
+  let planDraft = row.planDraft ?? null;
+  let merged = colSlices;
+  if (planDraft) {
+    const stripped = stripPlanSlicesBlock(planDraft);
+    planDraft = stripped.plan || null;
+    if (colSlices.length === 0 && stripped.slices.length > 0) {
+      merged = stripped.slices;
+    }
+  }
   return {
     id: row.id,
     projectId: row.projectId,
@@ -42,12 +55,12 @@ function rowToIdea(row: typeof savedIdeas.$inferSelect): Idea {
     description: row.description ?? null,
     status: ((row.status as IdeaStatus) ?? "draft"),
     tags,
-    planDraft: row.planDraft ?? null,
+    planDraft,
     savedAt: row.savedAt,
     updatedAt: row.updatedAt || row.savedAt,
     spawnedTaskId: row.spawnedTaskId ?? null,
     spawnedAt: row.spawnedAt ?? null,
-    ...(planSlices && planSlices.length > 0 ? { planSlices } : {}),
+    ...(merged.length > 0 ? { planSlices: merged } : {}),
   };
 }
 
@@ -195,12 +208,27 @@ export function updateSavedIdea(
   return getSavedIdea(db, id);
 }
 
+/**
+ * Persist a plan draft. Always passes the text through
+ * `stripPlanSlicesBlock` first, so the persisted `planDraft` never
+ * carries the raw json-slices fence and the extracted slices land in
+ * the dedicated column. If the caller already passed slices via a
+ * separate `updateSavedIdeaSlices` call those win — we only fill the
+ * column here when we recovered slices from the body and the row had
+ * none yet.
+ */
 export function updateSavedIdeaPlan(
   db: Db,
   id: string,
   planDraft: string | null,
 ): Idea | null {
-  return updateSavedIdea(db, id, { planDraft });
+  if (planDraft == null) return updateSavedIdea(db, id, { planDraft: null });
+  const { plan, slices } = stripPlanSlicesBlock(planDraft);
+  const cur = getSavedIdea(db, id);
+  const haveSlices = (cur?.planSlices ?? []).length > 0;
+  const patch: UpdateIdeaInput = { planDraft: plan };
+  if (slices.length > 0 && !haveSlices) patch.planSlices = slices;
+  return updateSavedIdea(db, id, patch);
 }
 
 export function updateSavedIdeaSlices(

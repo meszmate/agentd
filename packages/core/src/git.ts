@@ -1,3 +1,5 @@
+import { stripPlanSlicesBlock } from "@agentd/contracts";
+
 async function run(
   cmd: string[],
   cwd: string,
@@ -1701,73 +1703,35 @@ const SLICE_BLOCK_RE = /```json-slices\s*\n([\s\S]*?)\n```/i;
  * slices and the other doesn't, and the spawn sheet UX silently splits.
  */
 const SLICE_BLOCK_INSTRUCTION = [
-  `After the plan prose, append a fenced \`\`\`json-slices\`\`\` block whose body is a JSON array of {title, prompt, agent?, model?, thinkingLevel?, permissionMode?} objects. Each entry becomes one task in a sibling chain that shares a single git branch and runs sequentially, so slices represent independent commits stacked on the same branch.`,
+  `After the plan prose, append a fenced \`\`\`json-slices\`\`\` block whose body is a JSON array of {title, prompt} objects (with optional agent / model / thinkingLevel / permissionMode hints). Each entry becomes one task in a sibling chain that shares a single git branch and runs sequentially, so slices represent independent commits stacked on the same branch.`,
   ``,
-  `The block is REQUIRED whenever ANY of these are true:`,
-  `- The plan has more than one phase (e.g. "Phase 1 — Backend", "Phase 2 — Frontend", or any numbered/named phases).`,
-  `- The plan assigns different agents or models to different sections (e.g. "agent: codex" for one part, "agent: claude" for another).`,
-  `- The work crosses a clear boundary (backend vs frontend, library vs app, codegen vs hand-edit, schema/migration vs application code).`,
-  `- The plan calls for sequential PRs or stacked branches.`,
+  `Slice WHENEVER the plan has more than one self-contained step that could land as its own commit. The split is about commit boundaries and runner handoffs — NOT about specific domains. Anywhere the work changes shape (different files, different concerns, a clear "now we move on to…" beat) is a slice boundary. Use as many slices as the plan has natural beats — two, four, seven, whatever fits the work.`,
   ``,
-  `When you emit slices, mirror the structure of your plan body exactly: one slice per phase, in execution order, with the same agent/model assignments your prose called out. Don't write a phased plan and then collapse it into a single slice — that defeats the purpose. The operator wants to fan a multi-phase plan across specialized agents (e.g. codex on the backend, claude on the frontend).`,
+  `Skip the block ONLY for genuinely single-step work — one tight change in one place. Even then, a single-slice block is fine and lets the operator tweak before spawning.`,
   ``,
-  `Each slice's \`prompt\` is the full standalone instruction that slice's runner will receive. Make it self-contained — it should make sense without seeing sibling slices, but can reference "the previous slice's commits on this branch" since they all share the worktree.`,
+  `Mirror the structure of your plan body exactly: one slice per step, in execution order. Don't collapse a multi-step plan into one slice; don't pad a single-step plan with fake slices.`,
   ``,
-  `Field rules: \`agent\` is "claude" or "codex". \`model\` is a free-form id the operator's model registry recognizes (e.g. "opus", "sonnet", "haiku", "gpt-5-codex"). \`thinkingLevel\` is "minimal" (codex-only) | "low" | "medium" | "high" | "xhigh" | "max" (claude-only); the runner clamps mismatches automatically. \`permissionMode\` is "bypassPermissions" | "acceptEdits" | "plan".`,
+  `Each slice's \`prompt\` is the full standalone instruction that slice's runner will receive. Make it self-contained — it should make sense without seeing sibling slices, but it can reference "the previous slice's commits on this branch" since they share the worktree. Include the relevant files, the contract / shape to follow, and the acceptance criteria for that slice.`,
   ``,
-  `Skip the block ONLY for genuinely single-phase, single-boundary work — and even then, an explicit single-slice block is fine and lets the operator tweak the spawn before launching. Don't fabricate slices to pad the plan, but don't under-slice a phased plan either.`,
+  `Hint fields are OPTIONAL — the operator picks agent / model / thinking at spawn time and your suggestions are starting points, not lockdowns. Only set them when the slice has a strong reason (e.g. one slice obviously benefits from deeper reasoning, or from a model with a different strength). When in doubt, omit them and let the operator choose.`,
   ``,
-  `Example for a plan that splits backend → frontend:`,
+  `Field rules: \`agent\` is "claude" or "codex". \`model\` is a free-form id ("opus", "sonnet", "haiku", "gpt-5-codex", or any id the operator's registry recognizes). \`thinkingLevel\` is "minimal" (codex-only) | "low" | "medium" | "high" | "xhigh" | "max" (claude-only); mismatches get clamped. \`permissionMode\` is "bypassPermissions" | "acceptEdits" | "plan".`,
+  ``,
+  `Generic shape:`,
   `\`\`\`json-slices`,
   `[`,
-  `  {"title":"Backend","prompt":"<full backend prompt — files to touch, contracts to extend, endpoints to add, acceptance>","agent":"codex","model":"gpt-5-codex"},`,
-  `  {"title":"Frontend","prompt":"<full frontend prompt — components, hooks, settings UI, acceptance — assumes the backend slice's commits are already on this branch>","agent":"claude","model":"sonnet"}`,
+  `  {"title":"<short label>","prompt":"<full self-contained instruction for this step>"},`,
+  `  {"title":"<short label>","prompt":"<full self-contained instruction; can reference earlier slices' commits>"}`,
   `]`,
   `\`\`\``,
 ].join("\n");
 
 export function parseSlicesFromPlan(text: string): ParsedPlan {
-  const match = text.match(SLICE_BLOCK_RE);
-  if (!match) return { plan: text, slices: [] };
-  const plan = text.replace(SLICE_BLOCK_RE, "").trimEnd();
-  const raw = match[1] ?? "";
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { plan, slices: [] };
-  }
-  if (!Array.isArray(parsed)) return { plan, slices: [] };
-  const out: ParsedPlan["slices"] = [];
-  for (const entry of parsed) {
-    if (!entry || typeof entry !== "object") continue;
-    const e = entry as Record<string, unknown>;
-    const title = typeof e.title === "string" ? e.title.trim() : "";
-    const prompt = typeof e.prompt === "string" ? e.prompt.trim() : "";
-    if (!title || !prompt) continue;
-    const slice: ParsedPlan["slices"][number] = { title, prompt };
-    if (e.agent === "claude" || e.agent === "codex") slice.agent = e.agent;
-    if (typeof e.model === "string" && e.model.trim()) slice.model = e.model.trim();
-    if (
-      e.thinkingLevel === "minimal" ||
-      e.thinkingLevel === "low" ||
-      e.thinkingLevel === "medium" ||
-      e.thinkingLevel === "high" ||
-      e.thinkingLevel === "xhigh" ||
-      e.thinkingLevel === "max"
-    ) {
-      slice.thinkingLevel = e.thinkingLevel;
-    }
-    if (
-      e.permissionMode === "bypassPermissions" ||
-      e.permissionMode === "acceptEdits" ||
-      e.permissionMode === "plan"
-    ) {
-      slice.permissionMode = e.permissionMode;
-    }
-    out.push(slice);
-  }
-  return { plan, slices: out };
+  // Delegates to the canonical helper in @agentd/contracts so the
+  // server, the web app, and any downstream consumer share one
+  // source of truth for what counts as a slice block.
+  const { plan, slices } = stripPlanSlicesBlock(text);
+  return { plan, slices };
 }
 
 /* ── Suggestion → plan generator ───────────────────────────────────── */
@@ -2078,21 +2042,30 @@ export async function* streamIdeaConversation(
     const tm = cleaned.match(/(^|\n)\s*TITLE:\s*([^\n]+?)\s*$/i);
     if (tm) suggestedTitle = (tm[2] ?? "").trim() || null;
   }
-  // Plan slices: parse from the plan body (mode === "plan") or from a
-  // chat-mode plan-update block. Either way, the slice block is part
-  // of the plan markdown so we feed both sources through the same
-  // helper. Returning the slices on the result lets the daemon
-  // persist them on the idea without a second round trip.
+  // Plan slices: ALWAYS strip the json-slices block from whatever we
+  // return, regardless of mode — the operator should never see the
+  // raw fence in chat or plan. We pull slices from the plan body
+  // first (mode === "plan"), then from any chat-mode plan-update
+  // block, and finally a last-ditch sweep of the chat reply itself
+  // for the rare turn where the agent emits slices in a non-plan
+  // reply.
   let planSlices: ParsedPlan["slices"] | undefined;
   let finalReply = cleaned;
   if (mode === "plan") {
     const parsed = parseSlicesFromPlan(cleaned);
     finalReply = parsed.plan;
     if (parsed.slices.length > 0) planSlices = parsed.slices;
-  } else if (planContent) {
-    const parsed = parseSlicesFromPlan(planContent);
-    planContent = parsed.plan;
-    if (parsed.slices.length > 0) planSlices = parsed.slices;
+  } else {
+    if (planContent) {
+      const parsed = parseSlicesFromPlan(planContent);
+      planContent = parsed.plan;
+      if (parsed.slices.length > 0) planSlices = parsed.slices;
+    }
+    // Defensive strip on the chat body too — never let raw slice
+    // markup leak into the message thread.
+    const chatStrip = parseSlicesFromPlan(cleaned);
+    finalReply = chatStrip.plan;
+    if (!planSlices && chatStrip.slices.length > 0) planSlices = chatStrip.slices;
   }
   return {
     reply: finalReply,
