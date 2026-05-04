@@ -1,7 +1,41 @@
+import { createHash } from "node:crypto";
 import { eq, desc, and, sql } from "drizzle-orm";
-import type { Idea, IdeaStatus } from "@agentd/contracts";
+import type {
+  Idea,
+  IdeaSource,
+  IdeaSourceRef,
+  IdeaStatus,
+} from "@agentd/contracts";
 import { ideaMessages, savedIdeas, type Db } from "./db.ts";
 import { newId } from "./auth.ts";
+
+function parseSourceRefs(raw: string | null | undefined): IdeaSourceRef[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item) => {
+      if (
+        typeof item !== "object" ||
+        item == null ||
+        !Number.isInteger((item as { issueNumber?: unknown }).issueNumber) ||
+        typeof (item as { url?: unknown }).url !== "string" ||
+        typeof (item as { title?: unknown }).title !== "string"
+      ) {
+        return [];
+      }
+      return [
+        {
+          issueNumber: (item as { issueNumber: number }).issueNumber,
+          url: (item as { url: string }).url,
+          title: (item as { title: string }).title,
+        },
+      ];
+    });
+  } catch {
+    return [];
+  }
+}
 
 function rowToIdea(row: typeof savedIdeas.$inferSelect): Idea {
   const tags = row.tagsCsv
@@ -19,6 +53,8 @@ function rowToIdea(row: typeof savedIdeas.$inferSelect): Idea {
     description: row.description ?? null,
     status: ((row.status as IdeaStatus) ?? "draft"),
     tags,
+    source: ((row.source as IdeaSource) ?? "manual"),
+    sourceRefs: parseSourceRefs(row.sourceRefsJson),
     planDraft: row.planDraft ?? null,
     savedAt: row.savedAt,
     updatedAt: row.updatedAt || row.savedAt,
@@ -41,6 +77,8 @@ export interface CreateIdeaInput {
   description?: string | null;
   status?: IdeaStatus;
   tags?: string[];
+  source?: IdeaSource;
+  sourceRefs?: IdeaSourceRef[];
   suggestionId?: string | null;
   optionIndex?: number | null;
   planDraft?: string | null;
@@ -75,6 +113,8 @@ export function createSavedIdea(db: Db, input: CreateIdeaInput): Idea {
       description: input.description ?? null,
       status: input.status ?? "draft",
       tagsCsv: tagsToCsv(input.tags),
+      source: input.source ?? "manual",
+      sourceRefsJson: JSON.stringify(input.sourceRefs ?? []),
       planDraft: input.planDraft ?? null,
       savedAt: now,
       updatedAt: now,
@@ -112,6 +152,35 @@ export function listSavedIdeas(
     all = all.filter((i) => !i.spawnedTaskId);
   }
   return decorateWithMessageStats(db, all);
+}
+
+export function hashSourceRefs(refs: IdeaSourceRef[]): string {
+  const issueNumbers = Array.from(
+    new Set(
+      refs
+        .map((ref) => ref.issueNumber)
+        .filter((n) => Number.isInteger(n)),
+    ),
+  ).sort((a, b) => a - b);
+  return createHash("sha1").update(issueNumbers.join(",")).digest("hex");
+}
+
+export function findActiveIdeaBySourceRefHash(
+  db: Db,
+  projectId: string,
+  hash: string,
+): Idea | null {
+  const rows = db
+    .select()
+    .from(savedIdeas)
+    .where(eq(savedIdeas.projectId, projectId))
+    .all();
+  for (const row of rows) {
+    const idea = rowToIdea(row);
+    if (idea.status === "archived") continue;
+    if (hashSourceRefs(idea.sourceRefs) === hash) return idea;
+  }
+  return null;
 }
 
 /**

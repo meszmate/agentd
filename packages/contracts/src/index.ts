@@ -483,6 +483,20 @@ export const IdeaStatus = z.enum([
 ]);
 export type IdeaStatus = z.infer<typeof IdeaStatus>;
 
+export const IdeaSource = z.enum([
+  "manual",
+  "brainstorm",
+  "github_issues",
+]);
+export type IdeaSource = z.infer<typeof IdeaSource>;
+
+export const IdeaSourceRef = z.object({
+  issueNumber: z.number().int(),
+  url: z.string(),
+  title: z.string(),
+});
+export type IdeaSourceRef = z.infer<typeof IdeaSourceRef>;
+
 /**
  * First-class project-scoped idea. Has a workflow status, optional
  * extended description, tags, optional plan draft, and an attached
@@ -508,6 +522,10 @@ export const Idea = z.object({
   status: IdeaStatus,
   /** Operator-attached tags. */
   tags: z.array(z.string()),
+  /** Where this idea came from. */
+  source: IdeaSource.default("manual"),
+  /** External records the idea was synthesized from. */
+  sourceRefs: z.array(IdeaSourceRef).default([]),
   /** Plan draft the operator stashed alongside the idea. */
   planDraft: z.string().nullable(),
   savedAt: z.number(),
@@ -766,6 +784,31 @@ export const IdeateRequest = z.object({
   effort: ThinkingLevel.optional(),
 });
 export type IdeateRequest = z.infer<typeof IdeateRequest>;
+
+export const GenerateIdeasFromIssuesRequest = z.object({
+  /** How many open issues to fetch from GitHub. */
+  limit: z.number().int().min(1).max(200).default(50),
+  /** Maximum number of synthesized ideas to return. */
+  max: z.number().int().min(1).max(20).default(8),
+  /** Which CLI to drive the synthesis helper through. */
+  agent: AgentKind.optional(),
+  /** Override which model the helper uses. */
+  model: z.string().optional(),
+  /** Override helper thinking effort. */
+  effort: ThinkingLevel.optional(),
+});
+export type GenerateIdeasFromIssuesRequest = z.infer<
+  typeof GenerateIdeasFromIssuesRequest
+>;
+
+export const GenerateIdeasFromIssuesResponse = z.object({
+  created: z.number().int(),
+  skipped: z.number().int(),
+  ideas: z.array(Idea),
+});
+export type GenerateIdeasFromIssuesResponse = z.infer<
+  typeof GenerateIdeasFromIssuesResponse
+>;
 
 export const RunTemplateRequest = z.object({
   args: z.record(z.string(), z.string()).default({}),

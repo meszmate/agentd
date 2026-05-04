@@ -23,6 +23,7 @@ import {
   CreateCouncilRequest,
   IdeaChatRequest,
   IdeateRequest,
+  GenerateIdeasFromIssuesRequest,
   PlanSuggestionRequest,
   ResolveSuggestionRequest,
   SaveIdeaRequest,
@@ -55,6 +56,8 @@ import {
   listMessages,
   listFiles,
   diffAgainst,
+  fetchOpenGithubIssues,
+  findActiveIdeaBySourceRefHash,
   listLog,
   revertCommit,
   autoCommit,
@@ -71,6 +74,7 @@ import {
   streamInstructionsConversation,
   streamValidateIdea,
   getPrState,
+  getProjectGithubSlug,
   setTaskDiscordThread,
   setTaskPrUrl,
   aggregateToolStats,
@@ -85,7 +89,9 @@ import {
   deleteSavedIdea,
   getSavedIdea,
   getSuggestion,
+  GithubIssuesError,
   addSuggestionValidation,
+  hashSourceRefs,
   listCouncils,
   listIdeaMessages,
   listSavedIdeas,
@@ -94,7 +100,9 @@ import {
   runIdeation,
   streamIdeaConversation,
   streamIdeation,
+  streamSynthesizeIssues,
   streamValidateIdeas,
+  type SynthesizeIssuesResult,
   updateSavedIdea,
   updateSavedIdeaPlan,
   listTodos,
@@ -2068,7 +2076,7 @@ export function buildServer(opts: BuildServerOptions) {
   api.post("/templates/:id/run", async (c) => {
     const tpl = getTemplate(db, c.req.param("id")) ?? getTemplateByName(db, c.req.param("id"));
     if (!tpl) return c.json({ error: "not found" }, 404);
-    const body = await c.req.json().catch(() => ({}));
+    const body = (await c.req.json().catch(() => null)) ?? {};
     const parsed = RunTemplateRequest.safeParse(body);
     if (!parsed.success)
       return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
@@ -3213,9 +3221,133 @@ export function buildServer(opts: BuildServerOptions) {
       ...(parsed.data.planDraft != null
         ? { planDraft: parsed.data.planDraft }
         : {}),
+      ...(parsed.data.suggestionId != null || parsed.data.optionIndex != null
+        ? { source: "brainstorm" as const }
+        : {}),
     });
     pubSavedIdeaChanged(idea.id);
     return c.json({ idea });
+  });
+
+  api.post("/projects/:slug/ideas/from-github-issues", async (c) => {
+    const slug = c.req.param("slug");
+    const project = getProjectBySlug(db, slug);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = GenerateIdeasFromIssuesRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid body", issues: parsed.error.issues },
+        400,
+      );
+    }
+
+    if (!(await getProjectGithubSlug(project.path))) {
+      return c.json(
+        { error: "project origin is not a GitHub repository" },
+        400,
+      );
+    }
+
+    let issues: Awaited<ReturnType<typeof fetchOpenGithubIssues>>;
+    try {
+      issues = await fetchOpenGithubIssues(project.path, parsed.data.limit);
+    } catch (e) {
+      if (e instanceof GithubIssuesError) {
+        return c.json(
+          {
+            error: e.message,
+            stderr: e.stderr || null,
+            code: e.code,
+          },
+          502,
+        );
+      }
+      return c.json(
+        { error: (e as Error).message || "failed to fetch GitHub issues" },
+        502,
+      );
+    }
+
+    if (issues.length === 0) {
+      return c.json({ created: 0, skipped: 0, ideas: [] });
+    }
+
+    const cfg = loadConfig(paths.root);
+    const helper = {
+      ...cfg.aiHelpers,
+      ...(parsed.data.agent ? { agent: parsed.data.agent } : {}),
+      ...(parsed.data.model ? { model: parsed.data.model } : {}),
+      ...(parsed.data.effort ? { effort: parsed.data.effort } : {}),
+    };
+
+    const synthesis = streamSynthesizeIssues(project.path, issues, {
+      helper,
+      max: parsed.data.max,
+    });
+    let synthesized: SynthesizeIssuesResult | null = null;
+    while (true) {
+      const next = await synthesis.next();
+      if (next.done) {
+        synthesized = next.value;
+        break;
+      }
+    }
+    if (!synthesized || synthesized.source.startsWith("fallback")) {
+      return c.json(
+        {
+          error:
+            synthesized?.error ??
+            "failed to synthesize ideas from GitHub issues",
+          source: synthesized?.source ?? "fallback-error",
+        },
+        502,
+      );
+    }
+
+    const issuesByNumber = new Map(issues.map((issue) => [issue.number, issue]));
+    const ideas: Array<ReturnType<typeof createSavedIdea>> = [];
+    let skipped = 0;
+    for (const draft of synthesized.ideas) {
+      const sourceRefs = draft.sourceIssueNumbers.flatMap((issueNumber) => {
+        const issue = issuesByNumber.get(issueNumber);
+        if (!issue) return [];
+        return [
+          {
+            issueNumber: issue.number,
+            url: issue.url,
+            title: issue.title,
+          },
+        ];
+      });
+      const hash = hashSourceRefs(sourceRefs);
+      if (findActiveIdeaBySourceRefHash(db, project.id, hash)) {
+        skipped += 1;
+        continue;
+      }
+      const idea = createSavedIdea(db, {
+        projectId: project.id,
+        text: draft.title,
+        description: draft.description,
+        tags: Array.from(
+          new Set(
+            ["from-github", ...draft.tags]
+              .map((tag) => tag.trim())
+              .filter(Boolean),
+          ),
+        ),
+        source: "github_issues",
+        sourceRefs,
+      });
+      pubSavedIdeaChanged(idea.id);
+      ideas.push(idea);
+    }
+
+    return c.json({
+      created: ideas.length,
+      skipped,
+      ideas,
+    });
   });
 
   /**

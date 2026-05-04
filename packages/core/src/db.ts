@@ -105,6 +105,10 @@ export const savedIdeas = sqliteTable("saved_ideas", {
   status: text("status").notNull().default("draft"),
   /** Comma-separated tag list — kept simple to avoid a join table. */
   tagsCsv: text("tags_csv"),
+  /** How the idea entered the library. */
+  source: text("source").notNull().default("manual"),
+  /** JSON array of external records the idea was synthesized from. */
+  sourceRefsJson: text("source_refs_json").notNull().default("[]"),
   /** Optional pre-generated plan blob the operator hand-edited and stashed. */
   planDraft: text("plan_draft"),
   savedAt: integer("saved_at").notNull(),
@@ -435,6 +439,8 @@ CREATE TABLE IF NOT EXISTS saved_ideas (
   description TEXT,
   status TEXT NOT NULL DEFAULT 'draft',
   tags_csv TEXT,
+  source TEXT NOT NULL DEFAULT 'manual',
+  source_refs_json TEXT NOT NULL DEFAULT '[]',
   plan_draft TEXT,
   saved_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL DEFAULT 0,
@@ -586,6 +592,8 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE projects ADD COLUMN instructions_enabled INTEGER NOT NULL DEFAULT 1",
   "ALTER TABLE tasks ADD COLUMN codex_thread_id TEXT",
   "ALTER TABLE projects ADD COLUMN notify_suggestions INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE saved_ideas ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'",
+  "ALTER TABLE saved_ideas ADD COLUMN source_refs_json TEXT NOT NULL DEFAULT '[]'",
 ];
 
 function migrate(sqlite: Database): void {

@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 async function run(
   cmd: string[],
   cwd: string,
@@ -20,6 +22,314 @@ async function run(
   ]);
   const exitCode = await proc.exited;
   return { stdout, stderr, exitCode };
+}
+
+export interface GithubSlug {
+  owner: string;
+  repo: string;
+}
+
+export interface GithubIssue {
+  number: number;
+  title: string;
+  body: string;
+  labels: Array<{ name: string }>;
+  url: string;
+  updatedAt: string;
+}
+
+type GithubIssuesErrorCode = "gh_missing" | "gh_not_authed" | "gh_failed";
+
+export class GithubIssuesError extends Error {
+  code: GithubIssuesErrorCode;
+  stderr: string;
+
+  constructor(code: GithubIssuesErrorCode, message: string, stderr = "") {
+    super(message);
+    this.name = "GithubIssuesError";
+    this.code = code;
+    this.stderr = stderr;
+  }
+}
+
+const GithubIssueSchema = z.object({
+  number: z.number().int(),
+  title: z.string(),
+  body: z.string().nullable().default("").transform((body) => body ?? ""),
+  labels: z
+    .array(z.object({ name: z.string() }).passthrough())
+    .default([]),
+  url: z.string(),
+  updatedAt: z.string(),
+});
+
+const GithubIssueListSchema = z.array(GithubIssueSchema);
+
+const SynthesizeIssuesIdeaSchema = z.object({
+  title: z.string().min(1),
+  description: z.string().min(1),
+  sourceIssueNumbers: z.array(z.number().int()).min(1),
+  tags: z.array(z.string()).default([]),
+});
+
+const SynthesizeIssuesOutputSchema = z.object({
+  ideas: z.array(SynthesizeIssuesIdeaSchema).default([]),
+});
+
+export interface SynthesizeIssuesResult {
+  ideas: Array<z.infer<typeof SynthesizeIssuesIdeaSchema>>;
+  source: "claude" | "codex" | "fallback-empty" | "fallback-error" | "fallback-invalid-output";
+  error?: string;
+}
+
+function parseGithubSlug(remoteUrl: string): GithubSlug | null {
+  const trimmed = remoteUrl.trim();
+  const match = trimmed.match(
+    /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/]+)\/([^/]+?)(?:\.git)?$/,
+  );
+  if (!match) return null;
+  const owner = match[1]?.trim();
+  const repo = match[2]?.trim();
+  if (!owner || !repo) return null;
+  return { owner, repo };
+}
+
+export async function getProjectGithubSlug(cwd: string): Promise<GithubSlug | null> {
+  const res = await run(["git", "-C", cwd, "remote", "get-url", "origin"], cwd);
+  if (res.exitCode !== 0) return null;
+  return parseGithubSlug(res.stdout);
+}
+
+function classifyGhFailure(stderr: string, stdout: string): GithubIssuesErrorCode {
+  const text = `${stderr}\n${stdout}`.trim();
+  if (
+    /gh auth login|not logged into any github hosts|authentication failed|http 401/i.test(
+      text,
+    )
+  ) {
+    return "gh_not_authed";
+  }
+  return "gh_failed";
+}
+
+export async function fetchOpenGithubIssues(
+  cwd: string,
+  limit: number,
+): Promise<GithubIssue[]> {
+  const slug = await getProjectGithubSlug(cwd);
+  if (!slug) {
+    throw new GithubIssuesError(
+      "gh_failed",
+      "origin remote is not a GitHub repository",
+    );
+  }
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn({
+      cmd: [
+        "gh",
+        "issue",
+        "list",
+        "-R",
+        `${slug.owner}/${slug.repo}`,
+        "--state",
+        "open",
+        "--limit",
+        String(limit),
+        "--json",
+        "number,title,body,labels,url,updatedAt",
+      ],
+      cwd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+  } catch (e) {
+    throw new GithubIssuesError(
+      "gh_missing",
+      "gh CLI is not installed or not on PATH",
+      (e as Error).message,
+    );
+  }
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    const code = classifyGhFailure(stderr, stdout);
+    throw new GithubIssuesError(
+      code,
+      code === "gh_not_authed"
+        ? "gh CLI is not authenticated for GitHub"
+        : "gh issue list failed",
+      stderr.trim() || stdout.trim(),
+    );
+  }
+  return GithubIssueListSchema.parse(JSON.parse(stdout));
+}
+
+function truncateIssueBody(body: string): string {
+  return body.replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+function buildSynthesizeIssuesPrompt(
+  issues: GithubIssue[],
+  max: number,
+): string {
+  const renderedIssues = issues
+    .map((issue) => {
+      const labels = issue.labels.map((label) => label.name).filter(Boolean);
+      return [
+        `#${issue.number}: ${issue.title}`,
+        `updated: ${issue.updatedAt}`,
+        labels.length > 0 ? `labels: ${labels.join(", ")}` : `labels: none`,
+        `url: ${issue.url}`,
+        `body: ${truncateIssueBody(issue.body) || "(empty)"}`,
+      ].join("\n");
+    })
+    .join("\n\n---\n\n");
+
+  return [
+    `You are clustering open GitHub issues into a short list of product ideas for the operator.`,
+    `Each idea should combine related issues into one actionable direction. Prefer broader patterns over one-issue restatements when that makes sense.`,
+    ``,
+    `Return STRICT JSON only. No markdown fences, no prose, no explanation.`,
+    `The JSON schema is:`,
+    `{"ideas":[{"title":"string","description":"string","sourceIssueNumbers":[1,2],"tags":["string"]}]}`,
+    ``,
+    `Rules:`,
+    `- Return at most ${max} ideas.`,
+    `- Every idea must reference one or more issue numbers from the provided list only.`,
+    `- Use concise titles and descriptions grounded in the issues.`,
+    `- \`tags\` should be short, lowercase, and sparse (0-4 tags).`,
+    `- Don't invent issue numbers, URLs, users, or implementation details not supported by the issues.`,
+    `- Prefer merging overlapping issues into the same idea when they clearly point at one theme.`,
+    ``,
+    `Open issues (${issues.length}):`,
+    renderedIssues,
+  ].join("\n");
+}
+
+function extractJsonObject(raw: string): string {
+  const cleaned = raw
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    return cleaned.slice(start, end + 1);
+  }
+  return cleaned;
+}
+
+function normalizeSynthesizedIdeas(
+  ideas: Array<z.infer<typeof SynthesizeIssuesIdeaSchema>>,
+  knownIssueNumbers: Set<number>,
+  max: number,
+): Array<z.infer<typeof SynthesizeIssuesIdeaSchema>> {
+  return ideas
+    .map((idea) => {
+      const sourceIssueNumbers = Array.from(
+        new Set(idea.sourceIssueNumbers.filter((n) => knownIssueNumbers.has(n))),
+      ).sort((a, b) => a - b);
+      const tags = Array.from(
+        new Set(
+          idea.tags
+            .map((tag) => tag.trim().toLowerCase())
+            .filter(Boolean),
+        ),
+      ).slice(0, 4);
+      return {
+        title: idea.title.trim(),
+        description: idea.description.trim(),
+        sourceIssueNumbers,
+        tags,
+      };
+    })
+    .filter(
+      (idea) =>
+        idea.title.length > 0 &&
+        idea.description.length > 0 &&
+        idea.sourceIssueNumbers.length > 0,
+    )
+    .slice(0, max);
+}
+
+export async function* streamSynthesizeIssues(
+  cwd: string,
+  issues: GithubIssue[],
+  opts: {
+    helper?: AiHelperOptions;
+    max: number;
+  },
+): AsyncGenerator<string, SynthesizeIssuesResult, void> {
+  if (issues.length === 0) {
+    return { ideas: [], source: "fallback-empty" };
+  }
+  const prompt = buildSynthesizeIssuesPrompt(issues, opts.max);
+  const argv = buildAiHelperArgv(opts.helper ?? {}, prompt);
+  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn({
+      cmd: argv,
+      cwd,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+  } catch (e) {
+    return {
+      ideas: [],
+      source: "fallback-error",
+      error: (e as Error).message,
+    };
+  }
+
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let raw = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      raw += chunk;
+      yield chunk;
+    }
+  } catch {
+    // stream cancelled
+  }
+  await proc.exited;
+  if (!raw.trim()) {
+    return { ideas: [], source: "fallback-empty" };
+  }
+
+  try {
+    const parsed = SynthesizeIssuesOutputSchema.parse(
+      JSON.parse(extractJsonObject(raw)),
+    );
+    const normalized = normalizeSynthesizedIdeas(
+      parsed.ideas,
+      new Set(issues.map((issue) => issue.number)),
+      opts.max,
+    );
+    return {
+      ideas: normalized,
+      source: opts.helper?.agent === "codex" ? "codex" : "claude",
+    };
+  } catch (e) {
+    return {
+      ideas: [],
+      source: "fallback-invalid-output",
+      error: `failed to parse synthesized ideas: ${(e as Error).message}`,
+    };
+  }
 }
 
 /**
