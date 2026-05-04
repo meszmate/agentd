@@ -5,13 +5,23 @@ async function run(
   cwd: string,
   opts?: { input?: string },
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn({
-    cmd,
-    cwd,
-    stdin: opts?.input ? "pipe" : "inherit",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  let proc;
+  try {
+    proc = Bun.spawn({
+      cmd,
+      cwd,
+      stdin: opts?.input ? "pipe" : "inherit",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  } catch (e) {
+    // Bun.spawn throws synchronously when the binary isn't on PATH
+    // (ENOENT). Returning a non-zero exit code here keeps every caller
+    // on the same code path as a normal git failure instead of
+    // crashing the daemon's completion hooks, helpers, etc.
+    const msg = (e as Error).message || String(e);
+    return { stdout: "", stderr: `${cmd[0]}: ${msg}`, exitCode: 127 };
+  }
   if (opts?.input) {
     proc.stdin?.write(opts.input);
     proc.stdin?.end();
