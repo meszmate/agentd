@@ -732,7 +732,14 @@ export function TaskDetail({ task }: { task: Task }) {
             </Panel>
             <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-ember-500/40 transition-colors dark:bg-ink-50/10" />
             <Panel id={`ws-${task.id}`} defaultSize={48} minSize={28}>
-              <TaskWorkspace task={task} onError={onError} plan={plan} planUpdatedAt={planUpdatedAt} />
+              <TaskWorkspace
+                task={task}
+                onError={onError}
+                plan={plan}
+                planUpdatedAt={planUpdatedAt}
+                messages={messages}
+                liveTools={liveTools}
+              />
             </Panel>
           </PanelGroup>
         ) : (
