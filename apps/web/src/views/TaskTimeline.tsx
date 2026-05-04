@@ -455,41 +455,40 @@ const TaskComposer = memo(function TaskComposer({
       <div className="mx-auto max-w-3xl">
         {plan && plan.length > 0 && <PlanStrip plan={plan} />}
         {queue.length > 0 && (
-          <div className="mb-2.5 overflow-hidden rounded-lg border border-violet-500/30 bg-gradient-to-br from-violet-500/[0.07] via-violet-500/[0.04] to-transparent shadow-[0_1px_0_rgba(139,92,246,0.06),0_8px_24px_-12px_rgba(139,92,246,0.18)] dark:from-violet-500/[0.12] dark:via-violet-500/[0.07] animate-fade-in">
-            <header className="flex items-center justify-between gap-2 px-3 py-1.5 bg-gradient-to-r from-violet-500/[0.08] to-transparent border-b border-violet-500/15">
-              <span className="inline-flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-violet-700 dark:text-violet-300 font-semibold">
-                <span className="h-2 w-2 rounded-full bg-violet-500" />
-                Queue
-                <span className="rounded-full px-1.5 py-px bg-violet-500/20 text-[9px] font-bold tabular-nums">
+          <div className="mb-2.5 overflow-hidden rounded-md border border-ink-900/10 bg-paper-50/80 dark:border-ink-50/10 dark:bg-ink-900/40 animate-fade-in">
+            <header className="flex items-center justify-between gap-2 px-2.5 py-1 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06]">
+              <span className="inline-flex items-center gap-1.5 font-mono text-[9.5px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400 font-semibold">
+                queued
+                <span className="rounded-sm px-1 py-px bg-ink-900/[0.06] dark:bg-ink-50/[0.08] text-[9px] tabular-nums text-ink-700 dark:text-ink-200">
                   {queue.length}
                 </span>
               </span>
-              <span className="font-mono text-[9px] text-violet-700/60 dark:text-violet-300/60">
-                click ↑ steer to fire after next tool call
+              <span className="font-mono text-[9px] text-ink-400 dark:text-ink-500">
+                fires after next tool call
               </span>
             </header>
             <ul
               ref={queueRef}
-              className="divide-y divide-violet-500/10"
+              className="divide-y divide-ink-900/[0.06] dark:divide-ink-50/[0.06]"
             >
               {queue.map((line, i) => (
                 <li
                   key={`${i}-${line.slice(0, 12)}`}
-                  className="group flex items-start gap-2.5 px-3 py-2 hover:bg-violet-500/[0.04] dark:hover:bg-violet-500/[0.06] transition-colors animate-slide-in"
+                  className="group flex items-start gap-2 px-2.5 py-1.5 hover:bg-ink-900/[0.025] dark:hover:bg-ink-50/[0.035] transition-colors animate-slide-in"
                 >
-                  <span className="mt-0.5 grid place-items-center size-5 rounded-full bg-violet-500/15 text-violet-700 dark:text-violet-300 font-mono text-[10px] tabular-nums font-semibold shrink-0">
+                  <span className="mt-0.5 font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 shrink-0 select-none w-4 text-right">
                     {i + 1}
                   </span>
-                  <span className="flex-1 min-w-0 whitespace-pre-wrap break-words text-[12.5px] leading-snug text-violet-900 dark:text-violet-100 pt-0.5">
+                  <span className="flex-1 min-w-0 whitespace-pre-wrap break-words text-[12.5px] leading-snug text-ink-700 dark:text-ink-200">
                     {line}
                   </span>
-                  <div className="flex items-center gap-1 shrink-0">
+                  <div className="flex items-center gap-0.5 shrink-0">
                     <button
                       type="button"
                       onClick={() => void fireRow(i)}
                       disabled={fireQueued.isPending}
                       title="Steer — send to the agent now (lands after the next tool call)"
-                      className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md font-mono text-[10px] uppercase tracking-[0.1em] font-semibold bg-gradient-to-b from-violet-500 to-violet-600 text-white shadow-sm shadow-violet-900/20 hover:from-violet-400 hover:to-violet-500 active:from-violet-600 active:to-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] font-semibold text-ink-600 dark:text-ink-300 hover:bg-ember-500/15 hover:text-ember-700 dark:hover:text-ember-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       {fireQueued.isPending ? (
                         <Loader2 className="h-3 w-3 animate-spin" />
@@ -502,7 +501,7 @@ const TaskComposer = memo(function TaskComposer({
                       type="button"
                       onClick={() => void removeQueued.mutateAsync(i)}
                       title="Remove from queue"
-                      className="grid place-items-center size-7 rounded-md text-violet-700/50 hover:bg-violet-500/20 hover:text-violet-700 dark:text-violet-300/50 dark:hover:text-violet-300 opacity-0 group-hover:opacity-100 transition-all"
+                      className="grid place-items-center size-6 rounded text-ink-400 hover:bg-ink-900/[0.06] hover:text-ink-700 dark:text-ink-500 dark:hover:bg-ink-50/[0.06] dark:hover:text-ink-200 opacity-0 group-hover:opacity-100 transition-all"
                     >
                       <X className="h-3 w-3" />
                     </button>
@@ -518,7 +517,7 @@ const TaskComposer = memo(function TaskComposer({
             className={cn(
               "shrink-0 mt-1.5 font-mono text-[14px] font-semibold leading-none transition-colors select-none",
               disabled
-                ? "text-violet-500 animate-blink"
+                ? "text-ember-500 animate-blink"
                 : "text-sky-700 dark:text-sky-300",
             )}
           >

@@ -278,30 +278,56 @@ function FileHunks({ file }: { file: DiffFile }) {
 
   return (
     <div className="font-mono text-[11.5px] leading-[1.5] overflow-x-auto">
-      {file.hunks.map((hunk, hi) => (
-        <Fragment key={hi}>
-          {hi > 0 && (
-            <div className="h-px bg-ink-900/5 dark:bg-ink-50/5" />
-          )}
-          <div
-            className={cn(
-              "flex w-full px-2 py-0.5 select-none",
-              "bg-ink-900/[0.03] dark:bg-ink-50/[0.04]",
-              "text-ink-500 dark:text-ink-400 text-[10.5px]",
-            )}
-          >
-            <span className="truncate">
-              @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},
-              {hunk.newLines} @@
-            </span>
-          </div>
-          <HunkBody
-            hunk={hunk}
-            language={file.language}
-            numWidth={numWidth}
-          />
-        </Fragment>
-      ))}
+      {file.hunks.map((hunk, hi) => {
+        // Lines elided between (or before) hunks. Mirrors claude-code's
+        // terminal "+N lines" marker so the operator can see the file
+        // jumps from line 12 to line 87 instead of guessing from the
+        // hunk header math. Above the first hunk, this is the stretch
+        // between line 1 and oldStart.
+        const prev = hi > 0 ? file.hunks[hi - 1] : null;
+        const gapStart = prev ? prev.oldStart + prev.oldLines : 1;
+        const gapLines = Math.max(0, hunk.oldStart - gapStart);
+        return (
+          <Fragment key={hi}>
+            {gapLines > 0 && <HunkGap lines={gapLines} numWidth={numWidth} />}
+            <div
+              className={cn(
+                "flex w-full px-2 py-0.5 select-none",
+                "bg-ink-900/[0.03] dark:bg-ink-50/[0.04]",
+                "text-ink-500 dark:text-ink-400 text-[10.5px]",
+              )}
+            >
+              <span className="truncate">
+                @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},
+                {hunk.newLines} @@
+              </span>
+            </div>
+            <HunkBody
+              hunk={hunk}
+              language={file.language}
+              numWidth={numWidth}
+            />
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+function HunkGap({ lines, numWidth }: { lines: number; numWidth: number }) {
+  const w = `${numWidth}ch`;
+  return (
+    <div className="flex w-full items-center select-none text-[10px] text-ink-400 dark:text-ink-500 bg-ink-900/[0.015] dark:bg-ink-50/[0.02]">
+      <span className="shrink-0 px-1 text-right" style={{ minWidth: w }}>
+        ⋮
+      </span>
+      <span className="shrink-0 px-1 text-right" style={{ minWidth: w }}>
+        ⋮
+      </span>
+      <span className="shrink-0 w-4 text-center"> </span>
+      <span className="pl-1 pr-3 italic tracking-wide">
+        +{lines} {lines === 1 ? "line" : "lines"}
+      </span>
     </div>
   );
 }

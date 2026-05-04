@@ -391,7 +391,7 @@ export function WorkCard({
               key={i}
               className={cn(
                 parentId &&
-                  "pl-3 ml-3 border-l-2 border-violet-500/30 bg-violet-500/[0.025] rounded-r",
+                  "pl-3 ml-3 border-l-2 border-ink-900/15 dark:border-ink-50/15 bg-ink-900/[0.02] dark:bg-ink-50/[0.02] rounded-r",
               )}
             >
               <ToolRow
@@ -691,7 +691,17 @@ function parseToolCall(content: string): ParsedTool {
         typeof args.offset === "number" ? ` @${args.offset}` : "";
       const limit =
         typeof args.limit === "number" ? ` ×${args.limit}` : "";
-      return { name, kind, summary: `${shortPath(path)}${offset}${limit}`, detail: null };
+      return {
+        name,
+        kind,
+        summary: `${shortPath(path)}${offset}${limit}`,
+        detail: null,
+        // Carry the path so `inferOutputLanguage` can highlight the
+        // file content preview (file body that the daemon attaches as
+        // `tool_result.preview`) in the file's native language.
+        detailFilename: path !== "?" ? shortPath(path) : undefined,
+        detailLanguage: path !== "?" ? langFromPath(path) : undefined,
+      };
     }
     case "Write": {
       const path = get("file_path", "path") ?? "?";
