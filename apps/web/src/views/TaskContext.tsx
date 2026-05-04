@@ -76,13 +76,17 @@ export function TaskContext({ task }: { task: Task }) {
   return (
     <ScrollArea className="h-full">
       <div className="px-5 py-4 space-y-4">
-        {/* Conversation usage — Claude-style bar */}
+        {/* Live context — what's actually loaded in the agent's
+            current turn (latest input + output reported by the
+            runner). Decays after /compact. */}
         <UsageBar
-          label="Conversation"
+          label={conversation.liveTurn ? "Live context" : "Context (estimate)"}
           hint={
-            conversationHot
-              ? "near the model's limit · /compact to free space"
-              : "tokens used in this task so far"
+            conversation.liveTurn
+              ? conversationHot
+                ? "this turn is near the model's limit · /compact to free space"
+                : "tokens loaded in the agent's current turn"
+              : "no per-turn usage logged yet — showing lifetime estimate; run a turn for a live read"
           }
           used={conversation.used}
           window={conversation.window}
@@ -96,6 +100,20 @@ export function TaskContext({ task }: { task: Task }) {
           }
           right={<CompactDialogTrigger task={task} hot={conversationHot} />}
         />
+        {conversation.cumulative != null &&
+          conversation.cumulative !== conversation.used && (
+            <div className="flex items-baseline gap-2 -mt-2 px-0.5">
+              <span className="font-mono text-[9.5px] uppercase tracking-[0.14em] text-ink-400 dark:text-ink-500">
+                Lifetime spend
+              </span>
+              <span className="font-mono text-[10.5px] tabular-nums text-ink-500 dark:text-ink-400">
+                {formatTokens(conversation.cumulative)}
+              </span>
+              <span className="text-[10px] text-ink-400 dark:text-ink-500">
+                billed across all turns (never decreases)
+              </span>
+            </div>
+          )}
 
         {/* Skill suffix usage */}
         <UsageBar

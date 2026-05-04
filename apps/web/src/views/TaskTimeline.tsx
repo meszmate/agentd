@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAutoAnimate } from "@formkit/auto-animate/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -87,8 +87,6 @@ export function TaskTimeline({
   compactedAt?: number | null;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const [text, setText] = useState("");
-  const send = useSendInput(taskId);
   const client = useClient();
   const { toast } = useApp();
   const [compacting, setCompacting] = useState(false);
@@ -111,6 +109,12 @@ export function TaskTimeline({
   };
 
   const streamEntries = streams ? Object.entries(streams) : [];
+
+  // Group walking is O(n) over messages; computing it once per change
+  // beats the original code path which called groupTaskMessages twice
+  // per iteration (O(n²)) inside the map. On a long codex chat this
+  // alone made the input feel laggy.
+  const groups = useMemo(() => groupTaskMessages(messages), [messages]);
 
   /**
    * Stick-to-bottom UX. Auto-scroll runs only when the operator is
@@ -193,57 +197,6 @@ export function TaskTimeline({
   }, [turn?.startedAt]);
   const elapsedMs = turn?.startedAt ? Date.now() - turn.startedAt : 0;
 
-  // Live queue snapshot — server-side state, polled. Renders as the
-  // strip above the input so the operator can see what's pending.
-  const steerQ = useTaskSteer(taskId);
-  const removeQueued = useRemoveQueuedSteer(taskId);
-  const queue = steerQ.data?.queue ?? [];
-
-  const fireQueued = useFireQueuedSteer(taskId);
-
-  // FLIP animator on the queue list — rows slide as they're fired or
-  // removed, matching the right-side todos timeline feel.
-  const [queueRef] = useAutoAnimate<HTMLUListElement>({
-    duration: 420,
-    easing: "cubic-bezier(0.16, 1, 0.3, 1)",
-  });
-
-  const submit = async () => {
-    const msg = text.trim();
-    if (!msg) return;
-    setText("");
-    if (disabled) {
-      // Mid-turn: queue the message — it does NOT go to the agent
-      // until the operator clicks the per-row Steer button. This
-      // matches the deliberate "draft then fire" feel claude-code
-      // has: type your thoughts now, send when the moment is right.
-      try {
-        await client.steerTask(taskId, msg, "queue");
-        await steerQ.refetch();
-      } catch (e) {
-        onError((e as Error).message);
-      }
-      return;
-    }
-    appendLocal("user", msg);
-    try {
-      await send.mutateAsync(msg);
-    } catch (e) {
-      onError((e as Error).message);
-    }
-  };
-
-  const fireRow = async (index: number, line: string) => {
-    // Optimistic chat append so the bubble shows up the moment the
-    // operator hits Steer — before the server persists.
-    appendLocal("user", line);
-    try {
-      await fireQueued.mutateAsync(index);
-    } catch (e) {
-      onError((e as Error).message);
-    }
-  };
-
   return (
     <div className="flex h-full min-h-0 flex-col">
       {overSoftLimit && (
@@ -316,10 +269,10 @@ export function TaskTimeline({
           ) : (
             <ol className="space-y-5">
               {(() => {
-                const groups = groupTaskMessages(messages);
                 // Index of the final tools group — only THAT card's
                 // last pair is allowed to spin, and only while the
                 // task is mid-turn. Older tool groups are settled.
+                // Computed inline against the memoized `groups`.
                 let lastToolsIdx = -1;
                 for (let i = groups.length - 1; i >= 0; i--) {
                   if (groups[i]!.kind === "tools") {
@@ -328,14 +281,18 @@ export function TaskTimeline({
                   }
                 }
                 return groups.map((g, gi) => {
-                  // /compact divider sits above the first message in
-                  // the group whose ts falls after the watermark.
+                  // /compact divider sits at the BOUNDARY between
+                  // pre-compact and post-compact messages. If every
+                  // group is after the watermark (no real boundary
+                  // exists), suppress the divider instead of pinning
+                  // a permanent "context compacted · …ago" banner.
                   const firstTs = g.firstTs;
                   const prevGroup = groups[gi - 1];
                   const showDivider =
                     compactedAt != null &&
                     firstTs >= compactedAt &&
-                    (!prevGroup || prevGroup.firstTs < compactedAt);
+                    !!prevGroup &&
+                    prevGroup.firstTs < compactedAt;
                   return (
                     <Fragment key={g.key}>
                       {showDivider && <CompactDivider ts={compactedAt!} />}
@@ -409,143 +366,209 @@ export function TaskTimeline({
         </div>
       </div>
 
-      {/* Input */}
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit();
-        }}
-        className="border-t border-ink-900/10 dark:border-ink-50/10 px-6 py-4"
-      >
-        <div className="mx-auto max-w-3xl">
-          {/* Inline plan strip — shows the agent's live TodoWrite plan
-              right above the input, claude-code style. Highlights the
-              in-progress item, lists pending below it, collapses
-              completed into a count. Full history lives in the right
-              sidebar's Todos tab. */}
-          {plan && plan.length > 0 && <PlanStrip plan={plan} />}
-          {/* Steer queue — each pending message gets its own row so
-              long inputs stay readable. Items live until the operator
-              clicks Steer to fire them (writes to stdin for claude,
-              SIGINT-respawn for codex). Once fired, the message lands
-              in the chat and the row vanishes. */}
-          {queue.length > 0 && (
-            <div className="mb-2.5 overflow-hidden rounded-lg border border-violet-500/30 bg-gradient-to-br from-violet-500/[0.07] via-violet-500/[0.04] to-transparent shadow-[0_1px_0_rgba(139,92,246,0.06),0_8px_24px_-12px_rgba(139,92,246,0.18)] dark:from-violet-500/[0.12] dark:via-violet-500/[0.07] animate-fade-in">
-              <header className="flex items-center justify-between gap-2 px-3 py-1.5 bg-gradient-to-r from-violet-500/[0.08] to-transparent border-b border-violet-500/15">
-                <span className="inline-flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-violet-700 dark:text-violet-300 font-semibold">
-                  <span className="h-2 w-2 rounded-full bg-violet-500" />
-                  Queue
-                  <span className="rounded-full px-1.5 py-px bg-violet-500/20 text-[9px] font-bold tabular-nums">
-                    {queue.length}
-                  </span>
-                </span>
-                <span className="font-mono text-[9px] text-violet-700/60 dark:text-violet-300/60">
-                  click ↑ steer to fire after next tool call
-                </span>
-              </header>
-              <ul
-                ref={queueRef}
-                className="divide-y divide-violet-500/10"
-              >
-                {queue.map((line, i) => (
-                  <li
-                    key={`${i}-${line.slice(0, 12)}`}
-                    className="group flex items-start gap-2.5 px-3 py-2 hover:bg-violet-500/[0.04] dark:hover:bg-violet-500/[0.06] transition-colors animate-slide-in"
-                  >
-                    <span className="mt-0.5 grid place-items-center size-5 rounded-full bg-violet-500/15 text-violet-700 dark:text-violet-300 font-mono text-[10px] tabular-nums font-semibold shrink-0">
-                      {i + 1}
-                    </span>
-                    <span className="flex-1 min-w-0 whitespace-pre-wrap break-words text-[12.5px] leading-snug text-violet-900 dark:text-violet-100 pt-0.5">
-                      {line}
-                    </span>
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => void fireRow(i, line)}
-                        disabled={fireQueued.isPending}
-                        title="Steer — send to the agent now (lands after the next tool call)"
-                        className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md font-mono text-[10px] uppercase tracking-[0.1em] font-semibold bg-gradient-to-b from-violet-500 to-violet-600 text-white shadow-sm shadow-violet-900/20 hover:from-violet-400 hover:to-violet-500 active:from-violet-600 active:to-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                      >
-                        {fireQueued.isPending ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <ArrowRight className="h-3 w-3" />
-                        )}
-                        steer
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void removeQueued.mutateAsync(i)}
-                        title="Remove from queue"
-                        className="grid place-items-center size-7 rounded-md text-violet-700/50 hover:bg-violet-500/20 hover:text-violet-700 dark:text-violet-300/50 dark:hover:text-violet-300 opacity-0 group-hover:opacity-100 transition-all"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          <div className="flex items-start gap-2.5">
-            <span
-              className={cn(
-                "shrink-0 mt-1.5 font-mono text-[14px] font-semibold leading-none transition-colors select-none",
-                disabled
-                  ? "text-violet-500 animate-blink"
-                  : "text-sky-700 dark:text-sky-300",
-              )}
-            >
-              ›
-            </span>
-            <Textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-                  e.preventDefault();
-                  void submit();
-                }
-              }}
-              placeholder={
-                disabled
-                  ? "type to queue — agent fires it after the next tool call"
-                  : "send input to the agent"
-              }
-              rows={3}
-              data-shortcut-target="chat-input"
-              className={cn(
-                "flex-1 resize-none border-none shadow-none bg-transparent focus-visible:ring-0 px-0 py-1 font-mono text-[13px] leading-snug placeholder:text-ink-400/60 dark:placeholder:text-ink-500/60",
-              )}
-              aria-label="Message"
-            />
-            <div className="shrink-0 mt-0.5 flex items-center gap-1.5">
-              <span className="hidden sm:flex items-center gap-1 text-2xs text-ink-400 dark:text-ink-500">
-                <Kbd>⌘</Kbd>
-                <Kbd>↵</Kbd>
-              </span>
-              <Button
-                type="submit"
-                size="sm"
-                disabled={send.isPending || !text.trim()}
-              >
-                {send.isPending ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : disabled ? (
-                  <ListPlus className="h-3.5 w-3.5" />
-                ) : (
-                  <Send className="h-3.5 w-3.5" />
-                )}
-                {disabled ? "Queue" : "Send"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      </form>
+      <TaskComposer
+        taskId={taskId}
+        disabled={disabled}
+        appendLocal={appendLocal}
+        onError={onError}
+        plan={plan}
+      />
     </div>
   );
 }
+
+/**
+ * Chat input + queue strip + plan strip. Lives in its own component so
+ * keystrokes only re-render the composer — not the entire message
+ * history above it. Without this split, every character typed would
+ * walk the full message tree (markdown, code blocks, autoAnimate, the
+ * resize observer chain), which makes typing in long sessions
+ * unusable. `React.memo` keeps it from re-rendering on every WS event
+ * the parent fires (deltas, usage, etc.) — only `disabled` and `plan`
+ * actually flow into the composer.
+ */
+const TaskComposer = memo(function TaskComposer({
+  taskId,
+  disabled,
+  appendLocal,
+  onError,
+  plan,
+}: {
+  taskId: string;
+  disabled: boolean;
+  appendLocal: (role: Message["role"], content: string) => void;
+  onError: (m: string) => void;
+  plan?: TaskPlanItem[];
+}) {
+  const [text, setText] = useState("");
+  const send = useSendInput(taskId);
+  const client = useClient();
+  const steerQ = useTaskSteer(taskId);
+  const removeQueued = useRemoveQueuedSteer(taskId);
+  const fireQueued = useFireQueuedSteer(taskId);
+  const queue = steerQ.data?.queue ?? [];
+
+  const [queueRef] = useAutoAnimate<HTMLUListElement>({
+    duration: 420,
+    easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+  });
+
+  const submit = async () => {
+    const msg = text.trim();
+    if (!msg) return;
+    setText("");
+    if (disabled) {
+      try {
+        await client.steerTask(taskId, msg, "queue");
+        await steerQ.refetch();
+      } catch (e) {
+        onError((e as Error).message);
+      }
+      return;
+    }
+    appendLocal("user", msg);
+    try {
+      await send.mutateAsync(msg);
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
+
+  const fireRow = async (index: number, line: string) => {
+    appendLocal("user", line);
+    try {
+      await fireQueued.mutateAsync(index);
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+      className="border-t border-ink-900/10 dark:border-ink-50/10 px-6 py-4"
+    >
+      <div className="mx-auto max-w-3xl">
+        {plan && plan.length > 0 && <PlanStrip plan={plan} />}
+        {queue.length > 0 && (
+          <div className="mb-2.5 overflow-hidden rounded-lg border border-violet-500/30 bg-gradient-to-br from-violet-500/[0.07] via-violet-500/[0.04] to-transparent shadow-[0_1px_0_rgba(139,92,246,0.06),0_8px_24px_-12px_rgba(139,92,246,0.18)] dark:from-violet-500/[0.12] dark:via-violet-500/[0.07] animate-fade-in">
+            <header className="flex items-center justify-between gap-2 px-3 py-1.5 bg-gradient-to-r from-violet-500/[0.08] to-transparent border-b border-violet-500/15">
+              <span className="inline-flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-violet-700 dark:text-violet-300 font-semibold">
+                <span className="h-2 w-2 rounded-full bg-violet-500" />
+                Queue
+                <span className="rounded-full px-1.5 py-px bg-violet-500/20 text-[9px] font-bold tabular-nums">
+                  {queue.length}
+                </span>
+              </span>
+              <span className="font-mono text-[9px] text-violet-700/60 dark:text-violet-300/60">
+                click ↑ steer to fire after next tool call
+              </span>
+            </header>
+            <ul
+              ref={queueRef}
+              className="divide-y divide-violet-500/10"
+            >
+              {queue.map((line, i) => (
+                <li
+                  key={`${i}-${line.slice(0, 12)}`}
+                  className="group flex items-start gap-2.5 px-3 py-2 hover:bg-violet-500/[0.04] dark:hover:bg-violet-500/[0.06] transition-colors animate-slide-in"
+                >
+                  <span className="mt-0.5 grid place-items-center size-5 rounded-full bg-violet-500/15 text-violet-700 dark:text-violet-300 font-mono text-[10px] tabular-nums font-semibold shrink-0">
+                    {i + 1}
+                  </span>
+                  <span className="flex-1 min-w-0 whitespace-pre-wrap break-words text-[12.5px] leading-snug text-violet-900 dark:text-violet-100 pt-0.5">
+                    {line}
+                  </span>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => void fireRow(i, line)}
+                      disabled={fireQueued.isPending}
+                      title="Steer — send to the agent now (lands after the next tool call)"
+                      className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md font-mono text-[10px] uppercase tracking-[0.1em] font-semibold bg-gradient-to-b from-violet-500 to-violet-600 text-white shadow-sm shadow-violet-900/20 hover:from-violet-400 hover:to-violet-500 active:from-violet-600 active:to-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {fireQueued.isPending ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <ArrowRight className="h-3 w-3" />
+                      )}
+                      steer
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void removeQueued.mutateAsync(i)}
+                      title="Remove from queue"
+                      className="grid place-items-center size-7 rounded-md text-violet-700/50 hover:bg-violet-500/20 hover:text-violet-700 dark:text-violet-300/50 dark:hover:text-violet-300 opacity-0 group-hover:opacity-100 transition-all"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div className="flex items-start gap-2.5">
+          <span
+            className={cn(
+              "shrink-0 mt-1.5 font-mono text-[14px] font-semibold leading-none transition-colors select-none",
+              disabled
+                ? "text-violet-500 animate-blink"
+                : "text-sky-700 dark:text-sky-300",
+            )}
+          >
+            ›
+          </span>
+          <Textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                e.preventDefault();
+                void submit();
+              }
+            }}
+            placeholder={
+              disabled
+                ? "type to queue — agent fires it after the next tool call"
+                : "send input to the agent"
+            }
+            rows={3}
+            data-shortcut-target="chat-input"
+            className={cn(
+              "flex-1 resize-none border-none shadow-none bg-transparent focus-visible:ring-0 px-0 py-1 font-mono text-[13px] leading-snug placeholder:text-ink-400/60 dark:placeholder:text-ink-500/60",
+            )}
+            aria-label="Message"
+          />
+          <div className="shrink-0 mt-0.5 flex items-center gap-1.5">
+            <span className="hidden sm:flex items-center gap-1 text-2xs text-ink-400 dark:text-ink-500">
+              <Kbd>⌘</Kbd>
+              <Kbd>↵</Kbd>
+            </span>
+            <Button
+              type="submit"
+              size="sm"
+              disabled={send.isPending || !text.trim()}
+            >
+              {send.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : disabled ? (
+                <ListPlus className="h-3.5 w-3.5" />
+              ) : (
+                <Send className="h-3.5 w-3.5" />
+              )}
+              {disabled ? "Queue" : "Send"}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </form>
+  );
+});
 
 /**
  * Parse a `[result <tool> ok|err] <output>` message into its parts.
@@ -554,13 +577,41 @@ export function TaskTimeline({
  */
 function parseToolResultMessage(
   content: string,
-): { tool: string; ok: boolean; output: string } | null {
-  const m = content.match(/^\[result ([^\s\]]+) (ok|err)\]\s*([\s\S]*)$/);
+): {
+  tool: string;
+  ok: boolean;
+  output: string;
+  toolUseId?: string;
+  parentToolUseId?: string;
+} | null {
+  // Accept the legacy `[result <tool> ok|err]` shape AND the swarm-aware
+  // shape `[result <tool> ok|err p:<parentId> u:<toolUseId>]` where the
+  // metadata segment is optional and the two ids may appear in either
+  // order. Earlier the regex only matched the legacy shape, so any
+  // claude turn that emitted ids fell through and rendered as a raw
+  // system row in the chat (e.g. "[result (result) ok u:toolu_X] 225 :
+  // p, 226 …").
+  const m = content.match(
+    /^\[result ([^\s\]]+) (ok|err)((?:\s+(?:[pu]):[A-Za-z0-9_-]+)*)\]\s*([\s\S]*)$/,
+  );
   if (!m) return null;
+  const meta = m[3] ?? "";
+  let toolUseId: string | undefined;
+  let parentToolUseId: string | undefined;
+  for (const seg of meta.trim().split(/\s+/).filter(Boolean)) {
+    const colon = seg.indexOf(":");
+    if (colon < 0) continue;
+    const key = seg.slice(0, colon);
+    const value = seg.slice(colon + 1);
+    if (key === "p") parentToolUseId = value;
+    else if (key === "u") toolUseId = value;
+  }
   return {
     tool: m[1]!,
     ok: m[2] === "ok",
-    output: m[3] ?? "",
+    output: m[4] ?? "",
+    ...(toolUseId ? { toolUseId } : {}),
+    ...(parentToolUseId ? { parentToolUseId } : {}),
   };
 }
 
@@ -592,6 +643,7 @@ function groupTaskMessages(messages: Message[]): TaskGroup[] {
     input?: unknown;
     ok?: boolean;
     preview?: string;
+    toolUseId?: string;
   }> = [];
   let bufFirstTs = 0;
   let bufKey = "";
@@ -613,11 +665,16 @@ function groupTaskMessages(messages: Message[]): TaskGroup[] {
     }
     const result = parseToolResultMessage(m.content);
     if (result) {
+      if (buf.length === 0) {
+        bufFirstTs = m.ts;
+        bufKey = `tools:${m.id}`;
+      }
       buf.push({
         kind: "tool_result",
         name: result.tool,
         ok: result.ok,
         preview: result.output,
+        ...(result.toolUseId ? { toolUseId: result.toolUseId } : {}),
       });
       continue;
     }
@@ -639,7 +696,22 @@ function groupTaskMessages(messages: Message[]): TaskGroup[] {
       bufFirstTs = m.ts;
       bufKey = `tools:${m.id}`;
     }
-    buf.push({ kind: "tool_use", name: callMatch[1]!.trim(), input });
+    // Pull the tool-use id the daemon injects into args so we can
+    // match this call with its result by id (positional pairing
+    // breaks when claude batches multiple tool_uses + results in
+    // one assistant turn — the order isn't guaranteed to interleave).
+    const callToolUseId =
+      input &&
+      typeof input === "object" &&
+      typeof (input as Record<string, unknown>)._agentdToolId === "string"
+        ? ((input as Record<string, unknown>)._agentdToolId as string)
+        : undefined;
+    buf.push({
+      kind: "tool_use",
+      name: callMatch[1]!.trim(),
+      input,
+      ...(callToolUseId ? { toolUseId: callToolUseId } : {}),
+    });
   }
   flushTools();
   return out;
@@ -652,6 +724,21 @@ function TimelineItem({ message: m }: { message: Message }) {
   if (m.role === "system") {
     const meta = parseSystemMessage(m.content);
     if (meta) return <StructuredItem ts={m.ts} {...meta} />;
+    // Hide leftover codex internal markers from older runs.
+    //  - `{"type":"item.started",…}` — raw stream-json envelopes the
+    //    runner used to forward when it didn't recognize an event.
+    //  - `[codex thread] <uuid>` — the carrier the runner emits with
+    //    the codex thread id so the daemon can save it for resume.
+    //    Internal plumbing; never useful in the chat.
+    const trimmed = m.content.trim();
+    if (
+      /^\{"type":"(item|turn|thread|response)\.(started|completed|in_progress|done|created)"/.test(
+        trimmed,
+      ) ||
+      /^\[codex thread\] [0-9a-f-]{36}$/i.test(trimmed)
+    ) {
+      return null;
+    }
     // Plain system rows (raw stderr, etc.) — single line, low key.
     return (
       <li className="flex items-start gap-2">

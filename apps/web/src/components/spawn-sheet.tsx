@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Loader2, Rocket } from "lucide-react";
+import type { PlanSlice } from "@agentd/contracts";
 import {
   Sheet,
   SheetContent,
@@ -28,9 +29,11 @@ import {
   usePatchPrefs,
   usePrefs,
   useSkills,
+  useSpawnTasksMulti,
 } from "@/queries";
 import { useApp } from "@/AppContext";
 import { ProjectPicker } from "@/components/project-picker";
+import { PlanSlicesEditor } from "@/components/plan-slices-editor";
 import {
   WorkspaceSetup,
   defaultWorkspaceSetup,
@@ -40,15 +43,57 @@ import { BookText } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type PermissionMode = "bypassPermissions" | "acceptEdits" | "plan";
-type ThinkingLevel = "low" | "medium" | "high" | "max" | "xhigh";
+type ThinkingLevel =
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 
-const THINKING_LEVELS: { value: ThinkingLevel; label: string; hint: string }[] = [
-  { value: "low", label: "low", hint: "fastest, minimal reasoning — quick edits" },
-  { value: "medium", label: "medium", hint: "balanced — most everyday tasks" },
-  { value: "high", label: "high", hint: "default — solid for multi-step engineering" },
-  { value: "max", label: "max", hint: "extended thinking budget — slower, deeper" },
-  { value: "xhigh", label: "xhigh", hint: "deepest tier — gnarly debugging / architecture" },
-];
+// Per-agent thinking-level choices. Claude's CLI takes `--effort` and
+// accepts low|medium|high|xhigh|max (no `minimal`). Codex's CLI takes
+// `-c model_reasoning_effort=` and accepts minimal|low|medium|high|xhigh
+// (no `max`). The UI hides values that aren't valid for the selected
+// agent so the operator doesn't pick something the runner has to clamp.
+const THINKING_LEVEL_META: Record<
+  ThinkingLevel,
+  { label: string; hint: string }
+> = {
+  minimal: {
+    label: "minimal",
+    hint: "codex-only — lightest reasoning tier; near-zero think time",
+  },
+  low: { label: "low", hint: "fastest — quick edits / small refactors" },
+  medium: { label: "medium", hint: "balanced — most everyday tasks" },
+  high: { label: "high", hint: "default — solid for multi-step engineering" },
+  xhigh: {
+    label: "xhigh",
+    hint: "deepest tier — gnarly debugging / architecture",
+  },
+  max: {
+    label: "max",
+    hint: "claude-only — extended thinking budget; slower, deeper",
+  },
+};
+
+const THINKING_LEVELS_BY_AGENT: Record<
+  "claude" | "codex",
+  ReadonlyArray<ThinkingLevel>
+> = {
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  codex: ["minimal", "low", "medium", "high", "xhigh"],
+};
+
+function clampThinkingLevel(
+  agent: "claude" | "codex",
+  level: ThinkingLevel,
+): ThinkingLevel {
+  if (THINKING_LEVELS_BY_AGENT[agent].includes(level)) return level;
+  if (agent === "claude" && level === "minimal") return "low";
+  if (agent === "codex" && level === "max") return "xhigh";
+  return "high";
+}
 
 const PERMISSION_MODES: { value: PermissionMode; label: string; hint: string }[] = [
   {
@@ -77,8 +122,11 @@ export function SpawnSheet({
 }) {
   const create = useCreateTask();
   const createCouncil = useCreateCouncil();
+  const spawnMulti = useSpawnTasksMulti();
   const modelsQ = useModels();
   const [councilMode, setCouncilMode] = useState(false);
+  const [phaseMode, setPhaseMode] = useState(false);
+  const [slices, setSlices] = useState<PlanSlice[]>([]);
   const navigate = useNavigate();
   const { toast } = useApp();
   const prefsQ = usePrefs();
@@ -120,7 +168,7 @@ export function SpawnSheet({
     setAgent(p.lastAgent);
     setAutoPush(p.lastAutoPush);
     setPermissionMode(p.lastPermissionMode);
-    setThinkingLevel(p.lastThinkingLevel);
+    setThinkingLevel(clampThinkingLevel(p.lastAgent, p.lastThinkingLevel));
     setModel(
       p.lastAgent === "claude" ? p.lastModelClaude : p.lastModelCodex,
     );
@@ -145,6 +193,13 @@ export function SpawnSheet({
     );
   }, [agent, hydrated, prefsQ.data]);
 
+  // Clamp the thinking level whenever the operator switches agents so
+  // an inapplicable choice (e.g. `max` on codex, `minimal` on claude)
+  // doesn't get persisted or sent to the runner.
+  useEffect(() => {
+    setThinkingLevel((cur) => clampThinkingLevel(agent, cur));
+  }, [agent]);
+
   const skillsQ = useSkills(repoPath || undefined);
   const availableSkills = skillsQ.data?.skills ?? [];
 
@@ -166,16 +221,77 @@ export function SpawnSheet({
     if (open) {
       setPrompt("");
       setTitle("");
+      setPhaseMode(false);
+      setSlices([]);
     }
   }, [open]);
 
+  // Phase mode and council mode are mutually exclusive — flipping one
+  // on flips the other off so the spawn button knows exactly which
+  // path to take. Seeding the slices on first enter gives the operator
+  // a working backend/frontend split they can edit instead of staring
+  // at an empty editor.
+  const togglePhaseMode = (on: boolean) => {
+    setPhaseMode(on);
+    if (on) {
+      setCouncilMode(false);
+      setSlices((cur) =>
+        cur.length > 0
+          ? cur
+          : [
+              { title: "backend", agent: "codex", prompt: "" },
+              { title: "frontend", agent: "claude", prompt: "" },
+            ],
+      );
+    }
+  };
+  const toggleCouncilMode = (on: boolean) => {
+    setCouncilMode(on);
+    if (on) setPhaseMode(false);
+  };
+
   const submit = async () => {
-    if (!repoPath.trim() || !prompt.trim()) {
-      toast("Repo path and prompt are required", true);
+    if (!repoPath.trim()) {
+      toast("Repo path is required", true);
+      return;
+    }
+    if (!phaseMode && !prompt.trim()) {
+      toast("Prompt is required", true);
       return;
     }
     try {
       const finalBase = (workspace.baseBranch || baseBranch).trim() || "main";
+
+      // Phase mode: each slice spawns as its own sibling task on a
+      // shared branch, chained via dependsOnTaskId. Per-slice agent /
+      // model / thinking overrides come from the editor; everything
+      // else (workspace, base branch, auto-push) is global.
+      if (phaseMode) {
+        if (slices.length === 0) {
+          toast("Add at least one slice", true);
+          return;
+        }
+        const blanks = slices.findIndex((s) => !s.prompt.trim());
+        if (blanks !== -1) {
+          toast(`Slice ${blanks + 1} needs a prompt`, true);
+          return;
+        }
+        const res = await spawnMulti.mutateAsync({
+          repoPath: repoPath.trim(),
+          baseBranch: finalBase,
+          slices,
+          autoPush,
+          ...(title.trim() ? { title: title.trim() } : {}),
+          ...(workspace.branchName.trim()
+            ? { branchName: workspace.branchName.trim() }
+            : {}),
+        });
+        toast(`Spawned ${res.tasks.length} slices`);
+        onClose();
+        const first = res.tasks[0];
+        if (first) navigate(`/tasks/${first.id}`);
+        return;
+      }
 
       // Council mode pulls members straight from the registry. Whatever
       // models the user has configured for this agent become parallel
@@ -327,8 +443,29 @@ export function SpawnSheet({
               </div>
               <Switch
                 checked={councilMode}
-                onCheckedChange={setCouncilMode}
+                onCheckedChange={toggleCouncilMode}
               />
+            </div>
+
+            <div
+              className={cn(
+                "flex items-center justify-between rounded-md border p-3 transition-colors",
+                phaseMode
+                  ? "border-ember-500/30 bg-ember-500/[0.06]"
+                  : "border-ink-900/10 bg-paper-50 dark:border-ink-50/10 dark:bg-ink-800",
+              )}
+            >
+              <div className="pr-3">
+                <Label className="text-xs normal-case tracking-normal text-foreground">
+                  Multi-agent (phase)
+                </Label>
+                <p className="text-2xs text-muted-foreground">
+                  Split the work into N slices that run sequentially on a
+                  shared branch — e.g. backend on codex, frontend on claude.
+                  Each slice gets its own prompt, agent and model.
+                </p>
+              </div>
+              <Switch checked={phaseMode} onCheckedChange={togglePhaseMode} />
             </div>
 
             <Field>
@@ -354,29 +491,53 @@ export function SpawnSheet({
               />
             </Field>
 
-            <Field>
-              <Label htmlFor="spawn-prompt">Prompt</Label>
-              <Textarea
-                id="spawn-prompt"
-                rows={6}
-                placeholder="Describe what the agent should do…"
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                onKeyDown={(e) => {
-                  if (
-                    (e.metaKey || e.ctrlKey) &&
-                    e.key === "Enter" &&
-                    !create.isPending
-                  ) {
-                    e.preventDefault();
-                    void submit();
-                  }
-                }}
-              />
-              <p className="text-2xs text-muted-foreground">
-                <span className="font-mono">⌘↵</span> to submit
-              </p>
-            </Field>
+            {!phaseMode && (
+              <Field>
+                <Label htmlFor="spawn-prompt">Prompt</Label>
+                <Textarea
+                  id="spawn-prompt"
+                  rows={6}
+                  placeholder="Describe what the agent should do…"
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (
+                      (e.metaKey || e.ctrlKey) &&
+                      e.key === "Enter" &&
+                      !create.isPending
+                    ) {
+                      e.preventDefault();
+                      void submit();
+                    }
+                  }}
+                />
+                <p className="text-2xs text-muted-foreground">
+                  <span className="font-mono">⌘↵</span> to submit
+                </p>
+              </Field>
+            )}
+
+            {phaseMode && (
+              <Field>
+                <Label>Slices ({slices.length})</Label>
+                <PlanSlicesEditor
+                  slices={slices}
+                  onChange={setSlices}
+                  modelSuggestions={{
+                    claude: (modelsQ.data?.models.claude ?? []).map(
+                      (m) => m.id,
+                    ),
+                    codex: (modelsQ.data?.models.codex ?? []).map((m) => m.id),
+                  }}
+                  disabled={spawnMulti.isPending}
+                />
+                <p className="text-2xs text-muted-foreground mt-1">
+                  Slices run in order on a shared branch. Each lands its own
+                  commit; per-slice agent / model / thinking override the
+                  spawn defaults.
+                </p>
+              </Field>
+            )}
 
             {availableSkills.length > 0 && (
               <Field>
@@ -439,6 +600,8 @@ export function SpawnSheet({
               <Switch checked={autoPush} onCheckedChange={setAutoPush} />
             </div>
 
+            {!phaseMode && (
+            <>
             <Field>
               <Label>Permissions</Label>
               <div className="flex flex-wrap gap-1.5">
@@ -470,14 +633,15 @@ export function SpawnSheet({
             <Field>
               <Label>Thinking</Label>
               <div className="flex flex-wrap gap-1.5">
-                {THINKING_LEVELS.map((m) => {
-                  const on = thinkingLevel === m.value;
+                {THINKING_LEVELS_BY_AGENT[agent].map((value) => {
+                  const meta = THINKING_LEVEL_META[value];
+                  const on = thinkingLevel === value;
                   return (
                     <button
-                      key={m.value}
+                      key={value}
                       type="button"
-                      onClick={() => setThinkingLevel(m.value)}
-                      title={m.hint}
+                      onClick={() => setThinkingLevel(value)}
+                      title={meta.hint}
                       className={cn(
                         "inline-flex items-center gap-1.5 h-6 px-2 rounded-md border text-[11px] transition-colors",
                         on
@@ -485,13 +649,13 @@ export function SpawnSheet({
                           : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
                       )}
                     >
-                      <span className="font-mono">{m.label}</span>
+                      <span className="font-mono">{meta.label}</span>
                     </button>
                   );
                 })}
               </div>
               <p className="text-2xs text-muted-foreground mt-1">
-                {THINKING_LEVELS.find((m) => m.value === thinkingLevel)?.hint}
+                {THINKING_LEVEL_META[thinkingLevel].hint}
               </p>
             </Field>
 
@@ -514,6 +678,8 @@ export function SpawnSheet({
                 override only — flips back via the chip on the task header.
               </p>
             </Field>
+            </>
+            )}
           </div>
         </div>
 
@@ -521,13 +687,20 @@ export function SpawnSheet({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button onClick={submit} disabled={create.isPending}>
-            {create.isPending ? (
+          <Button
+            onClick={submit}
+            disabled={create.isPending || spawnMulti.isPending}
+          >
+            {create.isPending || spawnMulti.isPending ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <Rocket className="h-4 w-4" />
             )}
-            Spawn task
+            {phaseMode
+              ? `Spawn ${slices.length} slice${slices.length === 1 ? "" : "s"}`
+              : councilMode
+                ? "Spawn council"
+                : "Spawn task"}
           </Button>
         </SheetFooter>
       </SheetContent>

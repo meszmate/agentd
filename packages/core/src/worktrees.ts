@@ -17,12 +17,34 @@ export interface CreateWorktreeOptions {
    * `new` (default) — create `branchName` off `baseBranch`.
    * `existing`      — switch onto `branchName` (must already exist locally
    *                   or as a remote tracking branch).
+   * `shared`        — reuse the worktree at `<worktreeRoot>/<planGroupId>`
+   *                   (or create it on first call). Sibling slices in the
+   *                   same plan group land here. The branch is auto-created
+   *                   on first call and reused thereafter; subsequent calls
+   *                   are no-ops if the path already holds the right branch.
    */
-  branchMode?: "new" | "existing";
+  branchMode?: "new" | "existing" | "shared";
+  /**
+   * Required when branchMode === "shared". Used as the directory name
+   * inside `worktreeRoot` so every sibling slice lands in the same path.
+   */
+  planGroupId?: string;
   /** Run `git fetch && git pull --ff-only` on the base before creating. */
   pullLatest?: boolean;
   /** Optional remote name for fetch/pull (default `origin`). */
   remote?: string;
+}
+
+/**
+ * Path that every sibling slice in `planGroupId` shares. Used by the
+ * shared worktree mode and by callers that need to know where to look
+ * (e.g. cleanup decisions when sibling tasks finish).
+ */
+export function worktreePathForGroup(
+  worktreeRoot: string,
+  planGroupId: string,
+): string {
+  return join(worktreeRoot, planGroupId);
 }
 
 export interface CreateWorktreeResult {
@@ -155,6 +177,14 @@ async function localBranchExists(
   return r.exitCode === 0;
 }
 
+async function currentBranchAt(repoPath: string): Promise<string | null> {
+  const r = await run(
+    ["git", "symbolic-ref", "--short", "-q", "HEAD"],
+    repoPath,
+  );
+  return r.exitCode === 0 ? r.stdout.trim() || null : null;
+}
+
 async function hasUncommittedChanges(repoPath: string): Promise<boolean> {
   const r = await run(["git", "status", "--porcelain"], repoPath);
   if (r.exitCode !== 0) return false;
@@ -224,6 +254,46 @@ export async function createWorktree(
   }
 
   // ── worktree mode ──
+  if (branchMode === "shared") {
+    const groupId = opts.planGroupId;
+    if (!groupId) {
+      throw new Error("shared branch mode requires planGroupId");
+    }
+    const worktreePath = worktreePathForGroup(worktreeRoot, groupId);
+    if (existsSync(worktreePath)) {
+      // Idempotent: someone (the first slice) already created it.
+      // Verify the path is actually checked out on the expected branch
+      // before reusing it; fall through to a recreate if not.
+      const cur = await currentBranchAt(worktreePath);
+      if (cur === branchName) return { worktreePath, branch: branchName };
+      // Different branch: switch the existing worktree onto branchName.
+      // Try checkout first (existing branch), else create.
+      const exists = await localBranchExists(repoPath, branchName);
+      const args = exists
+        ? ["git", "checkout", branchName]
+        : ["git", "checkout", "-b", branchName, baseBranch];
+      const r = await run(args, worktreePath);
+      if (r.exitCode !== 0) {
+        throw new Error(
+          `git checkout in shared worktree failed: ${r.stderr || r.stdout}`,
+        );
+      }
+      return { worktreePath, branch: branchName };
+    }
+    // First call for this group: create the worktree on a new branch
+    // off baseBranch. If branchName already exists locally we attach to it.
+    const exists = await localBranchExists(repoPath, branchName);
+    const args = exists
+      ? ["git", "worktree", "add", worktreePath, branchName]
+      : ["git", "worktree", "add", "-b", branchName, worktreePath, baseBranch];
+    const r = await run(args, repoPath);
+    if (r.exitCode !== 0) {
+      throw new Error(
+        `git worktree add (shared) failed: ${r.stderr || r.stdout}`,
+      );
+    }
+    return { worktreePath, branch: branchName };
+  }
   const worktreePath = join(worktreeRoot, taskId);
   if (branchMode === "existing") {
     // git worktree add accepts either the branch name (will check out) or

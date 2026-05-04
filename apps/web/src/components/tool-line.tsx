@@ -373,8 +373,27 @@ export function WorkCard({
       <ul className="space-y-0.5">
         {visible.map((p, i) => {
           const isLast = i === visible.length - 1;
+          // Sub-agent tool calls carry `_agentdParent` in their input
+          // (injected by the daemon when the upstream runner reported
+          // a parent_tool_use_id). Indent + draw a left spine so the
+          // operator can see "this Bash was run BY the Task spawn
+          // above" instead of reading them as siblings.
+          const input =
+            p.input && typeof p.input === "object"
+              ? (p.input as Record<string, unknown>)
+              : null;
+          const parentId =
+            input && typeof input._agentdParent === "string"
+              ? input._agentdParent
+              : null;
           return (
-            <li key={i}>
+            <li
+              key={i}
+              className={cn(
+                parentId &&
+                  "pl-3 ml-3 border-l-2 border-violet-500/30 bg-violet-500/[0.025] rounded-r",
+              )}
+            >
               <ToolRow
                 content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
                 output={p.output}
@@ -523,6 +542,7 @@ export function pairToolEvents(
     input?: unknown;
     ok?: boolean;
     preview?: string;
+    toolUseId?: string;
   }>,
 ): Array<{
   name: string;
@@ -531,6 +551,17 @@ export function pairToolEvents(
   ok: boolean;
   running: boolean;
 }> {
+  // Build an id → result lookup so we can pair by id when claude
+  // batches several tool_uses then several tool_results in one turn
+  // (positional pairing alone breaks because the indexes don't line
+  // up — Use1, Use2, Result2, Result1 is a real shape claude emits).
+  const resultById = new Map<string, (typeof events)[number]>();
+  for (const ev of events) {
+    if (ev.kind === "tool_result" && typeof ev.toolUseId === "string") {
+      resultById.set(ev.toolUseId, ev);
+    }
+  }
+  const consumedIds = new Set<string>();
   const out: Array<{
     name: string;
     input: unknown;
@@ -541,8 +572,21 @@ export function pairToolEvents(
   for (let i = 0; i < events.length; i++) {
     const ev = events[i]!;
     if (ev.kind !== "tool_use" || typeof ev.name !== "string") continue;
-    const next = events[i + 1];
-    const matched = next && next.kind === "tool_result" ? next : null;
+    let matched: (typeof events)[number] | null = null;
+    if (ev.toolUseId && resultById.has(ev.toolUseId)) {
+      matched = resultById.get(ev.toolUseId)!;
+      consumedIds.add(ev.toolUseId);
+    } else {
+      // Fall back to the next tool_result not yet claimed by an id pair.
+      for (let j = i + 1; j < events.length; j++) {
+        const cand = events[j]!;
+        if (cand.kind !== "tool_result") continue;
+        if (cand.toolUseId && consumedIds.has(cand.toolUseId)) continue;
+        matched = cand;
+        if (cand.toolUseId) consumedIds.add(cand.toolUseId);
+        break;
+      }
+    }
     out.push({
       name: ev.name,
       input: ev.input,
@@ -622,6 +666,12 @@ function parseToolCall(content: string): ParsedTool {
   } catch {
     return { name, kind: classify(name), summary: trimOneLine(argsRaw, 100), detail: null };
   }
+  // Swarm nesting metadata is injected by the daemon as
+  // `_agentdParent` / `_agentdToolId` on the args object. Strip them
+  // before per-tool parsing so the existing switch cases see only
+  // real tool arguments.
+  if ("_agentdParent" in args) delete args._agentdParent;
+  if ("_agentdToolId" in args) delete args._agentdToolId;
 
   const kind = classify(name);
   const get = (...keys: string[]): string | undefined => {

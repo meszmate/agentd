@@ -5,6 +5,7 @@ import type {
   Idea,
   IdeaMessage,
   IdeaStatus,
+  PlanSlice,
   SavedIdea,
   Suggestion,
   Todo,
@@ -73,11 +74,11 @@ export interface AgentdUserPrefs {
   lastAutoPush: boolean;
   lastAutoPr: boolean;
   lastPermissionMode: "bypassPermissions" | "acceptEdits" | "plan";
-  lastThinkingLevel: "low" | "medium" | "high" | "max" | "xhigh";
+  lastThinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   lastModelClaude: string;
   lastModelCodex: string;
   workspaceMode: "worktree" | "in_place";
-  branchMode: "new" | "existing";
+  branchMode: "new" | "existing" | "shared";
   pullLatest: boolean;
   sidebarExpandedProjects: string[];
   taskWorkspaceOpen: boolean;
@@ -273,6 +274,12 @@ export class AgentdClient {
   async getModels(): Promise<{
     models: AgentdModelRegistry;
     defaults?: { claude?: string; codex?: string };
+    /**
+     * Operator's preferred thinking level per agent, set in
+     * `cfg.defaultThinking`. Spawn UIs read this so the picker opens
+     * pre-filled with the operator's preference instead of "auto".
+     */
+    defaultThinking?: { claude: ThinkingLevel; codex: ThinkingLevel };
     /**
      * Where each agent's model list was sourced from, so the UI can
      * surface "list pulled from codex 3 min ago" with a refresh
@@ -522,6 +529,8 @@ export class AgentdClient {
         message: IdeaMessage;
         ideaStatus: IdeaStatus;
         planDraft?: string | null;
+        planSlices?: PlanSlice[];
+        suggestedTitle?: string;
       }
     | { ok: false; source: string; error: string }
   > {
@@ -758,6 +767,15 @@ export class AgentdClient {
       body: JSON.stringify({ planDraft }),
     });
   }
+  async updateSavedIdeaSlices(
+    id: string,
+    slices: PlanSlice[] | null,
+  ): Promise<{ idea: SavedIdea }> {
+    return this.req(`/api/saved-ideas/${encodeURIComponent(id)}/slices`, {
+      method: "PUT",
+      body: JSON.stringify({ slices }),
+    });
+  }
   async spawnFromSavedIdea(
     id: string,
     body: {
@@ -770,6 +788,72 @@ export class AgentdClient {
     },
   ): Promise<{ idea: SavedIdea; task: Task }> {
     return this.req(`/api/saved-ideas/${encodeURIComponent(id)}/spawn`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+  /**
+   * Fan a saved idea's slices out into N sibling tasks. Returns the
+   * created tasks in slice order; the first one starts immediately,
+   * the rest stay `pending` until their parent finishes.
+   */
+  async spawnMultiFromSavedIdea(
+    id: string,
+    body: {
+      slices: PlanSlice[];
+      shareWorktree?: boolean;
+      branchName?: string;
+      baseBranch?: string;
+      title?: string;
+    },
+  ): Promise<{ idea: SavedIdea; tasks: Task[] }> {
+    return this.req(`/api/saved-ideas/${encodeURIComponent(id)}/spawn-multi`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+  /**
+   * Fan a freeform plan (no saved idea) into N sibling tasks. Same
+   * mechanics as `spawnMultiFromSavedIdea` — shared worktree by default,
+   * sequential `dependsOnTaskId` chain — but takes the repo path
+   * directly so the spawn sheet can phase a plan without persisting it
+   * as an idea first.
+   */
+  async spawnTasksMulti(body: {
+    repoPath: string;
+    slices: PlanSlice[];
+    shareWorktree?: boolean;
+    branchName?: string;
+    baseBranch?: string;
+    title?: string;
+    autoPush?: boolean;
+  }): Promise<{ tasks: Task[] }> {
+    return this.req(`/api/tasks/spawn-multi`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Add a sibling task to an existing one — same worktree + branch,
+   * chained sequentially via dependsOnTaskId. Used by the task page's
+   * "Spawn related task" action so the operator can drop another
+   * agent (different model / different concern) on the same checkout.
+   */
+  async spawnSiblingTask(
+    parentId: string,
+    body: {
+      agent: "claude" | "codex";
+      prompt: string;
+      title?: string;
+      model?: string;
+      thinkingLevel?: ThinkingLevel;
+      permissionMode?: "bypassPermissions" | "acceptEdits" | "plan";
+      autoCommit?: boolean;
+      autoPush?: boolean;
+    },
+  ): Promise<{ task: Task }> {
+    return this.req(`/api/tasks/${encodeURIComponent(parentId)}/spawn-sibling`, {
       method: "POST",
       body: JSON.stringify(body),
     });
@@ -787,7 +871,7 @@ export class AgentdClient {
       thinkingLevel?: ThinkingLevel;
       permissionMode?: "bypassPermissions" | "acceptEdits" | "plan";
       workspaceMode?: "worktree" | "in_place";
-      branchMode?: "new" | "existing";
+      branchMode?: "new" | "existing" | "shared";
       branchName?: string;
       pullLatest?: boolean;
       title?: string;
@@ -815,7 +899,12 @@ export class AgentdClient {
     },
     onChunk: (chunk: string) => void,
     signal?: AbortSignal,
-  ): Promise<{ plan: string; source: string; error?: string }> {
+  ): Promise<{
+    plan: string;
+    source: string;
+    error?: string;
+    slices?: PlanSlice[];
+  }> {
     const r = await fetch(
       `${this.server}/api/suggestions/${encodeURIComponent(id)}/plan`,
       {
@@ -1858,7 +1947,20 @@ export class AgentdClient {
         }[];
       };
     };
-    conversation: { used: number; window: number };
+    conversation: {
+      /** Live context size (latest turn's input + output). */
+      used: number;
+      /** Model's context window. */
+      window: number;
+      /** True when `used` is sourced from the per-turn signal; false
+       *  when we fell back to the lifetime cumulative because the
+       *  task hasn't logged a usage event since this code shipped. */
+      liveTurn?: boolean;
+      /** Lifetime billing total (sum of every turn's input+output).
+       *  Never decreases; shown alongside `used` so the operator can
+       *  see both "current context" and "lifetime spend". */
+      cumulative?: number;
+    };
   }> {
     return this.req(`/api/tasks/${encodeURIComponent(id)}/context`);
   }

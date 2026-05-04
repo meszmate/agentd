@@ -14,13 +14,26 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import type {
-  AgentKind,
-  PermissionMode,
-  SavedIdea,
-  Suggestion,
-  ThinkingLevel,
+import {
+  THINKING_LEVELS_BY_AGENT,
+  clampThinkingLevel,
+  type AgentKind,
+  type PermissionMode,
+  type PlanSlice,
+  type SavedIdea,
+  type Suggestion,
+  type ThinkingLevel,
 } from "@agentd/contracts";
+
+const THINK_HINT: Record<ThinkingLevel, string> = {
+  minimal: "minimal · codex-only",
+  low: "low · fastest",
+  medium: "medium · balanced",
+  high: "high · default",
+  xhigh: "xhigh · deepest",
+  max: "max · claude-only",
+};
+import { PlanSlicesEditor } from "@/components/plan-slices-editor";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -39,6 +52,8 @@ import {
   useResolveSuggestion,
   useSaveIdea,
   useSavedIdeas,
+  useSpawnMultiFromSavedIdea,
+  useUpdateSavedIdeaSlices,
 } from "@/queries";
 import { qk } from "@/queries";
 import { useQueryClient } from "@tanstack/react-query";
@@ -815,12 +830,22 @@ function PlanAndSpawnSheet({
   const navigate = useNavigate();
   const { toast } = useApp();
   const resolve = useResolveSuggestion();
+  const spawnMulti = useSpawnMultiFromSavedIdea();
+  const persistSlices = useUpdateSavedIdeaSlices();
 
   const [plan, setPlan] = useState(savedIdea?.planDraft ?? "");
   const [planSource, setPlanSource] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(!savedIdea?.planDraft);
   const [planError, setPlanError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Slice editor state. Seeded from the idea's persisted slices when
+  // we open from a saved idea; the planner can overwrite this when it
+  // emits a json-slices block. The operator can edit / clear at any
+  // time — clearing reverts to single-task spawn.
+  const [slices, setSlices] = useState<PlanSlice[]>(
+    savedIdea?.planSlices ?? [],
+  );
+  const [shareWorktree, setShareWorktree] = useState<boolean>(true);
 
   // Planner pick mirrors brainstorm — encoded as `<agent>:<model>`.
   const [planPick, setPlanPick] = useState<string>("");
@@ -831,6 +856,13 @@ function PlanAndSpawnSheet({
   const [permission, setPermission] = useState<PermissionMode>(
     "bypassPermissions",
   );
+
+  // Clamp the thinking level whenever the operator picks a different
+  // agent so an inapplicable choice (e.g. `max` on codex, `minimal`
+  // on claude) doesn't get sent to the runner.
+  useEffect(() => {
+    setThinking((cur) => clampThinkingLevel(agent, cur));
+  }, [agent]);
 
   const generatePlan = useMemo(
     () => async () => {
@@ -856,6 +888,7 @@ function PlanAndSpawnSheet({
         );
         if (r.error) setPlanError(r.error);
         if (r.plan && r.source !== "fallback-error") setPlan(r.plan);
+        if (r.slices && r.slices.length > 0) setSlices(r.slices);
         setPlanSource(r.source);
       } catch (e) {
         if ((e as { name?: string }).name !== "AbortError") {
@@ -920,6 +953,53 @@ function PlanAndSpawnSheet({
       toast((e as Error).message, true);
     }
   };
+
+  const onSpawnMulti = async () => {
+    if (!savedIdea) {
+      toast("save the idea first to fan it into slices", true);
+      return;
+    }
+    if (slices.length === 0) {
+      toast("add at least one slice to fan out", true);
+      return;
+    }
+    const bad = slices.find((s) => !s.title.trim() || !s.prompt.trim());
+    if (bad) {
+      toast("each slice needs a title and a prompt", true);
+      return;
+    }
+    try {
+      const r = await spawnMulti.mutateAsync({
+        id: savedIdea.id,
+        slices,
+        shareWorktree,
+        title: seed.preview.split("\n")[0]!.slice(0, 80),
+      });
+      toast(
+        `spawned ${r.tasks.length} sibling task${r.tasks.length === 1 ? "" : "s"}${
+          shareWorktree ? " on a shared branch" : ""
+        }`,
+      );
+      onClose();
+      navigate(`/tasks/${r.tasks[0]!.id}`);
+    } catch (e) {
+      toast((e as Error).message, true);
+    }
+  };
+
+  // Persist slice edits to the saved idea on a small debounce so a
+  // closed sheet (or refresh) doesn't lose the operator's work.
+  useEffect(() => {
+    if (!savedIdea) return;
+    const t = setTimeout(() => {
+      void persistSlices.mutateAsync({
+        id: savedIdea.id,
+        slices: slices.length > 0 ? slices : null,
+      }).catch(() => {});
+    }, 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slices, savedIdea?.id]);
 
   const stashPlan = async () => {
     if (!suggestion) return;
@@ -1074,13 +1154,10 @@ function PlanAndSpawnSheet({
               <ToolbarPick
                 label={`think · ${thinking}`}
                 width="auto"
-                options={[
-                  { value: "low", label: "low · fastest" },
-                  { value: "medium", label: "medium · balanced" },
-                  { value: "high", label: "high · default" },
-                  { value: "max", label: "max · deepest" },
-                  { value: "xhigh", label: "xhigh · claude tier" },
-                ]}
+                options={THINKING_LEVELS_BY_AGENT[agent].map((v) => ({
+                  value: v,
+                  label: THINK_HINT[v],
+                }))}
                 onSelect={(v) => setThinking(v as ThinkingLevel)}
               />
               <ToolbarPick
@@ -1105,6 +1182,74 @@ function PlanAndSpawnSheet({
               becomes the agent's prompt — edit it before hitting spawn.
             </p>
           </div>
+
+          {savedIdea && (
+            <div className="rounded-lg border border-ink-900/10 bg-paper-100/40 dark:border-ink-50/10 dark:bg-ink-900/30 p-3 space-y-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+                  Slices
+                </span>
+                <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+                  · split the plan across agents/models · run sequentially on the same branch
+                </span>
+                <span className="ml-auto inline-flex items-center gap-2">
+                  {slices.length > 1 && (
+                    <label className="inline-flex items-center gap-1 font-mono text-[10.5px] text-ink-600 dark:text-ink-300">
+                      <input
+                        type="checkbox"
+                        checked={shareWorktree}
+                        onChange={(e) => setShareWorktree(e.target.checked)}
+                        className="h-3 w-3 accent-ember-500"
+                      />
+                      share branch
+                    </label>
+                  )}
+                  {slices.length === 0 ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSlices([
+                          {
+                            title: "slice 1",
+                            prompt: plan.trim() || "",
+                          },
+                        ])
+                      }
+                      className="inline-flex items-center gap-1 h-6 px-2 rounded border border-ink-900/10 bg-paper-50 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-600 hover:bg-paper-100 hover:border-ink-900/20 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-300 dark:hover:bg-ink-700"
+                    >
+                      split into slices
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setSlices([])}
+                      className="inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] uppercase tracking-[0.06em] text-ink-500 hover:text-red-600 dark:text-ink-400 dark:hover:text-red-300"
+                    >
+                      clear slices
+                    </button>
+                  )}
+                </span>
+              </div>
+              {slices.length > 0 && (
+                <PlanSlicesEditor
+                  slices={slices}
+                  onChange={setSlices}
+                  modelSuggestions={{
+                    claude: (models?.models.claude ?? []).map((m) => m.id),
+                    codex: (models?.models.codex ?? []).map((m) => m.id),
+                  }}
+                  disabled={spawnMulti.isPending}
+                />
+              )}
+              {slices.length === 0 && (
+                <p className="text-[10.5px] text-ink-400 dark:text-ink-500 leading-relaxed">
+                  Single task by default. Add a slice to use a different
+                  agent/model for part of the plan — siblings run in
+                  order on a shared branch so each can land its own commit.
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         <footer className="flex items-center gap-2 border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] px-5 py-3 bg-paper-100/40 dark:bg-ink-900/30">
@@ -1129,15 +1274,36 @@ function PlanAndSpawnSheet({
           <Button
             size="sm"
             onClick={() => void onSpawn()}
-            disabled={resolve.isPending || streaming || !plan.trim()}
+            disabled={
+              resolve.isPending ||
+              spawnMulti.isPending ||
+              streaming ||
+              !plan.trim()
+            }
+            title="Spawn one task using the plan above"
           >
             {resolve.isPending ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <Zap className="h-3.5 w-3.5" />
             )}
-            Spawn
+            Spawn as one
           </Button>
+          {savedIdea && slices.length > 0 && (
+            <Button
+              size="sm"
+              onClick={() => void onSpawnMulti()}
+              disabled={spawnMulti.isPending || resolve.isPending || streaming}
+              title="Spawn one task per slice on a shared branch"
+            >
+              {spawnMulti.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Zap className="h-3.5 w-3.5" />
+              )}
+              Spawn {slices.length} slices
+            </Button>
+          )}
         </footer>
       </div>
     </div>

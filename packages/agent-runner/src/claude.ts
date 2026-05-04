@@ -17,6 +17,13 @@ interface ClaudeUsage {
 interface ClaudeStreamMessage {
   type?: string;
   subtype?: string;
+  /**
+   * Set on assistant + user events that came from a sub-agent (Task
+   * tool spawn). Claude-code wraps the sub-session's messages in the
+   * parent process's stream-json with this field pointing at the
+   * dispatching tool_use id, so we can reconstruct the swarm tree.
+   */
+  parent_tool_use_id?: string | null;
   message?: {
     role?: string;
     content?: Array<{
@@ -24,6 +31,8 @@ interface ClaudeStreamMessage {
       text?: string;
       name?: string;
       input?: unknown;
+      id?: string;
+      tool_use_id?: string;
     }>;
     usage?: ClaudeUsage;
   };
@@ -67,6 +76,15 @@ export class ClaudeRunner implements AgentRunner {
    * separate (`kind:"exit"`).
    */
   private inTurn = false;
+  /**
+   * Map of tool_use_id → tool name, populated from `assistant` events
+   * with `tool_use` blocks. When the matching `tool_result` shows up
+   * on the next `user` event, we look up the name here so the
+   * timeline can render `[result Bash ok …]` instead of an opaque
+   * `[result (result) ok …]` that the web's parser used to drop into
+   * the chat as a system row.
+   */
+  private toolUseNames = new Map<string, string>();
 
   constructor(private readonly opts: ClaudeRunnerOptions = {}) {}
 
@@ -125,9 +143,12 @@ export class ClaudeRunner implements AgentRunner {
     }
     // Reasoning effort. Claude's CLI takes --effort directly; we just clamp
     // to its accepted set. Default to `high` so casual single-line prompts
-    // still get real thinking time.
-    const effort = opts.thinkingLevel ?? "high";
-    args.push("--effort", effort);
+    // still get real thinking time. Codex's `minimal` tier doesn't exist on
+    // claude — we map it to `low`, the closest equivalent. The other levels
+    // are 1:1 with claude's flag values.
+    const requested = opts.thinkingLevel ?? "high";
+    const claudeEffort = requested === "minimal" ? "low" : requested;
+    args.push("--effort", claudeEffort);
     if (opts.appendSystemPrompt && opts.appendSystemPrompt.trim().length > 0) {
       args.push("--append-system-prompt", opts.appendSystemPrompt);
     }
@@ -269,14 +290,40 @@ export class ClaudeRunner implements AgentRunner {
     }
 
     if (type === "assistant" && parsed.message?.content) {
+      // `parent_tool_use_id` is the SDK's nesting key — claude-code
+      // sets it on every assistant/user message that originated from a
+      // sub-agent (Task tool spawn). Carry it onto each child event so
+      // the daemon + web can render the swarm as a tree under the
+      // dispatching Task row instead of flattening it.
+      const parentToolUseId =
+        typeof parsed.parent_tool_use_id === "string"
+          ? parsed.parent_tool_use_id
+          : undefined;
       for (const block of parsed.message.content) {
         if (block.type === "text" && typeof block.text === "string") {
-          this.emit({ kind: "message", role: "agent", text: block.text });
+          this.emit({
+            kind: "message",
+            role: "agent",
+            text: block.text,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          });
         } else if (block.type === "tool_use" && typeof block.name === "string") {
+          const toolUseId =
+            typeof (block as { id?: unknown }).id === "string"
+              ? ((block as { id?: string }).id as string)
+              : undefined;
+          // Remember the name keyed by id so the matching
+          // `tool_result` event can emit a real tool name instead of
+          // a generic placeholder. Without this lookup the result
+          // header reads `[result (result) ok …]` and the web's
+          // parser dumps it into the chat as a raw system row.
+          if (toolUseId) this.toolUseNames.set(toolUseId, block.name);
           this.emit({
             kind: "tool_call",
             tool: block.name,
             args: block.input ?? {},
+            ...(toolUseId ? { toolUseId } : {}),
+            ...(parentToolUseId ? { parentToolUseId } : {}),
           });
         }
       }
@@ -293,18 +340,35 @@ export class ClaudeRunner implements AgentRunner {
       return;
     }
     if (type === "user" && parsed.message?.content) {
+      const parentToolUseId =
+        typeof parsed.parent_tool_use_id === "string"
+          ? parsed.parent_tool_use_id
+          : undefined;
       for (const block of parsed.message.content) {
         if (block.type === "tool_result") {
-          const content = block as { content?: unknown; is_error?: boolean };
+          const content = block as {
+            tool_use_id?: string;
+            content?: unknown;
+            is_error?: boolean;
+          };
           const text =
             typeof content.content === "string"
               ? content.content
               : JSON.stringify(content.content ?? null);
+          // Look up the tool name from the call we saw earlier in
+          // this turn. Without this the timeline shows `[result
+          // (result) ok …]` for orphan rows.
+          const toolName =
+            (content.tool_use_id &&
+              this.toolUseNames.get(content.tool_use_id)) ||
+            "tool";
           this.emit({
             kind: "tool_result",
-            tool: "(result)",
+            tool: toolName,
             ok: !content.is_error,
             output: text,
+            ...(content.tool_use_id ? { toolUseId: content.tool_use_id } : {}),
+            ...(parentToolUseId ? { parentToolUseId } : {}),
           });
         }
       }

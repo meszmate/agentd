@@ -804,6 +804,15 @@ function SidebarTaskList({ tasks }: { tasks: Task[] }) {
     });
   };
 
+  // Group consecutive sidebar rows that share a `planGroupId` so the
+  // operator visually sees plan-slice siblings as one cluster (shared
+  // worktree / branch). Tasks without a group render solo. Drag-
+  // ordering still works because cluster siblings sit adjacent in
+  // the input list — moving the cluster's anchor moves the whole
+  // group together. Main folded active + recent into a single
+  // `tasks` list, so we cluster that one list.
+  const grouped = clusterByPlanGroup(liveTasks);
+
   return (
     <ul
       ref={ref}
@@ -818,16 +827,97 @@ function SidebarTaskList({ tasks }: { tasks: Task[] }) {
           items={liveTasks.map((t) => t.id)}
           strategy={verticalListSortingStrategy}
         >
-          {liveTasks.map((t) => (
-            <SortableSidebarTaskRow key={t.id} task={t} />
-          ))}
+          {grouped.map((cluster) =>
+            cluster.tasks.length > 1 ? (
+              <SliceCluster
+                key={cluster.key}
+                tasks={cluster.tasks}
+                rowFor={(t, i) => (
+                  <SortableSidebarTaskRow
+                    key={t.id}
+                    task={t}
+                    sliceIndex={i + 1}
+                    sliceTotal={cluster.tasks.length}
+                  />
+                )}
+              />
+            ) : (
+              <SortableSidebarTaskRow
+                key={cluster.tasks[0]!.id}
+                task={cluster.tasks[0]!}
+              />
+            ),
+          )}
         </SortableContext>
       </DndContext>
     </ul>
   );
 }
 
-function SortableSidebarTaskRow({ task }: { task: Task }) {
+/**
+ * Group consecutive tasks by `planGroupId` so plan-slice siblings sit
+ * together. Preserves input ordering — tasks with NULL group key
+ * always render solo (one cluster of size 1 each). Tasks with the
+ * same group key may appear in non-adjacent positions in the input,
+ * so we do an in-order single-pass cluster: when we see a group key
+ * we've seen before, push the task onto its existing cluster instead
+ * of starting a new one.
+ */
+function clusterByPlanGroup(
+  tasks: Task[],
+): Array<{ key: string; tasks: Task[] }> {
+  const out: Array<{ key: string; tasks: Task[] }> = [];
+  const groupIdx = new Map<string, number>();
+  for (const t of tasks) {
+    const g = t.planGroupId;
+    if (!g) {
+      out.push({ key: `solo:${t.id}`, tasks: [t] });
+      continue;
+    }
+    const idx = groupIdx.get(g);
+    if (idx == null) {
+      groupIdx.set(g, out.length);
+      out.push({ key: g, tasks: [t] });
+    } else {
+      out[idx]!.tasks.push(t);
+    }
+  }
+  return out;
+}
+
+/**
+ * Visual cluster wrapper for plan-slice siblings — adds an ember left
+ * spine so the group reads as one chunk in the sidebar. Each task
+ * row renders normally inside, with a small `1/N` chip surfaced via
+ * the `sliceIndex` / `sliceTotal` props.
+ */
+function SliceCluster({
+  tasks,
+  rowFor,
+}: {
+  tasks: Task[];
+  rowFor: (t: Task, index: number) => React.ReactNode;
+}) {
+  return (
+    <li className="-ml-2 pl-2 rounded-r border-l-2 border-ember-500/30 bg-ember-500/[0.025]">
+      <ul className="space-y-0.5">
+        {tasks.map((t, i) => (
+          <li key={t.id}>{rowFor(t, i)}</li>
+        ))}
+      </ul>
+    </li>
+  );
+}
+
+function SortableSidebarTaskRow({
+  task,
+  sliceIndex,
+  sliceTotal,
+}: {
+  task: Task;
+  sliceIndex?: number;
+  sliceTotal?: number;
+}) {
   const {
     attributes,
     listeners,
@@ -848,6 +938,8 @@ function SortableSidebarTaskRow({ task }: { task: Task }) {
       dragStyle={style}
       dragHandleProps={{ ...attributes, ...listeners }}
       isDragging={isDragging}
+      sliceIndex={sliceIndex}
+      sliceTotal={sliceTotal}
     />
   );
 }
@@ -858,12 +950,18 @@ function SidebarTaskRow({
   dragStyle,
   dragHandleProps,
   isDragging,
+  sliceIndex,
+  sliceTotal,
 }: {
   task: Task;
   dragRef?: (el: HTMLElement | null) => void;
   dragStyle?: React.CSSProperties;
   dragHandleProps?: React.HTMLAttributes<HTMLButtonElement>;
   isDragging?: boolean;
+  /** 1-based position within a sibling cluster — only set when the
+   *  cluster has 2+ tasks. */
+  sliceIndex?: number;
+  sliceTotal?: number;
 }) {
   const { latestByTask } = useRealtime();
   const liveEvent = latestByTask[t.id];
@@ -935,6 +1033,11 @@ function SidebarTaskRow({
         <span className={cn("h-1.5 w-1.5 rounded-full mt-1.5 shrink-0", dot)} />
         <span className="flex-1 min-w-0">
           <span className="block truncate text-ink-900 dark:text-ink-50">
+            {sliceIndex != null && sliceTotal != null && (
+              <span className="mr-1.5 inline-flex items-center align-middle h-3.5 px-1 rounded font-mono text-[8.5px] font-semibold tabular-nums text-ember-700 bg-ember-500/10 ring-1 ring-ember-500/20 dark:text-ember-300">
+                {sliceIndex}/{sliceTotal}
+              </span>
+            )}
             {t.title}
           </span>
           {showLive && liveEvent && (

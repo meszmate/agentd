@@ -4,13 +4,17 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckSquare,
   ExternalLink,
+  GitBranchPlus,
   Hash,
+  Loader2,
   MoreHorizontal,
   PanelRight,
   PanelRightClose,
   RotateCcw,
+  Sparkles,
   Square,
   Trash2,
+  Zap,
 } from "lucide-react";
 import {
   Panel,
@@ -47,9 +51,11 @@ import {
   usePrefs,
   useProject,
   useRemoveTask,
+  useSpawnSiblingTask,
   useStopTask,
   useTask,
   useTaskStream,
+  useTasks,
 } from "@/queries";
 import { useApp, useClient } from "@/AppContext";
 import {
@@ -61,6 +67,20 @@ import {
 import { TaskTimeline } from "@/views/TaskTimeline";
 import { TaskWorkspace } from "@/views/TaskWorkspace";
 import { ShipMenu } from "@/components/ship-menu";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import type {
+  AgentKind,
+  ThinkingLevel,
+} from "@agentd/contracts";
 import type { TaskPlanItem } from "@/views/TaskPlan";
 
 export function TaskDetail({ task }: { task: Task }) {
@@ -71,7 +91,9 @@ export function TaskDetail({ task }: { task: Task }) {
   const taskQ = useTask(task.id);
   const stop = useStopTask(task.id);
   const remove = useRemoveTask();
+  const spawnSibling = useSpawnSiblingTask();
   const qc = useQueryClient();
+  const [siblingOpen, setSiblingOpen] = useState(false);
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
@@ -216,12 +238,31 @@ export function TaskDetail({ task }: { task: Task }) {
           return;
         }
         setLastToolHint(`→ ${event.tool}`);
-        // Persist in the same `[call <tool>] <argsJson>` shape the daemon
-        // writes server-side so the ToolLine renderer treats live + history
-        // identically.
+        // Persist in the EXACT shape the daemon writes server-side so
+        // the dedup against re-fetched messages (line ~167's
+        // `s.content === m.content` check) actually matches. The
+        // daemon injects `_agentdParent` / `_agentdToolId` into args
+        // for swarm nesting; replicating that here keeps the local
+        // tmp_ row from doubling with its persisted twin once the
+        // server message lands.
+        const liveArgs =
+          (event.parentToolUseId || event.toolUseId) &&
+          event.args &&
+          typeof event.args === "object" &&
+          !Array.isArray(event.args)
+            ? {
+                ...(event.args as Record<string, unknown>),
+                ...(event.parentToolUseId
+                  ? { _agentdParent: event.parentToolUseId }
+                  : {}),
+                ...(event.toolUseId
+                  ? { _agentdToolId: event.toolUseId }
+                  : {}),
+              }
+            : event.args;
         appendLocal(
           "tool",
-          `[call ${event.tool}] ${JSON.stringify(event.args ?? {})}`,
+          `[call ${event.tool}] ${JSON.stringify(liveArgs ?? {}).slice(0, 32_000)}`,
         );
         // tool_result events are intentionally dropped from the timeline —
         // the result of "Read foo.ts" is the file contents, which was the
@@ -260,10 +301,28 @@ export function TaskDetail({ task }: { task: Task }) {
 
   const { live } = useTaskStream(task.id, handleEvent);
 
+  // Cumulative billing-style total (never decreases) — shown in the
+  // task header chip + cost summaries.
   const totalTokens = useMemo(
     () => (task.totalInputTokens ?? 0) + (task.totalOutputTokens ?? 0),
     [task.totalInputTokens, task.totalOutputTokens],
   );
+  // Live context-size signal — the timeline's compact-banner reads
+  // this. Each runner usage event REPLACES `latestTurnInput/Output`,
+  // so this reflects the most recent turn's footprint (≈ current
+  // context). Falls back to the cumulative total only when no usage
+  // event has fired since this code shipped, so older data still
+  // shows a sensible-but-pessimistic value until the next turn.
+  const contextTokens = useMemo(() => {
+    const inT = task.latestTurnInputTokens;
+    const outT = task.latestTurnOutputTokens;
+    if (inT == null && outT == null) return totalTokens;
+    return (inT ?? 0) + (outT ?? 0);
+  }, [
+    task.latestTurnInputTokens,
+    task.latestTurnOutputTokens,
+    totalTokens,
+  ]);
   const isTerminal =
     task.status === "done" ||
     task.status === "failed" ||
@@ -381,8 +440,10 @@ export function TaskDetail({ task }: { task: Task }) {
 
         <Spacer />
 
-        {/* stats */}
-        <ContextUsage totalTokens={totalTokens} />
+        {/* stats — `ContextUsage` shows current context size (decays
+            after /compact); the `tok` chip next to it is the lifetime
+            total for billing context. */}
+        <ContextUsage totalTokens={contextTokens} />
         <span className="hidden md:flex items-center gap-3 font-mono text-[11px] tabular-nums text-ink-400 dark:text-ink-500">
           <span>{formatTokens(totalTokens)} tok</span>
           <span>{formatCost(task.totalCostUsd)}</span>
@@ -413,7 +474,7 @@ export function TaskDetail({ task }: { task: Task }) {
           />
         )}
         <ShipMenu task={task} />
-        {!isTerminal && (
+        {isRunning && (
           <Button
             variant="outline"
             size="xs"
@@ -444,6 +505,10 @@ export function TaskDetail({ task }: { task: Task }) {
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-[14rem]">
             <DropdownMenuLabel>Task</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => setSiblingOpen(true)}>
+              <GitBranchPlus /> Spawn related task on this worktree
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             {task.closedAt ? (
               <DropdownMenuItem onClick={onReopen}>
@@ -539,6 +604,12 @@ export function TaskDetail({ task }: { task: Task }) {
             <CouncilChip task={task} />
           </>
         )}
+        {task.planGroupId && (
+          <>
+            <span className="text-ink-300 dark:text-ink-600 shrink-0">·</span>
+            <SliceChip task={task} />
+          </>
+        )}
       </div>
 
       {/* Body */}
@@ -559,7 +630,7 @@ export function TaskDetail({ task }: { task: Task }) {
                 disabled={isRunning}
                 lastToolHint={lastToolHint}
                 streams={streams}
-                totalTokens={totalTokens}
+                totalTokens={contextTokens}
                 turn={turn}
                 plan={plan}
                 compactedAt={task.lastCompactedAt ?? null}
@@ -579,36 +650,62 @@ export function TaskDetail({ task }: { task: Task }) {
             disabled={isRunning}
             lastToolHint={lastToolHint}
             streams={streams}
-            totalTokens={totalTokens}
+            totalTokens={contextTokens}
             turn={turn}
             plan={plan}
           />
         )}
       </div>
+      <SpawnSiblingDialog
+        open={siblingOpen}
+        onOpenChange={setSiblingOpen}
+        parentTask={task}
+        spawnSibling={spawnSibling}
+        onError={onError}
+        toast={toast}
+      />
     </div>
   );
 }
 
-const THINKING_LEVELS = [
-  { value: "low", label: "low", hint: "fastest, minimal reasoning" },
-  { value: "medium", label: "medium", hint: "balanced" },
-  { value: "high", label: "high", hint: "default" },
-  { value: "max", label: "max", hint: "extended thinking budget" },
-  { value: "xhigh", label: "xhigh", hint: "deepest tier" },
-] as const;
+const THINKING_LEVEL_HINTS: Record<
+  "minimal" | "low" | "medium" | "high" | "xhigh" | "max",
+  string
+> = {
+  minimal: "codex-only — lightest reasoning",
+  low: "fastest, minimal reasoning",
+  medium: "balanced",
+  high: "default",
+  xhigh: "deepest tier",
+  max: "claude-only — extended thinking",
+};
 
-type ThinkingLevelValue = (typeof THINKING_LEVELS)[number]["value"];
+const THINKING_LEVELS_BY_AGENT_TASK = {
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  codex: ["minimal", "low", "medium", "high", "xhigh"],
+} as const;
+
+type ThinkingLevelValue =
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 
 /**
  * Inline thinking-level dropdown on the task header. Mutating it does NOT
  * interrupt the in-flight turn — the new level applies to the next runner
- * spawn (next user message or steered queue drain).
+ * spawn (next user message or steered queue drain). The visible options
+ * track the task's agent so codex tasks don't see `max` (claude-only) and
+ * claude tasks don't see `minimal` (codex-only).
  */
 function ThinkingLevelChip({ task }: { task: Task }) {
   const client = useClient();
   const qc = useQueryClient();
   const { toast } = useApp();
   const current = (task.thinkingLevel ?? "high") as ThinkingLevelValue;
+  const levels = THINKING_LEVELS_BY_AGENT_TASK[task.agent];
   const set = async (level: ThinkingLevelValue) => {
     if (level === current) return;
     try {
@@ -637,18 +734,18 @@ function ThinkingLevelChip({ task }: { task: Task }) {
           Thinking · next turn
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {THINKING_LEVELS.map((m) => (
+        {levels.map((value) => (
           <DropdownMenuItem
-            key={m.value}
-            onClick={() => void set(m.value)}
+            key={value}
+            onClick={() => void set(value)}
             className={cn(
               "flex items-baseline justify-between gap-2",
-              m.value === current && "text-ember-700 dark:text-ember-300",
+              value === current && "text-ember-700 dark:text-ember-300",
             )}
           >
-            <span className="font-mono">{m.label}</span>
+            <span className="font-mono">{value}</span>
             <span className="text-[10px] text-ink-400 dark:text-ink-500">
-              {m.hint}
+              {THINKING_LEVEL_HINTS[value]}
             </span>
           </DropdownMenuItem>
         ))}
@@ -1097,6 +1194,99 @@ function CouncilChip({ task }: { task: Task }) {
   );
 }
 
+/**
+ * Plan-slice membership chip — shows "slice K of N" + a quick-jump
+ * dropdown to siblings, plus a "waiting on parent" pill when the
+ * task is still pending behind an upstream slice.
+ */
+function SliceChip({ task }: { task: Task }) {
+  const tasksQ = useTasks();
+  const all = tasksQ.data?.tasks ?? [];
+  const siblings = useMemo(
+    () =>
+      all
+        .filter((t) => t.planGroupId === task.planGroupId)
+        .sort((a, b) => a.createdAt - b.createdAt),
+    [all, task.planGroupId],
+  );
+  const myIdx = siblings.findIndex((t) => t.id === task.id);
+  const total = siblings.length || 1;
+  const parent = task.dependsOnTaskId
+    ? all.find((t) => t.id === task.dependsOnTaskId) ?? null
+    : null;
+  const isWaiting =
+    task.status === "pending" && !!task.dependsOnTaskId && parent
+      ? parent.status !== "done" && parent.status !== "idle"
+      : false;
+  const tone = isWaiting
+    ? "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/20"
+    : "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/20";
+  const label = isWaiting
+    ? `waiting · slice ${myIdx + 1}/${total}`
+    : `slice ${myIdx + 1}/${total}`;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          title={
+            parent
+              ? `Sibling slice — depends on ${parent.title.slice(0, 60)}`
+              : "Plan slice sibling group"
+          }
+          className={cn(
+            "inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] border shrink-0 transition-colors",
+            tone,
+          )}
+        >
+          {label}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-72">
+        <DropdownMenuLabel className="text-[10px] uppercase tracking-[0.12em]">
+          Plan group {task.planGroupId?.slice(-6)}
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {parent && (
+          <div className="px-2 py-1.5 text-[11px] text-ink-600 dark:text-ink-300 leading-relaxed">
+            <span className="font-mono uppercase tracking-[0.08em] text-ink-400 dark:text-ink-500">
+              waiting on
+            </span>
+            <div className="mt-0.5">
+              <Link
+                to={`/tasks/${parent.id}`}
+                className="font-mono hover:underline"
+              >
+                → {parent.title.slice(0, 64)} · {parent.status}
+              </Link>
+            </div>
+          </div>
+        )}
+        <div className="px-2 py-1.5 text-[10px] text-ink-500 dark:text-ink-400">
+          siblings ({siblings.length}):
+          <ul className="mt-1 space-y-0.5">
+            {siblings.map((t, i) => (
+              <li key={t.id}>
+                <Link
+                  to={`/tasks/${t.id}`}
+                  className={cn(
+                    "font-mono hover:underline",
+                    t.id === task.id &&
+                      "text-ember-700 dark:text-ember-300",
+                  )}
+                >
+                  {t.id === task.id ? "→ " : "  "}
+                  {i + 1}. {t.title.slice(0, 48)} · {t.status}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function LiveBadge({ live, terminal }: { live: boolean; terminal: boolean }) {
   if (terminal) {
     return (
@@ -1341,5 +1531,263 @@ function DiscordThreadChip({
         <Hash className="h-3 w-3" /> {label}
       </a>
     </Button>
+  );
+}
+
+/**
+ * Compact dialog for adding a sibling task on the parent's worktree.
+ * Picks an agent + model + thinking level + prompt; the new task
+ * chains via `dependsOnTaskId` so it runs after the parent's current
+ * turn finishes (sequential is the only safe option on a shared
+ * checkout). Both end up in the same `planGroupId` so the sidebar
+ * groups them visually.
+ */
+function SpawnSiblingDialog({
+  open,
+  onOpenChange,
+  parentTask,
+  spawnSibling,
+  onError,
+  toast,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  parentTask: Task;
+  spawnSibling: ReturnType<typeof useSpawnSiblingTask>;
+  onError: (m: string) => void;
+  toast: (m: string, isError?: boolean) => void;
+}) {
+  const navigate = useNavigate();
+  const modelsQ = useModels();
+  const [agent, setAgent] = useState<AgentKind>(parentTask.agent);
+  const [model, setModel] = useState<string>("");
+  const [thinking, setThinking] = useState<ThinkingLevel | "">("");
+  const [prompt, setPrompt] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  // Reset on open so a stale draft doesn't leak between sessions.
+  useEffect(() => {
+    if (open) {
+      setAgent(parentTask.agent);
+      setModel("");
+      setThinking("");
+      setPrompt("");
+    }
+  }, [open, parentTask.agent]);
+
+  // Snap thinking off invalid agent values when switching agents.
+  useEffect(() => {
+    setThinking((cur) => {
+      if (cur === "") return cur;
+      if (agent === "claude" && cur === "minimal") return "low";
+      if (agent === "codex" && cur === "max") return "xhigh";
+      return cur;
+    });
+  }, [agent]);
+
+  const defaultThinking = modelsQ.data?.defaultThinking;
+  const agentModels = modelsQ.data?.models?.[agent] ?? [];
+  const thinkLevels: ThinkingLevel[] =
+    agent === "claude"
+      ? ["low", "medium", "high", "xhigh", "max"]
+      : ["minimal", "low", "medium", "high", "xhigh"];
+
+  const launch = async () => {
+    if (!prompt.trim()) {
+      toast("prompt is empty", true);
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const r = await spawnSibling.mutateAsync({
+        parentId: parentTask.id,
+        agent,
+        prompt: prompt.trim(),
+        ...(model ? { model } : {}),
+        ...(thinking ? { thinkingLevel: thinking as ThinkingLevel } : {}),
+      });
+      toast(`queued sibling ${shortId(r.task.id)} on ${agent}`);
+      onOpenChange(false);
+      navigate(`/tasks/${r.task.id}`);
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const NONE = "__none";
+  return (
+    <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay
+          className={cn(
+            "fixed inset-0 z-50 bg-ink-900/30 backdrop-blur-sm",
+            "data-[state=open]:animate-in data-[state=closed]:animate-out",
+            "data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+          )}
+        />
+        <DialogPrimitive.Content
+          className={cn(
+            "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
+            "w-[96vw] max-w-[640px] max-h-[88vh] flex flex-col",
+            "rounded-xl border border-ink-900/10 bg-paper-50 shadow-deep dark:border-ink-50/10 dark:bg-ink-900",
+            "overflow-hidden",
+            "data-[state=open]:animate-in data-[state=closed]:animate-out",
+            "data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+            "data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+          )}
+        >
+          <DialogPrimitive.Title className="sr-only">
+            Spawn related task on this worktree
+          </DialogPrimitive.Title>
+          <header className="flex items-center gap-2 px-4 py-2.5 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06]">
+            <GitBranchPlus className="h-3.5 w-3.5 text-ember-500" />
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ember-700 dark:text-ember-300">
+              Spawn related
+            </span>
+            <span className="text-ink-300 dark:text-ink-600">·</span>
+            <span className="font-mono text-[11px] text-ink-700 dark:text-ink-200 truncate">
+              {parentTask.branch}
+            </span>
+            <span className="ml-auto" />
+          </header>
+          <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3.5">
+            <p className="text-[11.5px] text-ink-500 dark:text-ink-400 leading-relaxed">
+              Adds a task to the same worktree + branch as
+              <span className="font-mono mx-1 text-ink-700 dark:text-ink-200">
+                {parentTask.title.slice(0, 60)}
+              </span>
+              . Runs sequentially after this task's current turn so they don't race on the same files.
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              <FieldRowSibling label="agent">
+                <Select
+                  value={agent}
+                  onValueChange={(v) => setAgent(v as AgentKind)}
+                  disabled={submitting}
+                >
+                  <SelectTrigger className="h-8 text-[12px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="claude">claude</SelectItem>
+                    <SelectItem value="codex">codex</SelectItem>
+                  </SelectContent>
+                </Select>
+              </FieldRowSibling>
+              <FieldRowSibling label="model">
+                <Select
+                  value={
+                    model && agentModels.some((m) => m.id === model)
+                      ? model
+                      : NONE
+                  }
+                  onValueChange={(v) => setModel(v === NONE ? "" : v)}
+                  disabled={submitting}
+                >
+                  <SelectTrigger className="h-8 text-[12px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NONE}>auto · {agent} latest</SelectItem>
+                    {agentModels.map((m) => (
+                      <SelectItem key={m.id} value={m.id}>
+                        {m.label || m.id}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </FieldRowSibling>
+              <FieldRowSibling label="think">
+                <Select
+                  value={thinking || NONE}
+                  onValueChange={(v) =>
+                    setThinking(v === NONE ? "" : (v as ThinkingLevel))
+                  }
+                  disabled={submitting}
+                >
+                  <SelectTrigger className="h-8 text-[12px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NONE}>
+                      auto · {defaultThinking?.[agent] ?? (agent === "claude" ? "xhigh" : "high")}
+                    </SelectItem>
+                    {thinkLevels.map((lvl) => (
+                      <SelectItem key={lvl} value={lvl}>
+                        {lvl}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </FieldRowSibling>
+            </div>
+            <div className="space-y-1.5">
+              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+                Prompt
+              </span>
+              <Textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder={`What should ${agent} do on this worktree?`}
+                disabled={submitting}
+                rows={Math.min(12, Math.max(5, prompt.split("\n").length + 2))}
+                className="text-[12px] font-mono leading-relaxed resize-y"
+                autoFocus
+              />
+            </div>
+          </div>
+          <footer className="flex items-center gap-2 px-4 py-2.5 border-t border-ink-900/[0.06] dark:border-ink-50/[0.06]">
+            <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+              chains after this task's current turn
+            </span>
+            <span className="ml-auto" />
+            <button
+              type="button"
+              onClick={() => onOpenChange(false)}
+              disabled={submitting}
+              className="inline-flex items-center h-7 px-2.5 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-ink-900 dark:hover:text-ink-50 disabled:opacity-50"
+            >
+              cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void launch()}
+              disabled={submitting || !prompt.trim()}
+              className={cn(
+                "inline-flex items-center gap-1.5 h-7 px-3 rounded font-mono text-[10px] uppercase tracking-[0.08em]",
+                "border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300",
+                "hover:bg-ember-500/20 disabled:opacity-40 disabled:cursor-not-allowed",
+              )}
+            >
+              {submitting ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <Zap className="h-3 w-3" />
+              )}
+              spawn
+            </button>
+          </footer>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
+  );
+}
+
+function FieldRowSibling({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1">
+      <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+        {label}
+      </span>
+      {children}
+    </div>
   );
 }

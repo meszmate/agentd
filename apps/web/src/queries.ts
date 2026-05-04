@@ -724,6 +724,70 @@ export function useSpawnFromSavedIdea() {
   });
 }
 
+export function useSpawnMultiFromSavedIdea() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      ...body
+    }: {
+      id: string;
+    } & Parameters<AgentdClient["spawnMultiFromSavedIdea"]>[1]) =>
+      client.spawnMultiFromSavedIdea(id, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["saved-ideas"] });
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+    },
+  });
+}
+
+export function useSpawnTasksMulti() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Parameters<AgentdClient["spawnTasksMulti"]>[0]) =>
+      client.spawnTasksMulti(body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+    },
+  });
+}
+
+export function useSpawnSiblingTask() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      parentId,
+      ...body
+    }: {
+      parentId: string;
+    } & Parameters<AgentdClient["spawnSiblingTask"]>[1]) =>
+      client.spawnSiblingTask(parentId, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+    },
+  });
+}
+
+export function useUpdateSavedIdeaSlices() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      slices,
+    }: {
+      id: string;
+      slices: Parameters<AgentdClient["updateSavedIdeaSlices"]>[1];
+    }) => client.updateSavedIdeaSlices(id, slices),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["saved-ideas"] });
+    },
+  });
+}
+
 export function useTaskContext(id: string | null | undefined) {
   const client = useClient();
   return useQuery({

@@ -3,6 +3,8 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import type { IdeaChatEvent } from "@agentd/client";
 import {
+  ArrowDown,
+  ArrowUp,
   ArrowUpRight,
   CheckCircle2,
   ClipboardList,
@@ -11,6 +13,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Pencil,
+  Plus,
   Send,
   Shuffle,
   Sparkles,
@@ -19,7 +22,15 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import type { AgentKind, IdeaMessage, IdeaStatus, ThinkingLevel } from "@agentd/contracts";
+import type {
+  AgentKind,
+  IdeaMessage,
+  IdeaStatus,
+  PlanSlice,
+  ThinkingLevel,
+} from "@agentd/contracts";
+import { stripPlanSlicesBlock } from "@agentd/contracts";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   Kicker,
   PageTopbar,
@@ -70,6 +81,7 @@ import {
   useModels,
   useProject,
   useResolveSuggestion,
+  useSpawnMultiFromSavedIdea,
   useUpdateIdea,
 } from "@/queries";
 import { useQueryClient } from "@tanstack/react-query";
@@ -92,6 +104,7 @@ export function IdeaWorkshop() {
   const update = useUpdateIdea();
   const remove = useDeleteSavedIdea();
   const resolve = useResolveSuggestion();
+  const spawnMulti = useSpawnMultiFromSavedIdea();
   const client = useClient();
   const qc = useQueryClient();
   const { toast } = useApp();
@@ -155,7 +168,26 @@ export function IdeaWorkshop() {
   const threadRef = useRef<HTMLDivElement>(null);
   const planScrollRef = useRef<HTMLDivElement>(null);
 
-  const idea = ideaQ.data?.idea ?? null;
+  // Defensive client-side strip: if the daemon hasn't yet been
+  // restarted with the new core build (or somehow returns a plan
+  // with the raw fence still in it), normalise on the client so the
+  // UI never shows the json-slices block in the plan textarea and
+  // the spawn dialog gets seeded with the recovered slices.
+  const idea = useMemo(() => {
+    const raw = ideaQ.data?.idea ?? null;
+    if (!raw) return null;
+    const stripped = raw.planDraft
+      ? stripPlanSlicesBlock(raw.planDraft)
+      : { plan: "", slices: [] as PlanSlice[] };
+    const cleanedDraft = raw.planDraft ? stripped.plan || null : raw.planDraft;
+    const colSlices = raw.planSlices ?? [];
+    const merged = colSlices.length > 0 ? colSlices : stripped.slices;
+    return {
+      ...raw,
+      planDraft: cleanedDraft,
+      ...(merged.length > 0 ? { planSlices: merged } : {}),
+    };
+  }, [ideaQ.data?.idea]);
   const messages = ideaQ.data?.messages ?? [];
   const project = projectQ.data?.project ?? null;
 
@@ -637,7 +669,7 @@ export function IdeaWorkshop() {
         open={spawnOpen}
         onOpenChange={setSpawnOpen}
         idea={idea}
-        onSpawn={async ({ agent, model, thinkingLevel }) => {
+        onSpawnSingle={async ({ agent, model, thinkingLevel }) => {
           if (!id) return;
           const prompt =
             (idea.planDraft?.trim() ||
@@ -672,6 +704,23 @@ export function IdeaWorkshop() {
               setSpawnOpen(false);
               navigate(`/tasks/${r.task.id}`);
             }
+          } catch (e) {
+            toast((e as Error).message, true);
+          }
+        }}
+        onSpawnSlices={async ({ slices, shareWorktree }) => {
+          if (!id) return;
+          try {
+            const r = await spawnMulti.mutateAsync({
+              id,
+              slices,
+              shareWorktree,
+              title: idea.text.split("\n")[0]!.slice(0, 80),
+            });
+            const first = r.tasks[0];
+            toast(`spawned ${r.tasks.length} slices`);
+            setSpawnOpen(false);
+            if (first) navigate(`/tasks/${first.id}`);
           } catch (e) {
             toast((e as Error).message, true);
           }
@@ -1379,15 +1428,25 @@ function SpawnDialog({
   open,
   onOpenChange,
   idea,
-  onSpawn,
+  onSpawnSingle,
+  onSpawnSlices,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
-  idea: { planDraft: string | null; description: string | null; text: string };
-  onSpawn: (opts: {
+  idea: {
+    planDraft: string | null;
+    description: string | null;
+    text: string;
+    planSlices?: PlanSlice[];
+  };
+  onSpawnSingle: (opts: {
     agent: AgentKind;
     model?: string;
     thinkingLevel?: ThinkingLevel;
+  }) => Promise<void>;
+  onSpawnSlices: (opts: {
+    slices: PlanSlice[];
+    shareWorktree: boolean;
   }) => Promise<void>;
 }) {
   const modelsQ = useModels();
@@ -1396,221 +1455,714 @@ function SpawnDialog({
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | "">("");
   const [submitting, setSubmitting] = useState(false);
 
+  // Slice editor state — seeded from the idea's persisted slices when
+  // the dialog opens. Operator can edit per-slice agent/model/think,
+  // add new slices, remove, reorder. When non-empty, hitting "Spawn"
+  // fans out via the multi endpoint instead of a single task.
+  const [slices, setSlices] = useState<PlanSlice[]>(idea.planSlices ?? []);
+  const [shareWorktree, setShareWorktree] = useState<boolean>(true);
+  const [forceSingle, setForceSingle] = useState<boolean>(false);
+  useEffect(() => {
+    if (open) {
+      setSlices(idea.planSlices ?? []);
+      setForceSingle(false);
+    }
+  }, [open, idea.planSlices]);
+
+  const useSlices = !forceSingle && slices.length > 0;
+
   const models = modelsQ.data?.models;
   const defaults = modelsQ.data?.defaults;
   const agentModels = models ? models[agent] : [];
 
-  // When the agent selection changes, snap the model to either the
-  // server-side default for that agent, or the first model available.
+  // Keep the current model selection if it's still valid for the agent.
+  // Otherwise prefer the operator's saved default (`cfg.defaultModel`),
+  // and if that's unset, leave the field empty so we pass no `--model`
+  // flag to the runner. Each CLI then resolves its own latest (claude
+  // expands `opus`/`sonnet`/`haiku` family aliases at request time;
+  // codex uses its configured default). This avoids silently
+  // preselecting whichever id happens to sit at index 0 in the cache.
   useEffect(() => {
     if (!agentModels) return;
     if (model && agentModels.some((m) => m.id === model)) return;
     const def = defaults?.[agent];
-    setModel(
-      def && agentModels.some((m) => m.id === def)
-        ? def
-        : agentModels[0]?.id ?? "",
-    );
-  }, [agent, agentModels?.length]);
+    setModel(def && agentModels.some((m) => m.id === def) ? def : "");
+  }, [agent, agentModels, model, defaults]);
+
+  // Seed the picker with the operator's preferred thinking level for
+  // the chosen agent (`cfg.defaultThinking`, surfaced via /api/models).
+  // Falls back to xhigh for claude and high for codex if config hasn't
+  // loaded yet — those match the schema defaults so we're never out of
+  // sync. Also clamps if the operator switches agents while the field
+  // holds an inapplicable value (`max` on codex / `minimal` on claude).
+  const defaultThinking = modelsQ.data?.defaultThinking;
+  useEffect(() => {
+    setThinkingLevel((cur) => {
+      // Clamp any cross-agent value first.
+      if (agent === "claude" && cur === "minimal") return "low";
+      if (agent === "codex" && cur === "max") return "xhigh";
+      // Empty / unset → snap to the operator's per-agent default so
+      // the picker opens reflecting their preference.
+      if (cur === "") {
+        return defaultThinking?.[agent] ?? (agent === "claude" ? "xhigh" : "high");
+      }
+      return cur;
+    });
+  }, [agent, defaultThinking?.claude, defaultThinking?.codex]);
 
   const promptPreview =
     idea.planDraft?.trim() || idea.description?.trim() || idea.text.trim();
 
   const summary = useMemo(() => {
+    if (useSlices)
+      return `${slices.length} slice${slices.length === 1 ? "" : "s"} on a shared branch — pick agent / model per slice below`;
     if (idea.planDraft) return "uses the plan draft as the task prompt";
     if (idea.description) return "uses the description (no plan drafted yet)";
     return "uses the idea title (consider drafting a plan first)";
-  }, [idea.planDraft, idea.description]);
+  }, [idea.planDraft, idea.description, useSlices, slices.length]);
 
+  const modelSuggestions = useMemo(
+    () => ({
+      claude: (modelsQ.data?.models?.claude ?? []).map((m) => m.id),
+      codex: (modelsQ.data?.models?.codex ?? []).map((m) => m.id),
+    }),
+    [modelsQ.data?.models],
+  );
+
+  const wordCount = promptPreview.split(/\s+/).filter(Boolean).length;
+  const hasSlices = slices.length > 0 || (idea.planSlices?.length ?? 0) > 0;
+
+  // Slices mode: which slice the right pane is currently showing /
+  // editing. Snaps back to 0 whenever slices change shape so we never
+  // hold a stale index.
+  const [activeSlice, setActiveSlice] = useState<number>(0);
+  useEffect(() => {
+    if (open) setActiveSlice(0);
+  }, [open]);
+  useEffect(() => {
+    if (activeSlice >= slices.length && slices.length > 0) {
+      setActiveSlice(slices.length - 1);
+    }
+  }, [slices.length, activeSlice]);
+
+  const updateSlice = (i: number, patch: Partial<PlanSlice>) => {
+    setSlices(slices.map((s, idx) => (idx === i ? { ...s, ...patch } : s)));
+  };
+  const removeSlice = (i: number) => {
+    setSlices(slices.filter((_, idx) => idx !== i));
+  };
+  const moveSlice = (i: number, dir: -1 | 1) => {
+    const j = i + dir;
+    if (j < 0 || j >= slices.length) return;
+    const next = slices.slice();
+    const tmp = next[i]!;
+    next[i] = next[j]!;
+    next[j] = tmp;
+    setSlices(next);
+    if (activeSlice === i) setActiveSlice(j);
+    else if (activeSlice === j) setActiveSlice(i);
+  };
+  const addSlice = () => {
+    const next: PlanSlice = {
+      title: `slice ${slices.length + 1}`,
+      prompt: "",
+    };
+    setSlices([...slices, next]);
+    setActiveSlice(slices.length);
+  };
+
+  const launch = async () => {
+    setSubmitting(true);
+    try {
+      if (useSlices) {
+        await onSpawnSlices({ slices, shareWorktree });
+      } else {
+        await onSpawnSingle({
+          agent,
+          ...(model ? { model } : {}),
+          ...(thinkingLevel
+            ? { thinkingLevel: thinkingLevel as ThinkingLevel }
+            : {}),
+        });
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const activeSliceData = useSlices ? slices[activeSlice] ?? null : null;
+  const thinkingLevels: ThinkingLevel[] =
+    agent === "claude"
+      ? ["low", "medium", "high", "xhigh", "max"]
+      : ["minimal", "low", "medium", "high", "xhigh"];
+
+  // Two-pane workshop — controls on the LEFT (compact stack), prompt
+  // body on the RIGHT (markdown preview in single mode, editable
+  // textarea for the selected slice in slices mode). Same dialog
+  // primitive shape as the InstructionsWorkshop dialog so the two feel
+  // like siblings.
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-xl">
-        <DialogHeader>
-          <DialogTitle>Spawn task from idea</DialogTitle>
-          <p className="text-[12px] text-ink-500 dark:text-ink-400">
-            {summary}
-          </p>
-        </DialogHeader>
-        <div className="space-y-4">
-          <div className="space-y-1.5">
-            <Label className="text-[11px] uppercase tracking-[0.1em] font-mono text-ink-500 dark:text-ink-400">
-              Coding agent
-            </Label>
-            <div className="flex gap-2">
-              {(["claude", "codex"] as const).map((k) => (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => setAgent(k)}
-                  className={cn(
-                    "flex-1 rounded-md border px-3 py-2 text-left transition-colors",
-                    agent === k
-                      ? "border-ember-500/60 bg-ember-500/10"
-                      : "border-ink-900/15 hover:bg-ink-900/[0.03] dark:border-ink-50/15 dark:hover:bg-ink-50/[0.03]",
-                  )}
-                >
-                  <div className="font-mono text-[10px] uppercase tracking-[0.1em] text-ink-500 dark:text-ink-400">
-                    {k}
-                  </div>
-                  <div className="text-[12.5px] font-medium text-ink-900 dark:text-ink-50">
-                    {k === "claude" ? "Claude Code" : "Codex CLI"}
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
+    <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay
+          className={cn(
+            "fixed inset-0 z-50 bg-ink-900/30 backdrop-blur-sm",
+            "data-[state=open]:animate-in data-[state=closed]:animate-out",
+            "data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+          )}
+        />
+        <DialogPrimitive.Content
+          className={cn(
+            "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
+            "w-[96vw] h-[82vh] max-w-[1100px]",
+            "grid grid-rows-[auto_minmax(0,1fr)_auto] grid-cols-1 md:grid-cols-[300px_minmax(0,1fr)]",
+            "border border-ink-900/10 bg-paper-50 shadow-deep dark:border-ink-50/10 dark:bg-ink-900",
+            "rounded-xl overflow-hidden",
+            "data-[state=open]:animate-in data-[state=closed]:animate-out",
+            "data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+            "data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+          )}
+        >
+          <DialogPrimitive.Title className="sr-only">
+            Launch {idea.text}
+          </DialogPrimitive.Title>
 
-          <div className="space-y-1.5">
-            <div className="flex items-baseline gap-2">
-              <Label
-                htmlFor="spawn-model"
-                className="text-[11px] uppercase tracking-[0.1em] font-mono text-ink-500 dark:text-ink-400"
-              >
-                Model
-              </Label>
-              <ModelSourceHint
-                agent={agent}
-                sources={modelsQ.data?.sources}
-              />
-            </div>
-            <Select
-              value={
-                model && agentModels?.some((m) => m.id === model)
-                  ? model
-                  : model
-                    ? "__custom"
-                    : ""
-              }
-              onValueChange={(v) => {
-                if (v === "__custom") {
-                  // Switch to free-text mode — keep whatever's there.
-                  setModel(model || "");
-                } else {
-                  setModel(v);
-                }
-              }}
+          {/* ── HEADER (spans both panes) ─────────────────────── */}
+          <header className="md:col-span-2 flex items-center gap-2 px-4 py-2.5 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900">
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ember-700 dark:text-ember-300">
+              Launch
+            </span>
+            <span className="text-ink-300 dark:text-ink-600">·</span>
+            <span className="text-[12px] font-medium text-ink-900 dark:text-ink-50 truncate">
+              {idea.text}
+            </span>
+            <span className="hidden sm:inline text-ink-300 dark:text-ink-600">·</span>
+            <span className="hidden sm:inline font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
+              {wordCount.toLocaleString()}w
+            </span>
+            <span className="ml-auto" />
+            <DialogPrimitive.Close
+              className="inline-flex items-center justify-center h-6 w-6 rounded text-ink-400 hover:bg-ink-900/[0.05] hover:text-ink-700 dark:hover:bg-ink-50/[0.05] dark:hover:text-ink-200"
+              aria-label="Close"
             >
-              <SelectTrigger id="spawn-model" className="text-[12.5px]">
-                <SelectValue placeholder="pick a model" />
-              </SelectTrigger>
-              <SelectContent>
-                {(agentModels ?? []).map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    <span className="flex items-baseline gap-2">
-                      <span className="font-medium">{m.label}</span>
-                      <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
-                        {m.id}
-                      </span>
-                      {m.tier && (
-                        <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-ember-700 dark:text-ember-300">
-                          {m.tier}
-                        </span>
+              <X className="h-3.5 w-3.5" />
+            </DialogPrimitive.Close>
+          </header>
+
+          {/* ── LEFT PANE — control stack ─────────────────────── */}
+          <aside className="border-r border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-100/30 dark:bg-ink-900/40 overflow-y-auto">
+            <div className="p-4 space-y-5">
+              {/* Mode toggle — segmented row */}
+              {hasSlices && (
+                <ControlBlock label="Mode">
+                  <div className="rounded-md border border-ink-900/10 dark:border-ink-50/10 overflow-hidden grid grid-cols-2 text-[11.5px]">
+                    <button
+                      type="button"
+                      onClick={() => setForceSingle(true)}
+                      className={cn(
+                        "px-2 py-1.5 font-mono transition-colors",
+                        !useSlices
+                          ? "bg-ember-500/15 text-ember-700 dark:text-ember-300 font-semibold"
+                          : "text-ink-500 hover:bg-ink-900/[0.03] dark:text-ink-400 dark:hover:bg-ink-50/[0.03]",
                       )}
-                    </span>
-                  </SelectItem>
-                ))}
-                <SelectItem value="__custom">
-                  <span className="flex items-baseline gap-2">
-                    <span className="font-medium">Custom…</span>
-                    <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
-                      type any model id below
-                    </span>
-                  </span>
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            {model && !agentModels?.some((m) => m.id === model) && (
-              <Input
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="model id (e.g. gpt-5.5, claude-sonnet-4-7)"
-                className="text-[12.5px] font-mono"
-              />
-            )}
-            {agent === "codex" &&
-              modelsQ.data?.sources?.codex?.available === false && (
-                <p className="text-[11px] text-amber-700 dark:text-amber-300">
-                  No codex models found at{" "}
-                  <code className="font-mono">~/.codex/models_cache.json</code>.
-                  Run any <code className="font-mono">codex</code> command once
-                  to populate the cache, then hit refresh.
-                </p>
+                    >
+                      single
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setForceSingle(false)}
+                      className={cn(
+                        "px-2 py-1.5 font-mono transition-colors border-l border-ink-900/10 dark:border-ink-50/10",
+                        useSlices
+                          ? "bg-ember-500/15 text-ember-700 dark:text-ember-300 font-semibold"
+                          : "text-ink-500 hover:bg-ink-900/[0.03] dark:text-ink-400 dark:hover:bg-ink-50/[0.03]",
+                      )}
+                    >
+                      slices · {slices.length}
+                    </button>
+                  </div>
+                </ControlBlock>
               )}
-          </div>
 
-          <div className="space-y-1.5">
-            <Label
-              htmlFor="spawn-thinking"
-              className="text-[11px] uppercase tracking-[0.1em] font-mono text-ink-500 dark:text-ink-400"
-            >
-              Thinking effort
-              <span className="ml-1 text-ink-400 dark:text-ink-500">
-                · optional
-              </span>
-            </Label>
-            <Select
-              value={thinkingLevel || "default"}
-              onValueChange={(v) =>
-                setThinkingLevel(v === "default" ? "" : (v as ThinkingLevel))
-              }
-            >
-              <SelectTrigger id="spawn-thinking" className="text-[12.5px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="default">use server default</SelectItem>
-                <SelectItem value="low">low</SelectItem>
-                <SelectItem value="medium">medium</SelectItem>
-                <SelectItem value="high">high</SelectItem>
-                <SelectItem value="max">max</SelectItem>
-                <SelectItem value="xhigh">xhigh</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+              {/* Slices list */}
+              {useSlices && (
+                <ControlBlock label="Slices">
+                  <ol className="space-y-1">
+                    {slices.map((s, i) => {
+                      const sel = i === activeSlice;
+                      const sAgent = s.agent ?? "claude";
+                      return (
+                        <li key={i}>
+                          <button
+                            type="button"
+                            onClick={() => setActiveSlice(i)}
+                            className={cn(
+                              "w-full text-left rounded-md px-2 py-1.5 transition-colors",
+                              sel
+                                ? "bg-ember-500/10 ring-1 ring-ember-500/30"
+                                : "hover:bg-ink-900/[0.03] dark:hover:bg-ink-50/[0.03]",
+                            )}
+                          >
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={cn(
+                                  "shrink-0 inline-flex items-center justify-center h-4 w-4 rounded-full font-mono text-[9px] font-semibold tabular-nums",
+                                  sel
+                                    ? "bg-ember-500 text-white"
+                                    : sAgent === "codex"
+                                      ? "bg-violet-500/20 text-violet-700 dark:text-violet-300"
+                                      : "bg-ember-500/20 text-ember-700 dark:text-ember-300",
+                                )}
+                              >
+                                {i + 1}
+                              </span>
+                              <span
+                                className={cn(
+                                  "flex-1 truncate text-[12px]",
+                                  sel
+                                    ? "text-ink-900 dark:text-ink-50 font-medium"
+                                    : "text-ink-700 dark:text-ink-200",
+                                )}
+                              >
+                                {s.title || `slice ${i + 1}`}
+                              </span>
+                            </div>
+                            <div className="mt-0.5 ml-5 font-mono text-[10px] text-ink-400 dark:text-ink-500 truncate">
+                              {sAgent}
+                              {s.model ? ` · ${s.model}` : ""}
+                            </div>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                  <button
+                    type="button"
+                    onClick={addSlice}
+                    disabled={submitting}
+                    className="mt-1.5 inline-flex items-center gap-1 h-6 px-2 rounded font-mono text-[10px] text-ink-500 hover:text-ember-700 dark:text-ink-400 dark:hover:text-ember-300 disabled:opacity-50"
+                  >
+                    <Plus className="h-3 w-3" /> add slice
+                  </button>
+                </ControlBlock>
+              )}
 
-          <div className="space-y-1.5">
-            <Label className="text-[11px] uppercase tracking-[0.1em] font-mono text-ink-500 dark:text-ink-400">
-              Prompt preview
-            </Label>
-            <pre className="max-h-44 overflow-y-auto rounded-md border border-ink-900/10 bg-paper-50 px-3 py-2 font-mono text-[11px] leading-relaxed text-ink-700 whitespace-pre-wrap dark:border-ink-50/10 dark:bg-ink-900 dark:text-ink-200">
-              {promptPreview}
-            </pre>
-          </div>
-        </div>
-        <DialogFooter>
-          <Button
-            variant="ghost"
-            onClick={() => onOpenChange(false)}
-            disabled={submitting}
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={async () => {
-              setSubmitting(true);
-              try {
-                await onSpawn({
-                  agent,
-                  ...(model ? { model } : {}),
-                  ...(thinkingLevel
-                    ? { thinkingLevel: thinkingLevel as ThinkingLevel }
-                    : {}),
-                });
-              } finally {
-                setSubmitting(false);
-              }
-            }}
-            disabled={submitting}
-          >
-            {submitting ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Zap className="h-3.5 w-3.5" />
-            )}
-            Spawn task
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+              {/* Per-slice config (selected slice in slices mode) */}
+              {useSlices && activeSliceData && (
+                <ControlBlock
+                  label={`Slice ${activeSlice + 1} config`}
+                  rightSlot={
+                    <span className="inline-flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => moveSlice(activeSlice, -1)}
+                        disabled={submitting || activeSlice === 0}
+                        className="p-1 rounded text-ink-400 hover:bg-ink-900/[0.05] hover:text-ink-700 disabled:opacity-30 dark:hover:bg-ink-50/[0.05] dark:hover:text-ink-200"
+                        aria-label="Move slice up"
+                      >
+                        <ArrowUp className="h-3 w-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => moveSlice(activeSlice, 1)}
+                        disabled={submitting || activeSlice === slices.length - 1}
+                        className="p-1 rounded text-ink-400 hover:bg-ink-900/[0.05] hover:text-ink-700 disabled:opacity-30 dark:hover:bg-ink-50/[0.05] dark:hover:text-ink-200"
+                        aria-label="Move slice down"
+                      >
+                        <ArrowDown className="h-3 w-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => removeSlice(activeSlice)}
+                        disabled={submitting || slices.length === 1}
+                        className="p-1 rounded text-ink-400 hover:bg-red-500/10 hover:text-red-500 disabled:opacity-30"
+                        aria-label="Remove slice"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </span>
+                  }
+                >
+                  <div className="space-y-1.5">
+                    <Input
+                      value={activeSliceData.title}
+                      onChange={(e) =>
+                        updateSlice(activeSlice, { title: e.target.value })
+                      }
+                      placeholder="title"
+                      disabled={submitting}
+                      className="h-7 text-[12px]"
+                    />
+                    <FieldRow label="agent">
+                      <Picker
+                        value={activeSliceData.agent ?? "claude"}
+                        onChange={(v) => {
+                          // Clear the slice's model when its agent
+                          // changes so we don't carry a claude id into a
+                          // codex slice (or vice versa). Empty means
+                          // "let the CLI pick its own latest."
+                          const nextAgent = v as AgentKind;
+                          const cur = activeSliceData.model;
+                          const stillValid =
+                            cur != null &&
+                            modelSuggestions[nextAgent].includes(cur);
+                          updateSlice(activeSlice, {
+                            agent: nextAgent,
+                            ...(stillValid ? {} : { model: undefined }),
+                          });
+                        }}
+                        disabled={submitting}
+                        items={[
+                          { value: "claude", label: "claude" },
+                          { value: "codex", label: "codex" },
+                        ]}
+                      />
+                    </FieldRow>
+                    <FieldRow label="model">
+                      <Picker
+                        value={
+                          activeSliceData.model
+                            ? modelSuggestions[
+                                activeSliceData.agent ?? "claude"
+                              ].includes(activeSliceData.model)
+                              ? activeSliceData.model
+                              : "__custom"
+                            : ""
+                        }
+                        onChange={(v) => {
+                          if (v === "__custom")
+                            updateSlice(activeSlice, {
+                              model: activeSliceData.model || "",
+                            });
+                          else
+                            updateSlice(activeSlice, { model: v || undefined });
+                        }}
+                        disabled={submitting}
+                        items={[
+                          {
+                            value: "",
+                            label: `auto · ${activeSliceData.agent ?? "claude"} picks latest`,
+                          },
+                          ...modelSuggestions[
+                            activeSliceData.agent ?? "claude"
+                          ].map((id) => ({ value: id, label: id })),
+                          { value: "__custom", label: "custom…" },
+                        ]}
+                      />
+                    </FieldRow>
+                    {activeSliceData.model &&
+                      !modelSuggestions[
+                        activeSliceData.agent ?? "claude"
+                      ].includes(activeSliceData.model) && (
+                        <FieldRow label="custom">
+                          <Input
+                            value={activeSliceData.model}
+                            onChange={(e) =>
+                              updateSlice(activeSlice, {
+                                model: e.target.value || undefined,
+                              })
+                            }
+                            placeholder="model id"
+                            disabled={submitting}
+                            className="flex-1 h-7 font-mono text-[11px]"
+                          />
+                        </FieldRow>
+                      )}
+                    <FieldRow label="think">
+                      <Picker
+                        value={activeSliceData.thinkingLevel ?? ""}
+                        onChange={(v) =>
+                          updateSlice(activeSlice, {
+                            thinkingLevel: (v as ThinkingLevel) || undefined,
+                          })
+                        }
+                        disabled={submitting}
+                        items={[
+                          { value: "", label: "(inherit)" },
+                          ...(activeSliceData.agent === "codex"
+                            ? ["minimal", "low", "medium", "high", "xhigh"]
+                            : ["low", "medium", "high", "xhigh", "max"]
+                          ).map((lvl) => ({ value: lvl, label: lvl })),
+                        ]}
+                      />
+                    </FieldRow>
+                  </div>
+                </ControlBlock>
+              )}
+
+              {/* Single-mode engine config */}
+              {!useSlices && (
+                <ControlBlock label="Engine">
+                  <div className="space-y-1.5">
+                    <FieldRow label="agent">
+                      <Picker
+                        value={agent}
+                        onChange={(v) => setAgent(v as AgentKind)}
+                        disabled={submitting}
+                        items={[
+                          { value: "claude", label: "claude" },
+                          { value: "codex", label: "codex" },
+                        ]}
+                      />
+                    </FieldRow>
+                    <FieldRow label="model">
+                      <Picker
+                        value={
+                          model && agentModels?.some((m) => m.id === model)
+                            ? model
+                            : model
+                              ? "__custom"
+                              : ""
+                        }
+                        onChange={(v) => {
+                          if (v === "__custom") setModel(model || "");
+                          else setModel(v);
+                        }}
+                        disabled={submitting}
+                        items={[
+                          {
+                            value: "",
+                            label: `auto · ${agent} picks latest`,
+                          },
+                          ...(agentModels ?? []).map((m) => ({
+                            value: m.id,
+                            label: m.label || m.id,
+                          })),
+                          { value: "__custom", label: "custom…" },
+                        ]}
+                      />
+                    </FieldRow>
+                    {model && !agentModels?.some((m) => m.id === model) && (
+                      <FieldRow label="custom">
+                        <Input
+                          value={model}
+                          onChange={(e) => setModel(e.target.value)}
+                          placeholder="model id"
+                          disabled={submitting}
+                          className="flex-1 h-7 font-mono text-[11px]"
+                        />
+                      </FieldRow>
+                    )}
+                    <FieldRow label="think">
+                      <Picker
+                        value={thinkingLevel}
+                        onChange={(v) =>
+                          setThinkingLevel(
+                            v === "" ? "" : (v as ThinkingLevel),
+                          )
+                        }
+                        disabled={submitting}
+                        items={[
+                          {
+                            value: "",
+                            label: `auto · ${defaultThinking?.[agent] ?? (agent === "claude" ? "xhigh" : "high")}`,
+                          },
+                          ...thinkingLevels.map((lvl) => ({
+                            value: lvl,
+                            label: lvl,
+                          })),
+                        ]}
+                      />
+                    </FieldRow>
+                  </div>
+                </ControlBlock>
+              )}
+
+              {/* Share-branch toggle (slices, > 1) */}
+              {useSlices && slices.length > 1 && (
+                <label className="flex items-center gap-2 font-mono text-[10.5px] text-ink-600 dark:text-ink-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={shareWorktree}
+                    onChange={(e) => setShareWorktree(e.target.checked)}
+                    className="h-3 w-3 accent-ember-500"
+                  />
+                  share branch (sequential on one worktree)
+                </label>
+              )}
+            </div>
+          </aside>
+
+          {/* ── RIGHT PANE — prompt body ─────────────────────── */}
+          <main className="overflow-y-auto bg-paper-50 dark:bg-ink-900">
+            <div className="px-6 py-5">
+              {useSlices && activeSliceData ? (
+                <div className="space-y-2">
+                  <div className="flex items-baseline gap-2">
+                    <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+                      slice {activeSlice + 1} prompt
+                    </span>
+                    <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+                      · {activeSliceData.prompt.split(/\s+/).filter(Boolean).length}w
+                    </span>
+                    <span className="ml-auto font-mono text-[10px] text-ink-400 dark:text-ink-500">
+                      this is what slice {activeSlice + 1}'s runner receives
+                    </span>
+                  </div>
+                  <Textarea
+                    value={activeSliceData.prompt}
+                    onChange={(e) =>
+                      updateSlice(activeSlice, { prompt: e.target.value })
+                    }
+                    disabled={submitting}
+                    className="min-h-[60vh] font-mono text-[12px] leading-relaxed border-ink-900/[0.08] dark:border-ink-50/[0.08]"
+                    placeholder="prompt for this slice…"
+                  />
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-baseline gap-2">
+                    <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+                      prompt preview
+                    </span>
+                    <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+                      · {wordCount.toLocaleString()}w · {promptPreview.length.toLocaleString()}c
+                    </span>
+                    <span className="ml-auto font-mono text-[10px] text-ink-400 dark:text-ink-500">
+                      this is what the runner receives
+                    </span>
+                  </div>
+                  <div className="prose-zen text-[12.5px] leading-relaxed text-ink-700 dark:text-ink-200">
+                    <Markdown text={promptPreview} />
+                  </div>
+                </div>
+              )}
+            </div>
+          </main>
+
+          {/* ── FOOTER (spans both panes) ─────────────────────── */}
+          <footer className="md:col-span-2 flex items-center gap-2 px-4 py-2.5 border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900">
+            <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+              {useSlices
+                ? `${slices.length} task${slices.length === 1 ? "" : "s"} · ${shareWorktree ? "shared branch" : "separate branches"}`
+                : `${agent} · ${model || "default"} · ${thinkingLevel || "default"}`}
+            </span>
+            <span className="ml-auto" />
+            <button
+              type="button"
+              onClick={() => onOpenChange(false)}
+              disabled={submitting}
+              className="inline-flex items-center h-7 px-2.5 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-ink-900 dark:hover:text-ink-50 disabled:opacity-50"
+            >
+              cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void launch()}
+              disabled={submitting || (useSlices && slices.length === 0)}
+              className={cn(
+                "inline-flex items-center gap-1.5 h-7 px-3 rounded font-mono text-[10px] uppercase tracking-[0.08em]",
+                "border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300",
+                "hover:bg-ember-500/20 disabled:opacity-40 disabled:cursor-not-allowed",
+              )}
+            >
+              {submitting ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <Zap className="h-3 w-3" />
+              )}
+              {useSlices
+                ? `launch ${slices.length}`
+                : "launch"}
+            </button>
+          </footer>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   );
 }
+
+/**
+ * Left-pane control block — uppercase mono kicker, optional right slot
+ * for inline action icons, then the children stacked underneath. No
+ * border around the block itself; the kicker + spacing carry it.
+ */
+function ControlBlock({
+  label,
+  rightSlot,
+  children,
+}: {
+  label: string;
+  rightSlot?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-1">
+        <span className="font-mono text-[9.5px] uppercase tracking-[0.16em] text-ink-500 dark:text-ink-400">
+          {label}
+        </span>
+        {rightSlot && <span className="ml-auto">{rightSlot}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * Inline labeled field — small mono label on the left, control filling
+ * the rest of the row. Used for the agent/model/think pickers in the
+ * left pane so the form reads as a tight key-value list.
+ */
+function FieldRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="shrink-0 w-12 font-mono text-[10px] text-ink-400 dark:text-ink-500">
+        {label}
+      </span>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * Compact mono dropdown built on the project's Radix-based `Select` —
+ * sized to fit the tight FieldRow (h-7, font-mono text-[11px]) so the
+ * spawn dialog uses the same picker chrome as the rest of the app
+ * instead of the browser's native `<select>`.
+ */
+function Picker({
+  value,
+  onChange,
+  items,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  items: { value: string; label: string }[];
+  disabled?: boolean;
+}) {
+  // Radix `Select` rejects empty-string values, so we map "" ↔ "__none"
+  // for the wire format and render the matching label in the trigger.
+  const NONE = "__none";
+  const sentinel = (v: string) => (v === "" ? NONE : v);
+  const fromSentinel = (v: string) => (v === NONE ? "" : v);
+  return (
+    <Select
+      value={sentinel(value)}
+      onValueChange={(v) => onChange(fromSentinel(v))}
+      disabled={disabled}
+    >
+      <SelectTrigger className="flex-1 h-7 px-2 font-mono text-[11px] text-ink-700 dark:text-ink-200">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {items.map((it) => (
+          <SelectItem
+            key={it.value === "" ? NONE : it.value}
+            value={it.value === "" ? NONE : it.value}
+          >
+            <span className="font-mono text-[11px]">{it.label}</span>
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+

@@ -26,6 +26,9 @@ import {
   PlanSuggestionRequest,
   ResolveSuggestionRequest,
   SaveIdeaRequest,
+  SpawnMultiRequest,
+  SpawnSiblingRequest,
+  SpawnTasksMultiRequest,
   UpdateIdeaRequest,
   CreateTodoRequest,
   UpdateTodoRequest,
@@ -97,6 +100,7 @@ import {
   streamValidateIdeas,
   updateSavedIdea,
   updateSavedIdeaPlan,
+  updateSavedIdeaSlices,
   listTodos,
   reopenTask,
   setCouncilWinner,
@@ -574,6 +578,11 @@ export function buildServer(opts: BuildServerOptions) {
     return c.json({
       models: { claude, codex },
       defaults: cfg.defaultModel,
+      // Operator's preferred thinking level per agent, surfaced here so
+      // the spawn UI can pre-fill the dot/picker without an extra
+      // round-trip. Editable via PATCH /api/config; falls back to
+      // claude=xhigh / codex=high if the operator never set it.
+      defaultThinking: cfg.defaultThinking,
       // Source-of-truth metadata so the UI can show a freshness hint
       // and a one-click refresh affordance ("Codex list updated 3
       // min ago — Refresh"). Helps when a brand-new model lands and
@@ -1589,12 +1598,29 @@ export function buildServer(opts: BuildServerOptions) {
       }
     }
 
-    // Conversation usage estimate — totalInput + totalOutput tokens reported
-    // by the agent stream. Window: assume 200k Sonnet/Codex unless we know
-    // better. Used by the UI to render a usage bar / warn at 80%.
-    const conversationTokens =
+    // Conversation usage — the LIVE context size (most recent turn's
+    // input + output reported by the runner), NOT the cumulative
+    // billing total. Cumulative sums every turn forever, so a
+    // task with 4 turns of 50K context each shows 200K used when
+    // the agent's actual context is just 50K. Falls back to the
+    // cumulative for old rows that never recorded a per-turn value.
+    //
+    // Keeping the same formula the timeline's compact-banner uses
+    // (`apps/web/src/views/TaskDetail.tsx` → `contextTokens`) so the
+    // header donut, the chat banner, and this Context tab all agree.
+    const liveTurnTokens =
+      task.latestTurnInputTokens != null || task.latestTurnOutputTokens != null
+        ? (task.latestTurnInputTokens ?? 0) + (task.latestTurnOutputTokens ?? 0)
+        : null;
+    const cumulativeTokens =
       (task.totalInputTokens ?? 0) + (task.totalOutputTokens ?? 0);
-    const conversationWindow = 200_000;
+    const conversationTokens = liveTurnTokens ?? cumulativeTokens;
+    // Per-agent context window. Claude Sonnet/Opus 4: 200K. Codex
+    // (GPT-5 family) defaults to 200K too, though specific models
+    // can run higher. Keep a single number for now; future work can
+    // resolve from cfg.models metadata if operators want to express
+    // a non-standard window.
+    const conversationWindow = task.agent === "codex" ? 200_000 : 200_000;
 
     // The catalog actually injected at spawn time (names + paths, no bodies).
     const skillsCatalog = renderSkillsCatalog(task.skills ?? [], {
@@ -1624,6 +1650,15 @@ export function buildServer(opts: BuildServerOptions) {
       conversation: {
         used: conversationTokens,
         window: conversationWindow,
+        // True when we couldn't pin the most recent turn's footprint
+        // and fell back to the lifetime cumulative — the UI shows a
+        // hint so the operator knows the % is a worst-case estimate
+        // until the next turn rewrites the gauge.
+        liveTurn: liveTurnTokens != null,
+        // Separate billing-style total — never decreases. Lets the
+        // tab surface "current context" + "lifetime spend" without
+        // conflating them.
+        cumulative: cumulativeTokens,
       },
     });
   });
@@ -1953,7 +1988,12 @@ export function buildServer(opts: BuildServerOptions) {
               ? { extraInstructions: cfg.agentInstructions }
               : {}),
           });
-          type Final = { plan: string; source: string; error?: string };
+          type Final = {
+            plan: string;
+            source: string;
+            error?: string;
+            slices?: import("@agentd/contracts").PlanSlice[];
+          };
           let result: Final | null = null;
           while (true) {
             const next = await it.next();
@@ -1969,6 +2009,9 @@ export function buildServer(opts: BuildServerOptions) {
               JSON.stringify({
                 source: result?.source ?? "fallback-empty",
                 plan: result?.plan ?? "",
+                ...(result?.slices && result.slices.length > 0
+                  ? { slices: result.slices }
+                  : {}),
               }),
             ),
           );
@@ -2348,15 +2391,27 @@ export function buildServer(opts: BuildServerOptions) {
       if (!dt || typeof dt !== "object") {
         return c.json({ error: "defaultThinking must be an object" }, 400);
       }
-      const allowed = ["low", "medium", "high", "max", "xhigh"] as const;
+      // Per-agent allowed sets — claude rejects `minimal`, codex rejects `max`.
+      const allowedClaude = ["low", "medium", "high", "xhigh", "max"] as const;
+      const allowedCodex = ["minimal", "low", "medium", "high", "xhigh"] as const;
       const cur = { ...cfg.defaultThinking };
-      for (const k of ["claude", "codex"] as const) {
-        const v = dt[k];
-        if (v == null) continue;
-        if (!allowed.includes(v as (typeof allowed)[number])) {
-          return c.json({ error: `defaultThinking.${k} must be one of ${allowed.join("|")}` }, 400);
+      if (dt.claude != null) {
+        if (!allowedClaude.includes(dt.claude as (typeof allowedClaude)[number])) {
+          return c.json(
+            { error: `defaultThinking.claude must be one of ${allowedClaude.join("|")}` },
+            400,
+          );
         }
-        cur[k] = v as (typeof allowed)[number];
+        cur.claude = dt.claude as (typeof allowedClaude)[number];
+      }
+      if (dt.codex != null) {
+        if (!allowedCodex.includes(dt.codex as (typeof allowedCodex)[number])) {
+          return c.json(
+            { error: `defaultThinking.codex must be one of ${allowedCodex.join("|")}` },
+            400,
+          );
+        }
+        cur.codex = dt.codex as (typeof allowedCodex)[number];
       }
       next.defaultThinking = cur;
       changed = true;
@@ -3533,6 +3588,7 @@ export function buildServer(opts: BuildServerOptions) {
                 }
                 let persisted;
                 let nextPlanDraft = idea.planDraft;
+                let nextPlanSlices = idea.planSlices ?? null;
                 if (mode === "plan") {
                   // Plan mode: the agent's reply IS the new plan. Stash
                   // it on the idea (the right-side plan panel shows
@@ -3542,6 +3598,14 @@ export function buildServer(opts: BuildServerOptions) {
                   // the activity history still survives reload.
                   const planned = updateSavedIdeaPlan(db, id, result.reply);
                   if (planned) nextPlanDraft = planned.planDraft;
+                  if (result.planSlices && result.planSlices.length > 0) {
+                    const sliced = updateSavedIdeaSlices(
+                      db,
+                      id,
+                      result.planSlices,
+                    );
+                    if (sliced) nextPlanSlices = sliced.planSlices ?? null;
+                  }
                   persisted = appendIdeaMessage(db, {
                     ideaId: id,
                     role: "system",
@@ -3583,6 +3647,14 @@ export function buildServer(opts: BuildServerOptions) {
                       result.planContent,
                     );
                     if (planned) nextPlanDraft = planned.planDraft;
+                    if (result.planSlices && result.planSlices.length > 0) {
+                      const sliced = updateSavedIdeaSlices(
+                        db,
+                        id,
+                        result.planSlices,
+                      );
+                      if (sliced) nextPlanSlices = sliced.planSlices ?? null;
+                    }
                     appendIdeaMessage(db, {
                       ideaId: id,
                       role: "system",
@@ -3599,6 +3671,9 @@ export function buildServer(opts: BuildServerOptions) {
                       message: persisted,
                       ideaStatus: nextStatus,
                       planDraft: nextPlanDraft,
+                      ...(nextPlanSlices && nextPlanSlices.length > 0
+                        ? { planSlices: nextPlanSlices }
+                        : {}),
                       ...(result.suggestedTitle
                         ? { suggestedTitle: result.suggestedTitle }
                         : {}),
@@ -3665,6 +3740,22 @@ export function buildServer(opts: BuildServerOptions) {
   });
 
   /**
+   * Persist the operator-edited slice list. Empty array (or null) clears
+   * the slices and reverts the spawn sheet to single-task mode.
+   */
+  api.put("/saved-ideas/:id/slices", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => null)) as {
+      slices?: import("@agentd/contracts").PlanSlice[] | null;
+    } | null;
+    const slices = body?.slices ?? null;
+    const updated = updateSavedIdeaSlices(db, id, slices);
+    if (!updated) return c.json({ error: "not found" }, 404);
+    pubSavedIdeaChanged(id);
+    return c.json({ idea: updated });
+  });
+
+  /**
    * Spawn a real task from a saved idea. Same machinery as the
    * suggestion resolve path — accepts the full executor knob set.
    */
@@ -3699,6 +3790,126 @@ export function buildServer(opts: BuildServerOptions) {
       const updated = markSavedIdeaSpawned(db, id, task.id) ?? idea;
       pubTaskChanged(task.id);
       return c.json({ idea: updated, task });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  /**
+   * Fan a saved idea's plan slices out into N sibling tasks. Slices
+   * share one worktree on one branch by default and run sequentially
+   * via dependsOnTaskId chains so they can land independent commits
+   * without racing on the same checkout. Returns the created tasks
+   * in slice order; the first one starts immediately.
+   */
+  api.post("/saved-ideas/:id/spawn-multi", async (c) => {
+    const id = c.req.param("id");
+    const idea = getSavedIdea(db, id);
+    if (!idea) return c.json({ error: "not found" }, 404);
+    const project = getProjectById(db, idea.projectId);
+    if (!project) return c.json({ error: "project gone" }, 400);
+    const body = await c.req.json().catch(() => null);
+    const parsed = SpawnMultiRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid body", issues: parsed.error.issues },
+        400,
+      );
+    }
+    try {
+      const created = await tasks.createBatch({
+        repoPath: project.path,
+        slices: parsed.data.slices,
+        ...(parsed.data.shareWorktree != null
+          ? { shareWorktree: parsed.data.shareWorktree }
+          : {}),
+        ...(parsed.data.branchName ? { branchName: parsed.data.branchName } : {}),
+        ...(parsed.data.baseBranch ? { baseBranch: parsed.data.baseBranch } : {}),
+        ...(parsed.data.title ? { titlePrefix: parsed.data.title } : {}),
+      });
+      const firstTask = created[0]!;
+      const updated = markSavedIdeaSpawned(db, id, firstTask.id) ?? idea;
+      for (const t of created) pubTaskChanged(t.id);
+      return c.json({ idea: updated, tasks: created });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  /**
+   * Saved-idea-free fan-out. Same `createBatch` mechanics as
+   * `/saved-ideas/:id/spawn-multi` but takes a `repoPath` directly so
+   * the spawn sheet's "phase this" toggle can split a plan across
+   * agents without first stashing it as an idea.
+   */
+  api.post("/tasks/spawn-multi", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = SpawnTasksMultiRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid body", issues: parsed.error.issues },
+        400,
+      );
+    }
+    try {
+      const created = await tasks.createBatch({
+        repoPath: parsed.data.repoPath,
+        slices: parsed.data.slices,
+        ...(parsed.data.shareWorktree != null
+          ? { shareWorktree: parsed.data.shareWorktree }
+          : {}),
+        ...(parsed.data.branchName ? { branchName: parsed.data.branchName } : {}),
+        ...(parsed.data.baseBranch ? { baseBranch: parsed.data.baseBranch } : {}),
+        ...(parsed.data.title ? { titlePrefix: parsed.data.title } : {}),
+        ...(parsed.data.autoPush != null ? { autoPush: parsed.data.autoPush } : {}),
+      });
+      for (const t of created) pubTaskChanged(t.id);
+      return c.json({ tasks: created });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  /**
+   * Spawn a sibling task on an existing task's worktree + branch. The
+   * new task chains via `dependsOnTaskId` so it runs after the parent
+   * finishes its current turn. Used by the task page's "Spawn related
+   * task" action — lets the operator drop a second agent (different
+   * model, different scope) onto the same checkout. Both end up in
+   * the same `planGroupId`, so the sidebar shows them as one cluster.
+   */
+  api.post("/tasks/:id/spawn-sibling", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => null);
+    const parsed = SpawnSiblingRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid body", issues: parsed.error.issues },
+        400,
+      );
+    }
+    try {
+      const sibling = await tasks.addSiblingTask(id, {
+        agent: parsed.data.agent,
+        prompt: parsed.data.prompt,
+        ...(parsed.data.title ? { title: parsed.data.title } : {}),
+        ...(parsed.data.model ? { model: parsed.data.model } : {}),
+        ...(parsed.data.thinkingLevel
+          ? { thinkingLevel: parsed.data.thinkingLevel }
+          : {}),
+        ...(parsed.data.permissionMode
+          ? { permissionMode: parsed.data.permissionMode }
+          : {}),
+        ...(parsed.data.autoCommit != null
+          ? { autoCommit: parsed.data.autoCommit }
+          : {}),
+        ...(parsed.data.autoPush != null
+          ? { autoPush: parsed.data.autoPush }
+          : {}),
+      });
+      pubTaskChanged(sibling.id);
+      pubTaskChanged(id);
+      return c.json({ task: sibling });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }

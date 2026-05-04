@@ -5,6 +5,7 @@ import type {
   Council,
   CouncilMember,
   PermissionMode,
+  PlanSlice,
   ResolveSuggestionRequest,
   Suggestion,
   Task,
@@ -21,7 +22,9 @@ import {
   detectDefaultBranch,
   EventBus,
   getTask,
+  getTasksDependingOn,
   listTasks,
+  listTasksByPlanGroup,
   listMessages,
   createCouncil as dbCreateCouncil,
   createSuggestion,
@@ -49,6 +52,7 @@ import {
   removeWorktree,
   syncAgentPlan,
   setTaskCodexThreadId,
+  setTaskPlanGroupId,
   updateTaskStatus,
   createWorktree,
   type AgentdPaths,
@@ -83,6 +87,26 @@ export interface CreateTaskParams {
   pullLatest?: boolean;
   thinkingLevel?: ThinkingLevel;
   model?: string;
+  /**
+   * Plan-slice chain: when set, the task is created as `pending` and
+   * spawnRunner is held until the parent transitions to `done`. The
+   * lifecycle hook in `runCompletionHooks` fans out from the parent.
+   */
+  dependsOnTaskId?: string | null;
+  /** Group key shared by every sibling slice in one plan. */
+  planGroupId?: string | null;
+  /**
+   * Pre-created worktree path (used by `createBatch` so every sibling
+   * reuses the single shared worktree). When set, the manager skips
+   * its own `createWorktree` call.
+   */
+  sharedWorktreePath?: string;
+  /**
+   * Pre-resolved branch name for the shared worktree. Required when
+   * `sharedWorktreePath` is set so the persisted task row matches the
+   * branch the worktree is checked out on.
+   */
+  sharedBranch?: string;
 }
 
 export class TaskManager {
@@ -120,6 +144,45 @@ export class TaskManager {
      */
     private readonly agentSessionToken: string,
   ) {}
+
+  /**
+   * Reset orphaned tasks at startup. When the daemon dies mid-turn the
+   * runner subprocess goes with it, but the task's row stays at
+   * `running` / `waiting_input` / `waiting_perm` / `idle` in the DB.
+   * After restart the UI keeps drawing "agent is thinking…" and the
+   * Stop button can't kill anything because there's no process. Sweep
+   * those rows back to `stopped`, drop a system breadcrumb so the
+   * operator knows what happened, and publish a status event so any
+   * connected client repaints. Called once from the daemon entry
+   * after the TaskManager is constructed.
+   */
+  recoverOrphans(): void {
+    const orphaned = listTasks(this.db).filter(
+      (t) =>
+        t.status === "running" ||
+        t.status === "waiting_input" ||
+        t.status === "waiting_perm" ||
+        t.status === "idle",
+    );
+    for (const t of orphaned) {
+      updateTaskStatus(this.db, t.id, "stopped");
+      try {
+        appendMessage(
+          this.db,
+          t.id,
+          "system",
+          "[daemon restarted — turn interrupted; send a new message to resume]",
+        );
+      } catch {
+        // never let a logging hiccup block startup
+      }
+      this.bus.publish({
+        taskId: t.id,
+        event: { kind: "status", status: "stopped" },
+        ts: Date.now(),
+      });
+    }
+  }
 
   list(): Task[] {
     return listTasks(this.db);
@@ -293,37 +356,48 @@ export class TaskManager {
     const taskId = newId("task");
     const workspaceMode = params.workspaceMode ?? "worktree";
     const branchMode = params.branchMode ?? "new";
-    // Auto-name the branch when the caller didn't provide one. The AI
-    // helper picks both the conventional prefix (feature/fix/refactor/
-    // chore) and a tight slug, so a "fix the worktree delete bug"
-    // prompt becomes `fix/worktree-delete` rather than getting jammed
-    // under `feature/`. Falls back to a heuristic prefix + deterministic
-    // slug if Claude isn't available.
     let branch: string;
-    if (branchMode === "existing") {
-      branch = params.branchName?.trim() || baseBranch;
-    } else if (params.branchName?.trim()) {
-      branch = params.branchName.trim();
+    let worktreePath: string;
+    if (params.sharedWorktreePath && params.sharedBranch) {
+      // Plan-slice sibling: the batch already created the shared
+      // worktree + branch; just reuse them so every slice lands on
+      // the same checkout.
+      worktreePath = params.sharedWorktreePath;
+      branch = params.sharedBranch;
     } else {
-      const cfg = loadConfig(this.paths.root);
-      const ai = await generateBranchName(params.prompt, {
-        helper: cfg.aiHelpers,
+      // Auto-name the branch when the caller didn't provide one. The
+      // AI helper picks both the conventional prefix (feature/fix/
+      // refactor/chore) and a tight slug, so a "fix the worktree
+      // delete bug" prompt becomes `fix/worktree-delete` rather than
+      // getting jammed under `feature/`. Falls back to a heuristic
+      // prefix + deterministic slug if Claude isn't available — and
+      // we never include the task id, so names stay short.
+      if (branchMode === "existing") {
+        branch = params.branchName?.trim() || baseBranch;
+      } else if (params.branchName?.trim()) {
+        branch = params.branchName.trim();
+      } else {
+        const cfg = loadConfig(this.paths.root);
+        const ai = await generateBranchName(params.prompt, {
+          helper: cfg.aiHelpers,
+        });
+        branch = `${ai.prefix}/${ai.slug}`;
+      }
+      const result = await createWorktree({
+        repoPath: params.repoPath,
+        worktreeRoot: this.paths.worktrees,
+        taskId,
+        baseBranch,
+        branchName: branch,
+        workspaceMode,
+        branchMode: branchMode === "shared" ? "new" : branchMode,
+        pullLatest: params.pullLatest ?? false,
       });
-      branch = `${ai.prefix}/${ai.slug}`;
+      worktreePath = result.worktreePath;
     }
     // Auto-create or look up the project for this repo path. Tasks belong
     // to projects so the sidebar can group them and surface what's new.
     const project = ensureProjectForPath(this.db, params.repoPath);
-    const { worktreePath } = await createWorktree({
-      repoPath: params.repoPath,
-      worktreeRoot: this.paths.worktrees,
-      taskId,
-      baseBranch,
-      branchName: branch,
-      workspaceMode,
-      branchMode,
-      pullLatest: params.pullLatest ?? false,
-    });
     const task: Task = createTask(this.db, {
       id: taskId,
       title,
@@ -349,11 +423,191 @@ export class TaskManager {
           return cfg.defaultThinking[params.agent];
         })(),
       model: params.model ?? "",
+      dependsOnTaskId: params.dependsOnTaskId ?? null,
+      planGroupId: params.planGroupId ?? null,
     });
     touchProject(this.db, project.id);
     appendMessage(this.db, task.id, "user", params.prompt);
+    if (params.dependsOnTaskId) {
+      // Chained child — wait for parent to finish. The lifecycle hook
+      // in runCompletionHooks fires spawnRunner once the parent reaches
+      // `done`. Tell the operator on the timeline so the pending state
+      // isn't a mystery.
+      const parent = getTask(this.db, params.dependsOnTaskId);
+      const label = parent?.title?.slice(0, 60) ?? params.dependsOnTaskId;
+      appendMessage(
+        this.db,
+        task.id,
+        "system",
+        `Waiting on parent slice "${label}" to finish before this slice runs.`,
+      );
+      this.bus.publishSystem({ kind: "task_changed", task });
+      return task;
+    }
     await this.spawnRunner(task, params.prompt, false);
     return task;
+  }
+
+  /**
+   * Spawn N sibling tasks from a single plan. Every slice shares one
+   * worktree on one branch (when `shareWorktree` is true, the default);
+   * slices run sequentially via `dependsOnTaskId` chains so two runners
+   * never race on the same checkout.
+   *
+   * Returns the created tasks in slice order. The first slice is
+   * spawned immediately; subsequent slices stay pending until the hook
+   * in `runCompletionHooks` drives them on parent completion.
+   */
+  async createBatch(params: {
+    repoPath: string;
+    baseBranch?: string;
+    slices: PlanSlice[];
+    titlePrefix?: string;
+    branchName?: string;
+    shareWorktree?: boolean;
+    autoPush?: boolean;
+  }): Promise<Task[]> {
+    if (params.slices.length === 0) {
+      throw new Error("createBatch needs at least one slice");
+    }
+    const baseBranch =
+      params.baseBranch ?? (await detectDefaultBranch(params.repoPath));
+    const cfg = loadConfig(this.paths.root);
+    const project = ensureProjectForPath(this.db, params.repoPath);
+    const planGroupId = newId("grp");
+    const shareWorktree = params.shareWorktree ?? params.slices.length > 1;
+
+    let sharedWorktreePath: string | undefined;
+    let sharedBranch: string | undefined;
+    if (shareWorktree) {
+      const branchName =
+        params.branchName?.trim() ||
+        `feature/${
+          (
+            await generateBranchName(
+              params.titlePrefix || params.slices[0]!.prompt,
+              { helper: cfg.aiHelpers },
+            )
+          ).slug
+        }`;
+      const result = await createWorktree({
+        repoPath: params.repoPath,
+        worktreeRoot: this.paths.worktrees,
+        taskId: planGroupId,
+        baseBranch,
+        branchName,
+        workspaceMode: "worktree",
+        branchMode: "shared",
+        planGroupId,
+        pullLatest: false,
+      });
+      sharedWorktreePath = result.worktreePath;
+      sharedBranch = result.branch;
+    }
+
+    const created: Task[] = [];
+    let prevId: string | null = null;
+    for (let i = 0; i < params.slices.length; i++) {
+      const slice = params.slices[i]!;
+      const agent: AgentKind = slice.agent ?? "claude";
+      const titleBase =
+        params.titlePrefix?.trim() || slice.prompt.split("\n")[0]!.slice(0, 60);
+      const title =
+        params.slices.length > 1
+          ? `[${i + 1}/${params.slices.length}] ${slice.title || titleBase}`.slice(
+              0,
+              120,
+            )
+          : slice.title || titleBase;
+      const task = await this.create({
+        agent,
+        repoPath: params.repoPath,
+        baseBranch,
+        prompt: slice.prompt,
+        title,
+        ...(slice.model ? { model: slice.model } : {}),
+        ...(slice.thinkingLevel ? { thinkingLevel: slice.thinkingLevel } : {}),
+        ...(slice.permissionMode
+          ? { permissionMode: slice.permissionMode }
+          : {}),
+        ...(params.autoPush != null ? { autoPush: params.autoPush } : {}),
+        ...(prevId ? { dependsOnTaskId: prevId } : {}),
+        planGroupId,
+        ...(sharedWorktreePath ? { sharedWorktreePath } : {}),
+        ...(sharedBranch ? { sharedBranch } : {}),
+      });
+      created.push(task);
+      prevId = task.id;
+    }
+    void project;
+    return created;
+  }
+
+  /**
+   * Add a sibling task to an existing one, sharing the parent's
+   * worktree + branch. The new task chains via `dependsOnTaskId`
+   * (sequential, runs after the parent finishes its current turn) so
+   * it never races on the shared checkout. The parent's planGroupId
+   * is reused (or assigned now if the parent was solo) so the
+   * sidebar clusters them as siblings — the operator visually sees
+   * "these tasks live on the same branch."
+   *
+   * Use case: drop a different agent on the same checkout to handle
+   * a different concern (codex picks up a refactor while claude
+   * worked on the feature, etc.).
+   */
+  async addSiblingTask(
+    parentId: string,
+    params: {
+      agent: AgentKind;
+      prompt: string;
+      title?: string;
+      model?: string;
+      thinkingLevel?: ThinkingLevel;
+      permissionMode?: PermissionMode;
+      autoCommit?: boolean;
+      autoPush?: boolean;
+    },
+  ): Promise<Task> {
+    const parent = getTask(this.db, parentId);
+    if (!parent) throw new Error("parent task not found");
+
+    // Promote a solo parent into a planGroup — the sidebar cluster
+    // logic groups by planGroupId, so without this the sibling would
+    // sit alone in the list.
+    let groupId = parent.planGroupId;
+    if (!groupId) {
+      groupId = newId("grp");
+      setTaskPlanGroupId(this.db, parent.id, groupId);
+    }
+
+    const titleBase =
+      params.title?.trim() || params.prompt.split("\n")[0]!.slice(0, 60);
+
+    return this.create({
+      agent: params.agent,
+      repoPath: parent.repoPath,
+      baseBranch: parent.baseBranch,
+      prompt: params.prompt,
+      title: titleBase,
+      ...(params.model ? { model: params.model } : {}),
+      ...(params.thinkingLevel ? { thinkingLevel: params.thinkingLevel } : {}),
+      ...(params.permissionMode
+        ? { permissionMode: params.permissionMode }
+        : {}),
+      ...(params.autoCommit != null ? { autoCommit: params.autoCommit } : {}),
+      ...(params.autoPush != null ? { autoPush: params.autoPush } : {}),
+      // Always chain — concurrent runners on a shared worktree race
+      // on the same files. The chain hook spawns this once the parent
+      // reaches done/idle.
+      dependsOnTaskId: parent.id,
+      planGroupId: groupId,
+      // Share the parent's existing worktree + branch verbatim. No
+      // new checkout, no new branch — the agent appears on the same
+      // commit history as everything else in this group.
+      sharedWorktreePath: parent.worktreePath,
+      sharedBranch: parent.branch,
+    });
   }
 
   async sendInput(taskId: string, text: string): Promise<void> {
@@ -570,7 +824,25 @@ export class TaskManager {
 
   async stop(taskId: string): Promise<void> {
     const session = this.running.get(taskId);
-    if (!session) return;
+    if (!session) {
+      // Even if no runner is alive, a pending chained child can be
+      // explicitly cancelled — propagate to its dependents and mark
+      // the row stopped so the UI clears the "waiting on parent" pill.
+      const cur = getTask(this.db, taskId);
+      if (cur && cur.status === "pending" && cur.dependsOnTaskId) {
+        updateTaskStatus(this.db, taskId, "stopped");
+        this.bus.publish({
+          taskId,
+          event: { kind: "status", status: "stopped" },
+          ts: Date.now(),
+        });
+        this.propagateCancelToDependents(
+          taskId,
+          "an upstream slice was cancelled",
+        );
+      }
+      return;
+    }
     await session.runner.stop("SIGTERM");
     session.unsubscribe();
     this.running.delete(taskId);
@@ -580,6 +852,10 @@ export class TaskManager {
       event: { kind: "status", status: "stopped" },
       ts: Date.now(),
     });
+    this.propagateCancelToDependents(
+      taskId,
+      "an upstream slice was cancelled",
+    );
   }
 
   async remove(taskId: string, opts?: { keepWorktree?: boolean }): Promise<void> {
@@ -693,13 +969,20 @@ export class TaskManager {
     }
     if (task.autoPush && task.autoCommit !== false) {
       finishParts.push(
-        "Auto-push is ON. After committing, push the branch to origin with `git push -u origin HEAD` without asking. Don't open a pull request — that step is manual.",
+        "Auto-push is ON. After committing, push the branch to origin with `git push -u origin HEAD` without asking. Don't open a pull request, that step is manual.",
       );
     } else {
       finishParts.push(
-        "Do NOT push the branch and do NOT open a pull request — those are manual steps.",
+        "Do NOT push the branch and do NOT open a pull request, those are manual steps.",
       );
     }
+    // Writing-style rule, last so it's the freshest hint when the
+    // agent composes its reply. Operators kept complaining the
+    // model's chat sounded like a press release. Force a more
+    // human cadence by yanking the em-dash crutch.
+    finishParts.push(
+      "Writing style: write like a human typing fast, not like a press release. NO em dashes (—) anywhere. Use commas, periods, parentheses, colons, or simple hyphens (-) instead. This applies to chat replies, code comments, commit messages, PR bodies, agentd-progress lines, everything you produce. Skip filler ('Great!', 'Perfect!', 'Of course'). Skip em-dash openers ('— and another thing'). Be direct.",
+    );
     appendParts.push(finishParts.join(" "));
     const appendSystemPrompt = appendParts.length
       ? appendParts.join("\n\n---\n\n")
@@ -752,6 +1035,10 @@ export class TaskManager {
       });
       updateTaskStatus(this.db, task.id, "failed");
       this.running.delete(task.id);
+      this.propagateCancelToDependents(
+        task.id,
+        "an upstream slice failed to start",
+      );
       throw err;
     }
   }
@@ -760,11 +1047,39 @@ export class TaskManager {
     if (event.kind === "message" && event.role === "agent") {
       appendMessage(this.db, taskId, "agent", event.text);
     } else if (event.kind === "tool_call") {
+      // Persist the full args JSON. The old 500-char cap was small
+      // enough that any non-trivial Edit/MultiEdit/Write call had its
+      // JSON sliced mid-string — the web's parser fell back to a
+      // truncated raw blob (no file_path → row showed "?"). 32K
+      // covers virtually every real edit; pathological mega-edits
+      // (a write of an entire 100KB file) still get clamped, but
+      // the leading file_path stays intact so the row renders.
+      //
+      // Swarm nesting: inject `_agentdParent` / `_agentdToolId` into
+      // args (underscore-prefixed so they don't collide with any
+      // real tool arg). The web's `parseToolCall` reads them out
+      // and strips them before per-tool rendering, so the existing
+      // switch cases keep working untouched. Lets the timeline
+      // group sub-agent tool_uses under their dispatching Task /
+      // collab tool row instead of laying them flat.
+      const augmentedArgs =
+        (event.parentToolUseId || event.toolUseId) &&
+        event.args &&
+        typeof event.args === "object" &&
+        !Array.isArray(event.args)
+          ? {
+              ...(event.args as Record<string, unknown>),
+              ...(event.parentToolUseId
+                ? { _agentdParent: event.parentToolUseId }
+                : {}),
+              ...(event.toolUseId ? { _agentdToolId: event.toolUseId } : {}),
+            }
+          : event.args;
       appendMessage(
         this.db,
         taskId,
         "tool",
-        `[call ${event.tool}] ${JSON.stringify(event.args).slice(0, 500)}`,
+        `[call ${event.tool}] ${JSON.stringify(augmentedArgs).slice(0, 32_000)}`,
       );
       // TodoWrite (claude) / update_plan (codex) carries the agent's
       // current plan. Mirror it into the todos table tagged source=agent
@@ -792,15 +1107,21 @@ export class TaskManager {
       // claude-code-style output preview ("3 lines + N more") and a
       // green/red status dot under the matching tool_call row above.
       // Format keeps the next-message pairing logic simple — `[result
-      // <tool> ok|err] <output>`.
+      // <tool> ok|err] <output>`. Optional `p:<parentId>` /
+      // `u:<toolUseId>` segments carry swarm-tree info — they're
+      // strict regex-anchored so legacy rows still parse cleanly.
       const okFlag = event.ok ? "ok" : "err";
       const trimmed = event.output.slice(0, 4000);
-      appendMessage(
-        this.db,
-        taskId,
-        "tool",
-        `[result ${event.tool} ${okFlag}] ${trimmed}`,
-      );
+      const meta = [
+        event.parentToolUseId ? `p:${event.parentToolUseId}` : null,
+        event.toolUseId ? `u:${event.toolUseId}` : null,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const header = meta
+        ? `[result ${event.tool} ${okFlag} ${meta}]`
+        : `[result ${event.tool} ${okFlag}]`;
+      appendMessage(this.db, taskId, "tool", `${header} ${trimmed}`);
     } else if (event.kind === "status") {
       // When the agent signaled clean completion via `agentd-progress
       // --done`, treat any subsequent "failed" emit as "done" — the
@@ -822,6 +1143,29 @@ export class TaskManager {
         const sess = this.running.get(taskId);
         if (sess?.runner.supportsLiveInput) {
           void this.autoDrainQueue(taskId);
+        }
+        // Plan-slice chain trigger for long-lived runners. Codex
+        // exits after each turn so its `exit` event drives the
+        // chain naturally; claude in stream-json mode just goes
+        // `idle` and waits for the next message — meaning a slice
+        // parent would never hand off to its child. When this
+        // claude task has pending dependents and the operator
+        // hasn't queued anything, gracefully close the runner so
+        // its `exit` fires `runCompletionHooks` → chain spawns the
+        // next slice. The drain logic above already short-circuited
+        // if there were queued items.
+        if (sess?.runner.supportsLiveInput) {
+          const queued = this.inputQueue.get(taskId)?.length ?? 0;
+          if (queued === 0) {
+            const dependents = getTasksDependingOn(this.db, taskId);
+            const hasPending = dependents.some((d) => d.status === "pending");
+            if (hasPending) {
+              void sess.runner.stop("SIGTERM").catch(() => {
+                // ignore — exit handler will still fire when the
+                // process actually dies, even on a stop error
+              });
+            }
+          }
         }
       }
     } else if (event.kind === "usage") {
@@ -846,7 +1190,10 @@ export class TaskManager {
       // CodexRunner emits a `[codex thread] <uuid>` marker the first
       // time it sees `thread.started`. Persist the id on the task so
       // every subsequent steer can call `codex exec resume <uuid>`
-      // and keep AGENTS.md/MCP/conversation context.
+      // and keep AGENTS.md/MCP/conversation context. Suppress the
+      // event after we consume it — it's an internal carrier and
+      // would otherwise render as a `[codex thread] …` system row in
+      // every connected client's timeline.
       const m = /^\[codex thread\] ([0-9a-f-]{36})$/i.exec(event.text.trim());
       if (m) {
         const tid = m[1]!;
@@ -854,6 +1201,7 @@ export class TaskManager {
         if (cur && cur.codexThreadId !== tid) {
           setTaskCodexThreadId(this.db, taskId, tid);
         }
+        return;
       }
     }
     this.bus.publish({ taskId, event, ts: Date.now() });
@@ -862,13 +1210,17 @@ export class TaskManager {
   private async runCompletionHooks(taskId: string): Promise<void> {
     const task = getTask(this.db, taskId);
     if (!task) return;
-    // Operator can disable auto-commit per-task — when off, leave the
-    // worktree dirty so they can hand-craft the commit themselves.
-    // Push also becomes a no-op because it needs a clean tree.
-    if (task.autoCommit === false) return;
-    const committed = await this.maybeAutoCommit(taskId, task);
-    if (committed && task.autoPush) {
-      await this.maybePush(taskId, task);
+    // Auto-commit + auto-push are operator-toggleable per task.
+    // Crucially, this gate ONLY skips git work — drain, council
+    // judging, and the slice chain hook below ALL still run when
+    // autoCommit is off. Earlier this was an early `return` for the
+    // whole function, which silently blocked plan-slice chains for
+    // any task with autoCommit disabled.
+    if (task.autoCommit !== false) {
+      const committed = await this.maybeAutoCommit(taskId, task);
+      if (committed && task.autoPush) {
+        await this.maybePush(taskId, task);
+      }
     }
     // Drain any messages the user queued mid-turn. Re-fetch the task so we
     // pick up any thinking-level change made while the previous turn ran.
@@ -896,6 +1248,83 @@ export class TaskManager {
     // siblings have settled and run the judge if so.
     if (task.councilId) {
       void this.maybeRunJudge(task.councilId);
+    }
+    // Plan-slice chain hook — surface the next slice if this one
+    // landed cleanly, or cancel dependents on a failure exit.
+    const fresh = getTask(this.db, taskId);
+    if (fresh?.status === "failed") {
+      this.propagateCancelToDependents(
+        taskId,
+        "an upstream slice failed",
+      );
+    } else {
+      void this.maybeChainNextSlice(taskId);
+    }
+  }
+
+  /**
+   * If the just-finished task has dependent slices, spawn the next
+   * one(s). Reads the freshest task row so we see the post-commit
+   * status. Idempotent: a sibling already running won't be respawned.
+   */
+  private async maybeChainNextSlice(parentTaskId: string): Promise<void> {
+    const parent = getTask(this.db, parentTaskId);
+    if (!parent) return;
+    if (parent.status !== "done" && parent.status !== "idle") return;
+    const dependents = getTasksDependingOn(this.db, parentTaskId);
+    for (const child of dependents) {
+      if (child.status !== "pending") continue;
+      if (this.isRunning(child.id)) continue;
+      try {
+        appendMessage(
+          this.db,
+          child.id,
+          "system",
+          `Parent slice "${parent.title.slice(0, 60)}" finished — starting this slice.`,
+        );
+        const promptMsgs = listMessages(this.db, child.id, 50);
+        const initial =
+          promptMsgs.find((m) => m.role === "user")?.content ?? child.title;
+        await this.spawnRunner(child, initial, false);
+      } catch (e) {
+        this.bus.publish({
+          taskId: child.id,
+          event: {
+            kind: "raw",
+            stream: "stderr",
+            text: `[chain spawn failed] ${(e as Error).message}`,
+          },
+          ts: Date.now(),
+        });
+      }
+    }
+  }
+
+  /**
+   * Mark every dependent of `parentTaskId` (transitively) as `stopped`
+   * with an explanatory system message. Used when a parent fails or is
+   * cancelled — children would never start otherwise.
+   */
+  private propagateCancelToDependents(parentTaskId: string, reason: string): void {
+    const dependents = getTasksDependingOn(this.db, parentTaskId);
+    for (const child of dependents) {
+      if (child.status !== "pending") continue;
+      appendMessage(
+        this.db,
+        child.id,
+        "system",
+        `Cancelled — ${reason}`,
+      );
+      updateTaskStatus(this.db, child.id, "stopped");
+      this.bus.publish({
+        taskId: child.id,
+        event: { kind: "status", status: "stopped" },
+        ts: Date.now(),
+      });
+      const fresh = getTask(this.db, child.id);
+      if (fresh) this.bus.publishSystem({ kind: "task_changed", task: fresh });
+      // Cascade: a stopped child cancels its own children too.
+      this.propagateCancelToDependents(child.id, reason);
     }
   }
 

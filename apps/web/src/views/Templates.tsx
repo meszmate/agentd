@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { clampThinkingLevel } from "@agentd/contracts";
 import { useNavigate } from "react-router-dom";
 import { Loader2, Plus, Rocket } from "lucide-react";
 import type { Task, Template } from "@agentd/contracts";
@@ -309,10 +310,17 @@ function CreateTemplateSheet({
     "bypassPermissions" | "acceptEdits" | "plan"
   >("bypassPermissions");
   const [thinkingLevel, setThinkingLevel] = useState<
-    "low" | "medium" | "high" | "max" | "xhigh"
+    "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
   >("high");
   const [model, setModel] = useState("");
   const [kind, setKind] = useState<"task" | "ideation">("task");
+
+  // Clamp thinking level when the operator switches agents so an
+  // inapplicable choice (max on codex / minimal on claude) doesn't
+  // reach the runner.
+  useEffect(() => {
+    setThinkingLevel((cur) => clampThinkingLevel(agent, cur));
+  }, [agent]);
 
   const submit = async () => {
     if (!name.trim() || !projectId || !promptTemplate.trim()) {
@@ -500,11 +508,18 @@ function CreateTemplateSheet({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    {agent === "codex" && (
+                      <SelectItem value="minimal">
+                        minimal (codex-only)
+                      </SelectItem>
+                    )}
                     <SelectItem value="low">low</SelectItem>
                     <SelectItem value="medium">medium</SelectItem>
                     <SelectItem value="high">high</SelectItem>
-                    <SelectItem value="max">max</SelectItem>
                     <SelectItem value="xhigh">xhigh</SelectItem>
+                    {agent === "claude" && (
+                      <SelectItem value="max">max (claude-only)</SelectItem>
+                    )}
                   </SelectContent>
                 </Select>
               </Field>

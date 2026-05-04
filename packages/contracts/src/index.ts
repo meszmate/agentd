@@ -37,23 +37,66 @@ export type WorkspaceMode = z.infer<typeof WorkspaceMode>;
 /**
  *   new      — create a fresh branch (auto-named or via `branchName`).
  *   existing — switch the worktree onto an existing branch and work there.
+ *   shared   — reuse a single worktree shared by every sibling task in the
+ *              same `planGroupId`. Sequential execution via `dependsOnTaskId`
+ *              guarantees only one runner touches the checkout at a time.
  */
-export const BranchMode = z.enum(["new", "existing"]);
+export const BranchMode = z.enum(["new", "existing", "shared"]);
 export type BranchMode = z.infer<typeof BranchMode>;
 
 /**
  * Reasoning / thinking effort. Mirrors Claude CLI's `--effort` enum so
  * Claude tasks can pass it through verbatim. Codex maps these to its
- * `model_reasoning_effort` config (`max` → `xhigh`, the rest are 1:1).
+/**
+ * Thinking-effort levels accepted by the union of supported agents.
+ * Not every agent supports every value:
  *
- *   low     — minimal reasoning; fastest and cheapest.
- *   medium  — balanced.
- *   high    — default. Solid for multi-step engineering work.
- *   max     — extended thinking budget; slower, deeper.
- *   xhigh   — Claude's deepest tier (alias of `max` on Codex).
+ *   minimal — Codex only (lightest reasoning tier).
+ *   low     — both.
+ *   medium  — both.
+ *   high    — both. Default for everyday work.
+ *   xhigh   — both. Codex's deepest tier.
+ *   max     — Claude only (extended thinking budget).
+ *
+ * The runners clamp gracefully: Claude treats `minimal` as `low`, and
+ * Codex maps `max` → `xhigh`. The UI hides values that aren't valid
+ * for the currently selected agent (see THINKING_LEVELS_BY_AGENT
+ * exported below).
  */
-export const ThinkingLevel = z.enum(["low", "medium", "high", "max", "xhigh"]);
+export const ThinkingLevel = z.enum([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
 export type ThinkingLevel = z.infer<typeof ThinkingLevel>;
+
+/** Which thinking levels each agent accepts, in display order. */
+export const THINKING_LEVELS_BY_AGENT: Record<
+  "claude" | "codex",
+  ReadonlyArray<ThinkingLevel>
+> = {
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  codex: ["minimal", "low", "medium", "high", "xhigh"],
+};
+
+/**
+ * Clamp a thinking level to the nearest legal value for the given
+ * agent. Used when the operator switches agents in the UI so an
+ * inapplicable level (e.g. `max` on codex) doesn't silently get sent
+ * to the wrong CLI flag.
+ */
+export function clampThinkingLevel(
+  agent: "claude" | "codex",
+  level: ThinkingLevel,
+): ThinkingLevel {
+  if (THINKING_LEVELS_BY_AGENT[agent].includes(level)) return level;
+  if (agent === "claude" && level === "minimal") return "low";
+  if (agent === "codex" && level === "max") return "xhigh";
+  return "high";
+}
 
 /**
  * One candidate agent in a council. Each member runs the same prompt in
@@ -171,6 +214,16 @@ export const Task = z.object({
   totalCacheReadTokens: z.number().optional(),
   totalCacheWriteTokens: z.number().optional(),
   totalCostUsd: z.number().nullable().optional(),
+  /**
+   * Tokens reported by the *most recent* usage event from the runner —
+   * NOT a running sum. Each agent turn carries the full conversation
+   * context as input, so this is the live "context size" indicator
+   * the timeline's compact-banner reads. Cumulative sums double-count
+   * the context (every turn re-sends prior history) and never go
+   * down after /compact, which is why we track this separately.
+   */
+  latestTurnInputTokens: z.number().nullable().optional(),
+  latestTurnOutputTokens: z.number().nullable().optional(),
   // Skill identifiers (`scope:slug`) that were activated when this task spawned.
   skills: z.array(z.string()).optional(),
   permissionMode: PermissionMode.optional(),
@@ -228,6 +281,20 @@ export const Task = z.object({
    * ideas into the project's Idea Library.
    */
   kind: z.enum(["work", "ideation"]).optional(),
+  /**
+   * When set, the task waits for `dependsOnTaskId` to reach status
+   * `done` before its runner spawns. Used by plan-slice batches so
+   * the second slice automatically picks up the first slice's
+   * commits on the shared branch. The lifecycle hook in
+   * TaskManager fires the dependent on parent completion.
+   */
+  dependsOnTaskId: z.string().nullable().optional(),
+  /**
+   * When set, the task is one of N siblings produced from a single
+   * plan. Same `planGroupId` means the same worktree + branch and a
+   * shared lineage in the UI ("slice 2 of 3"). Empty for solo tasks.
+   */
+  planGroupId: z.string().nullable().optional(),
 });
 export type Task = z.infer<typeof Task>;
 
@@ -301,6 +368,9 @@ export const AgentEvent = z.discriminatedUnion("kind", [
     kind: z.literal("message"),
     role: z.enum(["agent", "system"]),
     text: z.string(),
+    /** Same nesting key the tool_call/tool_result events use — sub-agent
+     *  prose nests under its dispatching Task / collab tool. */
+    parentToolUseId: z.string().optional(),
   }),
   /**
    * Incremental text delta for the agent's current message. The web
@@ -322,12 +392,27 @@ export const AgentEvent = z.discriminatedUnion("kind", [
     kind: z.literal("tool_call"),
     tool: z.string(),
     args: z.unknown(),
+    /**
+     * When set, this tool_use was emitted by a sub-agent. Claude's
+     * `Task` tool and codex's `collab_tool_call` produce nested agent
+     * sessions whose events stream back through the parent process's
+     * stdout, with `parent_tool_use_id` (claude) / parent agent slot
+     * (codex) pointing at the dispatching tool_use. The web groups
+     * descendants under that parent row so the timeline reads as a
+     * tree instead of a flat smear.
+     */
+    parentToolUseId: z.string().optional(),
+    /** Provided when the agent has its own tool_use id — used for
+     * matching tool_call ↔ tool_result and for the nesting key. */
+    toolUseId: z.string().optional(),
   }),
   z.object({
     kind: z.literal("tool_result"),
     tool: z.string(),
     ok: z.boolean(),
     output: z.string(),
+    parentToolUseId: z.string().optional(),
+    toolUseId: z.string().optional(),
   }),
   z.object({
     kind: z.literal("permission_request"),
@@ -484,6 +569,150 @@ export const IdeaStatus = z.enum([
 export type IdeaStatus = z.infer<typeof IdeaStatus>;
 
 /**
+ * One executable slice of a plan. The operator can split a single
+ * planDraft into N slices, each with its own agent / model / prompt,
+ * and spawn the whole batch as sibling tasks that share a worktree.
+ *
+ * Every field except `prompt` is optional — a slice without an
+ * agent/model just inherits the spawn defaults at creation time.
+ * The model is a free-form string so the operator can pin any
+ * version they like (or leave it blank to inherit).
+ */
+export const PlanSlice = z.object({
+  /** Short label shown in the editor + as a chip on the spawned task. */
+  title: z.string().min(1),
+  /** The text fed to the runner as the prompt. */
+  prompt: z.string().min(1),
+  agent: AgentKind.optional(),
+  model: z.string().optional(),
+  thinkingLevel: ThinkingLevel.optional(),
+  permissionMode: PermissionMode.optional(),
+});
+export type PlanSlice = z.infer<typeof PlanSlice>;
+
+/**
+ * Open-fence marker for the planner's `json-slices` block. Agents
+ * occasionally forget to close the fence (especially when truncated
+ * or when the closing backticks fall off the end of the streamed
+ * reply), so the strip logic below handles both fenced and
+ * unfenced trailing JSON.
+ */
+const SLICE_OPEN_FENCE_RE = /```json-slices[ \t]*\r?\n/gi;
+
+/** Closed form: open fence + content + close fence. Strict. */
+const SLICE_BLOCK_RE = /```json-slices[ \t]*\r?\n([\s\S]*?)\r?\n?```/gi;
+
+/**
+ * Bracket-balanced scan of a JSON array starting at `from`. Returns
+ * the end index (exclusive of the closing `]`) once the brackets
+ * balance, or -1 if the input ends inside the array. Tracks string
+ * literals so brackets inside JSON strings don't throw the count
+ * off.
+ */
+function scanJsonArrayEnd(text: string, from: number): number {
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = from; i < text.length; i++) {
+    const c = text[i]!;
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (inString) {
+      if (c === "\\") escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === "[" || c === "{") depth++;
+    else if (c === "]" || c === "}") {
+      depth--;
+      if (depth === 0 && c === "]") return i + 1;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Strip the trailing `json-slices` block(s) from a plan body and
+ * return both the cleaned plan + the parsed slices. Used by the
+ * persistence layer (so saved planDrafts never carry raw JSON) and
+ * by the web app (defensive strip on display for legacy plans
+ * persisted before the parser was wired up).
+ *
+ * Order of attack:
+ *   1. Strict fenced match (open + close fence).
+ *   2. Open-fence-only fallback — bracket-balance the trailing JSON
+ *      array so partially-truncated agent replies still get parsed.
+ *
+ * If the block exists but the JSON is malformed, the block is still
+ * stripped (so the operator never sees raw markup) and slices is
+ * returned empty.
+ */
+export function stripPlanSlicesBlock(text: string | null | undefined): {
+  plan: string;
+  slices: PlanSlice[];
+} {
+  if (!text) return { plan: "", slices: [] };
+  const slices: PlanSlice[] = [];
+
+  // Pass 1 — strict fenced blocks. Replace in place.
+  let cleaned = text;
+  const fencedRe = new RegExp(SLICE_BLOCK_RE.source, SLICE_BLOCK_RE.flags);
+  let m: RegExpExecArray | null;
+  while ((m = fencedRe.exec(text)) !== null) {
+    const raw = (m[1] ?? "").trim();
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        for (const r of parsed) {
+          const safe = PlanSlice.safeParse(r);
+          if (safe.success) slices.push(safe.data);
+        }
+      }
+    } catch {
+      // fall through — block still gets stripped
+    }
+  }
+  cleaned = cleaned.replace(fencedRe, "").trimEnd();
+
+  // Pass 2 — open-fence-only fallback for replies that never closed
+  // the block. Bracket-balance the JSON; if it parses, lift the
+  // slices and snip everything from the open fence onward.
+  const openRe = new RegExp(SLICE_OPEN_FENCE_RE.source, SLICE_OPEN_FENCE_RE.flags);
+  const openMatch = openRe.exec(cleaned);
+  if (openMatch) {
+    const fenceStart = openMatch.index;
+    const arrStart = cleaned.indexOf("[", openMatch.index + openMatch[0].length);
+    if (arrStart !== -1) {
+      let arrEnd = scanJsonArrayEnd(cleaned, arrStart);
+      // Truncated reply: take whatever's there and try to parse.
+      if (arrEnd === -1) arrEnd = cleaned.length;
+      const raw = cleaned.slice(arrStart, arrEnd).trim();
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          for (const r of parsed) {
+            const safe = PlanSlice.safeParse(r);
+            if (safe.success) slices.push(safe.data);
+          }
+        }
+      } catch {
+        // ignore — strip even if parse failed
+      }
+    }
+    cleaned = cleaned.slice(0, fenceStart).trimEnd();
+  }
+
+  return { plan: cleaned, slices };
+}
+
+/**
  * First-class project-scoped idea. Has a workflow status, optional
  * extended description, tags, optional plan draft, and an attached
  * conversation thread (`IdeaMessage[]`) where the operator and the
@@ -510,6 +739,14 @@ export const Idea = z.object({
   tags: z.array(z.string()),
   /** Plan draft the operator stashed alongside the idea. */
   planDraft: z.string().nullable(),
+  /**
+   * Optional executable cut of the plan. Each entry becomes its own
+   * sibling task at spawn time (sharing one worktree + branch). When
+   * empty, the spawn sheet behaves like the legacy "one prompt → one
+   * task" path. The planner can pre-populate this; the operator can
+   * edit / add / remove rows before spawning.
+   */
+  planSlices: z.array(PlanSlice).optional(),
   savedAt: z.number(),
   updatedAt: z.number(),
   spawnedTaskId: z.string().nullable(),
@@ -531,6 +768,7 @@ export const SaveIdeaRequest = z.object({
   suggestionId: z.string().optional(),
   optionIndex: z.number().int().min(0).optional(),
   planDraft: z.string().optional(),
+  planSlices: z.array(PlanSlice).optional(),
 });
 export type SaveIdeaRequest = z.infer<typeof SaveIdeaRequest>;
 
@@ -540,8 +778,64 @@ export const UpdateIdeaRequest = z.object({
   status: IdeaStatus.optional(),
   tags: z.array(z.string()).optional(),
   planDraft: z.string().nullable().optional(),
+  planSlices: z.array(PlanSlice).nullable().optional(),
 });
 export type UpdateIdeaRequest = z.infer<typeof UpdateIdeaRequest>;
+
+/**
+ * Body for `POST /api/saved-ideas/:id/spawn-multi` — fans the plan
+ * out into N sibling tasks. Slices share a `planGroupId` and run
+ * sequentially via `dependsOnTaskId` chains. When `shareWorktree`
+ * is true (default for >1 slices), every sibling reuses the same
+ * worktree path on the same branch.
+ */
+export const SpawnMultiRequest = z.object({
+  slices: z.array(PlanSlice).min(1),
+  /** Default true. When false each slice gets its own worktree (still chained). */
+  shareWorktree: z.boolean().optional(),
+  /** Override the auto-generated branch name. Honored when shareWorktree=true. */
+  branchName: z.string().optional(),
+  baseBranch: z.string().optional(),
+  /** Optional title prefix — falls back to the idea's text. */
+  title: z.string().optional(),
+});
+export type SpawnMultiRequest = z.infer<typeof SpawnMultiRequest>;
+
+/**
+ * Body for `POST /api/tasks/spawn-multi` — same fan-out shape as the
+ * saved-idea variant, but takes a `repoPath` directly so the spawn
+ * sheet can phase a plan without first stashing it as an idea.
+ */
+export const SpawnTasksMultiRequest = z.object({
+  repoPath: z.string().min(1),
+  slices: z.array(PlanSlice).min(1),
+  shareWorktree: z.boolean().optional(),
+  branchName: z.string().optional(),
+  baseBranch: z.string().optional(),
+  title: z.string().optional(),
+  autoPush: z.boolean().optional(),
+});
+export type SpawnTasksMultiRequest = z.infer<typeof SpawnTasksMultiRequest>;
+
+/**
+ * Body for `POST /api/tasks/:id/spawn-sibling` — adds a new task to
+ * the parent's worktree + branch. Sequential (chains via
+ * `dependsOnTaskId`), so the new agent runs once the parent finishes
+ * its current turn. Lets the operator drop a different agent / model
+ * onto the same checkout for a different concern (e.g. claude built
+ * the feature, codex follows up with a refactor on the same files).
+ */
+export const SpawnSiblingRequest = z.object({
+  agent: AgentKind,
+  prompt: z.string().min(1),
+  title: z.string().optional(),
+  model: z.string().optional(),
+  thinkingLevel: ThinkingLevel.optional(),
+  permissionMode: PermissionMode.optional(),
+  autoCommit: z.boolean().optional(),
+  autoPush: z.boolean().optional(),
+});
+export type SpawnSiblingRequest = z.infer<typeof SpawnSiblingRequest>;
 
 /**
  * Tool-call activity captured during the agent's turn — persisted

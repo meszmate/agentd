@@ -1,3 +1,5 @@
+import { stripPlanSlicesBlock } from "@agentd/contracts";
+
 async function run(
   cmd: string[],
   cwd: string,
@@ -38,7 +40,7 @@ export interface AiHelperOptions {
   agent?: "claude" | "codex";
   binary?: string;
   model?: string;
-  effort?: "low" | "medium" | "high" | "max" | "xhigh";
+  effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 /**
@@ -270,11 +272,16 @@ async function* runHelperWithEvents(
     cwd,
     useJson ? "stream-json" : "text",
   );
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  // stdin: "ignore" so codex's `exec` doesn't block on the
+  // "Reading additional input from stdin..." path when stdin is a
+  // pipe with no writer (see packages/agent-runner/src/codex.ts).
+  // Helpers always pass the prompt on argv, never via stdin.
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
       cmd: argv,
       cwd,
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -964,6 +971,7 @@ export async function generateCommitMessage(
       argv,
       {
         cwd,
+        stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
         env: process.env as Record<string, string>,
@@ -1021,12 +1029,12 @@ export async function* streamCommitMessage(
   }
   const prompt = buildCommitPrompt(diff, opts, opts.extraInstructions);
   const argv = buildAiHelperArgv(opts.helper ?? {}, prompt);
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
       cmd: argv,
       cwd,
-      stdin: "pipe",
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -1149,12 +1157,12 @@ export async function* streamPrMessage(
   }
   const prompt = buildPrPrompt(diff, opts, opts.extraInstructions);
   const argv = buildAiHelperArgv(opts.helper ?? {}, prompt);
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
       cmd: argv,
       cwd,
-      stdin: "pipe",
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -1660,6 +1668,72 @@ function parseScores(
   return { scores, source: "claude" };
 }
 
+/* ── Plan-slice parsing ───────────────────────────────────────────── */
+
+/**
+ * Parse a planner's output into prose + executable slices. The planner
+ * emits a fenced \`\`\`json-slices block at the tail; this helper
+ * strips the block from the prose body and returns its parsed payload.
+ *
+ * Forgiving: a missing or malformed block returns `slices: []` and
+ * leaves the original text untouched. Operators don't lose their plan
+ * to a JSON syntax glitch.
+ */
+export interface ParsedPlan {
+  plan: string;
+  slices: Array<{
+    title: string;
+    prompt: string;
+    agent?: "claude" | "codex";
+    model?: string;
+    thinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+    permissionMode?: "bypassPermissions" | "acceptEdits" | "plan";
+  }>;
+}
+
+const SLICE_BLOCK_RE = /```json-slices\s*\n([\s\S]*?)\n```/i;
+
+/**
+ * Shared instruction for both plan-generating prompts. Tells the model
+ * when slices are MANDATORY (any phased / multi-agent / cross-boundary
+ * plan) and gives it a concrete shape so the JSON parses cleanly.
+ *
+ * Kept in one place because the two callers (suggestion plan + idea
+ * conversation plan mode) must stay in sync — otherwise one path emits
+ * slices and the other doesn't, and the spawn sheet UX silently splits.
+ */
+const SLICE_BLOCK_INSTRUCTION = [
+  `After the plan prose, append a fenced \`\`\`json-slices\`\`\` block whose body is a JSON array of {title, prompt} objects (with optional agent / model / thinkingLevel / permissionMode hints). Each entry becomes one task in a sibling chain that shares a single git branch and runs sequentially, so slices represent independent commits stacked on the same branch.`,
+  ``,
+  `Slice WHENEVER the plan has more than one self-contained step that could land as its own commit. The split is about commit boundaries and runner handoffs — NOT about specific domains. Anywhere the work changes shape (different files, different concerns, a clear "now we move on to…" beat) is a slice boundary. Use as many slices as the plan has natural beats — two, four, seven, whatever fits the work.`,
+  ``,
+  `Skip the block ONLY for genuinely single-step work — one tight change in one place. Even then, a single-slice block is fine and lets the operator tweak before spawning.`,
+  ``,
+  `Mirror the structure of your plan body exactly: one slice per step, in execution order. Don't collapse a multi-step plan into one slice; don't pad a single-step plan with fake slices.`,
+  ``,
+  `Each slice's \`prompt\` is the full standalone instruction that slice's runner will receive. Make it self-contained — it should make sense without seeing sibling slices, but it can reference "the previous slice's commits on this branch" since they share the worktree. Include the relevant files, the contract / shape to follow, and the acceptance criteria for that slice.`,
+  ``,
+  `Hint fields are OPTIONAL — the operator picks agent / model / thinking at spawn time and your suggestions are starting points, not lockdowns. Only set them when the slice has a strong reason (e.g. one slice obviously benefits from deeper reasoning, or from a model with a different strength). When in doubt, omit them and let the operator choose.`,
+  ``,
+  `Field rules: \`agent\` is "claude" or "codex". \`model\` is a free-form id ("opus", "sonnet", "haiku", "gpt-5-codex", or any id the operator's registry recognizes). \`thinkingLevel\` is "minimal" (codex-only) | "low" | "medium" | "high" | "xhigh" | "max" (claude-only); mismatches get clamped. \`permissionMode\` is "bypassPermissions" | "acceptEdits" | "plan".`,
+  ``,
+  `Generic shape (the closing \`\`\` fence is REQUIRED — never omit it, the parser strips the block by matching open + close):`,
+  `\`\`\`json-slices`,
+  `[`,
+  `  {"title":"<short label>","prompt":"<full self-contained instruction for this step>"},`,
+  `  {"title":"<short label>","prompt":"<full self-contained instruction; can reference earlier slices' commits>"}`,
+  `]`,
+  `\`\`\``,
+].join("\n");
+
+export function parseSlicesFromPlan(text: string): ParsedPlan {
+  // Delegates to the canonical helper in @agentd/contracts so the
+  // server, the web app, and any downstream consumer share one
+  // source of truth for what counts as a slice block.
+  const { plan, slices } = stripPlanSlicesBlock(text);
+  return { plan, slices };
+}
+
 /* ── Suggestion → plan generator ───────────────────────────────────── */
 
 /**
@@ -1677,6 +1751,8 @@ export interface PlanResult {
   plan: string;
   source: "claude" | "fallback-empty" | "fallback-error";
   error?: string;
+  /** Parsed slices from the trailing json-slices block, when present. */
+  slices?: ParsedPlan["slices"];
 }
 
 export async function* streamSuggestionPlan(
@@ -1706,18 +1782,20 @@ export async function* streamSuggestionPlan(
     `- No code blocks unless quoting an exact API shape — the executor model will write the code.`,
     opts.extraInstructions ? `\nExtra guidance from the operator:\n${opts.extraInstructions}` : "",
     "",
+    SLICE_BLOCK_INSTRUCTION,
+    "",
     `The operator's idea:`,
     brief.slice(0, 2000),
   ].join("\n");
 
   const argv = buildAiHelperArgv(opts.helper ?? {}, ask, cwd);
 
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
       cmd: argv,
       cwd,
-      stdin: "pipe",
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -1750,7 +1828,12 @@ export async function* streamSuggestionPlan(
     .replace(/^```[a-z]*\n?|```$/g, "")
     .trim();
   if (!cleaned) return { plan: "", source: "fallback-empty" };
-  return { plan: cleaned, source: "claude" };
+  const parsed = parseSlicesFromPlan(cleaned);
+  return {
+    plan: parsed.plan,
+    source: "claude",
+    ...(parsed.slices.length > 0 ? { slices: parsed.slices } : {}),
+  };
 }
 
 /* ── Idea workshop conversation ────────────────────────────────────── */
@@ -1784,6 +1867,13 @@ export interface IdeaChatResult {
    * brainstorm UI uses this to keep its save-button label fresh.
    */
   suggestedTitle?: string | null;
+  /**
+   * Plan slices parsed from the agent's tail json-slices block. Only
+   * populated for `mode === "plan"` and when the agent actually emitted
+   * the block. The chat-mode plan-update path also routes through
+   * `parseSlicesFromPlan` so slices found there flow through too.
+   */
+  planSlices?: ParsedPlan["slices"];
 }
 
 export async function* streamIdeaConversation(
@@ -1839,6 +1929,8 @@ export async function* streamIdeaConversation(
             `Be specific. Reference real files/symbols/lines. Avoid filler. If a section truly has nothing to say, write "n/a — <one-line reason>".`,
             ``,
             `If the prior plan draft already exists, refine and extend it instead of rewriting from scratch — keep what's right, fix what's wrong, fill in what's missing. The operator's latest message (if any) is the diff to apply.`,
+            ``,
+            SLICE_BLOCK_INSTRUCTION,
           ].join("\n")
         : `Refine this idea with the operator. Be candid, concise, and specific — reference real files/patterns from the repo when relevant. Question assumptions when you spot them. Don't restate the operator; respond to them. Keep replies under 250 words.`;
 
@@ -1950,11 +2042,37 @@ export async function* streamIdeaConversation(
     const tm = cleaned.match(/(^|\n)\s*TITLE:\s*([^\n]+?)\s*$/i);
     if (tm) suggestedTitle = (tm[2] ?? "").trim() || null;
   }
+  // Plan slices: ALWAYS strip the json-slices block from whatever we
+  // return, regardless of mode — the operator should never see the
+  // raw fence in chat or plan. We pull slices from the plan body
+  // first (mode === "plan"), then from any chat-mode plan-update
+  // block, and finally a last-ditch sweep of the chat reply itself
+  // for the rare turn where the agent emits slices in a non-plan
+  // reply.
+  let planSlices: ParsedPlan["slices"] | undefined;
+  let finalReply = cleaned;
+  if (mode === "plan") {
+    const parsed = parseSlicesFromPlan(cleaned);
+    finalReply = parsed.plan;
+    if (parsed.slices.length > 0) planSlices = parsed.slices;
+  } else {
+    if (planContent) {
+      const parsed = parseSlicesFromPlan(planContent);
+      planContent = parsed.plan;
+      if (parsed.slices.length > 0) planSlices = parsed.slices;
+    }
+    // Defensive strip on the chat body too — never let raw slice
+    // markup leak into the message thread.
+    const chatStrip = parseSlicesFromPlan(cleaned);
+    finalReply = chatStrip.plan;
+    if (!planSlices && chatStrip.slices.length > 0) planSlices = chatStrip.slices;
+  }
   return {
-    reply: cleaned,
+    reply: finalReply,
     source: "claude",
     ...(planContent ? { planContent } : {}),
     ...(suggestedTitle ? { suggestedTitle } : {}),
+    ...(planSlices ? { planSlices } : {}),
   };
 }
 
@@ -2302,14 +2420,14 @@ export type SuggestionAction =
       index: number;
       agent?: "claude" | "codex";
       model?: string;
-      thinkingLevel?: "low" | "medium" | "high" | "max" | "xhigh";
+      thinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
     }
   | {
       action: "custom";
       prompt: string;
       agent?: "claude" | "codex";
       model?: string;
-      thinkingLevel?: "low" | "medium" | "high" | "max" | "xhigh";
+      thinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
     }
   | { action: "clarify"; question: string }
   | { action: "dismiss" };
@@ -2436,6 +2554,7 @@ export async function interpretSuggestionReply(args: {
     const proc = Bun.spawn({
       cmd: argv,
       cwd: process.cwd(),
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -2616,6 +2735,7 @@ export async function runJudge(
     const proc = Bun.spawn({
       cmd: argv,
       cwd: process.cwd(),
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -2753,12 +2873,12 @@ export async function* streamProjectInstructionsDraft(
   ];
   const ask = lines.filter(Boolean).join("\n");
   const argv = buildAiHelperArgv(opts.helper ?? {}, ask);
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
       cmd: argv,
       cwd,
-      stdin: "pipe",
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,
@@ -2823,6 +2943,7 @@ export async function generateBranchName(
     const proc = Bun.spawn({
       cmd: argv,
       cwd: process.cwd(),
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: process.env as Record<string, string>,

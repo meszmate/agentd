@@ -304,7 +304,7 @@ export const UserPrefs = z.object({
     .enum(["bypassPermissions", "acceptEdits", "plan"])
     .default("bypassPermissions"),
   lastThinkingLevel: z
-    .enum(["low", "medium", "high", "max", "xhigh"])
+    .enum(["minimal", "low", "medium", "high", "xhigh", "max"])
     .default("high"),
   lastModelClaude: z.string().default(""),
   lastModelCodex: z.string().default(""),
@@ -390,8 +390,10 @@ export const AgentdConfig = z.object({
    */
   defaultThinking: z
     .object({
-      claude: z.enum(["low", "medium", "high", "max", "xhigh"]).default("xhigh"),
-      codex: z.enum(["low", "medium", "high", "max", "xhigh"]).default("high"),
+      // Claude accepts low|medium|high|xhigh|max (no `minimal`).
+      claude: z.enum(["low", "medium", "high", "xhigh", "max"]).default("xhigh"),
+      // Codex accepts minimal|low|medium|high|xhigh (no `max`).
+      codex: z.enum(["minimal", "low", "medium", "high", "xhigh"]).default("high"),
     })
     .default({ claude: "xhigh", codex: "high" }),
   plugins: z

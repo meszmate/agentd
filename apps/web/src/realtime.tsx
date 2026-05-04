@@ -159,6 +159,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     let ws: WebSocket | null = null;
     let closed = false;
     let everConnected = false;
+    let helloCount = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let openedAt = 0;
     let consecutiveFastFails = 0;
@@ -170,6 +171,21 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       ws = client.watch(null, (msg: WsServerEvent) => {
         if (msg.type === "hello") {
           console.log("[rt] hello", msg);
+          helloCount += 1;
+          // The bus is in-memory — events between WS disconnect and
+          // reconnect aren't replayed. After a reconnect, anything
+          // the daemon mutated while we were gone (a chained slice
+          // spawning, a steered task moving status, a project being
+          // created from a brainstorm) is missing from our caches.
+          // Invalidate the queries the sidebar reads from so they
+          // refetch and pick up any drift. Skip on the very first
+          // hello — the initial mount already triggered fresh fetches.
+          if (helloCount > 1) {
+            void qc.invalidateQueries({ queryKey: qk.tasks() });
+            void qc.invalidateQueries({ queryKey: qk.projects() });
+            void qc.invalidateQueries({ queryKey: ["saved-ideas"] });
+            void qc.invalidateQueries({ queryKey: qk.bridgeSummary() });
+          }
           return;
         }
         if (msg.type === "task_updated") {
