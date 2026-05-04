@@ -27,6 +27,7 @@ import type {
   ThinkingLevel,
 } from "@agentd/contracts";
 import { stripPlanSlicesBlock } from "@agentd/contracts";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { PlanSlicesEditor } from "@/components/plan-slices-editor";
 import {
   Kicker,
@@ -1520,380 +1521,445 @@ function SpawnDialog({
   const wordCount = promptPreview.split(/\s+/).filter(Boolean).length;
   const hasSlices = slices.length > 0 || (idea.planSlices?.length ?? 0) > 0;
 
+  const launch = async () => {
+    setSubmitting(true);
+    try {
+      if (useSlices) {
+        await onSpawnSlices({ slices, shareWorktree });
+      } else {
+        await onSpawnSingle({
+          agent,
+          ...(model ? { model } : {}),
+          ...(thinkingLevel
+            ? { thinkingLevel: thinkingLevel as ThinkingLevel }
+            : {}),
+        });
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Custom DialogPrimitive frame — same backdrop / animation pattern as
+  // the InstructionsWorkshop dialog so the two feel like siblings, but
+  // a single-column launch console rather than a two-pane workshop.
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-3xl gap-0 p-0 overflow-hidden">
-        {/* Branded header — λ glyph + idea title + a live summary pill that
-            mirrors the chosen spawn shape (slices vs single, agent + model). */}
-        <DialogHeader className="px-6 pt-5 pb-4 border-b border-ink-900/[0.06] bg-gradient-to-br from-ember-500/[0.06] via-transparent to-transparent dark:border-ink-50/[0.06]">
-          <div className="flex items-center gap-3">
-            <span
-              className="inline-flex items-center justify-center h-9 w-9 rounded-lg font-mono text-[18px] font-semibold text-ember-600 bg-ember-500/10 ring-1 ring-ember-500/20 dark:text-ember-300 dark:bg-ember-500/15"
+    <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay
+          className={cn(
+            "fixed inset-0 z-50 bg-ink-900/40 backdrop-blur-md",
+            "data-[state=open]:animate-in data-[state=closed]:animate-out",
+            "data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+          )}
+        />
+        <DialogPrimitive.Content
+          className={cn(
+            "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
+            "w-[96vw] max-w-[820px] max-h-[88vh] flex flex-col",
+            "rounded-2xl border border-ink-900/10 bg-paper-50 shadow-deep dark:border-ink-50/10 dark:bg-ink-900",
+            "overflow-hidden",
+            "data-[state=open]:animate-in data-[state=closed]:animate-out",
+            "data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+            "data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+          )}
+        >
+          <DialogPrimitive.Title className="sr-only">
+            Launch {idea.text}
+          </DialogPrimitive.Title>
+
+          {/* ── HERO ─────────────────────────────────────────────
+              Ambient gradient header — no card, no border below it.
+              The mode pill toggle floats over the hero gradient so the
+              transition into the body feels seamless. */}
+          <div className="relative shrink-0 px-7 pt-6 pb-4 overflow-hidden">
+            {/* Soft ember orb behind the title — adds depth without a box */}
+            <div
               aria-hidden
-            >
-              λ
-            </span>
-            <div className="min-w-0">
-              <Kicker>Launching</Kicker>
-              <DialogTitle className="text-[17px] leading-tight font-semibold text-ink-900 dark:text-ink-50 truncate">
-                {idea.text}
-              </DialogTitle>
-            </div>
-          </div>
-          <p className="mt-2 text-[12px] text-ink-500 dark:text-ink-400 leading-relaxed">
-            {summary}
-          </p>
-        </DialogHeader>
-
-        <div className="px-6 py-5 space-y-5 max-h-[68vh] overflow-y-auto">
-          {hasSlices && (
-            <SlicesPanel
-              slices={slices}
-              setSlices={setSlices}
-              shareWorktree={shareWorktree}
-              setShareWorktree={setShareWorktree}
-              useSlices={useSlices}
-              forceSingle={forceSingle}
-              setForceSingle={setForceSingle}
-              submitting={submitting}
-              modelSuggestions={modelSuggestions}
+              className="pointer-events-none absolute -top-20 -left-20 h-60 w-60 rounded-full bg-ember-500/[0.12] blur-3xl"
             />
-          )}
-
-          {!useSlices && (
-            <div className="space-y-2">
-              <Label className="text-[10.5px] uppercase tracking-[0.14em] font-mono text-ink-500 dark:text-ink-400">
-                Coding agent
-              </Label>
-              <div className="grid grid-cols-2 gap-2">
-                {(["claude", "codex"] as const).map((k) => {
-                  const active = agent === k;
-                  const tint =
-                    k === "claude"
-                      ? "ember"
-                      : "violet";
-                  return (
-                    <button
-                      key={k}
-                      type="button"
-                      onClick={() => setAgent(k)}
-                      className={cn(
-                        "group relative overflow-hidden rounded-xl border px-4 py-3 text-left transition-all",
-                        active
-                          ? tint === "ember"
-                            ? "border-ember-500/50 bg-gradient-to-br from-ember-500/[0.12] via-ember-500/[0.05] to-transparent shadow-[0_1px_0_0_rgba(245,158,11,0.15)] dark:from-ember-500/[0.18]"
-                            : "border-violet-500/50 bg-gradient-to-br from-violet-500/[0.12] via-violet-500/[0.05] to-transparent shadow-[0_1px_0_0_rgba(139,92,246,0.18)] dark:from-violet-500/[0.18]"
-                          : "border-ink-900/10 bg-paper-50 hover:border-ink-900/20 hover:bg-paper-100 dark:border-ink-50/10 dark:bg-ink-900 dark:hover:bg-ink-800",
-                      )}
-                    >
-                      <div className="flex items-center gap-2 mb-1">
-                        <Sparkles
-                          className={cn(
-                            "h-3.5 w-3.5 transition-colors",
-                            active
-                              ? tint === "ember"
-                                ? "text-ember-600 dark:text-ember-300"
-                                : "text-violet-600 dark:text-violet-300"
-                              : "text-ink-400 dark:text-ink-500",
-                          )}
-                        />
-                        <span
-                          className={cn(
-                            "font-mono text-[10px] uppercase tracking-[0.14em]",
-                            active
-                              ? tint === "ember"
-                                ? "text-ember-700 dark:text-ember-300"
-                                : "text-violet-700 dark:text-violet-300"
-                              : "text-ink-500 dark:text-ink-400",
-                          )}
-                        >
-                          {k}
-                        </span>
-                      </div>
-                      <div className="text-[13px] font-medium text-ink-900 dark:text-ink-50">
-                        {k === "claude" ? "Claude Code" : "Codex CLI"}
-                      </div>
-                      <div className="text-[11px] text-ink-500 dark:text-ink-400">
-                        {k === "claude"
-                          ? "Anthropic — strong at planning + edits"
-                          : "OpenAI — fast file ops + scripting"}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {!useSlices && (
-          <div className="space-y-1.5">
-            <div className="flex items-baseline gap-2">
-              <Label
-                htmlFor="spawn-model"
-                className="text-[11px] uppercase tracking-[0.1em] font-mono text-ink-500 dark:text-ink-400"
+            <div
+              aria-hidden
+              className="pointer-events-none absolute -top-16 right-0 h-40 w-40 rounded-full bg-violet-500/[0.10] blur-3xl"
+            />
+            <div className="relative flex items-start gap-3">
+              <span
+                className="inline-flex shrink-0 items-center justify-center h-10 w-10 rounded-full font-mono text-[20px] font-semibold text-ember-600 bg-ember-500/10 ring-1 ring-ember-500/20 dark:text-ember-300 dark:bg-ember-500/15"
+                aria-hidden
               >
-                Model
-              </Label>
-              <ModelSourceHint
-                agent={agent}
-                sources={modelsQ.data?.sources}
-              />
-            </div>
-            <Select
-              value={
-                model && agentModels?.some((m) => m.id === model)
-                  ? model
-                  : model
-                    ? "__custom"
-                    : ""
-              }
-              onValueChange={(v) => {
-                if (v === "__custom") {
-                  // Switch to free-text mode — keep whatever's there.
-                  setModel(model || "");
-                } else {
-                  setModel(v);
-                }
-              }}
-            >
-              <SelectTrigger id="spawn-model" className="text-[12.5px]">
-                <SelectValue placeholder="pick a model" />
-              </SelectTrigger>
-              <SelectContent>
-                {(agentModels ?? []).map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    <span className="flex items-baseline gap-2">
-                      <span className="font-medium">{m.label}</span>
-                      <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
-                        {m.id}
-                      </span>
-                      {m.tier && (
-                        <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-ember-700 dark:text-ember-300">
-                          {m.tier}
-                        </span>
-                      )}
-                    </span>
-                  </SelectItem>
-                ))}
-                <SelectItem value="__custom">
-                  <span className="flex items-baseline gap-2">
-                    <span className="font-medium">Custom…</span>
-                    <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
-                      type any model id below
-                    </span>
+                λ
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-ember-700 dark:text-ember-300">
+                    Launching
                   </span>
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            {model && !agentModels?.some((m) => m.id === model) && (
-              <Input
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="model id (e.g. gpt-5.5, claude-sonnet-4-7)"
-                className="text-[12.5px] font-mono"
-              />
-            )}
-            {agent === "codex" &&
-              modelsQ.data?.sources?.codex?.available === false && (
-                <p className="text-[11px] text-amber-700 dark:text-amber-300">
-                  No codex models found at{" "}
-                  <code className="font-mono">~/.codex/models_cache.json</code>.
-                  Run any <code className="font-mono">codex</code> command once
-                  to populate the cache, then hit refresh.
+                  <span className="text-ink-300 dark:text-ink-600 font-mono text-[10px]">
+                    ·
+                  </span>
+                  <span className="font-mono text-[10px] tabular-nums text-ink-500 dark:text-ink-400">
+                    {wordCount.toLocaleString()} words
+                  </span>
+                </div>
+                <h2 className="mt-1 text-[19px] leading-tight font-semibold text-ink-900 dark:text-ink-50 truncate">
+                  {idea.text}
+                </h2>
+                <p className="mt-1 text-[12px] text-ink-500 dark:text-ink-400 leading-relaxed">
+                  {summary}
                 </p>
-              )}
+              </div>
+              <DialogPrimitive.Close
+                className="shrink-0 inline-flex items-center justify-center h-7 w-7 rounded-full text-ink-400 hover:bg-ink-900/[0.05] hover:text-ink-700 dark:hover:bg-ink-50/[0.05] dark:hover:text-ink-200"
+                aria-label="Close"
+              >
+                <X className="h-3.5 w-3.5" />
+              </DialogPrimitive.Close>
+            </div>
+
+            {/* Mode pill toggle — segmented control for Single vs Slices */}
+            {hasSlices && (
+              <div className="relative mt-4 flex items-center gap-2 flex-wrap">
+                <ModePill
+                  active={!useSlices}
+                  onClick={() => setForceSingle(true)}
+                  label="Single task"
+                  hint="one runner, one prompt"
+                />
+                <ModePill
+                  active={useSlices}
+                  onClick={() => setForceSingle(false)}
+                  label={`Slices · ${slices.length}`}
+                  hint="sequential on a shared branch"
+                  tint="ember"
+                />
+                {useSlices && slices.length > 1 && (
+                  <label className="ml-auto inline-flex items-center gap-1.5 font-mono text-[10.5px] text-ink-600 dark:text-ink-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={shareWorktree}
+                      onChange={(e) => setShareWorktree(e.target.checked)}
+                      className="h-3 w-3 accent-ember-500"
+                    />
+                    share branch
+                  </label>
+                )}
+              </div>
+            )}
           </div>
-          )}
 
-          {!useSlices && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label
-                  htmlFor="spawn-thinking"
-                  className="text-[10.5px] uppercase tracking-[0.14em] font-mono text-ink-500 dark:text-ink-400"
-                >
-                  Thinking effort
-                </Label>
-                <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
-                  {thinkingLevel || "server default"}
-                </span>
-              </div>
-              <ThinkingLadder
-                agent={agent}
-                value={thinkingLevel}
-                onChange={setThinkingLevel}
+          {/* Hairline gradient divider rather than a hard border line */}
+          <div className="shrink-0 h-px bg-gradient-to-r from-transparent via-ink-900/[0.08] to-transparent dark:via-ink-50/[0.08]" />
+
+          {/* ── BODY ─────────────────────────────────────────── */}
+          <div className="flex-1 min-h-0 overflow-y-auto px-7 py-6">
+            {useSlices ? (
+              /* Slice timeline — bare; no outer card. The PlanSlicesEditor
+                 already draws the spine + numbered chips, so we let the
+                 hero whitespace do the framing. */
+              <PlanSlicesEditor
+                slices={slices}
+                onChange={setSlices}
+                modelSuggestions={modelSuggestions}
+                disabled={submitting}
               />
-            </div>
-          )}
-
-          {!useSlices && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label className="text-[10.5px] uppercase tracking-[0.14em] font-mono text-ink-500 dark:text-ink-400">
-                  Prompt preview
-                </Label>
-                <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
-                  {wordCount.toLocaleString()}w · {promptPreview.length.toLocaleString()}c
-                </span>
-              </div>
-              <div className="relative rounded-xl border border-ink-900/10 bg-paper-50 dark:border-ink-50/10 dark:bg-ink-900 overflow-hidden">
-                <div className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-paper-50 to-transparent dark:from-ink-900 z-10" />
-                <pre className="max-h-44 overflow-y-auto px-4 py-3 font-mono text-[11px] leading-relaxed text-ink-700 dark:text-ink-200 whitespace-pre-wrap">
-                  {promptPreview}
-                </pre>
-                <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-paper-50 to-transparent dark:from-ink-900" />
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Sticky footer — gradient primary action, ghost cancel.
-            Disabled state has a soft "ready" cue so it doesn't look broken
-            when slice mode is on but no slices are present. */}
-        <DialogFooter className="px-6 py-4 border-t border-ink-900/[0.06] bg-paper-50/60 dark:border-ink-50/[0.06] dark:bg-ink-900/40">
-          <Button
-            variant="ghost"
-            onClick={() => onOpenChange(false)}
-            disabled={submitting}
-          >
-            Cancel
-          </Button>
-          <button
-            type="button"
-            onClick={async () => {
-              setSubmitting(true);
-              try {
-                if (useSlices) {
-                  await onSpawnSlices({
-                    slices,
-                    shareWorktree,
-                  });
-                } else {
-                  await onSpawnSingle({
-                    agent,
-                    ...(model ? { model } : {}),
-                    ...(thinkingLevel
-                      ? { thinkingLevel: thinkingLevel as ThinkingLevel }
-                      : {}),
-                  });
-                }
-              } finally {
-                setSubmitting(false);
-              }
-            }}
-            disabled={submitting || (useSlices && slices.length === 0)}
-            className={cn(
-              "inline-flex items-center gap-2 h-9 px-4 rounded-lg font-medium text-[12.5px]",
-              "bg-gradient-to-r from-ember-500 to-ember-600 text-white shadow-sm",
-              "hover:from-ember-600 hover:to-ember-700 hover:shadow",
-              "transition-all disabled:opacity-50 disabled:cursor-not-allowed",
-              "ring-1 ring-ember-500/30",
-            )}
-          >
-            {submitting ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
-              <Zap className="h-3.5 w-3.5" />
+              <div className="space-y-7">
+                <ConfigSection label="Engine" hint="who's driving this slice">
+                  <AgentToggle agent={agent} setAgent={setAgent} />
+                </ConfigSection>
+
+                <ConfigSection
+                  label="Model"
+                  hint={
+                    <ModelSourceHint
+                      agent={agent}
+                      sources={modelsQ.data?.sources}
+                    />
+                  }
+                >
+                  <Select
+                    value={
+                      model && agentModels?.some((m) => m.id === model)
+                        ? model
+                        : model
+                          ? "__custom"
+                          : ""
+                    }
+                    onValueChange={(v) => {
+                      if (v === "__custom") setModel(model || "");
+                      else setModel(v);
+                    }}
+                  >
+                    <SelectTrigger
+                      id="spawn-model"
+                      className="text-[12.5px] h-9 rounded-lg"
+                    >
+                      <SelectValue placeholder="pick a model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(agentModels ?? []).map((m) => (
+                        <SelectItem key={m.id} value={m.id}>
+                          <span className="flex items-baseline gap-2">
+                            <span className="font-medium">{m.label}</span>
+                            <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+                              {m.id}
+                            </span>
+                            {m.tier && (
+                              <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-ember-700 dark:text-ember-300">
+                                {m.tier}
+                              </span>
+                            )}
+                          </span>
+                        </SelectItem>
+                      ))}
+                      <SelectItem value="__custom">
+                        <span className="flex items-baseline gap-2">
+                          <span className="font-medium">Custom…</span>
+                          <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+                            type any model id below
+                          </span>
+                        </span>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {model && !agentModels?.some((m) => m.id === model) && (
+                    <Input
+                      value={model}
+                      onChange={(e) => setModel(e.target.value)}
+                      placeholder="model id (e.g. gpt-5.5, claude-sonnet-4-7)"
+                      className="mt-1.5 text-[12.5px] font-mono h-9"
+                    />
+                  )}
+                  {agent === "codex" &&
+                    modelsQ.data?.sources?.codex?.available === false && (
+                      <p className="mt-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+                        No codex models found at{" "}
+                        <code className="font-mono">
+                          ~/.codex/models_cache.json
+                        </code>
+                        . Run any <code className="font-mono">codex</code>{" "}
+                        command once to populate the cache.
+                      </p>
+                    )}
+                </ConfigSection>
+
+                <ConfigSection
+                  label="Thinking"
+                  hint={thinkingLevel || "server default"}
+                >
+                  <ThinkingLadder
+                    agent={agent}
+                    value={thinkingLevel}
+                    onChange={setThinkingLevel}
+                  />
+                </ConfigSection>
+
+                <ConfigSection
+                  label="Prompt"
+                  hint={`${wordCount.toLocaleString()}w · ${promptPreview.length.toLocaleString()}c`}
+                >
+                  <div className="relative -mx-1">
+                    <pre className="max-h-52 overflow-y-auto px-4 py-3 font-mono text-[11.5px] leading-relaxed text-ink-700 dark:text-ink-200 whitespace-pre-wrap rounded-lg bg-paper-100/50 dark:bg-ink-800/50">
+                      {promptPreview}
+                    </pre>
+                  </div>
+                </ConfigSection>
+              </div>
             )}
-            {useSlices
-              ? `Launch ${slices.length} slice${slices.length === 1 ? "" : "s"}`
-              : "Launch task"}
-          </button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          </div>
+
+          {/* ── FOOTER ───────────────────────────────────────── */}
+          <div className="shrink-0 h-px bg-gradient-to-r from-transparent via-ink-900/[0.08] to-transparent dark:via-ink-50/[0.08]" />
+          <div className="shrink-0 px-7 py-4 flex items-center gap-3">
+            <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+              {useSlices
+                ? `${slices.length} task${slices.length === 1 ? "" : "s"} ready`
+                : `${agent} · ${model || "default"} · ${thinkingLevel || "default think"}`}
+            </span>
+            <span className="ml-auto" />
+            <button
+              type="button"
+              onClick={() => onOpenChange(false)}
+              disabled={submitting}
+              className="inline-flex items-center h-9 px-3 rounded-lg font-mono text-[11px] uppercase tracking-[0.06em] text-ink-500 hover:text-ink-900 dark:hover:text-ink-50 disabled:opacity-50"
+            >
+              cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void launch()}
+              disabled={submitting || (useSlices && slices.length === 0)}
+              className={cn(
+                "group relative inline-flex items-center gap-2 h-9 pl-3.5 pr-4 rounded-full font-medium text-[12.5px]",
+                "bg-gradient-to-r from-ember-500 via-ember-500 to-amber-500 text-white",
+                "shadow-[0_0_0_1px_rgba(245,158,11,0.4),0_8px_20px_-8px_rgba(245,158,11,0.6)]",
+                "hover:shadow-[0_0_0_1px_rgba(245,158,11,0.6),0_12px_28px_-8px_rgba(245,158,11,0.8)]",
+                "active:scale-[0.98] transition-all",
+                "disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none disabled:from-ink-400 disabled:to-ink-500",
+              )}
+            >
+              {submitting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Zap className="h-3.5 w-3.5 group-hover:rotate-12 transition-transform" />
+              )}
+              <span>
+                {useSlices
+                  ? `Launch ${slices.length} slice${slices.length === 1 ? "" : "s"}`
+                  : "Launch task"}
+              </span>
+            </button>
+          </div>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   );
 }
 
 /**
- * Slice editor wrapper — header strip with the share-branch / single-mode
- * toggles + the embedded `<PlanSlicesEditor>`. Pulled out of the dialog
- * body so the SpawnDialog stays scannable.
+ * Section block used inside the dialog body. Inline label + hint + the
+ * actual control. No box around the section — the typography hierarchy
+ * (uppercase mono kicker + thin top divider on hover) does the framing.
  */
-function SlicesPanel({
-  slices,
-  setSlices,
-  shareWorktree,
-  setShareWorktree,
-  useSlices,
-  forceSingle,
-  setForceSingle,
-  submitting,
-  modelSuggestions,
+function ConfigSection({
+  label,
+  hint,
+  children,
 }: {
-  slices: PlanSlice[];
-  setSlices: (next: PlanSlice[]) => void;
-  shareWorktree: boolean;
-  setShareWorktree: (v: boolean) => void;
-  useSlices: boolean;
-  forceSingle: boolean;
-  setForceSingle: (v: boolean) => void;
-  submitting: boolean;
-  modelSuggestions: { claude: string[]; codex: string[] };
+  label: string;
+  hint?: React.ReactNode;
+  children: React.ReactNode;
 }) {
   return (
-    <div
+    <div className="space-y-2">
+      <div className="flex items-baseline gap-2">
+        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-ink-500 dark:text-ink-400">
+          {label}
+        </span>
+        <span className="ml-auto font-mono text-[10px] text-ink-400 dark:text-ink-500">
+          {hint}
+        </span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * Pill-style mode toggle for "Single task" vs "Slices · N". Active pill
+ * lights up with the chosen tint; inactive is a soft ghost. Kept floating
+ * above the body so the mode switch reads as the dialog's main verb.
+ */
+function ModePill({
+  active,
+  onClick,
+  label,
+  hint,
+  tint,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  hint: string;
+  tint?: "ember";
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
       className={cn(
-        "rounded-xl border bg-gradient-to-br from-ember-500/[0.05] via-transparent to-transparent",
-        useSlices
-          ? "border-ember-500/30 dark:border-ember-500/40"
-          : "border-ink-900/10 dark:border-ink-50/10",
+        "group inline-flex flex-col items-start px-3 py-1.5 rounded-full transition-all",
+        active
+          ? tint === "ember"
+            ? "bg-ember-500/15 ring-1 ring-ember-500/40 shadow-[0_0_0_3px_rgba(245,158,11,0.08)]"
+            : "bg-ink-900/[0.06] ring-1 ring-ink-900/15 dark:bg-ink-50/[0.06] dark:ring-ink-50/15"
+          : "ring-1 ring-transparent hover:bg-ink-900/[0.03] dark:hover:bg-ink-50/[0.03]",
       )}
     >
-      <div className="flex items-center gap-2 flex-wrap px-4 py-3 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06]">
-        <span
-          className={cn(
-            "inline-flex items-center justify-center h-5 min-w-[1.5rem] px-1.5 rounded-full font-mono text-[10px] font-semibold tabular-nums",
-            useSlices
-              ? "bg-ember-500 text-white"
-              : "bg-ink-900/[0.06] text-ink-500 dark:bg-ink-50/[0.06] dark:text-ink-400",
-          )}
-        >
-          {slices.length}
-        </span>
-        <span className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-ink-700 dark:text-ink-200">
-          slice{slices.length === 1 ? "" : "s"}
-        </span>
-        <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
-          · sequential on a shared branch
-        </span>
-        <span className="ml-auto inline-flex items-center gap-3">
-          {useSlices && slices.length > 1 && (
-            <label className="inline-flex items-center gap-1.5 font-mono text-[10.5px] text-ink-600 dark:text-ink-300 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={shareWorktree}
-                onChange={(e) => setShareWorktree(e.target.checked)}
-                className="h-3 w-3 accent-ember-500"
-              />
-              share branch
-            </label>
-          )}
-          <label className="inline-flex items-center gap-1.5 font-mono text-[10.5px] text-ink-600 dark:text-ink-300 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={forceSingle}
-              onChange={(e) => setForceSingle(e.target.checked)}
-              className="h-3 w-3 accent-ember-500"
-            />
-            single task
-          </label>
-        </span>
-      </div>
-      <div className="px-4 py-3">
-        {useSlices ? (
-          <PlanSlicesEditor
-            slices={slices}
-            onChange={setSlices}
-            modelSuggestions={modelSuggestions}
-            disabled={submitting}
-          />
-        ) : (
-          <p className="text-[11px] text-ink-500 dark:text-ink-400 leading-relaxed">
-            Slice mode disabled — using the picks below for one task.
-          </p>
+      <span
+        className={cn(
+          "font-mono text-[10.5px] uppercase tracking-[0.12em] leading-none",
+          active
+            ? tint === "ember"
+              ? "text-ember-700 dark:text-ember-300"
+              : "text-ink-700 dark:text-ink-200"
+            : "text-ink-500 dark:text-ink-400",
         )}
-      </div>
+      >
+        {label}
+      </span>
+      <span
+        className={cn(
+          "font-mono text-[9px] mt-0.5 leading-none",
+          active
+            ? "text-ink-500 dark:text-ink-400"
+            : "text-ink-400 dark:text-ink-500",
+        )}
+      >
+        {hint}
+      </span>
+    </button>
+  );
+}
+
+/**
+ * Two-up agent toggle. No bordered tiles — the active agent has a soft
+ * gradient bloom and a bold label, the inactive one is a flat
+ * monospaced label. Keeps the launch console reading as one immersive
+ * surface instead of a grid of cards.
+ */
+function AgentToggle({
+  agent,
+  setAgent,
+}: {
+  agent: AgentKind;
+  setAgent: (k: AgentKind) => void;
+}) {
+  return (
+    <div className="relative grid grid-cols-2 rounded-xl bg-paper-100/60 p-1 dark:bg-ink-800/60">
+      {/* Sliding glow indicator behind the active agent */}
+      <span
+        aria-hidden
+        className={cn(
+          "absolute top-1 bottom-1 w-[calc(50%-4px)] rounded-lg transition-all",
+          agent === "claude"
+            ? "left-1 bg-gradient-to-br from-ember-500/20 via-ember-500/[0.08] to-transparent shadow-[0_0_0_1px_rgba(245,158,11,0.25)]"
+            : "left-[calc(50%+1px)] bg-gradient-to-br from-violet-500/20 via-violet-500/[0.08] to-transparent shadow-[0_0_0_1px_rgba(139,92,246,0.25)]",
+        )}
+      />
+      {(["claude", "codex"] as const).map((k) => {
+        const active = agent === k;
+        const tint = k === "claude" ? "ember" : "violet";
+        return (
+          <button
+            key={k}
+            type="button"
+            onClick={() => setAgent(k)}
+            className="relative z-10 flex items-center justify-center gap-2 py-2.5"
+          >
+            <Sparkles
+              className={cn(
+                "h-3.5 w-3.5 transition-colors",
+                active
+                  ? tint === "ember"
+                    ? "text-ember-600 dark:text-ember-300"
+                    : "text-violet-600 dark:text-violet-300"
+                  : "text-ink-400 dark:text-ink-500",
+              )}
+            />
+            <span
+              className={cn(
+                "font-mono text-[12px] tracking-[0.04em] transition-colors",
+                active
+                  ? "text-ink-900 dark:text-ink-50 font-semibold"
+                  : "text-ink-500 dark:text-ink-400",
+              )}
+            >
+              {k === "claude" ? "Claude Code" : "Codex CLI"}
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -1922,25 +1988,24 @@ function ThinkingLadder({
       : ["minimal", "low", "medium", "high", "xhigh"];
   const idx = value ? levels.indexOf(value as ThinkingLevel) : -1;
   return (
-    <div className="rounded-xl border border-ink-900/10 bg-paper-50 px-3 py-3 dark:border-ink-50/10 dark:bg-ink-900">
-      <div className="flex items-center gap-1.5">
-        <button
-          type="button"
-          onClick={() => onChange("")}
-          className={cn(
-            "shrink-0 h-7 px-2 rounded-md font-mono text-[10px] uppercase tracking-[0.06em] transition-colors",
-            value === ""
-              ? "bg-ink-900/[0.08] text-ink-700 dark:bg-ink-50/[0.08] dark:text-ink-200"
-              : "text-ink-400 hover:bg-ink-900/[0.05] dark:text-ink-500 dark:hover:bg-ink-50/[0.05]",
-          )}
-          title="Use the server default thinking level"
-        >
-          default
-        </button>
-        <span className="text-ink-300 dark:text-ink-600 font-mono text-[10px]">
-          ·
-        </span>
-        <div className="flex-1 grid grid-cols-5 gap-1">
+    <div className="flex items-center gap-1.5">
+      <button
+        type="button"
+        onClick={() => onChange("")}
+        className={cn(
+          "shrink-0 h-7 px-2 rounded-md font-mono text-[10px] uppercase tracking-[0.06em] transition-colors",
+          value === ""
+            ? "bg-ink-900/[0.08] text-ink-700 dark:bg-ink-50/[0.08] dark:text-ink-200"
+            : "text-ink-400 hover:bg-ink-900/[0.05] dark:text-ink-500 dark:hover:bg-ink-50/[0.05]",
+        )}
+        title="Use the server default thinking level"
+      >
+        default
+      </button>
+      <span className="text-ink-300 dark:text-ink-600 font-mono text-[10px]">
+        ·
+      </span>
+      <div className="flex-1 grid grid-cols-5 gap-1">
           {levels.map((lvl, i) => {
             const active = i <= idx;
             const isCurrent = i === idx;
@@ -1979,7 +2044,6 @@ function ThinkingLadder({
               </button>
             );
           })}
-        </div>
       </div>
     </div>
   );
