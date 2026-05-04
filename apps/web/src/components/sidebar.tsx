@@ -837,7 +837,14 @@ function SidebarTaskList({
               <SliceCluster
                 key={cluster.key}
                 tasks={cluster.tasks}
-                rowFor={(t) => <SortableSidebarTaskRow key={t.id} task={t} />}
+                rowFor={(t, i) => (
+                  <SortableSidebarTaskRow
+                    key={t.id}
+                    task={t}
+                    sliceIndex={i + 1}
+                    sliceTotal={cluster.tasks.length}
+                  />
+                )}
               />
             ) : (
               <SortableSidebarTaskRow
@@ -853,7 +860,14 @@ function SidebarTaskList({
           <SliceCluster
             key={cluster.key}
             tasks={cluster.tasks}
-            rowFor={(t) => <SidebarTaskRow key={t.id} task={t} />}
+            rowFor={(t, i) => (
+              <SidebarTaskRow
+                key={t.id}
+                task={t}
+                sliceIndex={i + 1}
+                sliceTotal={cluster.tasks.length}
+              />
+            )}
           />
         ) : (
           <SidebarTaskRow
@@ -908,20 +922,28 @@ function SliceCluster({
   rowFor,
 }: {
   tasks: Task[];
-  rowFor: (t: Task) => React.ReactNode;
+  rowFor: (t: Task, index: number) => React.ReactNode;
 }) {
   return (
     <li className="-ml-2 pl-2 rounded-r border-l-2 border-ember-500/30 bg-ember-500/[0.025]">
       <ul className="space-y-0.5">
-        {tasks.map((t) => (
-          <li key={t.id}>{rowFor(t)}</li>
+        {tasks.map((t, i) => (
+          <li key={t.id}>{rowFor(t, i)}</li>
         ))}
       </ul>
     </li>
   );
 }
 
-function SortableSidebarTaskRow({ task }: { task: Task }) {
+function SortableSidebarTaskRow({
+  task,
+  sliceIndex,
+  sliceTotal,
+}: {
+  task: Task;
+  sliceIndex?: number;
+  sliceTotal?: number;
+}) {
   const {
     attributes,
     listeners,
@@ -942,6 +964,8 @@ function SortableSidebarTaskRow({ task }: { task: Task }) {
       dragStyle={style}
       dragHandleProps={{ ...attributes, ...listeners }}
       isDragging={isDragging}
+      sliceIndex={sliceIndex}
+      sliceTotal={sliceTotal}
     />
   );
 }
@@ -952,12 +976,18 @@ function SidebarTaskRow({
   dragStyle,
   dragHandleProps,
   isDragging,
+  sliceIndex,
+  sliceTotal,
 }: {
   task: Task;
   dragRef?: (el: HTMLElement | null) => void;
   dragStyle?: React.CSSProperties;
   dragHandleProps?: React.HTMLAttributes<HTMLButtonElement>;
   isDragging?: boolean;
+  /** 1-based position within a sibling cluster — only set when the
+   *  cluster has 2+ tasks. */
+  sliceIndex?: number;
+  sliceTotal?: number;
 }) {
   const { latestByTask } = useRealtime();
   const liveEvent = latestByTask[t.id];
@@ -1029,6 +1059,11 @@ function SidebarTaskRow({
         <span className={cn("h-1.5 w-1.5 rounded-full mt-1.5 shrink-0", dot)} />
         <span className="flex-1 min-w-0">
           <span className="block truncate text-ink-900 dark:text-ink-50">
+            {sliceIndex != null && sliceTotal != null && (
+              <span className="mr-1.5 inline-flex items-center align-middle h-3.5 px-1 rounded font-mono text-[8.5px] font-semibold tabular-nums text-ember-700 bg-ember-500/10 ring-1 ring-ember-500/20 dark:text-ember-300">
+                {sliceIndex}/{sliceTotal}
+              </span>
+            )}
             {t.title}
           </span>
           {showLive && liveEvent && (

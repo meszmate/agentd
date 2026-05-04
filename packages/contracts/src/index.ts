@@ -368,6 +368,9 @@ export const AgentEvent = z.discriminatedUnion("kind", [
     kind: z.literal("message"),
     role: z.enum(["agent", "system"]),
     text: z.string(),
+    /** Same nesting key the tool_call/tool_result events use — sub-agent
+     *  prose nests under its dispatching Task / collab tool. */
+    parentToolUseId: z.string().optional(),
   }),
   /**
    * Incremental text delta for the agent's current message. The web
@@ -389,12 +392,27 @@ export const AgentEvent = z.discriminatedUnion("kind", [
     kind: z.literal("tool_call"),
     tool: z.string(),
     args: z.unknown(),
+    /**
+     * When set, this tool_use was emitted by a sub-agent. Claude's
+     * `Task` tool and codex's `collab_tool_call` produce nested agent
+     * sessions whose events stream back through the parent process's
+     * stdout, with `parent_tool_use_id` (claude) / parent agent slot
+     * (codex) pointing at the dispatching tool_use. The web groups
+     * descendants under that parent row so the timeline reads as a
+     * tree instead of a flat smear.
+     */
+    parentToolUseId: z.string().optional(),
+    /** Provided when the agent has its own tool_use id — used for
+     * matching tool_call ↔ tool_result and for the nesting key. */
+    toolUseId: z.string().optional(),
   }),
   z.object({
     kind: z.literal("tool_result"),
     tool: z.string(),
     ok: z.boolean(),
     output: z.string(),
+    parentToolUseId: z.string().optional(),
+    toolUseId: z.string().optional(),
   }),
   z.object({
     kind: z.literal("permission_request"),

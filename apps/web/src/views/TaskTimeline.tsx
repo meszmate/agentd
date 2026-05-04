@@ -269,14 +269,22 @@ export function TaskTimeline({
           ) : (
             <ol className="space-y-5">
               {groups.map((g, gi) => {
-                // /compact divider sits above the first message in
-                // the group whose ts falls after the watermark.
+                // /compact divider sits at the BOUNDARY between
+                // pre-compact and post-compact messages. If every
+                // group is after the watermark (e.g. the operator
+                // compacted at the start of the conversation, or
+                // the daemon was restarted before any pre-compact
+                // chatter persisted) there's no meaningful boundary
+                // to mark, so we suppress it instead of pinning a
+                // permanent "context compacted · …ago" banner above
+                // an otherwise-normal timeline.
                 const firstTs = g.firstTs;
                 const prevGroup = groups[gi - 1];
                 const showDivider =
                   compactedAt != null &&
                   firstTs >= compactedAt &&
-                  (!prevGroup || prevGroup.firstTs < compactedAt);
+                  !!prevGroup &&
+                  prevGroup.firstTs < compactedAt;
                 return (
                   <Fragment key={g.key}>
                     {showDivider && <CompactDivider ts={compactedAt!} />}

@@ -373,8 +373,27 @@ export function WorkCard({
       <ul className="space-y-0.5">
         {visible.map((p, i) => {
           const isLast = i === visible.length - 1;
+          // Sub-agent tool calls carry `_agentdParent` in their input
+          // (injected by the daemon when the upstream runner reported
+          // a parent_tool_use_id). Indent + draw a left spine so the
+          // operator can see "this Bash was run BY the Task spawn
+          // above" instead of reading them as siblings.
+          const input =
+            p.input && typeof p.input === "object"
+              ? (p.input as Record<string, unknown>)
+              : null;
+          const parentId =
+            input && typeof input._agentdParent === "string"
+              ? input._agentdParent
+              : null;
           return (
-            <li key={i}>
+            <li
+              key={i}
+              className={cn(
+                parentId &&
+                  "pl-3 ml-3 border-l-2 border-violet-500/30 bg-violet-500/[0.025] rounded-r",
+              )}
+            >
               <ToolRow
                 content={`[call ${p.name}] ${JSON.stringify(p.input ?? {})}`}
                 output={p.output}
@@ -621,6 +640,12 @@ function parseToolCall(content: string): ParsedTool {
   } catch {
     return { name, kind: classify(name), summary: trimOneLine(argsRaw, 100), detail: null };
   }
+  // Swarm nesting metadata is injected by the daemon as
+  // `_agentdParent` / `_agentdToolId` on the args object. Strip them
+  // before per-tool parsing so the existing switch cases see only
+  // real tool arguments.
+  if ("_agentdParent" in args) delete args._agentdParent;
+  if ("_agentdToolId" in args) delete args._agentdToolId;
 
   const kind = classify(name);
   const get = (...keys: string[]): string | undefined => {

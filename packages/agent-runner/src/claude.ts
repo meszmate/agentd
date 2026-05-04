@@ -17,6 +17,13 @@ interface ClaudeUsage {
 interface ClaudeStreamMessage {
   type?: string;
   subtype?: string;
+  /**
+   * Set on assistant + user events that came from a sub-agent (Task
+   * tool spawn). Claude-code wraps the sub-session's messages in the
+   * parent process's stream-json with this field pointing at the
+   * dispatching tool_use id, so we can reconstruct the swarm tree.
+   */
+  parent_tool_use_id?: string | null;
   message?: {
     role?: string;
     content?: Array<{
@@ -24,6 +31,8 @@ interface ClaudeStreamMessage {
       text?: string;
       name?: string;
       input?: unknown;
+      id?: string;
+      tool_use_id?: string;
     }>;
     usage?: ClaudeUsage;
   };
@@ -287,14 +296,34 @@ export class ClaudeRunner implements AgentRunner {
     }
 
     if (type === "assistant" && parsed.message?.content) {
+      // `parent_tool_use_id` is the SDK's nesting key — claude-code
+      // sets it on every assistant/user message that originated from a
+      // sub-agent (Task tool spawn). Carry it onto each child event so
+      // the daemon + web can render the swarm as a tree under the
+      // dispatching Task row instead of flattening it.
+      const parentToolUseId =
+        typeof parsed.parent_tool_use_id === "string"
+          ? parsed.parent_tool_use_id
+          : undefined;
       for (const block of parsed.message.content) {
         if (block.type === "text" && typeof block.text === "string") {
-          this.emit({ kind: "message", role: "agent", text: block.text });
+          this.emit({
+            kind: "message",
+            role: "agent",
+            text: block.text,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          });
         } else if (block.type === "tool_use" && typeof block.name === "string") {
+          const toolUseId =
+            typeof (block as { id?: unknown }).id === "string"
+              ? ((block as { id?: string }).id as string)
+              : undefined;
           this.emit({
             kind: "tool_call",
             tool: block.name,
             args: block.input ?? {},
+            ...(toolUseId ? { toolUseId } : {}),
+            ...(parentToolUseId ? { parentToolUseId } : {}),
           });
         }
       }
@@ -311,9 +340,17 @@ export class ClaudeRunner implements AgentRunner {
       return;
     }
     if (type === "user" && parsed.message?.content) {
+      const parentToolUseId =
+        typeof parsed.parent_tool_use_id === "string"
+          ? parsed.parent_tool_use_id
+          : undefined;
       for (const block of parsed.message.content) {
         if (block.type === "tool_result") {
-          const content = block as { content?: unknown; is_error?: boolean };
+          const content = block as {
+            tool_use_id?: string;
+            content?: unknown;
+            is_error?: boolean;
+          };
           const text =
             typeof content.content === "string"
               ? content.content
@@ -323,6 +360,8 @@ export class ClaudeRunner implements AgentRunner {
             tool: "(result)",
             ok: !content.is_error,
             output: text,
+            ...(content.tool_use_id ? { toolUseId: content.tool_use_id } : {}),
+            ...(parentToolUseId ? { parentToolUseId } : {}),
           });
         }
       }

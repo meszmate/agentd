@@ -950,13 +950,20 @@ export class TaskManager {
     }
     if (task.autoPush && task.autoCommit !== false) {
       finishParts.push(
-        "Auto-push is ON. After committing, push the branch to origin with `git push -u origin HEAD` without asking. Don't open a pull request — that step is manual.",
+        "Auto-push is ON. After committing, push the branch to origin with `git push -u origin HEAD` without asking. Don't open a pull request, that step is manual.",
       );
     } else {
       finishParts.push(
-        "Do NOT push the branch and do NOT open a pull request — those are manual steps.",
+        "Do NOT push the branch and do NOT open a pull request, those are manual steps.",
       );
     }
+    // Writing-style rule, last so it's the freshest hint when the
+    // agent composes its reply. Operators kept complaining the
+    // model's chat sounded like a press release. Force a more
+    // human cadence by yanking the em-dash crutch.
+    finishParts.push(
+      "Writing style: write like a human typing fast, not like a press release. NO em dashes (—) anywhere. Use commas, periods, parentheses, colons, or simple hyphens (-) instead. This applies to chat replies, code comments, commit messages, PR bodies, agentd-progress lines, everything you produce. Skip filler ('Great!', 'Perfect!', 'Of course'). Skip em-dash openers ('— and another thing'). Be direct.",
+    );
     appendParts.push(finishParts.join(" "));
     const appendSystemPrompt = appendParts.length
       ? appendParts.join("\n\n---\n\n")
@@ -1028,11 +1035,32 @@ export class TaskManager {
       // covers virtually every real edit; pathological mega-edits
       // (a write of an entire 100KB file) still get clamped, but
       // the leading file_path stays intact so the row renders.
+      //
+      // Swarm nesting: inject `_agentdParent` / `_agentdToolId` into
+      // args (underscore-prefixed so they don't collide with any
+      // real tool arg). The web's `parseToolCall` reads them out
+      // and strips them before per-tool rendering, so the existing
+      // switch cases keep working untouched. Lets the timeline
+      // group sub-agent tool_uses under their dispatching Task /
+      // collab tool row instead of laying them flat.
+      const augmentedArgs =
+        (event.parentToolUseId || event.toolUseId) &&
+        event.args &&
+        typeof event.args === "object" &&
+        !Array.isArray(event.args)
+          ? {
+              ...(event.args as Record<string, unknown>),
+              ...(event.parentToolUseId
+                ? { _agentdParent: event.parentToolUseId }
+                : {}),
+              ...(event.toolUseId ? { _agentdToolId: event.toolUseId } : {}),
+            }
+          : event.args;
       appendMessage(
         this.db,
         taskId,
         "tool",
-        `[call ${event.tool}] ${JSON.stringify(event.args).slice(0, 32_000)}`,
+        `[call ${event.tool}] ${JSON.stringify(augmentedArgs).slice(0, 32_000)}`,
       );
       // TodoWrite (claude) / update_plan (codex) carries the agent's
       // current plan. Mirror it into the todos table tagged source=agent
@@ -1060,15 +1088,21 @@ export class TaskManager {
       // claude-code-style output preview ("3 lines + N more") and a
       // green/red status dot under the matching tool_call row above.
       // Format keeps the next-message pairing logic simple — `[result
-      // <tool> ok|err] <output>`.
+      // <tool> ok|err] <output>`. Optional `p:<parentId>` /
+      // `u:<toolUseId>` segments carry swarm-tree info — they're
+      // strict regex-anchored so legacy rows still parse cleanly.
       const okFlag = event.ok ? "ok" : "err";
       const trimmed = event.output.slice(0, 4000);
-      appendMessage(
-        this.db,
-        taskId,
-        "tool",
-        `[result ${event.tool} ${okFlag}] ${trimmed}`,
-      );
+      const meta = [
+        event.parentToolUseId ? `p:${event.parentToolUseId}` : null,
+        event.toolUseId ? `u:${event.toolUseId}` : null,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const header = meta
+        ? `[result ${event.tool} ${okFlag} ${meta}]`
+        : `[result ${event.tool} ${okFlag}]`;
+      appendMessage(this.db, taskId, "tool", `${header} ${trimmed}`);
     } else if (event.kind === "status") {
       updateTaskStatus(this.db, taskId, event.status);
       // Auto-fire any queued items at the turn boundary for
