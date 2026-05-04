@@ -5,16 +5,19 @@ import { langFromPath } from "@/components/tool-line";
 import { cn } from "@/lib/utils";
 
 /**
- * Renders an in-flight tool call as the model is assembling its arguments.
- * Anthropic streams these as `input_json_delta` chunks; we accumulate the
- * partial JSON and best-effort-extract the file path + content (Edit /
- * Write / MultiEdit) so the operator sees the file streaming character
- * by character — matching claude-code's terminal preview. Other tools
- * fall back to a raw partial-JSON block.
+ * Real-time view of what the agent is currently doing.
  *
- * The card is purely transient: it disappears the moment the matching
- * `tool_call` event lands with the complete args (the timeline's
- * persisted ToolRow takes over from there).
+ * As the model decides to call a tool, Anthropic streams the arguments
+ * as `input_json_delta` chunks (not all at once). This component reads
+ * those partial JSON chunks live and pulls out the file path + content
+ * for Edit / Write / MultiEdit, so the operator literally watches the
+ * file being typed character by character, the same way claude-code's
+ * terminal preview does it. Bash shows the command as it forms; other
+ * tools fall back to raw partial JSON.
+ *
+ * The card is purely transient. The instant the full `tool_call` event
+ * arrives with complete args, this card disappears and the persisted
+ * ToolRow in the timeline takes over.
  */
 export const LiveToolCard = memo(function LiveToolCard({
   toolName,
