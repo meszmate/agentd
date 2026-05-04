@@ -512,14 +512,17 @@ export class CodexRunner implements AgentRunner {
         });
         return;
       }
-      // For one change, emit a single Write/Edit pair so it renders
-      // as a normal file-edit row. For multiple, emit one MultiEdit
-      // pair with a synthesized summary so the operator sees the full
-      // set of paths. Either way the matching tool_result reflects
-      // success/failure of the whole patch.
-      if (changes.length === 1) {
-        const c = changes[0]!;
-        const tool = c.kind === "add" ? "Write" : c.kind === "delete" ? "Edit" : "Edit";
+      // Emit one tool_call per file regardless of how many files the
+      // patch touched. Codex's `apply_patch` is atomic over the whole
+      // set, but presenting the result as N separate Edit/Write rows
+      // lines up with the inline-diff renderer (one DiffFile per row)
+      // and gives the operator a per-file +N/-M pill — same shape
+      // claude's Edit/Write rows already use. The matching
+      // tool_result on each row carries the same overall status,
+      // since the patch succeeded or failed as a unit.
+      const ok = fci.status !== "failed";
+      for (const c of changes) {
+        const tool = c.kind === "add" ? "Write" : "Edit";
         this.emit({
           kind: "tool_call",
           tool,
@@ -528,26 +531,8 @@ export class CodexRunner implements AgentRunner {
         this.emit({
           kind: "tool_result",
           tool,
-          ok: fci.status !== "failed",
-          output: fci.status === "failed" ? "(patch failed)" : `${c.kind} ${c.path}`,
-        });
-      } else {
-        const summary = changes
-          .map((c) => `${c.kind} ${c.path}`)
-          .join("\n");
-        this.emit({
-          kind: "tool_call",
-          tool: "MultiEdit",
-          args: {
-            file_paths: changes.map((c) => c.path),
-            codex_changes: changes,
-          },
-        });
-        this.emit({
-          kind: "tool_result",
-          tool: "MultiEdit",
-          ok: fci.status !== "failed",
-          output: fci.status === "failed" ? `(patch failed)\n${summary}` : summary,
+          ok,
+          output: ok ? `${c.kind} ${c.path}` : `(patch failed) ${c.kind} ${c.path}`,
         });
       }
       return;

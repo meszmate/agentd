@@ -760,6 +760,14 @@ export function EditDiffPreview({
   taskId: string | null | undefined;
   payload: EditPreviewPayload;
 }) {
+  // Codex's `apply_patch` doesn't surface old/new strings the way
+  // claude's Edit does — the daemon enriches the tool call with a
+  // unified diff (computed via `git diff --no-index` against a
+  // per-task snapshot) and `parseToolCall` parses it into a
+  // `DiffFile`. Render as-is.
+  if (payload.kind === "unified") {
+    return <InlineDiff file={payload.file} />;
+  }
   // Write: render straight from the in-memory `content`.
   if (payload.kind === "write") {
     const file = synthesizeWriteDiff(payload.path, payload.content);
@@ -804,4 +812,5 @@ function EditPreviewWithFetch({
 
 export type EditPreviewPayload =
   | { kind: "edit"; path: string; oldString: string; newString: string }
-  | { kind: "write"; path: string; content: string };
+  | { kind: "write"; path: string; content: string }
+  | { kind: "unified"; file: DiffFile };

@@ -19,6 +19,8 @@ import { cn } from "@/lib/utils";
 import { CodeBlock, normalizeLanguage } from "@/components/code-block";
 import {
   EditDiffPreview,
+  parseUnifiedDiff,
+  type DiffFile,
   type EditPreviewPayload,
 } from "@/components/structured-diff";
 
@@ -745,6 +747,23 @@ function parseToolCall(content: string): ParsedTool {
     }
     case "Write": {
       const path = get("file_path", "path") ?? "?";
+      // Codex path: daemon enriched args with a unified diff
+      // (computed via `git diff --no-index` against a per-task
+      // snapshot). When present, render that directly so the
+      // operator sees the same +N/-M pills + 3-line context windows
+      // claude's Write rows already get.
+      const codex = parseCodexDiffFromArgs(args, "added");
+      if (codex) {
+        return {
+          name,
+          kind,
+          summary: shortPath(codex.file.displayPath || path),
+          detail: null,
+          editPreview: { kind: "unified", file: codex.file },
+          linesAdded: codex.file.additions || undefined,
+          linesRemoved: codex.file.deletions || undefined,
+        };
+      }
       const content = get("content");
       const lines = content ? content.split("\n").length : 0;
       return {
@@ -763,6 +782,23 @@ function parseToolCall(content: string): ParsedTool {
     case "Edit":
     case "MultiEdit": {
       const path = get("file_path", "path") ?? "?";
+      // Codex path — see Write case above for rationale.
+      const codexKind = get("codex_change_kind");
+      const codex = parseCodexDiffFromArgs(
+        args,
+        codexKind === "delete" ? "deleted" : "modified",
+      );
+      if (codex) {
+        return {
+          name,
+          kind,
+          summary: shortPath(codex.file.displayPath || path),
+          detail: null,
+          editPreview: { kind: "unified", file: codex.file },
+          linesAdded: codex.file.additions || undefined,
+          linesRemoved: codex.file.deletions || undefined,
+        };
+      }
       const oldStr = get("old_string") ?? "";
       const newStr = get("new_string") ?? "";
       const replaceAll = args.replace_all === true ? " (all)" : "";
@@ -884,6 +920,29 @@ function parseToolCall(content: string): ParsedTool {
       };
     }
   }
+}
+
+/**
+ * Codex-only path. Reads the `codex_diff` text the daemon stuffed
+ * into args (a unified diff produced by `git diff --no-index` on
+ * the pre-edit snapshot vs. post-edit disk content), parses it
+ * into a `DiffFile`, and forces `status` to match the codex change
+ * kind so a brand-new file shows up green like an `added` file
+ * rather than `modified`. Returns null when no diff was attached
+ * or the diff text didn't yield a parseable file (rare — empty
+ * patches, binary blobs without a recognizable header).
+ */
+function parseCodexDiffFromArgs(
+  args: Record<string, unknown>,
+  forcedStatus?: DiffFile["status"],
+): { file: DiffFile } | null {
+  const raw = args.codex_diff;
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  const files = parseUnifiedDiff(raw);
+  const file = files[0];
+  if (!file) return null;
+  if (forcedStatus) file.status = forcedStatus;
+  return { file };
 }
 
 function classify(name: string): ToolKind {

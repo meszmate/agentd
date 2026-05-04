@@ -67,6 +67,16 @@ import {
   CodexRunner,
   type AgentRunner,
 } from "@agentd/agent-runner";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import {
+  isAbsolute,
+  join as pjoin,
+  normalize,
+  relative,
+  resolve,
+} from "node:path";
 
 interface RunningSession {
   runner: AgentRunner;
@@ -140,6 +150,17 @@ export class TaskManager {
    * Cleared on exit so a future steer starts fresh.
    */
   private completedSignaled = new Set<string>();
+  /**
+   * Per-task in-memory snapshot of file content captured AFTER each
+   * codex `file_change`. Codex's JSONL stream only carries `{path,
+   * kind}` for edits — to render the same inline-diff claude rows
+   * use, we reconstruct each per-edit unified diff by comparing the
+   * post-edit disk content against the prior snapshot (or HEAD on
+   * first sighting). The snapshot is updated to the post-edit
+   * content so the next edit to the same file diffs against the
+   * right baseline. Cleared on task `exit`.
+   */
+  private codexFileSnapshots = new Map<string, Map<string, string>>();
 
   constructor(
     private readonly db: Db,
@@ -1165,6 +1186,14 @@ export class TaskManager {
   }
 
   private handleEvent(taskId: string, event: AgentEvent): void {
+    // Codex enrichment runs first so every consumer below — DB
+    // append, plan sync, bus publish — sees the args with
+    // `codex_diff` already attached. The web's `parseToolCall`
+    // picks that up to mount the same `<EditDiffPreview>` claude
+    // edits use.
+    if (event.kind === "tool_call") {
+      event = this.enrichCodexToolCall(taskId, event);
+    }
     if (event.kind === "message" && event.role === "agent") {
       appendMessage(this.db, taskId, "agent", event.text);
     } else if (event.kind === "tool_call") {
@@ -1312,6 +1341,9 @@ export class TaskManager {
       }
       // Reset the done-signal flag so a future steer starts fresh.
       this.completedSignaled.delete(taskId);
+      // Drop the codex per-file snapshots — a fresh run rebuilds them
+      // from HEAD on first sighting.
+      this.codexFileSnapshots.delete(taskId);
       // Fire-and-forget; commit + push + PR all run after the agent exits.
       void this.runCompletionHooks(taskId);
     } else if (event.kind === "raw" && event.stream === "stdout") {
@@ -1932,6 +1964,92 @@ export class TaskManager {
     }
   }
 
+  /**
+   * Codex's `file_change` items only carry `{path, kind}` — no patch
+   * body. To render the same inline diff claude's Edit/Write rows
+   * use, we synthesize a unified diff at observation time:
+   *
+   *   pre  = prior in-memory snapshot for this path, or HEAD blob on
+   *          first sighting (so the very first edit diffs against
+   *          what was committed)
+   *   post = current on-disk file content (codex applies the patch
+   *          before emitting `item.completed`, so the disk state IS
+   *          the post-edit state)
+   *
+   * The diff is computed via `git diff --no-index` against two
+   * tempfiles, the headers rewritten to point at the real path so
+   * the web's `parseUnifiedDiff` ends up with a sensible
+   * `displayPath`, and the result stuffed into args under
+   * `codex_diff`. The post-edit content is then cached as the next
+   * snapshot so a follow-up edit to the same file diffs correctly
+   * against its actual prior state instead of cumulatively against
+   * HEAD.
+   *
+   * No-op for events that don't carry `codex_change_kind` (i.e.
+   * everything claude emits, plus codex tool calls that aren't
+   * file edits).
+   */
+  private enrichCodexToolCall(taskId: string, event: AgentEvent): AgentEvent {
+    if (event.kind !== "tool_call") return event;
+    const args = event.args;
+    if (!args || typeof args !== "object" || Array.isArray(args)) return event;
+    const a = args as Record<string, unknown>;
+    const ckind =
+      typeof a.codex_change_kind === "string" ? a.codex_change_kind : null;
+    if (!ckind) return event;
+    const filePath = typeof a.file_path === "string" ? a.file_path : null;
+    if (!filePath) return event;
+    const task = getTask(this.db, taskId);
+    if (!task?.worktreePath) return event;
+
+    const root = task.worktreePath;
+    const abs = resolveCodexEditPath(root, filePath);
+    if (!abs) return event;
+
+    // Display path: prefer the path relative to the worktree root so
+    // the rendered diff header reads `apps/web/src/x.ts` instead of
+    // a noisy absolute path. Falls back to whatever codex sent.
+    let displayPath = filePath;
+    try {
+      const rel = relative(resolve(root), abs);
+      if (rel && !rel.startsWith("..") && !isAbsolute(rel)) displayPath = rel;
+    } catch {
+      // keep filePath as-is
+    }
+
+    let snaps = this.codexFileSnapshots.get(taskId);
+    if (!snaps) {
+      snaps = new Map();
+      this.codexFileSnapshots.set(taskId, snaps);
+    }
+
+    let pre: string;
+    if (snaps.has(filePath)) {
+      pre = snaps.get(filePath) ?? "";
+    } else {
+      pre = readGitHeadBlob(root, displayPath) ?? "";
+    }
+
+    let post = "";
+    if (ckind !== "delete") {
+      try {
+        post = readFileSync(abs, "utf8");
+      } catch {
+        post = "";
+      }
+    }
+
+    snaps.set(filePath, post);
+
+    const diff = computeUnifiedDiff(pre, post, displayPath);
+    if (!diff) return event;
+
+    return {
+      ...event,
+      args: { ...a, codex_diff: diff },
+    };
+  }
+
 }
 
 function findLastUserMessage(db: Db, taskId: string): string | null {
@@ -1993,4 +2111,117 @@ function parseAgentPlan(
     out.push({ text, status });
   }
   return out;
+}
+
+/**
+ * Resolve a codex-supplied file_path against the task worktree.
+ * Codex sometimes emits relative paths and sometimes absolute ones;
+ * either is fine as long as the final path stays inside the
+ * worktree. Returns null otherwise so we never read files outside
+ * the agent's sandbox.
+ */
+function resolveCodexEditPath(root: string, requested: string): string | null {
+  const absRoot = resolve(root);
+  const joined = isAbsolute(requested)
+    ? normalize(requested)
+    : normalize(pjoin(absRoot, requested));
+  const rel = relative(absRoot, joined);
+  if (rel.startsWith("..") || rel === "" || isAbsolute(rel)) return null;
+  return joined;
+}
+
+/**
+ * Read a file at the worktree's HEAD via `git show`. Used as the
+ * fallback "pre-edit" content the first time we see a path edited
+ * in this task. Returns null when the path doesn't exist at HEAD
+ * (e.g. it's being newly added) or git errors for any reason.
+ */
+function readGitHeadBlob(root: string, relPath: string): string | null {
+  try {
+    const r = spawnSync("git", ["show", `HEAD:${relPath}`], {
+      cwd: root,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    if (r.status === 0 && r.stdout) return r.stdout.toString("utf8");
+  } catch {
+    // ignore — null falls through to "no prior content"
+  }
+  return null;
+}
+
+/**
+ * Run `git diff --no-index` between two strings and return a
+ * unified-diff text whose `diff --git` / `---` / `+++` headers
+ * have been rewritten to point at `displayPath`. The web's
+ * `parseUnifiedDiff` keys off `a/<path>` and `b/<path>` for the
+ * header parsing — without the rewrite it'd display the temp dir
+ * path. Returns "" when the diff fails or the inputs are
+ * identical (caller decides what to do with that).
+ */
+function computeUnifiedDiff(
+  pre: string,
+  post: string,
+  displayPath: string,
+): string {
+  if (pre === post) return "";
+  const tmp = mkdtempSync(pjoin(tmpdir(), "agentd-codex-diff-"));
+  try {
+    const oldFile = pjoin(tmp, "pre");
+    const newFile = pjoin(tmp, "post");
+    writeFileSync(oldFile, pre);
+    writeFileSync(newFile, post);
+    // `--no-index` makes git diff arbitrary files (no repo
+    // required); exit codes: 0 = identical, 1 = differ, ≥2 = error.
+    const r = spawnSync(
+      "git",
+      ["diff", "--no-index", "--no-color", "--unified=3", oldFile, newFile],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    if (r.status !== 0 && r.status !== 1) return "";
+    const text = r.stdout ? r.stdout.toString("utf8") : "";
+    if (!text) return "";
+    return rewriteDiffPaths(text, displayPath);
+  } catch {
+    return "";
+  } finally {
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // ignore — tmpdir cleanup is best-effort
+    }
+  }
+}
+
+/**
+ * Replace the temp-file paths in a `git diff --no-index` output's
+ * `diff --git` / `---` / `+++` headers with `displayPath`. Leaves
+ * the body untouched — only the first three header lines need
+ * rewriting for `parseUnifiedDiff` to come out with the right
+ * `displayPath`.
+ */
+function rewriteDiffPaths(diff: string, displayPath: string): string {
+  const lines = diff.split("\n");
+  let seenDiff = false;
+  let seenMinus = false;
+  let seenPlus = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (!seenDiff && line.startsWith("diff --git ")) {
+      lines[i] = `diff --git a/${displayPath} b/${displayPath}`;
+      seenDiff = true;
+      continue;
+    }
+    if (!seenMinus && line.startsWith("--- ")) {
+      lines[i] = `--- a/${displayPath}`;
+      seenMinus = true;
+      continue;
+    }
+    if (!seenPlus && line.startsWith("+++ ")) {
+      lines[i] = `+++ b/${displayPath}`;
+      seenPlus = true;
+      continue;
+    }
+    if (seenDiff && seenMinus && seenPlus) break;
+  }
+  return lines.join("\n");
 }
