@@ -69,7 +69,7 @@ export function RateLimitChip() {
   if (limits.length === 0) return null;
 
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex items-center gap-1">
       {limits.map((rl) => (
         <ProviderChip key={rl.provider} rl={rl} />
       ))}
@@ -114,16 +114,14 @@ function ProviderChip({ rl }: { rl: ProviderRateLimit }) {
           <button
             type="button"
             className={cn(
-              "inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-[10.5px] font-mono uppercase tracking-[0.08em]",
+              "inline-flex h-7 items-center gap-1 rounded-md border px-1.5 text-[10px] font-mono tabular-nums",
               toneClass,
               tone === "danger" && "animate-pulse",
             )}
-            aria-label={`${providerLabel(rl.provider)} rate limit: ${primary.status}`}
+            aria-label={`${providerLabel(rl.provider)} rate limit: ${primary.status} (${windowLabel(primaryType)} resets in ${primaryReset})`}
           >
             <Gauge className="h-3 w-3" />
-            <span>{windowLabel(primaryType)}</span>
-            <span className="opacity-60">·</span>
-            <span className="tabular-nums">{primaryReset}</span>
+            <span>{primaryReset}</span>
           </button>
         </TooltipTrigger>
         <TooltipContent side="right" className="max-w-[260px]">

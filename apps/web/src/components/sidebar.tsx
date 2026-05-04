@@ -118,11 +118,10 @@ export function Sidebar({
         <Wordmark />
       </div>
 
-      <div className="px-3 pt-3 pb-2 shrink-0">
-        <ServerCard />
-      </div>
-
-      <div className="px-3 pb-2 shrink-0">
+      <div className="flex items-center gap-2 px-3 pt-3 pb-2 shrink-0">
+        <div className="min-w-0 flex-1">
+          <ServerCard />
+        </div>
         <RateLimitChip />
       </div>
 
