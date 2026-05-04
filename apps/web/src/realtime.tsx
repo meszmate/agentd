@@ -119,6 +119,7 @@ function describe(ev: AgentEvent): string | null {
     case "message_delta":
     case "message_end":
     case "todos_updated":
+    case "queue_updated":
       return null;
   }
 }
@@ -198,6 +199,13 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           const wasNew = !cur.find((t) => t.id === msg.task.id);
           if (wasNew) next.unshift(msg.task);
           qc.setQueryData(qk.tasks(), { tasks: next });
+          qc.setQueryData(qk.task(msg.task.id), (curTask: unknown) => {
+            const prev = curTask as
+              | { task: Task; messages: unknown[] }
+              | undefined;
+            return prev ? { ...prev, task: msg.task } : prev;
+          });
+          void qc.invalidateQueries({ queryKey: ["taskContext", msg.task.id] });
           setPulses((p) => ({ ...p, [msg.task.id]: Date.now() }));
           setLastStatusChange((cur2) => ({
             ...cur2,
@@ -510,10 +518,33 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         // agent finishes, which makes the steer flow feel stale.
         if (
           msg.event.kind === "status" ||
+          msg.event.kind === "exit" ||
+          msg.event.kind === "queue_updated"
+        ) {
+          if (msg.event.kind === "queue_updated") {
+            const queue = msg.event.queue;
+            qc.setQueryData(["task-steer", msg.taskId], (cur: unknown) => {
+              const prev = cur as
+                | { running: boolean; queue: string[] }
+                | undefined;
+              return {
+                running: prev?.running ?? true,
+                queue,
+              };
+            });
+          } else {
+            void qc.invalidateQueries({
+              queryKey: ["task-steer", msg.taskId],
+            });
+          }
+        }
+        if (
+          msg.event.kind === "usage" ||
+          msg.event.kind === "status" ||
           msg.event.kind === "exit"
         ) {
           void qc.invalidateQueries({
-            queryKey: ["task-steer", msg.taskId],
+            queryKey: ["taskContext", msg.taskId],
           });
         }
         // Also refresh the task's messages cache on turn boundaries

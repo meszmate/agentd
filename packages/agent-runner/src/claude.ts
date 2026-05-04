@@ -328,7 +328,7 @@ export class ClaudeRunner implements AgentRunner {
         }
       }
       const usage = parsed.message.usage;
-      if (usage) {
+      if (usage && !parentToolUseId) {
         this.emit({
           kind: "usage",
           inputTokens: usage.input_tokens,
@@ -375,25 +375,27 @@ export class ClaudeRunner implements AgentRunner {
       return;
     }
     if (type === "result") {
+      const parentToolUseId =
+        typeof parsed.parent_tool_use_id === "string"
+          ? parsed.parent_tool_use_id
+          : undefined;
+      if (parentToolUseId) return;
       // Note: parsed.result is a duplicate of the assistant turn's text — Claude
       // Code emits both `assistant` blocks (which we already surface as
       // kind=message,role=agent) and a final `result` echo. Re-emitting it
-      // would render the reply twice in the timeline. Keep usage/cost only.
+      // would render the reply twice in the timeline. Keep cost only:
+      // token usage here is aggregate run spend, not the current live
+      // context. Assistant message usage above carries the live turn.
       const cost =
         typeof parsed.total_cost_usd === "number"
           ? parsed.total_cost_usd
           : typeof parsed.cost_usd === "number"
             ? parsed.cost_usd
             : undefined;
-      if (parsed.usage || cost != null) {
-        const usage = parsed.usage ?? {};
+      if (cost != null) {
         this.emit({
           kind: "usage",
-          inputTokens: usage.input_tokens,
-          outputTokens: usage.output_tokens,
-          cacheReadTokens: usage.cache_read_input_tokens,
-          cacheWriteTokens: usage.cache_creation_input_tokens,
-          ...(cost != null ? { costUsd: cost } : {}),
+          costUsd: cost,
         });
       }
       // Turn boundary — agent is now idle waiting for the next stdin

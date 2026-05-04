@@ -9,7 +9,12 @@ import {
   RefreshCw,
   Sparkles,
 } from "lucide-react";
-import type { BranchMode, WorkspaceMode } from "@agentd/contracts";
+import type {
+  AgentKind,
+  BranchMode,
+  ThinkingLevel,
+  WorkspaceMode,
+} from "@agentd/contracts";
 import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
@@ -63,12 +68,18 @@ export function WorkspaceSetup({
    * The button is disabled when the prompt is empty.
    */
   prompt,
+  agent,
+  model,
+  thinkingLevel,
 }: {
   value: WorkspaceSetupValue;
   onChange: (next: WorkspaceSetupValue) => void;
   projectIdOrSlug?: string | null;
   compact?: boolean;
   prompt?: string;
+  agent?: AgentKind;
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
 }) {
   const branchesQ = useQuery({
     queryKey: ["project", projectIdOrSlug ?? "_none", "branches"] as const,
@@ -181,6 +192,9 @@ export function WorkspaceSetup({
             value={value.branchName}
             onChange={(b) => update({ branchName: b })}
             prompt={prompt}
+            agent={agent}
+            model={model}
+            thinkingLevel={thinkingLevel}
           />
         )}
       </div>
@@ -278,10 +292,16 @@ function NewBranchInput({
   value,
   onChange,
   prompt,
+  agent,
+  model,
+  thinkingLevel,
 }: {
   value: string;
   onChange: (v: string) => void;
   prompt?: string;
+  agent?: AgentKind;
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
 }) {
   const client = useClient();
   const [generating, setGenerating] = useState(false);
@@ -298,7 +318,11 @@ function NewBranchInput({
     if (!p) return;
     setGenerating(true);
     try {
-      const r = await client.suggestBranchName(p);
+      const r = await client.suggestBranchName(p, {
+        ...(agent ? { agent } : {}),
+        ...(model?.trim() ? { model: model.trim() } : {}),
+        ...(thinkingLevel ? { thinkingLevel } : {}),
+      });
       // Preserve whatever prefix the user already chose; otherwise take
       // the AI's inferred one (fix/refactor/chore/feature) so a "fix the
       // X bug" prompt doesn't get jammed under feature/.

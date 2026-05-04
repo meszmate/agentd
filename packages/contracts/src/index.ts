@@ -455,6 +455,10 @@ export const AgentEvent = z.discriminatedUnion("kind", [
     costUsd: z.number().optional(),
   }),
   z.object({
+    kind: z.literal("queue_updated"),
+    queue: z.array(z.string()),
+  }),
+  z.object({
     /**
      * Structured progress note the agent posts via `agentd progress` after
      * each meaningful step. The text is what the agent did; `done: true`

@@ -478,6 +478,9 @@ export function SpawnSheet({
                 }}
                 projectIdOrSlug={projectId || null}
                 prompt={prompt}
+                agent={agent}
+                model={model}
+                thinkingLevel={thinkingLevel}
               />
             </Field>
 

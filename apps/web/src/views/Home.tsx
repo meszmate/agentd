@@ -500,6 +500,7 @@ function Composer({ firstRun }: { firstRun: boolean }) {
             onChange={setWorkspace}
             projectIdOrSlug={projectId || null}
             prompt={prompt}
+            agent={agent}
           />
         </div>
       )}

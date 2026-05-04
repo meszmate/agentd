@@ -304,25 +304,27 @@ export function TaskDetail({ task }: { task: Task }) {
   // Cumulative billing-style total (never decreases) — shown in the
   // task header chip + cost summaries.
   const totalTokens = useMemo(
-    () => (task.totalInputTokens ?? 0) + (task.totalOutputTokens ?? 0),
-    [task.totalInputTokens, task.totalOutputTokens],
+    () =>
+      (task.totalInputTokens ?? 0) +
+      (task.totalOutputTokens ?? 0) +
+      (task.totalCacheReadTokens ?? 0) +
+      (task.totalCacheWriteTokens ?? 0),
+    [
+      task.totalInputTokens,
+      task.totalOutputTokens,
+      task.totalCacheReadTokens,
+      task.totalCacheWriteTokens,
+    ],
   );
-  // Live context-size signal — the timeline's compact-banner reads
-  // this. Each runner usage event REPLACES `latestTurnInput/Output`,
-  // so this reflects the most recent turn's footprint (≈ current
-  // context). Falls back to the cumulative total only when no usage
-  // event has fired since this code shipped, so older data still
-  // shows a sensible-but-pessimistic value until the next turn.
+  // Live context-size signal. Never fall back to lifetime spend here:
+  // cumulative usage re-counts prior turns and can be millions of
+  // tokens while the current working context is small or unknown.
   const contextTokens = useMemo(() => {
     const inT = task.latestTurnInputTokens;
     const outT = task.latestTurnOutputTokens;
-    if (inT == null && outT == null) return totalTokens;
+    if (inT == null && outT == null) return 0;
     return (inT ?? 0) + (outT ?? 0);
-  }, [
-    task.latestTurnInputTokens,
-    task.latestTurnOutputTokens,
-    totalTokens,
-  ]);
+  }, [task.latestTurnInputTokens, task.latestTurnOutputTokens]);
   const isTerminal =
     task.status === "done" ||
     task.status === "failed" ||

@@ -831,7 +831,12 @@ export interface CommitMessageShape {
 
 export interface CommitMessageResult {
   message: string;
-  source: "claude" | "fallback-no-changes" | "fallback-empty-output" | "fallback-claude-error";
+  source:
+    | "claude"
+    | "codex"
+    | "fallback-no-changes"
+    | "fallback-empty-output"
+    | "fallback-claude-error";
   error?: string;
 }
 
@@ -978,7 +983,14 @@ export async function generateCommitMessage(
       },
     );
     const out = await new Response(proc.stdout).text();
-    await proc.exited;
+    const code = await proc.exited;
+    if (code !== 0) {
+      return {
+        message: COMMIT_FALLBACK(opts.fallbackHint ?? ""),
+        source: "fallback-claude-error",
+        error: `helper exited ${code}`,
+      };
+    }
     const cleaned = cleanCommitOutput(out);
     if (!cleaned) {
       const stat = await readDiffStat(cwd, opts.baseRef);
@@ -992,7 +1004,7 @@ export async function generateCommitMessage(
       };
     }
     void diffSource;
-    return { message: cleaned, source: "claude" };
+    return { message: cleaned, source: opts.helper?.agent ?? "claude" };
   } catch (e) {
     return {
       message: COMMIT_FALLBACK(opts.fallbackHint ?? ""),
@@ -1072,7 +1084,7 @@ export async function* streamCommitMessage(
       source: "fallback-empty-output",
     };
   }
-  return { message: cleaned, source: "claude" };
+  return { message: cleaned, source: opts.helper?.agent ?? "claude" };
 }
 
 /* ── PR title + body generator ─────────────────────────────────────── */
@@ -1093,7 +1105,12 @@ export interface PrMessageResult {
   title: string;
   /** Markdown body, ready for `gh pr create --body`. */
   body: string;
-  source: "claude" | "fallback-no-changes" | "fallback-empty-output" | "fallback-claude-error";
+  source:
+    | "claude"
+    | "codex"
+    | "fallback-no-changes"
+    | "fallback-empty-output"
+    | "fallback-claude-error";
   error?: string;
 }
 
@@ -1196,7 +1213,7 @@ export async function* streamPrMessage(
       source: "fallback-empty-output",
     };
   }
-  return { ...split, source: "claude" };
+  return { ...split, source: opts.helper?.agent ?? "claude" };
 }
 
 function slugifyTitle(s: string): string {
@@ -2669,7 +2686,7 @@ export interface JudgeCandidate {
 export interface JudgeVerdict {
   winnerId: string;
   explanation: string;
-  source: "claude" | "fallback";
+  source: "claude" | "codex" | "fallback";
   error?: string;
 }
 
@@ -2752,7 +2769,7 @@ export async function runJudge(
         return {
           winnerId: target.id,
           explanation: m[2]!.trim().slice(0, 240),
-          source: "claude",
+          source: opts.helper?.agent ?? "claude",
         };
       }
     }
@@ -2791,7 +2808,7 @@ export interface BranchNameResult {
   prefix: BranchPrefix;
   /** Generated kebab-case slug, no prefix (e.g. "worktree-option"). */
   slug: string;
-  source: "claude" | "fallback";
+  source: "claude" | "codex" | "fallback";
   error?: string;
 }
 
@@ -2949,7 +2966,15 @@ export async function generateBranchName(
       env: process.env as Record<string, string>,
     });
     const out = await new Response(proc.stdout).text();
-    await proc.exited;
+    const code = await proc.exited;
+    if (code !== 0) {
+      return {
+        prefix: fallbackPrefix,
+        slug: deterministicSlug(trimmed),
+        source: "fallback",
+        error: `helper exited ${code}`,
+      };
+    }
     const raw = out
       .trim()
       .replace(/^```[a-z]*\n?|```$/g, "")
@@ -2982,7 +3007,7 @@ export async function generateBranchName(
         slug: deterministicSlug(trimmed),
         source: "fallback",
       };
-    return { prefix, slug: cleaned, source: "claude" };
+    return { prefix, slug: cleaned, source: opts.helper?.agent ?? "claude" };
   } catch (e) {
     return {
       prefix: fallbackPrefix,

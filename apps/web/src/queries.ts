@@ -271,18 +271,13 @@ export function useSendInput(taskId: string) {
   });
 }
 
-/**
- * Live snapshot of a task's running state + steer queue. Polls a small
- * tick because the queue mutates outside our control (chat plugin steer,
- * exit-time drain) and we don't want a stale UI.
- */
+/** Live snapshot of a task's running state + steer queue. */
 export function useTaskSteer(taskId: string) {
   const client = useClient();
   return useQuery({
     queryKey: ["task-steer", taskId] as const,
     queryFn: () => client.getTaskSteerState(taskId),
-    refetchInterval: 2_000,
-    staleTime: 1_500,
+    staleTime: 30_000,
     enabled: !!taskId,
   });
 }
@@ -805,6 +800,8 @@ export function useCompactTask(taskId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["taskContext", taskId] });
       void qc.invalidateQueries({ queryKey: qk.task(taskId) });
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+      void qc.invalidateQueries({ queryKey: ["task-steer", taskId] });
     },
   });
 }

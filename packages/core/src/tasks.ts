@@ -1,4 +1,4 @@
-import { eq, desc } from "drizzle-orm";
+import { and, desc, eq, lt } from "drizzle-orm";
 import type {
   Message,
   MirrorTarget,
@@ -152,6 +152,16 @@ export function markTaskCompacted(db: Db, id: string): Task | null {
     .where(eq(tasks.id, id))
     .run();
   return getTask(db, id);
+}
+
+export function pruneTaskMessagesBefore(
+  db: Db,
+  taskId: string,
+  ts: number,
+): void {
+  db.delete(messages)
+    .where(and(eq(messages.taskId, taskId), lt(messages.ts, ts)))
+    .run();
 }
 
 /** Mark a task as closed with an optional reason ("merged" / "abandoned" / etc.). */
@@ -396,7 +406,7 @@ export function setTaskPrUrl(db: Db, id: string, prUrl: string): void {
 export function setTaskCodexThreadId(
   db: Db,
   id: string,
-  threadId: string,
+  threadId: string | null,
 ): void {
   db.update(tasks)
     .set({ codexThreadId: threadId, updatedAt: Date.now() })
@@ -447,9 +457,15 @@ export function addTaskUsage(db: Db, id: string, delta: UsageDelta): void {
   // task shows "live context = 44" because the only uncached chunk
   // is the new user prompt — the rest came from the prompt cache.
   // Codex reports the same shape (`cached_input_tokens`).
-  if (delta.inputTokens != null || delta.cacheReadTokens != null) {
+  if (
+    delta.inputTokens != null ||
+    delta.cacheReadTokens != null ||
+    delta.cacheWriteTokens != null
+  ) {
     patch.latestTurnInputTokens =
-      (delta.inputTokens ?? 0) + (delta.cacheReadTokens ?? 0);
+      (delta.inputTokens ?? 0) +
+      (delta.cacheReadTokens ?? 0) +
+      (delta.cacheWriteTokens ?? 0);
   }
   if (delta.outputTokens != null) {
     patch.latestTurnOutputTokens = delta.outputTokens;
