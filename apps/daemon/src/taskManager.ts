@@ -1212,24 +1212,37 @@ export class TaskManager {
       // switch cases keep working untouched. Lets the timeline
       // group sub-agent tool_uses under their dispatching Task /
       // collab tool row instead of laying them flat.
-      const augmentedArgs =
-        (event.parentToolUseId || event.toolUseId) &&
+      //
+      // `codex_diff` (the synthetic unified-diff text the codex
+      // enrichment attaches for inline diff rendering) gets dropped
+      // from the persisted body — it can be ~30KB per file edit and
+      // anything that reads message history end-to-end (the `agentd
+      // show` / `agentd attach` history dump, future MCP servers,
+      // operator-side LLMs ingesting via stdout) was inhaling those
+      // diffs and blowing past its context window. The live bus
+      // event below still carries `codex_diff` so the web's inline
+      // diff renders during the run; on reload we just lose the
+      // inline body for codex rows, which falls back to a plain
+      // file-edit row with the +N/-M pill.
+      const persistedArgs =
         event.args &&
         typeof event.args === "object" &&
         !Array.isArray(event.args)
-          ? {
-              ...(event.args as Record<string, unknown>),
-              ...(event.parentToolUseId
-                ? { _agentdParent: event.parentToolUseId }
-                : {}),
-              ...(event.toolUseId ? { _agentdToolId: event.toolUseId } : {}),
-            }
+          ? (() => {
+              const { codex_diff: _diff, ...rest } = event.args as Record<
+                string,
+                unknown
+              >;
+              if (event.parentToolUseId) rest._agentdParent = event.parentToolUseId;
+              if (event.toolUseId) rest._agentdToolId = event.toolUseId;
+              return rest;
+            })()
           : event.args;
       appendMessage(
         this.db,
         taskId,
         "tool",
-        `[call ${event.tool}] ${JSON.stringify(augmentedArgs).slice(0, 32_000)}`,
+        `[call ${event.tool}] ${JSON.stringify(persistedArgs).slice(0, 32_000)}`,
       );
       // TodoWrite (claude) / update_plan (codex) carries the agent's
       // current plan. Mirror it into the todos table tagged source=agent
