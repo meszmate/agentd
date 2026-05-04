@@ -238,12 +238,31 @@ export function TaskDetail({ task }: { task: Task }) {
           return;
         }
         setLastToolHint(`→ ${event.tool}`);
-        // Persist in the same `[call <tool>] <argsJson>` shape the daemon
-        // writes server-side so the ToolLine renderer treats live + history
-        // identically.
+        // Persist in the EXACT shape the daemon writes server-side so
+        // the dedup against re-fetched messages (line ~167's
+        // `s.content === m.content` check) actually matches. The
+        // daemon injects `_agentdParent` / `_agentdToolId` into args
+        // for swarm nesting; replicating that here keeps the local
+        // tmp_ row from doubling with its persisted twin once the
+        // server message lands.
+        const liveArgs =
+          (event.parentToolUseId || event.toolUseId) &&
+          event.args &&
+          typeof event.args === "object" &&
+          !Array.isArray(event.args)
+            ? {
+                ...(event.args as Record<string, unknown>),
+                ...(event.parentToolUseId
+                  ? { _agentdParent: event.parentToolUseId }
+                  : {}),
+                ...(event.toolUseId
+                  ? { _agentdToolId: event.toolUseId }
+                  : {}),
+              }
+            : event.args;
         appendLocal(
           "tool",
-          `[call ${event.tool}] ${JSON.stringify(event.args ?? {})}`,
+          `[call ${event.tool}] ${JSON.stringify(liveArgs ?? {}).slice(0, 32_000)}`,
         );
         // tool_result events are intentionally dropped from the timeline —
         // the result of "Read foo.ts" is the file contents, which was the
