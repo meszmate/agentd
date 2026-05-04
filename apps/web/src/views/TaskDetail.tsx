@@ -128,17 +128,6 @@ export function TaskDetail({ task }: { task: Task }) {
    */
   const [streams, setStreams] = useState<Record<string, string>>({});
   /**
-   * In-flight tool calls — accumulates `tool_input_delta` partial JSON
-   * keyed by `toolUseId`. The web extracts a streaming preview (file
-   * path + content for Edit/Write, raw JSON otherwise) so the operator
-   * sees what the agent is currently writing while the model is still
-   * mid-call. Dropped when the matching `tool_call` event lands with
-   * the complete args, OR when the turn ends.
-   */
-  const [liveTools, setLiveTools] = useState<
-    Record<string, { name: string; partial: string }>
-  >({});
-  /**
    * Latest TodoWrite / update_plan snapshot from the agent. Replaced
    * wholesale on each tool call (those tools always send the full plan,
    * not deltas).
@@ -242,33 +231,7 @@ export function TaskDetail({ task }: { task: Task }) {
           delete next[event.streamId];
           return next;
         });
-      } else if (event.kind === "tool_input_delta") {
-        // Live partial-JSON for an in-flight tool call. Accumulate per
-        // toolUseId; the timeline renders a streaming "currently writing"
-        // preview while the call assembles. Dropped on the matching
-        // tool_call (below) or on turn end (cleanup effects further down).
-        setLiveTools((prev) => {
-          const cur = prev[event.toolUseId];
-          return {
-            ...prev,
-            [event.toolUseId]: {
-              name: event.toolName,
-              partial: (cur?.partial ?? "") + event.delta,
-            },
-          };
-        });
       } else if (event.kind === "tool_call") {
-        // Drop the live in-flight entry — the persisted tool row now
-        // carries the complete args.
-        if (event.toolUseId) {
-          const id = event.toolUseId;
-          setLiveTools((prev) => {
-            if (!(id in prev)) return prev;
-            const next = { ...prev };
-            delete next[id];
-            return next;
-          });
-        }
         // Intercept the agent's plan tools — render them as a structured
         // checklist instead of a wall of JSON. Both Claude (TodoWrite)
         // and Codex (update_plan) send the full snapshot per call.
@@ -360,7 +323,6 @@ export function TaskDetail({ task }: { task: Task }) {
       task.status === "waiting_perm";
     if (stillRunning) return;
     setStreams((cur) => (Object.keys(cur).length === 0 ? cur : {}));
-    setLiveTools((cur) => (Object.keys(cur).length === 0 ? cur : {}));
     setLastToolHint((cur) => (cur === null ? cur : null));
     setTurn((cur) =>
       cur.startedAt === null ? cur : { startedAt: null, tokens: cur.tokens },
@@ -419,7 +381,6 @@ export function TaskDetail({ task }: { task: Task }) {
   useEffect(() => {
     if (isRunning) return;
     setStreams((prev) => (Object.keys(prev).length ? {} : prev));
-    setLiveTools((prev) => (Object.keys(prev).length ? {} : prev));
     setTurn((cur) => (cur.startedAt == null ? cur : { startedAt: null, tokens: cur.tokens }));
     setLastToolHint((cur) => (cur == null ? cur : null));
   }, [isRunning]);
@@ -723,7 +684,6 @@ export function TaskDetail({ task }: { task: Task }) {
                 disabled={isRunning}
                 lastToolHint={lastToolHint}
                 streams={streams}
-                liveTools={liveTools}
                 totalTokens={contextTokens}
                 turn={turn}
                 plan={plan}
@@ -732,14 +692,7 @@ export function TaskDetail({ task }: { task: Task }) {
             </Panel>
             <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-ember-500/40 transition-colors dark:bg-ink-50/10" />
             <Panel id={`ws-${task.id}`} defaultSize={48} minSize={28}>
-              <TaskWorkspace
-                task={task}
-                onError={onError}
-                plan={plan}
-                planUpdatedAt={planUpdatedAt}
-                messages={messages}
-                liveTools={liveTools}
-              />
+              <TaskWorkspace task={task} onError={onError} plan={plan} planUpdatedAt={planUpdatedAt} />
             </Panel>
           </PanelGroup>
         ) : (

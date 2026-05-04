@@ -24,7 +24,6 @@ import { useApp, useClient } from "@/AppContext";
 import { cn, formatTokens, formatTs } from "@/lib/utils";
 import { CodeBlock } from "@/components/code-block";
 import { ToolLine, WorkCard, pairToolEvents } from "@/components/tool-line";
-import { LiveToolCard } from "@/components/live-tool-card";
 import type { TaskPlanItem } from "@/views/TaskPlan";
 import {
   useFireQueuedSteer,
@@ -56,7 +55,6 @@ export function TaskTimeline({
   disabled,
   lastToolHint,
   streams,
-  liveTools,
   totalTokens,
   contextWindow,
   turn,
@@ -73,13 +71,6 @@ export function TaskTimeline({
   lastToolHint?: string | null;
   /** In-flight streaming text per content-block, keyed by streamId. */
   streams?: Record<string, string>;
-  /**
-   * In-flight tool calls — live partial JSON per `toolUseId`, captured
-   * from `tool_input_delta` events. Renders as a transient "currently
-   * writing" card above the thinking pulse so the operator sees the
-   * file content streaming as the model assembles its Edit/Write call.
-   */
-  liveTools?: Record<string, { name: string; partial: string }>;
   /** Total tokens used in this conversation so far. */
   totalTokens?: number;
   /** Model context window (default 200_000). */
@@ -120,7 +111,6 @@ export function TaskTimeline({
   };
 
   const streamEntries = streams ? Object.entries(streams) : [];
-  const liveToolEntries = liveTools ? Object.entries(liveTools) : [];
 
   // Group walking is O(n) over messages; computing it once per change
   // beats the original code path which called groupTaskMessages twice
@@ -347,25 +337,7 @@ export function TaskTimeline({
                   </div>
                 </li>
               ))}
-              {/* Live in-flight tool input — claude-code-style preview of
-                  the file being currently written, fed by `tool_input_delta`
-                  events. Shown alongside any streaming text bubbles above.
-                  Disappears the moment the matching `tool_call` lands. */}
-              {liveToolEntries.map(([id, t]) => (
-                <li key={`live-tool:${id}`}>
-                  <div className="flex items-start gap-2.5">
-                    <span className="shrink-0 mt-0.5 font-mono text-[14px] font-semibold leading-none text-ember-500 animate-blink select-none">
-                      λ
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <LiveToolCard toolName={t.name} partial={t.partial} />
-                    </div>
-                  </div>
-                </li>
-              ))}
-              {busy &&
-                streamEntries.length === 0 &&
-                liveToolEntries.length === 0 && (
+              {busy && streamEntries.length === 0 && (
                 <li>
                   <div className="flex items-start gap-2.5">
                     <span className="shrink-0 mt-0.5 font-mono text-[14px] font-semibold leading-none text-ember-500 animate-blink select-none">

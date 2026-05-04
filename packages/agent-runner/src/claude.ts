@@ -48,12 +48,7 @@ interface ClaudeStreamMessage {
     type?: string;
     index?: number;
     delta?: { type?: string; text?: string; partial_json?: string };
-    content_block?: {
-      type?: string;
-      index?: number;
-      id?: string;
-      name?: string;
-    };
+    content_block?: { type?: string; index?: number };
     [key: string]: unknown;
   };
   [key: string]: unknown;
@@ -246,18 +241,6 @@ export class ClaudeRunner implements AgentRunner {
   private streamId(index: number): string {
     return `cb-${index}`;
   }
-  /**
-   * Per-content-block tool_use metadata captured at `content_block_start`,
-   * so the matching `input_json_delta` events can carry `toolUseId` +
-   * `toolName` to the web before the final assistant `tool_use` block
-   * arrives at block_stop. Cleared on block_stop. Without this map the
-   * deltas would be unattributable — the web couldn't tell which in-flight
-   * tool a partial-JSON chunk belongs to.
-   */
-  private toolBlocks = new Map<
-    number,
-    { id: string; name: string; parentToolUseId?: string }
-  >();
 
   private handleStdoutLine(line: string): void {
     let parsed: ClaudeStreamMessage | null = null;
@@ -274,27 +257,10 @@ export class ClaudeRunner implements AgentRunner {
     // ── Partial-message events (--include-partial-messages) ──
     if (type === "stream_event" && parsed.event) {
       const ev = parsed.event;
-      // Sub-agent (Task tool) partials carry parent_tool_use_id at the
-      // top level so swarm-nested live previews can hang off the right
-      // parent row in the timeline.
-      const parentToolUseId =
-        typeof parsed.parent_tool_use_id === "string"
-          ? parsed.parent_tool_use_id
-          : undefined;
       if (ev.type === "content_block_start") {
         const idx = Number(ev.index ?? 0);
         if (ev.content_block?.type === "text") {
           this.streamBuf.set(idx, "");
-        } else if (
-          ev.content_block?.type === "tool_use" &&
-          typeof ev.content_block.id === "string" &&
-          typeof ev.content_block.name === "string"
-        ) {
-          this.toolBlocks.set(idx, {
-            id: ev.content_block.id,
-            name: ev.content_block.name,
-            ...(parentToolUseId ? { parentToolUseId } : {}),
-          });
         }
       } else if (ev.type === "content_block_delta") {
         const idx = Number(ev.index ?? 0);
@@ -306,22 +272,6 @@ export class ClaudeRunner implements AgentRunner {
             streamId: this.streamId(idx),
             delta: ev.delta.text,
           });
-        } else if (
-          ev.delta?.type === "input_json_delta" &&
-          typeof ev.delta.partial_json === "string"
-        ) {
-          const meta = this.toolBlocks.get(idx);
-          if (meta) {
-            this.emit({
-              kind: "tool_input_delta",
-              toolUseId: meta.id,
-              toolName: meta.name,
-              delta: ev.delta.partial_json,
-              ...(meta.parentToolUseId
-                ? { parentToolUseId: meta.parentToolUseId }
-                : {}),
-            });
-          }
         }
       } else if (ev.type === "content_block_stop") {
         const idx = Number(ev.index ?? 0);
@@ -329,14 +279,12 @@ export class ClaudeRunner implements AgentRunner {
           this.emit({ kind: "message_end", streamId: this.streamId(idx) });
           this.streamBuf.delete(idx);
         }
-        this.toolBlocks.delete(idx);
       } else if (ev.type === "message_stop") {
         // Backstop — flush any leftover streams that didn't get a stop.
         for (const idx of this.streamBuf.keys()) {
           this.emit({ kind: "message_end", streamId: this.streamId(idx) });
         }
         this.streamBuf.clear();
-        this.toolBlocks.clear();
       }
       return;
     }

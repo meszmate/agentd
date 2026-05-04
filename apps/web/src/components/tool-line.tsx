@@ -853,7 +853,7 @@ function shortPath(p: string): string {
 }
 
 /** Best-effort filename → prism language. Falls through to "tsx". */
-export function langFromPath(p: string): string {
+function langFromPath(p: string): string {
   const ext = p.split(".").pop()?.toLowerCase() ?? "";
   switch (ext) {
     case "ts":

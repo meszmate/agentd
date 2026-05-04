@@ -418,23 +418,6 @@ export const AgentEvent = z.discriminatedUnion("kind", [
     kind: z.literal("message_end"),
     streamId: z.string(),
   }),
-  /**
-   * Partial-JSON delta for a tool_use input that's still being assembled.
-   * Anthropic's stream emits these as `content_block_delta` events with
-   * `delta.type=input_json_delta` while the model is mid-call. The web
-   * accumulates per `toolUseId` and renders a live "currently writing"
-   * preview (file path + content for Edit/Write, raw JSON otherwise),
-   * mirroring claude-code's terminal UX. The entry is dropped once the
-   * matching `tool_call` event lands with the same id and the complete
-   * args. Ephemeral — daemon forwards but doesn't persist.
-   */
-  z.object({
-    kind: z.literal("tool_input_delta"),
-    toolUseId: z.string(),
-    toolName: z.string(),
-    delta: z.string(),
-    parentToolUseId: z.string().optional(),
-  }),
   z.object({
     kind: z.literal("tool_call"),
     tool: z.string(),

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from "react";
-import type { Message, Task } from "@agentd/contracts";
+import type { Task } from "@agentd/contracts";
 import {
   Tabs,
   TabsContent,
@@ -10,7 +10,6 @@ import { TaskFiles } from "@/views/TaskFiles";
 import { TaskDiff } from "@/views/TaskDiff";
 import { TaskLog } from "@/views/TaskLog";
 import { TaskContext } from "@/views/TaskContext";
-import { TaskActivity } from "@/views/TaskActivity";
 import type { TaskPlanItem } from "@/views/TaskPlan";
 import { TodosPanel } from "@/components/todos-panel";
 
@@ -18,14 +17,12 @@ const Terminal = lazy(() =>
   import("./Terminal").then((m) => ({ default: m.Terminal })),
 );
 
-type Tab = "diff" | "live" | "todos" | "files" | "log" | "term" | "context";
+type Tab = "diff" | "todos" | "files" | "log" | "term" | "context";
 
 export function TaskWorkspace({
   task,
   onError,
   plan,
-  messages,
-  liveTools,
 }: {
   task: Task;
   onError: (m: string) => void;
@@ -33,10 +30,6 @@ export function TaskWorkspace({
   plan?: TaskPlanItem[];
   /** Kept for back-compat; no longer rendered. */
   planUpdatedAt?: number | null;
-  /** Persisted message stream — feeds the Live activity tab. */
-  messages?: Message[];
-  /** In-flight tool calls being streamed by the model. */
-  liveTools?: Record<string, { name: string; partial: string }>;
 }) {
   const [tab, setTab] = useState<Tab>("diff");
 
@@ -57,14 +50,6 @@ export function TaskWorkspace({
               <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
                 Diff
               </span>
-            </TabsTrigger>
-            <TabsTrigger value="live" variant="stretch">
-              <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
-                Live
-              </span>
-              {liveTools && Object.keys(liveTools).length > 0 && (
-                <span className="ml-1.5 h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink" />
-              )}
             </TabsTrigger>
             <TabsTrigger value="todos" variant="stretch">
               <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
@@ -115,12 +100,6 @@ export function TaskWorkspace({
         </TabsContent>
         <TabsContent value="diff" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskDiff taskId={task.id} />
-        </TabsContent>
-        <TabsContent value="live" className="flex-1 min-h-0 mt-0 overflow-hidden">
-          <TaskActivity
-            messages={messages ?? []}
-            liveTools={liveTools ?? {}}
-          />
         </TabsContent>
         <TabsContent value="log" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskLog taskId={task.id} onError={onError} />
