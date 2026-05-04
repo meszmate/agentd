@@ -1942,7 +1942,20 @@ export class AgentdClient {
         }[];
       };
     };
-    conversation: { used: number; window: number };
+    conversation: {
+      /** Live context size (latest turn's input + output). */
+      used: number;
+      /** Model's context window. */
+      window: number;
+      /** True when `used` is sourced from the per-turn signal; false
+       *  when we fell back to the lifetime cumulative because the
+       *  task hasn't logged a usage event since this code shipped. */
+      liveTurn?: boolean;
+      /** Lifetime billing total (sum of every turn's input+output).
+       *  Never decreases; shown alongside `used` so the operator can
+       *  see both "current context" and "lifetime spend". */
+      cumulative?: number;
+    };
   }> {
     return this.req(`/api/tasks/${encodeURIComponent(id)}/context`);
   }

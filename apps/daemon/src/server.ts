@@ -1598,12 +1598,29 @@ export function buildServer(opts: BuildServerOptions) {
       }
     }
 
-    // Conversation usage estimate — totalInput + totalOutput tokens reported
-    // by the agent stream. Window: assume 200k Sonnet/Codex unless we know
-    // better. Used by the UI to render a usage bar / warn at 80%.
-    const conversationTokens =
+    // Conversation usage — the LIVE context size (most recent turn's
+    // input + output reported by the runner), NOT the cumulative
+    // billing total. Cumulative sums every turn forever, so a
+    // task with 4 turns of 50K context each shows 200K used when
+    // the agent's actual context is just 50K. Falls back to the
+    // cumulative for old rows that never recorded a per-turn value.
+    //
+    // Keeping the same formula the timeline's compact-banner uses
+    // (`apps/web/src/views/TaskDetail.tsx` → `contextTokens`) so the
+    // header donut, the chat banner, and this Context tab all agree.
+    const liveTurnTokens =
+      task.latestTurnInputTokens != null || task.latestTurnOutputTokens != null
+        ? (task.latestTurnInputTokens ?? 0) + (task.latestTurnOutputTokens ?? 0)
+        : null;
+    const cumulativeTokens =
       (task.totalInputTokens ?? 0) + (task.totalOutputTokens ?? 0);
-    const conversationWindow = 200_000;
+    const conversationTokens = liveTurnTokens ?? cumulativeTokens;
+    // Per-agent context window. Claude Sonnet/Opus 4: 200K. Codex
+    // (GPT-5 family) defaults to 200K too, though specific models
+    // can run higher. Keep a single number for now; future work can
+    // resolve from cfg.models metadata if operators want to express
+    // a non-standard window.
+    const conversationWindow = task.agent === "codex" ? 200_000 : 200_000;
 
     // The catalog actually injected at spawn time (names + paths, no bodies).
     const skillsCatalog = renderSkillsCatalog(task.skills ?? [], {
@@ -1633,6 +1650,15 @@ export function buildServer(opts: BuildServerOptions) {
       conversation: {
         used: conversationTokens,
         window: conversationWindow,
+        // True when we couldn't pin the most recent turn's footprint
+        // and fell back to the lifetime cumulative — the UI shows a
+        // hint so the operator knows the % is a worst-case estimate
+        // until the next turn rewrites the gauge.
+        liveTurn: liveTurnTokens != null,
+        // Separate billing-style total — never decreases. Lets the
+        // tab surface "current context" + "lifetime spend" without
+        // conflating them.
+        cumulative: cumulativeTokens,
       },
     });
   });
