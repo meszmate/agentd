@@ -309,6 +309,26 @@ export function TaskDetail({ task }: { task: Task }) {
 
   const { live } = useTaskStream(task.id, handleEvent);
 
+  // Server status is the source of truth. The per-task WS events above
+  // settle local "in-flight" state (streams, lastToolHint, turn.startedAt)
+  // on the happy path, but a dropped/buffered status or message_end event
+  // would leave the "agent is thinking" pulse and any orphaned streaming
+  // bubble visible until a tab switch forces a refetch. Once the realtime
+  // bus pushes task_updated and task.status leaves the running set, force
+  // the local in-flight state to settle in lockstep.
+  useEffect(() => {
+    const stillRunning =
+      task.status === "running" ||
+      task.status === "waiting_input" ||
+      task.status === "waiting_perm";
+    if (stillRunning) return;
+    setStreams((cur) => (Object.keys(cur).length === 0 ? cur : {}));
+    setLastToolHint((cur) => (cur === null ? cur : null));
+    setTurn((cur) =>
+      cur.startedAt === null ? cur : { startedAt: null, tokens: cur.tokens },
+    );
+  }, [task.status]);
+
   // Cumulative billing-style total (never decreases) — shown in the
   // task header chip + cost summaries.
   const totalTokens = useMemo(
