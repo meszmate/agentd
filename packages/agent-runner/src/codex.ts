@@ -472,6 +472,7 @@ export class CodexRunner implements AgentRunner {
           kind: "tool_call",
           tool: "Bash",
           args: { command: ci.command },
+          toolUseId: itemId,
         });
       }
       if (isCompleted) {
@@ -490,6 +491,7 @@ export class CodexRunner implements AgentRunner {
           tool: "Bash",
           ok,
           output: display,
+          ...(itemId ? { toolUseId: itemId } : {}),
         });
       }
       return;
@@ -509,6 +511,7 @@ export class CodexRunner implements AgentRunner {
           tool: "Edit",
           ok: fci.status !== "failed",
           output: fci.status === "failed" ? "(patch failed)" : "(no changes)",
+          ...(itemId ? { toolUseId: itemId } : {}),
         });
         return;
       }
@@ -520,21 +523,32 @@ export class CodexRunner implements AgentRunner {
       // claude's Edit/Write rows already use. The matching
       // tool_result on each row carries the same overall status,
       // since the patch succeeded or failed as a unit.
+      //
+      // toolUseId is per-file (`<item.id>_f<idx>`) so the web's
+      // pair-by-id can match each row's call to its own result. If
+      // we shared item.id across rows, only the first row would
+      // pair by id and the rest would fall back to positional.
+      // Underscore separator (not `#`) so the daemon's persisted
+      // `[result … u:<id>]` regex (`[A-Za-z0-9_-]+`) round-trips
+      // the id back on reload.
       const ok = fci.status !== "failed";
-      for (const c of changes) {
+      changes.forEach((c, idx) => {
         const tool = c.kind === "add" ? "Write" : "Edit";
+        const rowId = itemId ? `${itemId}_f${idx}` : "";
         this.emit({
           kind: "tool_call",
           tool,
           args: { file_path: c.path, codex_change_kind: c.kind },
+          ...(rowId ? { toolUseId: rowId } : {}),
         });
         this.emit({
           kind: "tool_result",
           tool,
           ok,
           output: ok ? `${c.kind} ${c.path}` : `(patch failed) ${c.kind} ${c.path}`,
+          ...(rowId ? { toolUseId: rowId } : {}),
         });
-      }
+      });
       return;
     }
 
@@ -548,6 +562,7 @@ export class CodexRunner implements AgentRunner {
           kind: "tool_call",
           tool: "WebSearch",
           args: { query: ws.query ?? "", action: ws.action ?? null },
+          toolUseId: itemId,
         });
       }
       if (isCompleted) {
@@ -556,6 +571,7 @@ export class CodexRunner implements AgentRunner {
           tool: "WebSearch",
           ok: true,
           output: ws.query ? `searched: ${ws.query}` : "(searched)",
+          ...(itemId ? { toolUseId: itemId } : {}),
         });
       }
       return;
@@ -579,6 +595,7 @@ export class CodexRunner implements AgentRunner {
         kind: "tool_call",
         tool: "TodoWrite",
         args: { todos },
+        ...(itemId ? { toolUseId: itemId } : {}),
       });
       if (isCompleted) {
         this.emit({
@@ -586,6 +603,7 @@ export class CodexRunner implements AgentRunner {
           tool: "TodoWrite",
           ok: true,
           output: `${todos.length} todo${todos.length === 1 ? "" : "s"}`,
+          ...(itemId ? { toolUseId: itemId } : {}),
         });
       }
       return;
@@ -603,6 +621,7 @@ export class CodexRunner implements AgentRunner {
           kind: "tool_call",
           tool: toolName,
           args: mc.arguments ?? {},
+          toolUseId: itemId,
         });
       }
       if (isCompleted) {
@@ -612,9 +631,15 @@ export class CodexRunner implements AgentRunner {
             tool: toolName,
             ok: false,
             output: mc.error.message,
+            ...(itemId ? { toolUseId: itemId } : {}),
           });
         } else {
-          // Best-effort string render of the result content.
+          // Best-effort string render of the result content. We cap
+          // structured_content/content arrays at ~6KB before they hit
+          // the bus (and another 1500-char clamp at persist time in
+          // taskManager) — uncapped, a single MCP call returning a
+          // big JSON blob can blow up the operator's context budget
+          // without giving them anything useful to read.
           let out = "";
           if (mc.result?.structured_content != null) {
             out = JSON.stringify(mc.result.structured_content, null, 2);
@@ -627,11 +652,15 @@ export class CodexRunner implements AgentRunner {
           } else {
             out = mc.status === "failed" ? "(failed)" : "(ok)";
           }
+          if (out.length > 6000) {
+            out = out.slice(0, 6000) + `\n… (${out.length - 6000} more chars truncated)`;
+          }
           this.emit({
             kind: "tool_result",
             tool: toolName,
             ok: mc.status !== "failed",
             output: out,
+            ...(itemId ? { toolUseId: itemId } : {}),
           });
         }
       }
@@ -650,6 +679,7 @@ export class CodexRunner implements AgentRunner {
             kind: "tool_call",
             tool: "Error",
             args: {},
+            toolUseId: itemId,
           });
         }
         this.emit({
@@ -657,6 +687,7 @@ export class CodexRunner implements AgentRunner {
           tool: "Error",
           ok: false,
           output: ie.message ?? "error",
+          ...(itemId ? { toolUseId: itemId } : {}),
         });
       }
       return;
@@ -674,6 +705,7 @@ export class CodexRunner implements AgentRunner {
           kind: "tool_call",
           tool: generic.type,
           args: generic,
+          toolUseId: itemId,
         });
       }
       if (isCompleted) {
@@ -682,6 +714,7 @@ export class CodexRunner implements AgentRunner {
           tool: generic.type,
           ok: true,
           output: "(completed)",
+          ...(itemId ? { toolUseId: itemId } : {}),
         });
       }
     }

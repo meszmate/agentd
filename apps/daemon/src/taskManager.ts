@@ -1273,8 +1273,21 @@ export class TaskManager {
       // <tool> ok|err] <output>`. Optional `p:<parentId>` /
       // `u:<toolUseId>` segments carry swarm-tree info — they're
       // strict regex-anchored so legacy rows still parse cleanly.
+      //
+      // The persisted output is clamped to 1500 chars (down from 4000)
+      // so a codex run that fires ~100+ tool calls doesn't push the
+      // task's persisted history into the hundreds-of-KB range. A
+      // typical bash stdout, MCP result, or error blurb fits well
+      // under this; large compile/test dumps get a clear `(N more
+      // chars truncated)` marker so the operator knows to scroll the
+      // live event for the full text.
       const okFlag = event.ok ? "ok" : "err";
-      const trimmed = event.output.slice(0, 4000);
+      const PERSIST_LIMIT = 1500;
+      const raw = event.output;
+      const trimmed =
+        raw.length > PERSIST_LIMIT
+          ? `${raw.slice(0, PERSIST_LIMIT)}\n… (${raw.length - PERSIST_LIMIT} more chars truncated)`
+          : raw;
       const meta = [
         event.parentToolUseId ? `p:${event.parentToolUseId}` : null,
         event.toolUseId ? `u:${event.toolUseId}` : null,
