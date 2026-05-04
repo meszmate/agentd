@@ -542,6 +542,7 @@ export function pairToolEvents(
     input?: unknown;
     ok?: boolean;
     preview?: string;
+    toolUseId?: string;
   }>,
 ): Array<{
   name: string;
@@ -550,6 +551,17 @@ export function pairToolEvents(
   ok: boolean;
   running: boolean;
 }> {
+  // Build an id → result lookup so we can pair by id when claude
+  // batches several tool_uses then several tool_results in one turn
+  // (positional pairing alone breaks because the indexes don't line
+  // up — Use1, Use2, Result2, Result1 is a real shape claude emits).
+  const resultById = new Map<string, (typeof events)[number]>();
+  for (const ev of events) {
+    if (ev.kind === "tool_result" && typeof ev.toolUseId === "string") {
+      resultById.set(ev.toolUseId, ev);
+    }
+  }
+  const consumedIds = new Set<string>();
   const out: Array<{
     name: string;
     input: unknown;
@@ -560,8 +572,21 @@ export function pairToolEvents(
   for (let i = 0; i < events.length; i++) {
     const ev = events[i]!;
     if (ev.kind !== "tool_use" || typeof ev.name !== "string") continue;
-    const next = events[i + 1];
-    const matched = next && next.kind === "tool_result" ? next : null;
+    let matched: (typeof events)[number] | null = null;
+    if (ev.toolUseId && resultById.has(ev.toolUseId)) {
+      matched = resultById.get(ev.toolUseId)!;
+      consumedIds.add(ev.toolUseId);
+    } else {
+      // Fall back to the next tool_result not yet claimed by an id pair.
+      for (let j = i + 1; j < events.length; j++) {
+        const cand = events[j]!;
+        if (cand.kind !== "tool_result") continue;
+        if (cand.toolUseId && consumedIds.has(cand.toolUseId)) continue;
+        matched = cand;
+        if (cand.toolUseId) consumedIds.add(cand.toolUseId);
+        break;
+      }
+    }
     out.push({
       name: ev.name,
       input: ev.input,

@@ -577,13 +577,41 @@ const TaskComposer = memo(function TaskComposer({
  */
 function parseToolResultMessage(
   content: string,
-): { tool: string; ok: boolean; output: string } | null {
-  const m = content.match(/^\[result ([^\s\]]+) (ok|err)\]\s*([\s\S]*)$/);
+): {
+  tool: string;
+  ok: boolean;
+  output: string;
+  toolUseId?: string;
+  parentToolUseId?: string;
+} | null {
+  // Accept the legacy `[result <tool> ok|err]` shape AND the swarm-aware
+  // shape `[result <tool> ok|err p:<parentId> u:<toolUseId>]` where the
+  // metadata segment is optional and the two ids may appear in either
+  // order. Earlier the regex only matched the legacy shape, so any
+  // claude turn that emitted ids fell through and rendered as a raw
+  // system row in the chat (e.g. "[result (result) ok u:toolu_X] 225 :
+  // p, 226 …").
+  const m = content.match(
+    /^\[result ([^\s\]]+) (ok|err)((?:\s+(?:[pu]):[A-Za-z0-9_-]+)*)\]\s*([\s\S]*)$/,
+  );
   if (!m) return null;
+  const meta = m[3] ?? "";
+  let toolUseId: string | undefined;
+  let parentToolUseId: string | undefined;
+  for (const seg of meta.trim().split(/\s+/).filter(Boolean)) {
+    const colon = seg.indexOf(":");
+    if (colon < 0) continue;
+    const key = seg.slice(0, colon);
+    const value = seg.slice(colon + 1);
+    if (key === "p") parentToolUseId = value;
+    else if (key === "u") toolUseId = value;
+  }
   return {
     tool: m[1]!,
     ok: m[2] === "ok",
-    output: m[3] ?? "",
+    output: m[4] ?? "",
+    ...(toolUseId ? { toolUseId } : {}),
+    ...(parentToolUseId ? { parentToolUseId } : {}),
   };
 }
 
@@ -615,6 +643,7 @@ function groupTaskMessages(messages: Message[]): TaskGroup[] {
     input?: unknown;
     ok?: boolean;
     preview?: string;
+    toolUseId?: string;
   }> = [];
   let bufFirstTs = 0;
   let bufKey = "";
@@ -636,11 +665,16 @@ function groupTaskMessages(messages: Message[]): TaskGroup[] {
     }
     const result = parseToolResultMessage(m.content);
     if (result) {
+      if (buf.length === 0) {
+        bufFirstTs = m.ts;
+        bufKey = `tools:${m.id}`;
+      }
       buf.push({
         kind: "tool_result",
         name: result.tool,
         ok: result.ok,
         preview: result.output,
+        ...(result.toolUseId ? { toolUseId: result.toolUseId } : {}),
       });
       continue;
     }
@@ -662,7 +696,22 @@ function groupTaskMessages(messages: Message[]): TaskGroup[] {
       bufFirstTs = m.ts;
       bufKey = `tools:${m.id}`;
     }
-    buf.push({ kind: "tool_use", name: callMatch[1]!.trim(), input });
+    // Pull the tool-use id the daemon injects into args so we can
+    // match this call with its result by id (positional pairing
+    // breaks when claude batches multiple tool_uses + results in
+    // one assistant turn — the order isn't guaranteed to interleave).
+    const callToolUseId =
+      input &&
+      typeof input === "object" &&
+      typeof (input as Record<string, unknown>)._agentdToolId === "string"
+        ? ((input as Record<string, unknown>)._agentdToolId as string)
+        : undefined;
+    buf.push({
+      kind: "tool_use",
+      name: callMatch[1]!.trim(),
+      input,
+      ...(callToolUseId ? { toolUseId: callToolUseId } : {}),
+    });
   }
   flushTools();
   return out;

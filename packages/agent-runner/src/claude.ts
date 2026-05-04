@@ -76,6 +76,15 @@ export class ClaudeRunner implements AgentRunner {
    * separate (`kind:"exit"`).
    */
   private inTurn = false;
+  /**
+   * Map of tool_use_id → tool name, populated from `assistant` events
+   * with `tool_use` blocks. When the matching `tool_result` shows up
+   * on the next `user` event, we look up the name here so the
+   * timeline can render `[result Bash ok …]` instead of an opaque
+   * `[result (result) ok …]` that the web's parser used to drop into
+   * the chat as a system row.
+   */
+  private toolUseNames = new Map<string, string>();
 
   constructor(private readonly opts: ClaudeRunnerOptions = {}) {}
 
@@ -303,6 +312,12 @@ export class ClaudeRunner implements AgentRunner {
             typeof (block as { id?: unknown }).id === "string"
               ? ((block as { id?: string }).id as string)
               : undefined;
+          // Remember the name keyed by id so the matching
+          // `tool_result` event can emit a real tool name instead of
+          // a generic placeholder. Without this lookup the result
+          // header reads `[result (result) ok …]` and the web's
+          // parser dumps it into the chat as a raw system row.
+          if (toolUseId) this.toolUseNames.set(toolUseId, block.name);
           this.emit({
             kind: "tool_call",
             tool: block.name,
@@ -340,9 +355,16 @@ export class ClaudeRunner implements AgentRunner {
             typeof content.content === "string"
               ? content.content
               : JSON.stringify(content.content ?? null);
+          // Look up the tool name from the call we saw earlier in
+          // this turn. Without this the timeline shows `[result
+          // (result) ok …]` for orphan rows.
+          const toolName =
+            (content.tool_use_id &&
+              this.toolUseNames.get(content.tool_use_id)) ||
+            "tool";
           this.emit({
             kind: "tool_result",
-            tool: "(result)",
+            tool: toolName,
             ok: !content.is_error,
             output: text,
             ...(content.tool_use_id ? { toolUseId: content.tool_use_id } : {}),

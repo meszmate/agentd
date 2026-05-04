@@ -433,8 +433,16 @@ export function addTaskUsage(db: Db, id: string, delta: UsageDelta): void {
           : null,
     updatedAt: Date.now(),
   };
-  if (delta.inputTokens != null) {
-    patch.latestTurnInputTokens = delta.inputTokens;
+  // For "live context size" we want the TOTAL the model loaded this
+  // turn, including cache reads. Claude bills `input_tokens` as
+  // *uncached* only and reports the cached portion separately as
+  // `cache_read_input_tokens`. Without summing them, an early-turn
+  // task shows "live context = 44" because the only uncached chunk
+  // is the new user prompt — the rest came from the prompt cache.
+  // Codex reports the same shape (`cached_input_tokens`).
+  if (delta.inputTokens != null || delta.cacheReadTokens != null) {
+    patch.latestTurnInputTokens =
+      (delta.inputTokens ?? 0) + (delta.cacheReadTokens ?? 0);
   }
   if (delta.outputTokens != null) {
     patch.latestTurnOutputTokens = delta.outputTokens;
