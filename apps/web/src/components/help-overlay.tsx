@@ -25,7 +25,6 @@ const GROUPS: { heading: string; items: { keys: string[]; label: string }[] }[] 
       { keys: ["g", "e"], label: "Templates" },
       { keys: ["g", "s"], label: "Schedules" },
       { keys: ["g", "k"], label: "Skills" },
-      { keys: ["g", "w"], label: "Tools" },
       { keys: ["g", "r"], label: "Terminal" },
       { keys: ["g", "a"], label: "Activity" },
       { keys: ["g", "p"], label: "Plugins" },

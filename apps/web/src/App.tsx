@@ -46,9 +46,6 @@ const Activity = lazy(() =>
 const Skills = lazy(() =>
   import("@/views/Skills").then((m) => ({ default: m.Skills })),
 );
-const Tools = lazy(() =>
-  import("@/views/Tools").then((m) => ({ default: m.Tools })),
-);
 const Projects = lazy(() =>
   import("@/views/Projects").then((m) => ({ default: m.Projects })),
 );
@@ -132,14 +129,6 @@ const router = createBrowserRouter([
         element: (
           <ViewSuspense>
             <Skills />
-          </ViewSuspense>
-        ),
-      },
-      {
-        path: "tools",
-        element: (
-          <ViewSuspense>
-            <Tools />
           </ViewSuspense>
         ),
       },

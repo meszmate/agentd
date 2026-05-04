@@ -17,7 +17,6 @@ import {
   Settings as SettingsIcon,
   Smartphone,
   TerminalSquare,
-  Wrench,
 } from "lucide-react";
 import type { Project, Task } from "@agentd/contracts";
 import { cn, formatTs } from "@/lib/utils";
@@ -71,7 +70,6 @@ const SECTIONS: {
       { to: "/templates", label: "Templates", icon: FileTerminal, kbd: "g e" },
       { to: "/schedules", label: "Schedules", icon: CalendarClock, kbd: "g s" },
       { to: "/skills", label: "Skills", icon: BookText, kbd: "g k" },
-      { to: "/tools", label: "Tools", icon: Wrench, kbd: "g w" },
       { to: "/terminal", label: "Terminal", icon: TerminalSquare, kbd: "g r" },
     ],
   },
