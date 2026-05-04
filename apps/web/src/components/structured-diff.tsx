@@ -17,6 +17,9 @@ import {
 import { useTheme } from "@/components/theme-provider";
 import { cn } from "@/lib/utils";
 import { normalizeLanguage } from "@/components/code-block";
+import { useFile } from "@/queries";
+
+const CONTEXT_LINES = 3;
 
 /**
  * Per-file structured diff renderer that mirrors claude-code's terminal
@@ -262,6 +265,40 @@ const FileBlock = memo(function FileBlock({ file }: { file: DiffFile }) {
     </div>
   );
 });
+
+/**
+ * Stand-alone hunk renderer for a single `DiffFile` with no file
+ * header. Tool rows in the activity stream embed this beneath the
+ * one-line tool summary so the path/+N/-N pills stay above the diff
+ * body, mirroring claude-code's terminal layout.
+ */
+export function InlineDiff({
+  file,
+  className,
+}: {
+  file: DiffFile;
+  className?: string;
+}) {
+  if (file.isBinary) {
+    return (
+      <div className="px-3 py-2 font-mono text-[11px] text-ink-500 dark:text-ink-400">
+        Binary file
+      </div>
+    );
+  }
+  if (file.hunks.length === 0) return null;
+  return (
+    <div
+      className={cn(
+        "rounded border border-ink-900/10 dark:border-ink-50/10",
+        "bg-paper-50/40 dark:bg-ink-900/40 overflow-hidden",
+        className,
+      )}
+    >
+      <FileHunks file={file} />
+    </div>
+  );
+}
 
 function FileHunks({ file }: { file: DiffFile }) {
   const numWidth = useMemo(() => {
@@ -537,3 +574,234 @@ function statusIcon(status: DiffFile["status"]) {
       return FileCode;
   }
 }
+
+/**
+ * Build a single-file `DiffFile` from an Edit/MultiEdit's
+ * `old_string` / `new_string` pair. When `fileContent` (the file's
+ * current on-disk text, post-edit) is supplied and `new_string` is
+ * located inside it, the synthesized hunk gets real absolute line
+ * numbers plus 3 lines of context above and below — same shape
+ * claude-code's terminal renders for an Edit. If the file content
+ * isn't available or the new string can't be located (e.g. a later
+ * edit overwrote it), we fall back to a context-free hunk anchored
+ * at line 1 so the row still shows something sensible.
+ */
+export function synthesizeEditDiff(
+  path: string,
+  oldString: string,
+  newString: string,
+  fileContent?: string,
+): DiffFile {
+  const oldLines = oldString.length === 0 ? [] : oldString.split("\n");
+  const newLines = newString.length === 0 ? [] : newString.split("\n");
+  const file: DiffFile = {
+    oldPath: path,
+    newPath: path,
+    displayPath: path,
+    status: "modified",
+    isBinary: false,
+    language: detectLanguage(path),
+    hunks: [],
+    additions: newLines.length,
+    deletions: oldLines.length,
+  };
+
+  const hunk =
+    buildContextualHunk(fileContent, oldLines, newLines) ??
+    buildContextlessHunk(oldLines, newLines);
+  file.hunks.push(hunk);
+  return file;
+}
+
+/**
+ * Build a `DiffFile` for a Write tool call. We don't have the file's
+ * pre-write content, so every line counts as an addition (status =
+ * "added"). Matches how claude-code's terminal renders Write — full
+ * file body with green wash, line numbers from 1.
+ */
+export function synthesizeWriteDiff(path: string, content: string): DiffFile {
+  const lines = content.length === 0 ? [] : content.split("\n");
+  const hunk: DiffHunk = {
+    header: "",
+    oldStart: 0,
+    oldLines: 0,
+    newStart: 1,
+    newLines: lines.length,
+    lines: lines.map((c, i) => ({
+      kind: "add" as const,
+      content: c,
+      oldNum: null,
+      newNum: i + 1,
+    })),
+  };
+  return {
+    oldPath: null,
+    newPath: path,
+    displayPath: path,
+    status: "added",
+    isBinary: false,
+    language: detectLanguage(path),
+    hunks: lines.length > 0 ? [hunk] : [],
+    additions: lines.length,
+    deletions: 0,
+  };
+}
+
+function buildContextualHunk(
+  fileContent: string | undefined,
+  oldLines: string[],
+  newLines: string[],
+): DiffHunk | null {
+  if (!fileContent) return null;
+  const newString = newLines.join("\n");
+  // Anchor on `new_string`: post-edit, that's what's actually in the
+  // file. Empty new_string would match anywhere — bail.
+  if (newString.length === 0) return null;
+  const idx = fileContent.indexOf(newString);
+  if (idx < 0) return null;
+
+  const allLines = fileContent.split("\n");
+  const startLineNew = fileContent.slice(0, idx).split("\n").length;
+
+  const ctxBeforeStart = Math.max(1, startLineNew - CONTEXT_LINES);
+  const beforeCtx = allLines.slice(ctxBeforeStart - 1, startLineNew - 1);
+
+  const newEndLine = startLineNew + newLines.length - 1;
+  const ctxAfterStart = newEndLine + 1;
+  const ctxAfterEnd = Math.min(allLines.length, ctxAfterStart + CONTEXT_LINES - 1);
+  const afterCtx =
+    ctxAfterStart > allLines.length
+      ? []
+      : allLines.slice(ctxAfterStart - 1, ctxAfterEnd);
+
+  // Old/new track the same line numbers up to the change, then
+  // diverge by (oldLines.length vs newLines.length) for the trailing
+  // context. Using `startLineNew` as the anchor for both is valid
+  // because the lines before the change are byte-identical in old
+  // and new.
+  const anchor = startLineNew - beforeCtx.length;
+  const hunk: DiffHunk = {
+    header: "",
+    oldStart: anchor,
+    oldLines: beforeCtx.length + oldLines.length + afterCtx.length,
+    newStart: anchor,
+    newLines: beforeCtx.length + newLines.length + afterCtx.length,
+    lines: [],
+  };
+
+  let oldNum = anchor;
+  let newNum = anchor;
+  for (const line of beforeCtx) {
+    hunk.lines.push({ kind: "ctx", content: line, oldNum, newNum });
+    oldNum++;
+    newNum++;
+  }
+  for (const del of oldLines) {
+    hunk.lines.push({ kind: "del", content: del, oldNum, newNum: null });
+    oldNum++;
+  }
+  for (const add of newLines) {
+    hunk.lines.push({ kind: "add", content: add, oldNum: null, newNum });
+    newNum++;
+  }
+  for (const line of afterCtx) {
+    hunk.lines.push({ kind: "ctx", content: line, oldNum, newNum });
+    oldNum++;
+    newNum++;
+  }
+  return hunk;
+}
+
+function buildContextlessHunk(
+  oldLines: string[],
+  newLines: string[],
+): DiffHunk {
+  return {
+    header: "",
+    oldStart: 1,
+    oldLines: oldLines.length,
+    newStart: 1,
+    newLines: newLines.length,
+    lines: [
+      ...oldLines.map((c, i) => ({
+        kind: "del" as const,
+        content: c,
+        oldNum: i + 1,
+        newNum: null,
+      })),
+      ...newLines.map((c, i) => ({
+        kind: "add" as const,
+        content: c,
+        oldNum: null,
+        newNum: i + 1,
+      })),
+    ],
+  };
+}
+
+/**
+ * Renders an Edit/MultiEdit/Write tool call as a structured diff with
+ * 3-line context windows, matching claude-code's terminal output.
+ *
+ * For Edit/MultiEdit we lazy-fetch the file's current content via
+ * `useFile` and locate `new_string` inside it to recover absolute
+ * line numbers + surrounding context. If the fetch is in-flight or
+ * the string can no longer be found (subsequent edits stomped it),
+ * we fall back to a context-free diff so the row still shows the
+ * change.
+ *
+ * For Write we don't need the pre-edit file (every line is an add),
+ * so the render is synchronous.
+ */
+export function EditDiffPreview({
+  taskId,
+  payload,
+}: {
+  taskId: string | null | undefined;
+  payload: EditPreviewPayload;
+}) {
+  // Write: render straight from the in-memory `content`.
+  if (payload.kind === "write") {
+    const file = synthesizeWriteDiff(payload.path, payload.content);
+    return <InlineDiff file={file} />;
+  }
+
+  return (
+    <EditPreviewWithFetch
+      taskId={taskId}
+      path={payload.path}
+      oldString={payload.oldString}
+      newString={payload.newString}
+    />
+  );
+}
+
+function EditPreviewWithFetch({
+  taskId,
+  path,
+  oldString,
+  newString,
+}: {
+  taskId: string | null | undefined;
+  path: string;
+  oldString: string;
+  newString: string;
+}) {
+  // Skip the network round-trip when we don't have a task context
+  // (e.g. an embed in a non-task surface) — render the contextless
+  // fallback directly. The query is also disabled internally without
+  // an id, so this just spares us the conditional hook gymnastics.
+  const fileQ = useFile(taskId ?? null, taskId ? path : null);
+  const file = useMemo(() => {
+    const content =
+      fileQ.data && typeof fileQ.data.content === "string"
+        ? fileQ.data.content
+        : undefined;
+    return synthesizeEditDiff(path, oldString, newString, content);
+  }, [path, oldString, newString, fileQ.data]);
+  return <InlineDiff file={file} />;
+}
+
+export type EditPreviewPayload =
+  | { kind: "edit"; path: string; oldString: string; newString: string }
+  | { kind: "write"; path: string; content: string };

@@ -13,7 +13,13 @@ import { ToolLine } from "@/components/tool-line";
  * Auto-scrolls to the tail unless the operator has manually scrolled
  * up (claude-code "follow mode" behavior).
  */
-export function TaskActivity({ messages }: { messages: Message[] }) {
+export function TaskActivity({
+  taskId,
+  messages,
+}: {
+  taskId: string;
+  messages: Message[];
+}) {
   const entries = useMemo(() => buildActivityEntries(messages), [messages]);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -65,6 +71,7 @@ export function TaskActivity({ messages }: { messages: Message[] }) {
             output={e.output}
             outputOk={e.ok}
             running={e.running}
+            taskId={taskId}
           />
         ))}
         <div ref={tailRef} />

@@ -102,7 +102,7 @@ export function TaskWorkspace({
         </div>
 
         <TabsContent value="live" className="flex-1 min-h-0 mt-0 overflow-hidden">
-          <TaskActivity messages={messages ?? []} />
+          <TaskActivity taskId={task.id} messages={messages ?? []} />
         </TabsContent>
         <TabsContent value="todos" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TodosPanel taskId={task.id} />

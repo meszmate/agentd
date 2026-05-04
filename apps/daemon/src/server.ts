@@ -38,7 +38,7 @@ import {
   type Task,
   type WsServerEvent,
 } from "@agentd/contracts";
-import { join, normalize, relative, resolve } from "node:path";
+import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 import {
   existsSync,
   statSync,
@@ -5215,8 +5215,16 @@ export function buildServer(opts: BuildServerOptions) {
 }
 
 function resolveSafePath(root: string, requested: string): string | null {
-  const joined = normalize(join(root, requested));
-  const rel = relative(root, joined);
+  // Tool calls (Edit / Write) pass `file_path` as an absolute path,
+  // while the file tree passes relative paths. Accept both: when the
+  // input is absolute, resolve it directly so we don't accidentally
+  // double-prefix it onto the worktree root. Either way the final
+  // path must stay inside `root`.
+  const absoluteRoot = resolve(root);
+  const joined = isAbsolute(requested)
+    ? normalize(requested)
+    : normalize(join(absoluteRoot, requested));
+  const rel = relative(absoluteRoot, joined);
   if (rel.startsWith("..") || rel === "" || rel.startsWith("/")) return null;
   return joined;
 }

@@ -17,6 +17,10 @@ import { Highlight, themes } from "prism-react-renderer";
 import { useTheme } from "@/components/theme-provider";
 import { cn } from "@/lib/utils";
 import { CodeBlock, normalizeLanguage } from "@/components/code-block";
+import {
+  EditDiffPreview,
+  type EditPreviewPayload,
+} from "@/components/structured-diff";
 
 /**
  * Compact one-line render for an agent tool call. Mirrors the realtime
@@ -36,6 +40,7 @@ export function ToolLine({
   className,
   output,
   outputOk,
+  taskId,
 }: {
   content: string;
   running?: boolean;
@@ -49,6 +54,14 @@ export function ToolLine({
   output?: string | null;
   /** false ⇒ red dot (tool failed). true / undefined ⇒ neutral. */
   outputOk?: boolean;
+  /**
+   * Task whose worktree the tool ran in. When set, Edit/MultiEdit/
+   * Write rows lazy-fetch the file via `useFile(taskId, path)` so
+   * the synthesized diff includes 3 lines of context above/below the
+   * change (matching claude-code's terminal). Without it the diff
+   * still renders, just without surrounding context.
+   */
+  taskId?: string;
 }) {
   const parsed = parseToolCall(content);
   const Icon = ICONS[parsed.kind] ?? Wrench;
@@ -56,6 +69,7 @@ export function ToolLine({
   // visible) — claude-code feel. Other tools (Glob, Grep, Read,
   // WebFetch, Task) keep the compact one-liner.
   const showInlineCode = parsed.detail != null && parsed.detailLanguage != null;
+  const showInlineDiff = parsed.editPreview != null;
   // Plain-text detail (e.g. Bash description, Task prompt) — kept
   // collapsible so it doesn't dominate.
   const [openText, setOpenText] = useState(false);
@@ -125,7 +139,12 @@ export function ToolLine({
           </button>
         )}
       </div>
-      {showInlineCode && (
+      {showInlineDiff && (
+        <div className="mt-1">
+          <EditDiffPreview taskId={taskId} payload={parsed.editPreview!} />
+        </div>
+      )}
+      {!showInlineDiff && showInlineCode && (
         <div className="mt-1">
           <CodeBlock
             code={parsed.detail!}
@@ -334,6 +353,7 @@ export function WorkCard({
   className,
   defaultLimit = 8,
   liveTrailing,
+  taskId,
 }: {
   pairs: ReturnType<typeof pairToolEvents>;
   className?: string;
@@ -343,6 +363,9 @@ export function WorkCard({
    *  (matches the live-streaming case where the latest call hasn't
    *  resolved yet). */
   liveTrailing?: boolean;
+  /** Forwarded to each `<ToolRow>` so Edit/Write rows can lazy-fetch
+   *  the file for context-line synthesis. */
+  taskId?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   if (pairs.length === 0) return null;
@@ -399,6 +422,7 @@ export function WorkCard({
                 output={p.output}
                 outputOk={p.ok}
                 running={p.running || (liveTrailing && isLast && !p.output)}
+                taskId={taskId}
               />
             </li>
           );
@@ -419,11 +443,13 @@ export function ToolRow({
   output,
   outputOk,
   running,
+  taskId,
 }: {
   content: string;
   output?: string | null;
   outputOk?: boolean;
   running?: boolean;
+  taskId?: string;
 }) {
   const parsed = parseToolCall(content);
   const Icon = ICONS[parsed.kind] ?? Wrench;
@@ -431,7 +457,8 @@ export function ToolRow({
   const hasOutput = !!output && output.length > 0;
   const hasInlineDetail =
     parsed.detail != null && parsed.detailLanguage != null;
-  const expandable = hasOutput || hasInlineDetail;
+  const hasInlineDiff = parsed.editPreview != null;
+  const expandable = hasOutput || hasInlineDetail || hasInlineDiff;
   return (
     <div
       className={cn(
@@ -494,7 +521,12 @@ export function ToolRow({
           </span>
         )}
       </button>
-      {open && hasInlineDetail && (
+      {open && hasInlineDiff && (
+        <div className="mt-1 ml-6">
+          <EditDiffPreview taskId={taskId} payload={parsed.editPreview!} />
+        </div>
+      )}
+      {open && !hasInlineDiff && hasInlineDetail && (
         <div className="mt-1 ml-6">
           <CodeBlock
             code={parsed.detail!}
@@ -645,6 +677,14 @@ interface ParsedTool {
    */
   linesAdded?: number;
   linesRemoved?: number;
+  /**
+   * Set for Edit / MultiEdit / Write / NotebookEdit. Render uses this
+   * to mount `<EditDiffPreview>` (lazy file fetch + 3-line context
+   * windows) instead of a flat `<CodeBlock>`. When present, callers
+   * MUST ignore `detail` / `detailDiffMarks` for this tool — the diff
+   * preview component owns the body render.
+   */
+  editPreview?: EditPreviewPayload;
 }
 
 /**
@@ -711,9 +751,11 @@ function parseToolCall(content: string): ParsedTool {
         name,
         kind,
         summary: shortPath(path),
-        detail: content ?? null,
-        detailLanguage: content ? langFromPath(path) : undefined,
-        detailFilename: shortPath(path),
+        detail: null,
+        editPreview:
+          path !== "?" && content != null
+            ? { kind: "write", path, content }
+            : undefined,
         // Write creates the whole file → all lines count as added.
         linesAdded: lines || undefined,
       };
@@ -721,32 +763,25 @@ function parseToolCall(content: string): ParsedTool {
     case "Edit":
     case "MultiEdit": {
       const path = get("file_path", "path") ?? "?";
-      const oldStr = get("old_string");
-      const newStr = get("new_string");
+      const oldStr = get("old_string") ?? "";
+      const newStr = get("new_string") ?? "";
       const replaceAll = args.replace_all === true ? " (all)" : "";
-      const oldLines = oldStr ? oldStr.split("\n") : [];
-      const newLines = newStr ? newStr.split("\n") : [];
-      // Build raw code (no +/- prefixes) so prism highlights it in
-      // the file's native language. The diffMarks array carries the
-      // +/- info per line, used by CodeBlock to wash the row green/red.
-      const detail =
-        oldLines.length + newLines.length > 0
-          ? [...oldLines, ...newLines].join("\n")
-          : null;
-      const detailDiffMarks: Array<"+" | "-"> | undefined = detail
-        ? [
-            ...oldLines.map(() => "-" as const),
-            ...newLines.map(() => "+" as const),
-          ]
-        : undefined;
+      const oldLines = oldStr.length === 0 ? [] : oldStr.split("\n");
+      const newLines = newStr.length === 0 ? [] : newStr.split("\n");
       return {
         name,
         kind,
         summary: `${shortPath(path)}${replaceAll}`,
-        detail,
-        detailLanguage: detail ? langFromPath(path) : undefined,
-        detailFilename: shortPath(path),
-        detailDiffMarks,
+        detail: null,
+        editPreview:
+          path !== "?" && (oldStr.length > 0 || newStr.length > 0)
+            ? {
+                kind: "edit",
+                path,
+                oldString: oldStr,
+                newString: newStr,
+              }
+            : undefined,
         linesAdded: newLines.length || undefined,
         linesRemoved: oldLines.length || undefined,
       };
@@ -811,13 +846,30 @@ function parseToolCall(content: string): ParsedTool {
         detail: null,
       };
     }
-    case "NotebookEdit":
+    case "NotebookEdit": {
+      const path = get("notebook_path", "path") ?? "?";
+      const newSrc = get("new_source") ?? "";
+      const oldSrc = get("old_source") ?? "";
+      const oldLines = oldSrc.length === 0 ? [] : oldSrc.split("\n");
+      const newLines = newSrc.length === 0 ? [] : newSrc.split("\n");
       return {
         name,
         kind: "edit",
-        summary: shortPath(get("notebook_path", "path") ?? "?"),
+        summary: shortPath(path),
         detail: null,
+        editPreview:
+          path !== "?" && (oldSrc.length > 0 || newSrc.length > 0)
+            ? {
+                kind: "edit",
+                path,
+                oldString: oldSrc,
+                newString: newSrc,
+              }
+            : undefined,
+        linesAdded: newLines.length || undefined,
+        linesRemoved: oldLines.length || undefined,
       };
+    }
     default: {
       // Unknown tool — show the first key/value pair we find as a hint,
       // stash the full args in detail.

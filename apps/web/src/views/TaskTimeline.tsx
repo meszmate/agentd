@@ -303,10 +303,11 @@ export function TaskTimeline({
                           <WorkCard
                             pairs={g.pairs}
                             liveTrailing={busy && gi === lastToolsIdx}
+                            taskId={taskId}
                           />
                         </li>
                       ) : (
-                        <TimelineItem message={g.message} />
+                        <TimelineItem message={g.message} taskId={taskId} />
                       )}
                     </Fragment>
                   );
@@ -717,7 +718,13 @@ function groupTaskMessages(messages: Message[]): TaskGroup[] {
   return out;
 }
 
-function TimelineItem({ message: m }: { message: Message }) {
+function TimelineItem({
+  message: m,
+  taskId,
+}: {
+  message: Message;
+  taskId?: string;
+}) {
   // Structured system messages (`agentd-progress`, `agentd-share`,
   // `agentd-ask`) keep their styled-chip render — they carry
   // semantic meaning the operator scans for.
@@ -758,7 +765,7 @@ function TimelineItem({ message: m }: { message: Message }) {
   if (m.role === "tool") {
     return (
       <li>
-        <ToolLine content={m.content} />
+        <ToolLine content={m.content} taskId={taskId} />
       </li>
     );
   }
