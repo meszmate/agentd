@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from "react";
-import type { Task } from "@agentd/contracts";
+import type { Message, Task } from "@agentd/contracts";
 import {
   Tabs,
   TabsContent,
@@ -10,6 +10,7 @@ import { TaskFiles } from "@/views/TaskFiles";
 import { TaskDiff } from "@/views/TaskDiff";
 import { TaskLog } from "@/views/TaskLog";
 import { TaskContext } from "@/views/TaskContext";
+import { TaskActivity } from "@/views/TaskActivity";
 import type { TaskPlanItem } from "@/views/TaskPlan";
 import { TodosPanel } from "@/components/todos-panel";
 
@@ -17,12 +18,13 @@ const Terminal = lazy(() =>
   import("./Terminal").then((m) => ({ default: m.Terminal })),
 );
 
-type Tab = "diff" | "todos" | "files" | "log" | "term" | "context";
+type Tab = "live" | "diff" | "todos" | "files" | "log" | "term" | "context";
 
 export function TaskWorkspace({
   task,
   onError,
   plan,
+  messages,
 }: {
   task: Task;
   onError: (m: string) => void;
@@ -30,8 +32,10 @@ export function TaskWorkspace({
   plan?: TaskPlanItem[];
   /** Kept for back-compat; no longer rendered. */
   planUpdatedAt?: number | null;
+  /** Persisted message stream — feeds the Live activity tab. */
+  messages?: Message[];
 }) {
-  const [tab, setTab] = useState<Tab>("diff");
+  const [tab, setTab] = useState<Tab>("live");
 
   const planCount = plan?.length ?? 0;
   const planActive = (plan ?? []).filter((p) => p.status === "in_progress").length;
@@ -46,6 +50,11 @@ export function TaskWorkspace({
       >
         <div className="flex h-9 items-stretch border-b border-ink-900/10 dark:border-ink-50/10 px-1 shrink-0 overflow-x-auto">
           <TabsList variant="stretch" className="h-9">
+            <TabsTrigger value="live" variant="stretch">
+              <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
+                Live
+              </span>
+            </TabsTrigger>
             <TabsTrigger value="diff" variant="stretch">
               <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
                 Diff
@@ -92,6 +101,9 @@ export function TaskWorkspace({
           </span>
         </div>
 
+        <TabsContent value="live" className="flex-1 min-h-0 mt-0 overflow-hidden">
+          <TaskActivity messages={messages ?? []} />
+        </TabsContent>
         <TabsContent value="todos" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TodosPanel taskId={task.id} />
         </TabsContent>
