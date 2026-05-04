@@ -409,8 +409,30 @@ export class ClaudeRunner implements AgentRunner {
       return;
     }
     if (type === "system") {
-      // CLI bookkeeping (init, status pings, hook lifecycle, etc.) — the
-      // operator can't act on any of it, so it stays off the timeline.
+      // claude-code emits a synthetic `compact_boundary` system message
+      // every time it auto-compacts (or the user runs /compact inside
+      // claude). The boundary lands in the JSONL stream BEFORE the
+      // post-compaction summary message, so by the time the daemon
+      // sees it we still have the chance to mirror the prune in our
+      // own history. Source: ~/claude-code/src/utils/messages.ts
+      // (createCompactBoundaryMessage) + .../utils/messages/mappers.ts
+      // (toSDKMessages — wraps it as { subtype: "compact_boundary",
+      // compact_metadata: { trigger, pre_tokens, … } } on stdout).
+      if (parsed.subtype === "compact_boundary") {
+        const meta = parsed.compact_metadata as
+          | { trigger?: "auto" | "manual"; pre_tokens?: number }
+          | undefined;
+        this.emit({
+          kind: "auto_compacted",
+          ...(meta?.trigger ? { trigger: meta.trigger } : {}),
+          ...(typeof meta?.pre_tokens === "number"
+            ? { preTokens: meta.pre_tokens }
+            : {}),
+        });
+        return;
+      }
+      // Other CLI bookkeeping (init, status pings, hook lifecycle, …) —
+      // the operator can't act on any of it, so it stays off the timeline.
       return;
     }
     if (type === "rate_limit_event") {

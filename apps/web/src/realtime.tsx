@@ -138,6 +138,10 @@ function describe(ev: AgentEvent): string | null {
       // crowd the per-task signal without telling the operator
       // anything they don't already see.
       return null;
+    case "auto_compacted":
+      return ev.preTokens
+        ? `✂ compacted · ${ev.preTokens.toLocaleString()} tokens`
+        : "✂ compacted";
     // Streaming partials are too noisy for the activity ticker — drop them.
     case "message_delta":
     case "message_end":
@@ -624,6 +628,14 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           (msg.event.kind === "status" &&
             (msg.event.status === "idle" || msg.event.status === "done"))
         ) {
+          void qc.invalidateQueries({ queryKey: qk.task(msg.taskId) });
+        }
+        // Auto-compaction prunes pre-boundary messages out of the DB
+        // and inserts a synthetic divider — the timeline cache is now
+        // out of sync with the server, so refetch immediately. Without
+        // this the operator's open task page keeps showing the old
+        // (already-deleted) rows until the next status flip.
+        if (msg.event.kind === "auto_compacted") {
           void qc.invalidateQueries({ queryKey: qk.task(msg.taskId) });
         }
         // Workspace caches (file tree + git status + recent commits)

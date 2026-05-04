@@ -808,7 +808,12 @@ function TimelineItem({ message: m }: { message: Message }) {
   );
 }
 
-type StructuredKind = "progress" | "progress-done" | "share" | "ask";
+type StructuredKind =
+  | "progress"
+  | "progress-done"
+  | "share"
+  | "ask"
+  | "compacted";
 
 interface ParsedSystem {
   kind: StructuredKind;
@@ -849,6 +854,23 @@ function parseSystemMessage(content: string): ParsedSystem | null {
       text: content.slice("[ask]".length).trim(),
     };
   }
+  // Compaction boundary written by handleAutoCompacted in the daemon
+  // when the underlying CLI auto-compacts (claude's compact_boundary
+  // event, codex's input-token drop heuristic). Format:
+  //   [compacted <trigger>]            Conversation compacted
+  //   [compacted <trigger> <preTokens>] Conversation compacted
+  // We only need the trigger + pre-token count for the chip text.
+  const compactedMatch = /^\[compacted\s+(auto|manual)(?:\s+(\d+))?\]\s*(.*)$/.exec(
+    content,
+  );
+  if (compactedMatch) {
+    const trig = compactedMatch[1] ?? "auto";
+    const preTokens = compactedMatch[2];
+    const detail = preTokens
+      ? `${trig} · ${Number(preTokens).toLocaleString()} tokens summarized`
+      : trig;
+    return { kind: "compacted", text: detail };
+  }
   return null;
 }
 
@@ -857,6 +879,23 @@ function StructuredItem({
   text,
   ts,
 }: ParsedSystem & { ts: number }) {
+  // The compaction marker is a horizontal divider, not a chip — it's a
+  // boundary in the timeline, so render it across the whole row instead
+  // of as another colored card.
+  if (kind === "compacted") {
+    return (
+      <li className="relative my-2">
+        <div className="flex items-center gap-2 text-ink-400 dark:text-ink-500">
+          <span className="h-px flex-1 bg-ink-200 dark:bg-ink-700" />
+          <span className="font-mono text-2xs uppercase tracking-[0.12em]">
+            ✂ compacted · {text}
+          </span>
+          <span className="font-mono text-2xs">{formatTs(ts)}</span>
+          <span className="h-px flex-1 bg-ink-200 dark:bg-ink-700" />
+        </div>
+      </li>
+    );
+  }
   // Per-kind styling: emerald for done, ember for in-flight progress,
   // violet for shares, amber for asks.
   const style = (() => {

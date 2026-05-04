@@ -554,6 +554,26 @@ export const AgentEvent = z.discriminatedUnion("kind", [
     overageDisabledReason: z.string().optional(),
     isUsingOverage: z.boolean().optional(),
   }),
+  z.object({
+    /**
+     * The underlying CLI just compacted its own context — Claude emits
+     * this from a `compact_boundary` system event in stream-json output;
+     * Codex doesn't surface it on stdout, so the runner infers it from a
+     * sharp drop in `input_tokens` between turns. Either way, the agent's
+     * working memory is now a short summary of everything that came
+     * before, so the daemon mirrors that by pruning prior messages from
+     * the task's history and inserting a synthetic boundary row.
+     *
+     *   trigger    — "auto" when the CLI fired it; "manual" when the
+     *                operator drove a /compact. Codex always reports
+     *                "auto" (we only detect auto fires there).
+     *   preTokens  — token count just before the compaction, when the
+     *                CLI told us. Used purely for the boundary's tooltip.
+     */
+    kind: z.literal("auto_compacted"),
+    trigger: z.enum(["auto", "manual"]).optional(),
+    preTokens: z.number().optional(),
+  }),
 ]);
 export type AgentEvent = z.infer<typeof AgentEvent>;
 
