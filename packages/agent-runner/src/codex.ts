@@ -173,6 +173,25 @@ export class CodexRunner implements AgentRunner {
   private exitTask: Promise<void> | null = null;
   private threadId: string | null = null;
   private suppressRouterErrorContinuation = false;
+  /**
+   * Token usage from the previous resumed turn, captured from the
+   * caller via {@link RunnerStartOptions.priorInputTokens}. Codex's
+   * `exec --json` mode silently drops the `context_compaction` item
+   * (see ~/codex/codex-rs/exec/src/event_processor_with_jsonl_output.rs's
+   * `map_item_with_id` — the match has no `ContextCompaction` arm, so it
+   * falls through to None). The only externally observable signal is the
+   * `input_tokens` count in `turn.completed`, which drops sharply
+   * compared to the previous turn whenever codex auto-compacts. We use
+   * this prior baseline to detect that drop and emit a synthetic
+   * `auto_compacted` event so the daemon can mirror the prune.
+   */
+  private priorInputTokens: number | null = null;
+  /**
+   * One-shot guard: only emit `auto_compacted` once per process. Codex's
+   * `exec` is single-shot per turn, so this just prevents a double-fire
+   * inside the same turn (e.g. if turn.completed retries).
+   */
+  private compactionEmitted = false;
 
   constructor(private readonly opts: CodexRunnerOptions = {}) {}
 
@@ -202,6 +221,11 @@ export class CodexRunner implements AgentRunner {
       opts.permissionMode ??
       this.opts.defaultPermissionMode ??
       "bypassPermissions";
+    this.priorInputTokens =
+      typeof opts.priorInputTokens === "number" && opts.priorInputTokens > 0
+        ? opts.priorInputTokens
+        : null;
+    this.compactionEmitted = false;
 
     // Build args. Two subcommand shapes:
     //   - first turn:  `codex exec [flags] <prompt>`
@@ -400,6 +424,37 @@ export class CodexRunner implements AgentRunner {
     if (t === "turn.started") return;
     if (t === "turn.completed" && parsed.usage) {
       const u = parsed.usage;
+      // Auto-compact heuristic. Codex's --json output doesn't carry the
+      // ContextCompaction item (filtered out in
+      // event_processor_with_jsonl_output.rs::map_item_with_id, which
+      // returns None for it), so we fall back to watching the working
+      // context size across turns. A real compaction always pulls the
+      // model's loaded context down to a few thousand tokens of
+      // summary, so any drop of >=60% from a non-trivial baseline
+      // (>30k) is almost certainly a compaction. We compare the SUMMED
+      // (uncached + cached) figure on both sides so cache turnover
+      // alone doesn't trip the threshold — daemon-side
+      // `latestTurnInputTokens` is already the sum (see
+      // packages/core/src/tasks.ts addTaskUsage), and we sum here
+      // before comparing.
+      const prev = this.priorInputTokens;
+      const curSummed =
+        (typeof u.input_tokens === "number" ? u.input_tokens : 0) +
+        (typeof u.cached_input_tokens === "number" ? u.cached_input_tokens : 0);
+      if (
+        !this.compactionEmitted &&
+        prev != null &&
+        prev >= 30_000 &&
+        curSummed > 0 &&
+        curSummed < prev * 0.4
+      ) {
+        this.compactionEmitted = true;
+        this.emit({
+          kind: "auto_compacted",
+          trigger: "auto",
+          preTokens: prev,
+        });
+      }
       this.emit({
         kind: "usage",
         inputTokens: u.input_tokens,

@@ -52,6 +52,17 @@ export interface RunnerStartOptions {
    * AGENTD_TOKEN so the agent's `agentd progress` Bash calls work.
    */
   env?: Record<string, string>;
+  /**
+   * Codex-only — last turn's `input_tokens` from `turn.completed`.
+   * Codex's `exec --json` doesn't surface its `context_compaction`
+   * item events on stdout, so the runner can't see compaction directly;
+   * a sharp drop in `input_tokens` versus the previous turn is the
+   * cleanest externally-observable proxy. The daemon persists the
+   * baseline on the task between spawns and passes it back here so the
+   * runner can fire a synthetic `auto_compacted` event when it crosses
+   * the threshold. Other runners ignore this field.
+   */
+  priorInputTokens?: number;
 }
 
 export type RunnerEventListener = (event: AgentEvent) => void;

@@ -540,12 +540,28 @@ export function appendMessage(
   role: Message["role"],
   content: string,
 ): Message {
+  return appendMessageAt(db, taskId, role, content, Date.now());
+}
+
+/**
+ * Same as {@link appendMessage} but lets the caller pin the row's
+ * timestamp explicitly. Used by the auto-compaction handler so the
+ * synthetic boundary row sits at the start of the current turn — the
+ * exact cutoff that {@link pruneTaskMessagesBefore} then walks down to.
+ */
+export function appendMessageAt(
+  db: Db,
+  taskId: string,
+  role: Message["role"],
+  content: string,
+  ts: number,
+): Message {
   const m: Message = {
     id: newId("msg"),
     taskId,
     role,
     content,
-    ts: Date.now(),
+    ts,
   };
   db.insert(messages).values(m).run();
   return m;
