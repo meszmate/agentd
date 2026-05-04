@@ -135,13 +135,14 @@ export function useTask(id: string | null | undefined) {
   });
 }
 
-export function useFiles(id: string | null | undefined, refetchInterval = 8000) {
+export function useFiles(id: string | null | undefined) {
   const client = useClient();
   return useQuery({
     queryKey: qk.files(id ?? "_none"),
     queryFn: () => client.listFiles(id!),
     enabled: !!id,
-    refetchInterval,
+    // Invalidated by the realtime bus on tool_result/exit; no polling.
+    staleTime: 60_000,
   });
 }
 
@@ -154,16 +155,14 @@ export function useFile(id: string | null | undefined, path: string | null) {
   });
 }
 
-export function useGitStatus(
-  id: string | null | undefined,
-  refetchInterval = 4000,
-) {
+export function useGitStatus(id: string | null | undefined) {
   const client = useClient();
   return useQuery({
     queryKey: ["task", id ?? "_none", "git-status"] as const,
     queryFn: () => client.gitStatus(id!),
     enabled: !!id,
-    refetchInterval,
+    // Invalidated by the realtime bus on tool_result/exit; no polling.
+    staleTime: 60_000,
   });
 }
 
@@ -176,13 +175,14 @@ export function useDiff(id: string | null | undefined, base?: string) {
   });
 }
 
-export function useLog(id: string | null | undefined, limit = 50, refetchInterval = 6000) {
+export function useLog(id: string | null | undefined, limit = 50) {
   const client = useClient();
   return useQuery({
     queryKey: qk.log(id ?? "_none", limit),
     queryFn: () => client.getLog(id!, limit),
     enabled: !!id,
-    refetchInterval,
+    // Invalidated by the realtime bus on tool_result/exit; no polling.
+    staleTime: 60_000,
   });
 }
 

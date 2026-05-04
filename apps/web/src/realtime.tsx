@@ -87,6 +87,22 @@ interface RtContext extends RtState {
 const Ctx = createContext<RtContext | null>(null);
 const RECENT_CAP = 80;
 
+// Tools that don't mutate the worktree — invalidating files/git/log on
+// these would just trigger a re-fetch storm during a long agent turn
+// where the agent is reading dozens of files. Anything not in this set
+// (Edit/Write/Bash/MultiEdit/etc.) is treated as potentially mutating.
+const READONLY_TOOLS = new Set([
+  "Read",
+  "Glob",
+  "Grep",
+  "WebFetch",
+  "WebSearch",
+  "ReadNotebook",
+  "TodoWrite",
+  "ExitPlanMode",
+  "ToolSearch",
+]);
+
 function describe(ev: AgentEvent): string | null {
   switch (ev.kind) {
     case "message": {
@@ -583,6 +599,24 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
             (msg.event.status === "idle" || msg.event.status === "done"))
         ) {
           void qc.invalidateQueries({ queryKey: qk.task(msg.taskId) });
+        }
+        // Workspace caches (file tree + git status + recent commits)
+        // refresh in response to actual state-changing events instead
+        // of a 4-8s poll. Tool calls cover mid-turn edits; exit covers
+        // the post-turn auto-commit. Read-only tools (Read/Glob/Grep
+        // etc.) don't dirty the worktree, so skip those to avoid
+        // hammering the daemon on every fetch the agent does.
+        if (
+          msg.event.kind === "exit" ||
+          (msg.event.kind === "tool_result" &&
+            !READONLY_TOOLS.has(msg.event.tool))
+        ) {
+          void qc.invalidateQueries({ queryKey: qk.files(msg.taskId) });
+          void qc.invalidateQueries({
+            queryKey: ["task", msg.taskId, "git-status"] as const,
+          });
+          void qc.invalidateQueries({ queryKey: qk.diff(msg.taskId) });
+          void qc.invalidateQueries({ queryKey: qk.log(msg.taskId) });
         }
       });
       ws.addEventListener("open", () => {
