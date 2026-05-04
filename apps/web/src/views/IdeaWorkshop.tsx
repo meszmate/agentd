@@ -50,6 +50,13 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -1778,55 +1785,82 @@ function SpawnDialog({
                       className="h-7 text-[12px]"
                     />
                     <FieldRow label="agent">
-                      <select
+                      <Picker
                         value={activeSliceData.agent ?? "claude"}
-                        onChange={(e) =>
-                          updateSlice(activeSlice, {
-                            agent: e.target.value as AgentKind,
-                          })
+                        onChange={(v) =>
+                          updateSlice(activeSlice, { agent: v as AgentKind })
                         }
                         disabled={submitting}
-                        className="flex-1 h-7 px-1.5 rounded border border-ink-900/10 dark:border-ink-50/10 bg-paper-50 dark:bg-ink-800 font-mono text-[11px] text-ink-700 dark:text-ink-200"
-                      >
-                        <option value="claude">claude</option>
-                        <option value="codex">codex</option>
-                      </select>
-                    </FieldRow>
-                    <FieldRow label="model">
-                      <Input
-                        value={activeSliceData.model ?? ""}
-                        onChange={(e) =>
-                          updateSlice(activeSlice, {
-                            model: e.target.value || undefined,
-                          })
-                        }
-                        placeholder="(inherit)"
-                        disabled={submitting}
-                        className="flex-1 h-7 font-mono text-[11px]"
+                        items={[
+                          { value: "claude", label: "claude" },
+                          { value: "codex", label: "codex" },
+                        ]}
                       />
                     </FieldRow>
+                    <FieldRow label="model">
+                      <Picker
+                        value={
+                          activeSliceData.model
+                            ? modelSuggestions[
+                                activeSliceData.agent ?? "claude"
+                              ].includes(activeSliceData.model)
+                              ? activeSliceData.model
+                              : "__custom"
+                            : ""
+                        }
+                        onChange={(v) => {
+                          if (v === "__custom")
+                            updateSlice(activeSlice, {
+                              model: activeSliceData.model || "",
+                            });
+                          else
+                            updateSlice(activeSlice, { model: v || undefined });
+                        }}
+                        disabled={submitting}
+                        items={[
+                          { value: "", label: "(inherit)" },
+                          ...modelSuggestions[
+                            activeSliceData.agent ?? "claude"
+                          ].map((id) => ({ value: id, label: id })),
+                          { value: "__custom", label: "custom…" },
+                        ]}
+                      />
+                    </FieldRow>
+                    {activeSliceData.model &&
+                      !modelSuggestions[
+                        activeSliceData.agent ?? "claude"
+                      ].includes(activeSliceData.model) && (
+                        <FieldRow label="custom">
+                          <Input
+                            value={activeSliceData.model}
+                            onChange={(e) =>
+                              updateSlice(activeSlice, {
+                                model: e.target.value || undefined,
+                              })
+                            }
+                            placeholder="model id"
+                            disabled={submitting}
+                            className="flex-1 h-7 font-mono text-[11px]"
+                          />
+                        </FieldRow>
+                      )}
                     <FieldRow label="think">
-                      <select
+                      <Picker
                         value={activeSliceData.thinkingLevel ?? ""}
-                        onChange={(e) =>
+                        onChange={(v) =>
                           updateSlice(activeSlice, {
-                            thinkingLevel:
-                              (e.target.value as ThinkingLevel) || undefined,
+                            thinkingLevel: (v as ThinkingLevel) || undefined,
                           })
                         }
                         disabled={submitting}
-                        className="flex-1 h-7 px-1.5 rounded border border-ink-900/10 dark:border-ink-50/10 bg-paper-50 dark:bg-ink-800 font-mono text-[11px] text-ink-700 dark:text-ink-200"
-                      >
-                        <option value="">(inherit)</option>
-                        {(activeSliceData.agent === "codex"
-                          ? ["minimal", "low", "medium", "high", "xhigh"]
-                          : ["low", "medium", "high", "xhigh", "max"]
-                        ).map((lvl) => (
-                          <option key={lvl} value={lvl}>
-                            {lvl}
-                          </option>
-                        ))}
-                      </select>
+                        items={[
+                          { value: "", label: "(inherit)" },
+                          ...(activeSliceData.agent === "codex"
+                            ? ["minimal", "low", "medium", "high", "xhigh"]
+                            : ["low", "medium", "high", "xhigh", "max"]
+                          ).map((lvl) => ({ value: lvl, label: lvl })),
+                        ]}
+                      />
                     </FieldRow>
                   </div>
                 </ControlBlock>
@@ -1837,18 +1871,18 @@ function SpawnDialog({
                 <ControlBlock label="Engine">
                   <div className="space-y-1.5">
                     <FieldRow label="agent">
-                      <select
+                      <Picker
                         value={agent}
-                        onChange={(e) => setAgent(e.target.value as AgentKind)}
+                        onChange={(v) => setAgent(v as AgentKind)}
                         disabled={submitting}
-                        className="flex-1 h-7 px-1.5 rounded border border-ink-900/10 dark:border-ink-50/10 bg-paper-50 dark:bg-ink-800 font-mono text-[11px] text-ink-700 dark:text-ink-200"
-                      >
-                        <option value="claude">claude</option>
-                        <option value="codex">codex</option>
-                      </select>
+                        items={[
+                          { value: "claude", label: "claude" },
+                          { value: "codex", label: "codex" },
+                        ]}
+                      />
                     </FieldRow>
                     <FieldRow label="model">
-                      <select
+                      <Picker
                         value={
                           model && agentModels?.some((m) => m.id === model)
                             ? model
@@ -1856,21 +1890,20 @@ function SpawnDialog({
                               ? "__custom"
                               : ""
                         }
-                        onChange={(e) => {
-                          if (e.target.value === "__custom") setModel(model || "");
-                          else setModel(e.target.value);
+                        onChange={(v) => {
+                          if (v === "__custom") setModel(model || "");
+                          else setModel(v);
                         }}
                         disabled={submitting}
-                        className="flex-1 h-7 px-1.5 rounded border border-ink-900/10 dark:border-ink-50/10 bg-paper-50 dark:bg-ink-800 font-mono text-[11px] text-ink-700 dark:text-ink-200"
-                      >
-                        <option value="">default</option>
-                        {(agentModels ?? []).map((m) => (
-                          <option key={m.id} value={m.id}>
-                            {m.label || m.id}
-                          </option>
-                        ))}
-                        <option value="__custom">custom…</option>
-                      </select>
+                        items={[
+                          { value: "", label: "default" },
+                          ...(agentModels ?? []).map((m) => ({
+                            value: m.id,
+                            label: m.label || m.id,
+                          })),
+                          { value: "__custom", label: "custom…" },
+                        ]}
+                      />
                     </FieldRow>
                     {model && !agentModels?.some((m) => m.id === model) && (
                       <FieldRow label="custom">
@@ -1884,25 +1917,22 @@ function SpawnDialog({
                       </FieldRow>
                     )}
                     <FieldRow label="think">
-                      <select
+                      <Picker
                         value={thinkingLevel}
-                        onChange={(e) =>
+                        onChange={(v) =>
                           setThinkingLevel(
-                            e.target.value === ""
-                              ? ""
-                              : (e.target.value as ThinkingLevel),
+                            v === "" ? "" : (v as ThinkingLevel),
                           )
                         }
                         disabled={submitting}
-                        className="flex-1 h-7 px-1.5 rounded border border-ink-900/10 dark:border-ink-50/10 bg-paper-50 dark:bg-ink-800 font-mono text-[11px] text-ink-700 dark:text-ink-200"
-                      >
-                        <option value="">default</option>
-                        {thinkingLevels.map((lvl) => (
-                          <option key={lvl} value={lvl}>
-                            {lvl}
-                          </option>
-                        ))}
-                      </select>
+                        items={[
+                          { value: "", label: "default" },
+                          ...thinkingLevels.map((lvl) => ({
+                            value: lvl,
+                            label: lvl,
+                          })),
+                        ]}
+                      />
                     </FieldRow>
                   </div>
                 </ControlBlock>
@@ -2058,6 +2088,51 @@ function FieldRow({
       </span>
       {children}
     </div>
+  );
+}
+
+/**
+ * Compact mono dropdown built on the project's Radix-based `Select` —
+ * sized to fit the tight FieldRow (h-7, font-mono text-[11px]) so the
+ * spawn dialog uses the same picker chrome as the rest of the app
+ * instead of the browser's native `<select>`.
+ */
+function Picker({
+  value,
+  onChange,
+  items,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  items: { value: string; label: string }[];
+  disabled?: boolean;
+}) {
+  // Radix `Select` rejects empty-string values, so we map "" ↔ "__none"
+  // for the wire format and render the matching label in the trigger.
+  const NONE = "__none";
+  const sentinel = (v: string) => (v === "" ? NONE : v);
+  const fromSentinel = (v: string) => (v === NONE ? "" : v);
+  return (
+    <Select
+      value={sentinel(value)}
+      onValueChange={(v) => onChange(fromSentinel(v))}
+      disabled={disabled}
+    >
+      <SelectTrigger className="flex-1 h-7 px-2 font-mono text-[11px] text-ink-700 dark:text-ink-200">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {items.map((it) => (
+          <SelectItem
+            key={it.value === "" ? NONE : it.value}
+            value={it.value === "" ? NONE : it.value}
+          >
+            <span className="font-mono text-[11px]">{it.label}</span>
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }
 
