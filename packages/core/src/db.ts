@@ -103,6 +103,17 @@ export const tasks = sqliteTable("tasks", {
    * Approve / Request changes / Merge) on the task detail view.
    */
   githubPr: integer("github_pr"),
+  /**
+   * Live PR state ("OPEN" / "CLOSED" / "MERGED") refreshed from
+   * `gh pr view` on spawn, after each PR action, and on github tab
+   * reload. NULL when the task isn't a PR task or hasn't been refreshed
+   * yet. Drives the lifecycle icon shown next to the task title.
+   */
+  githubPrState: text("github_pr_state"),
+  /** True when the PR is marked draft on github.com. */
+  githubPrIsDraft: integer("github_pr_is_draft"),
+  /** Live issue state ("OPEN" / "CLOSED"); same refresh triggers as PR state. */
+  githubIssueState: text("github_issue_state"),
 });
 
 /**
@@ -655,6 +666,9 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE projects ADD COLUMN open_issue_count INTEGER",
   "ALTER TABLE projects ADD COLUMN open_pr_count INTEGER",
   "ALTER TABLE projects ADD COLUMN github_counts_at INTEGER",
+  "ALTER TABLE tasks ADD COLUMN github_pr_state TEXT",
+  "ALTER TABLE tasks ADD COLUMN github_pr_is_draft INTEGER",
+  "ALTER TABLE tasks ADD COLUMN github_issue_state TEXT",
 ];
 
 function migrate(sqlite: Database): void {

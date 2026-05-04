@@ -308,6 +308,23 @@ export const Task = z.object({
    * worktree setup so the agent lands on the PR's branch.
    */
   githubPr: z.number().int().nullable().optional(),
+  /**
+   * Live PR state from `gh pr view` — "OPEN" / "CLOSED" / "MERGED".
+   * Refreshed on spawn, on every PR action (comment / review / merge),
+   * and whenever the project's github tab is reloaded. Surfaced as a
+   * lifecycle icon next to the task title in lists.
+   */
+  githubPrState: z.string().nullable().optional(),
+  /**
+   * True for PRs marked draft on github.com. Pairs with `githubPrState`
+   * to pick the right icon (gray draft vs. green open).
+   */
+  githubPrIsDraft: z.boolean().optional(),
+  /**
+   * Live issue state from `gh issue view` — "OPEN" / "CLOSED".
+   * Refreshed on the same triggers as `githubPrState`.
+   */
+  githubIssueState: z.string().nullable().optional(),
 });
 export type Task = z.infer<typeof Task>;
 

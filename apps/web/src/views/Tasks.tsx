@@ -23,6 +23,7 @@ import {
   shortId,
 } from "@/lib/utils";
 import { TaskDetail } from "@/views/TaskDetail";
+import { TaskGithubBadge } from "@/components/ui/task-github-badge";
 
 type StatusFilter = "all" | "active" | "done" | "failed" | "closed";
 
@@ -359,6 +360,7 @@ function TaskRow({
         )}
         <StatusDotSm status={task.status} />
         <div className="flex items-center gap-2 min-w-0 flex-1">
+          <TaskGithubBadge task={task} size="sm" />
           <span className="text-[13px] font-medium text-ink-900 dark:text-ink-50 truncate shrink-0 max-w-[42ch]">
             {task.title}
           </span>
@@ -369,7 +371,7 @@ function TaskRow({
           <span className="font-mono text-[11px] text-ink-400 dark:text-ink-500 truncate min-w-0">
             {task.branch}
           </span>
-          {task.prUrl && (
+          {task.prUrl && !task.githubPr && (
             <span className="shrink-0 inline-flex h-4 px-1 rounded text-[9px] font-medium uppercase tracking-[0.08em] bg-ember-500/10 text-ember-700 dark:text-ember-300">
               pr
             </span>

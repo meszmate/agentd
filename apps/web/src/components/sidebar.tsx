@@ -25,6 +25,7 @@ import { Wordmark } from "@/components/wordmark";
 import { ServerCard } from "@/components/server-card";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Kbd } from "@/components/ui/kbd";
+import { TaskGithubBadge } from "@/components/ui/task-github-badge";
 import {
   usePatchPrefs,
   usePrefs,
@@ -1064,13 +1065,14 @@ function SidebarTaskRow({
       >
         <span className={cn("h-1.5 w-1.5 rounded-full mt-1.5 shrink-0", dot)} />
         <span className="flex-1 min-w-0">
-          <span className="block truncate text-ink-900 dark:text-ink-50">
+          <span className="flex items-center gap-1 min-w-0 text-ink-900 dark:text-ink-50">
             {sliceIndex != null && sliceTotal != null && (
-              <span className="mr-1.5 inline-flex items-center align-middle h-3.5 px-1 rounded font-mono text-[8.5px] font-semibold tabular-nums text-ember-700 bg-ember-500/10 ring-1 ring-ember-500/20 dark:text-ember-300">
+              <span className="shrink-0 inline-flex items-center align-middle h-3.5 px-1 rounded font-mono text-[8.5px] font-semibold tabular-nums text-ember-700 bg-ember-500/10 ring-1 ring-ember-500/20 dark:text-ember-300">
                 {sliceIndex}/{sliceTotal}
               </span>
             )}
-            {t.title}
+            <TaskGithubBadge task={t} size="xs" />
+            <span className="truncate">{t.title}</span>
           </span>
           {showLive && liveEvent && (
             <span

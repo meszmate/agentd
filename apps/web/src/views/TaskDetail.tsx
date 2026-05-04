@@ -77,6 +77,7 @@ import { ShipMenu } from "@/components/ship-menu";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { TaskGithubBadge } from "@/components/ui/task-github-badge";
 import {
   Select,
   SelectContent,
@@ -1873,8 +1874,14 @@ function PrActionBar({
   return (
     <div className="border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-ember-500/[0.04] px-5 py-2 shrink-0">
       <div className="flex items-center gap-2 flex-wrap">
+        <TaskGithubBadge task={task} size="sm" />
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ember-700 dark:text-ember-300">
           PR #{task.githubPr}
+          {task.githubPrState && task.githubPrState.toUpperCase() !== "OPEN"
+            ? ` · ${task.githubPrState.toLowerCase()}`
+            : task.githubPrIsDraft
+              ? " · draft"
+              : ""}
         </span>
         <span className="text-ink-300 dark:text-ink-600">·</span>
         <Button

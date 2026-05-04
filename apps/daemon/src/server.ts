@@ -182,6 +182,8 @@ import {
   formatIssueConversation,
   formatPrConversation,
   renderConfigTemplate,
+  setTaskGithubMeta,
+  listTasks,
 } from "@agentd/core";
 import type { PluginManager } from "./pluginManager.ts";
 import { requireSession, bearerOrHeader } from "./auth.ts";
@@ -4226,6 +4228,55 @@ export function buildServer(opts: BuildServerOptions) {
     if (next) pubProjectChanged(next.id);
   }
 
+  /**
+   * Re-pull the live state (`OPEN` / `MERGED` / `CLOSED`, plus draft for
+   * PRs) for a single task from `gh` and persist it. Best-effort: a `gh`
+   * failure is swallowed so the prior cached state stays put. Publishes
+   * `task_changed` so the lifecycle icon updates everywhere without a
+   * poll. Used after PR actions and during project github refreshes.
+   */
+  async function refreshTaskGithubMeta(
+    taskId: string,
+    cwd: string,
+  ): Promise<void> {
+    const task = tasks.get(taskId);
+    if (!task) return;
+    if (task.githubPr) {
+      const r = await ghViewPr(cwd, task.githubPr);
+      if (!r.ok || !r.data) return;
+      const next = setTaskGithubMeta(db, taskId, {
+        githubPrState: r.data.state || null,
+        githubPrIsDraft: r.data.isDraft === true,
+      });
+      if (next) pubTaskChanged(taskId);
+    } else if (task.githubIssue) {
+      const r = await ghViewIssue(cwd, task.githubIssue);
+      if (!r.ok || !r.data) return;
+      const next = setTaskGithubMeta(db, taskId, {
+        githubIssueState: r.data.state || null,
+      });
+      if (next) pubTaskChanged(taskId);
+    }
+  }
+
+  /**
+   * Fan-out refresh: every task in this project that's tied to a
+   * GitHub issue or PR re-pulls its lifecycle state. Runs serially to
+   * stay friendly to `gh`'s implicit rate limiter (HTTP-cached, so
+   * cheap on the second hit). Fire-and-forget — callers don't wait.
+   */
+  async function refreshProjectTaskGithubMeta(project: {
+    id: string;
+    path: string;
+  }): Promise<void> {
+    const all = listTasks(db);
+    for (const t of all) {
+      if (t.projectId !== project.id) continue;
+      if (!t.githubPr && !t.githubIssue) continue;
+      await refreshTaskGithubMeta(t.id, project.path).catch(() => {});
+    }
+  }
+
   api.get("/projects/:idOrSlug/github/repo", async (c) => {
     const key = c.req.param("idOrSlug");
     const project =
@@ -4387,6 +4438,7 @@ export function buildServer(opts: BuildServerOptions) {
       getProjectById(db, key) ?? getProjectBySlug(db, key);
     if (!project) return c.json({ error: "not found" }, 404);
     await refreshGithubCounts(project).catch(() => {});
+    void refreshProjectTaskGithubMeta(project).catch(() => {});
     pubGithubRefreshed(project.id);
     return c.json({ ok: true });
   });
@@ -4426,6 +4478,11 @@ export function buildServer(opts: BuildServerOptions) {
     let prompt = parsed.data.prompt?.trim() ?? "";
     let title = parsed.data.title?.trim() ?? "";
     let conversation = "";
+    const spawnMeta: {
+      githubPrState?: string | null;
+      githubPrIsDraft?: boolean | null;
+      githubIssueState?: string | null;
+    } = {};
     if (parsed.data.kind === "issue") {
       const r = await ghViewIssue(project.path, parsed.data.number);
       if (!r.ok || !r.data) {
@@ -4436,6 +4493,7 @@ export function buildServer(opts: BuildServerOptions) {
       }
       const issue = r.data;
       conversation = formatIssueConversation(issue);
+      spawnMeta.githubIssueState = issue.state || "OPEN";
       if (!title) title = `#${issue.number} ${issue.title}`.slice(0, 100);
       if (parsed.data.preset === "fix-issue" || (!prompt && parsed.data.preset !== "freeform")) {
         prompt = renderConfigTemplate(presets.fixIssue, {
@@ -4462,6 +4520,8 @@ export function buildServer(opts: BuildServerOptions) {
       }
       const pr = r.data;
       conversation = formatPrConversation(pr);
+      spawnMeta.githubPrState = pr.state || "OPEN";
+      spawnMeta.githubPrIsDraft = pr.isDraft === true;
       if (!title) title = `PR #${pr.number} ${pr.title}`.slice(0, 100);
       if (parsed.data.preset === "review-pr" || (!prompt && parsed.data.preset !== "freeform")) {
         prompt = renderConfigTemplate(presets.reviewPr, {
@@ -4501,6 +4561,10 @@ export function buildServer(opts: BuildServerOptions) {
           ? { branchName: `gh-pr-${parsed.data.number}` }
           : {}),
       });
+      // Stamp the live PR/issue state from the gh view we already
+      // performed above so the lifecycle icon shows up immediately,
+      // without a second `gh` round-trip.
+      setTaskGithubMeta(db, task.id, spawnMeta);
       pubTaskChanged(task.id);
       void refreshGithubCounts(project).catch(() => {});
       pubGithubRefreshed(project.id);
@@ -4546,6 +4610,7 @@ export function buildServer(opts: BuildServerOptions) {
     const r = await ghPrComment(ctx.project.path, ctx.number, commentBody);
     if (!r.ok) return c.json({ error: r.error ?? "gh pr comment failed" }, 400);
     void refreshGithubCounts(ctx.project).catch(() => {});
+    void refreshTaskGithubMeta(ctx.task.id, ctx.project.path).catch(() => {});
     pubGithubRefreshed(ctx.project.id);
     return c.json({ ok: true });
   });
@@ -4567,6 +4632,7 @@ export function buildServer(opts: BuildServerOptions) {
     );
     if (!r.ok) return c.json({ error: r.error ?? "gh pr review failed" }, 400);
     void refreshGithubCounts(ctx.project).catch(() => {});
+    void refreshTaskGithubMeta(ctx.task.id, ctx.project.path).catch(() => {});
     pubGithubRefreshed(ctx.project.id);
     return c.json({ ok: true });
   });
@@ -4583,6 +4649,7 @@ export function buildServer(opts: BuildServerOptions) {
     const r = await ghPrMerge(ctx.project.path, ctx.number, method);
     if (!r.ok) return c.json({ error: r.error ?? "gh pr merge failed" }, 400);
     void refreshGithubCounts(ctx.project).catch(() => {});
+    void refreshTaskGithubMeta(ctx.task.id, ctx.project.path).catch(() => {});
     pubGithubRefreshed(ctx.project.id);
     return c.json({ ok: true });
   });
