@@ -134,6 +134,7 @@ function describe(ev: AgentEvent): string | null {
     // Streaming partials are too noisy for the activity ticker — drop them.
     case "message_delta":
     case "message_end":
+    case "tool_input_delta":
     case "todos_updated":
     case "queue_updated":
       return null;

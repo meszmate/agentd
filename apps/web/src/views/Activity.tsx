@@ -44,6 +44,7 @@ const KIND_LABEL: Record<Kind, string> = {
   message: "msg",
   message_delta: "δ",
   message_end: "/δ",
+  tool_input_delta: "→δ",
   tool_call: "→ tool",
   tool_result: "← tool",
   permission_request: "perm",
@@ -63,6 +64,7 @@ const KIND_TONE: Record<Kind, string> = {
   message: "text-ink-700 dark:text-ink-200",
   message_delta: "text-ink-400 dark:text-ink-500",
   message_end: "text-ink-400 dark:text-ink-500",
+  tool_input_delta: "text-ink-400 dark:text-ink-500",
   tool_call: "text-sky-700 dark:text-sky-300",
   tool_result: "text-sky-700 dark:text-sky-300",
   permission_request: "text-amber-700 dark:text-amber-300",
@@ -106,6 +108,8 @@ function renderEvent(ev: AgentEvent): { primary: string; secondary?: string } {
       return { primary: ev.delta.slice(0, 80), secondary: ev.streamId };
     case "message_end":
       return { primary: "stream done", secondary: ev.streamId };
+    case "tool_input_delta":
+      return { primary: ev.delta.slice(0, 80), secondary: ev.toolName };
     case "tool_call":
       return {
         primary: ev.tool,
@@ -253,6 +257,7 @@ export function Activity() {
       message: 0,
       message_delta: 0,
       message_end: 0,
+      tool_input_delta: 0,
       tool_call: 0,
       tool_result: 0,
       permission_request: 0,
