@@ -60,8 +60,15 @@ export function TaskContext({ task }: { task: Task }) {
     );
   }
 
-  const { agentInstructions, skills, repoCanonical, suffix, conversation, catalogs } =
-    ctxQ.data;
+  const {
+    agentInstructions,
+    projectInstructions,
+    skills,
+    repoCanonical,
+    suffix,
+    conversation,
+    catalogs,
+  } = ctxQ.data;
 
   const conversationPct = Math.round(
     (conversation.used / conversation.window) * 100,
@@ -80,13 +87,13 @@ export function TaskContext({ task }: { task: Task }) {
             current turn (latest input + output reported by the
             runner). Decays after /compact. */}
         <UsageBar
-          label={conversation.liveTurn ? "Live context" : "Context (estimate)"}
+          label="Live context"
           hint={
             conversation.liveTurn
               ? conversationHot
                 ? "this turn is near the model's limit · /compact to free space"
                 : "tokens loaded in the agent's current turn"
-              : "no per-turn usage logged yet — showing lifetime estimate; run a turn for a live read"
+              : "no live usage reading yet; lifetime spend is shown separately"
           }
           used={conversation.used}
           window={conversation.window}
@@ -121,7 +128,7 @@ export function TaskContext({ task }: { task: Task }) {
           hint={
             overBudget
               ? `${suffix.trimmed.length} skill${suffix.trimmed.length === 1 ? "" : "s"} auto-trimmed to fit ${formatTokens(suffix.budget)} budget`
-              : `${formatTokens(suffix.used)} of ${formatTokens(suffix.budget)} budget · skills + agent policy`
+              : `${formatTokens(suffix.used)} of ${formatTokens(suffix.budget)} budget · injected catalogs + policy`
           }
           used={suffix.used}
           window={suffix.budget}
@@ -158,6 +165,15 @@ export function TaskContext({ task }: { task: Task }) {
             label="Agent policy"
             hint="from Settings → Agent policy"
             body={agentInstructions}
+          />
+        )}
+
+        {projectInstructions && (
+          <ContextBlock
+            icon={<Sparkles className="h-3.5 w-3.5" />}
+            label="Project instructions"
+            hint="from this project"
+            body={projectInstructions}
           />
         )}
 
@@ -270,7 +286,10 @@ export function TaskContext({ task }: { task: Task }) {
           </div>
         ) : null}
 
-        {!agentInstructions && !repoCanonical && skills.length === 0 && (
+        {!agentInstructions &&
+          !projectInstructions &&
+          !repoCanonical &&
+          skills.length === 0 && (
           <div className="rounded-lg border border-ink-900/10 dark:border-ink-50/10 bg-paper-100 dark:bg-ink-800 px-4 py-3 text-[11px] text-ink-500 dark:text-ink-400">
             No additional context being injected. The agent runs on its
             default system prompt only.

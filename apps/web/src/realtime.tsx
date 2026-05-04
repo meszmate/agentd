@@ -119,6 +119,7 @@ function describe(ev: AgentEvent): string | null {
     case "message_delta":
     case "message_end":
     case "todos_updated":
+    case "queue_updated":
       return null;
   }
 }
@@ -198,6 +199,13 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           const wasNew = !cur.find((t) => t.id === msg.task.id);
           if (wasNew) next.unshift(msg.task);
           qc.setQueryData(qk.tasks(), { tasks: next });
+          qc.setQueryData(qk.task(msg.task.id), (curTask: unknown) => {
+            const prev = curTask as
+              | { task: Task; messages: unknown[] }
+              | undefined;
+            return prev ? { ...prev, task: msg.task } : prev;
+          });
+          void qc.invalidateQueries({ queryKey: ["taskContext", msg.task.id] });
           setPulses((p) => ({ ...p, [msg.task.id]: Date.now() }));
           setLastStatusChange((cur2) => ({
             ...cur2,
@@ -414,6 +422,31 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           void qc.invalidateQueries({ queryKey: ["models"] });
           return;
         }
+        if (msg.type === "github_refreshed") {
+          // Project's GitHub state shifted — issue/PR list refresh,
+          // spawn, PR action completed, status probe re-ran. Web
+          // refetches every project-scoped github query so every
+          // connected client picks up the new state without polling.
+          void qc.invalidateQueries({
+            queryKey: ["github", "issues", msg.projectId],
+          });
+          void qc.invalidateQueries({
+            queryKey: ["github", "prs", msg.projectId],
+          });
+          // Detail panels (single issue/PR) too — a PR action that
+          // posted a comment/review should refresh the open detail.
+          void qc.invalidateQueries({
+            queryKey: ["github", "issue", msg.projectId],
+          });
+          void qc.invalidateQueries({
+            queryKey: ["github", "pr", msg.projectId],
+          });
+          // Project itself may have had `githubRepo` cached in this
+          // tick — invalidate the project queries so the GitHub link
+          // reflects the resolved owner/repo.
+          void qc.invalidateQueries({ queryKey: ["project", msg.projectId] });
+          return;
+        }
         if (
           msg.type === "discord_test_send" ||
           msg.type === "discord_create_thread" ||
@@ -510,10 +543,33 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         // agent finishes, which makes the steer flow feel stale.
         if (
           msg.event.kind === "status" ||
+          msg.event.kind === "exit" ||
+          msg.event.kind === "queue_updated"
+        ) {
+          if (msg.event.kind === "queue_updated") {
+            const queue = msg.event.queue;
+            qc.setQueryData(["task-steer", msg.taskId], (cur: unknown) => {
+              const prev = cur as
+                | { running: boolean; queue: string[] }
+                | undefined;
+              return {
+                running: prev?.running ?? true,
+                queue,
+              };
+            });
+          } else {
+            void qc.invalidateQueries({
+              queryKey: ["task-steer", msg.taskId],
+            });
+          }
+        }
+        if (
+          msg.event.kind === "usage" ||
+          msg.event.kind === "status" ||
           msg.event.kind === "exit"
         ) {
           void qc.invalidateQueries({
-            queryKey: ["task-steer", msg.taskId],
+            queryKey: ["taskContext", msg.taskId],
           });
         }
         // Also refresh the task's messages cache on turn boundaries

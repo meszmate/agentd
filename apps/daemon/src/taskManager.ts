@@ -17,6 +17,7 @@ import {
   addTaskUsage,
   appendMessage,
   autoCommit,
+  checkoutPrInWorktree,
   createTask,
   deleteTask,
   detectDefaultBranch,
@@ -26,6 +27,8 @@ import {
   listTasks,
   listTasksByPlanGroup,
   listMessages,
+  markTaskCompacted,
+  pruneTaskMessagesBefore,
   createCouncil as dbCreateCouncil,
   createSuggestion,
   dismissSuggestion as dbDismissSuggestion,
@@ -55,6 +58,7 @@ import {
   setTaskPlanGroupId,
   updateTaskStatus,
   createWorktree,
+  type AiHelperOptions,
   type AgentdPaths,
   type Db,
 } from "@agentd/core";
@@ -107,6 +111,15 @@ export interface CreateTaskParams {
    * branch the worktree is checked out on.
    */
   sharedBranch?: string;
+  /**
+   * GitHub-spawn metadata. When `githubPr` is set, the manager runs
+   * `gh pr checkout <n>` inside the freshly-created worktree before
+   * the runner starts, so the agent lands on the PR's branch instead
+   * of an agentd-named one. Both ids are persisted on the task row
+   * for the UI's PR action bar / issue deep link.
+   */
+  githubIssue?: number | null;
+  githubPr?: number | null;
 }
 
 export class TaskManager {
@@ -117,6 +130,7 @@ export class TaskManager {
    * joined with blank lines so they read like one continuous note.
    */
   private inputQueue = new Map<string, string[]>();
+  private compacting = new Map<string, { startedAt: number }>();
   /**
    * Tasks whose agent signaled clean completion via `agentd-progress
    * --done`. The runner closes stdin in response, but claude's CLI may
@@ -184,6 +198,24 @@ export class TaskManager {
     }
   }
 
+  private helperForTask(params: {
+    agent: AgentKind;
+    model?: string | null;
+    thinkingLevel?: ThinkingLevel | null;
+  }): AiHelperOptions {
+    const cfg = loadConfig(this.paths.root);
+    const helper: AiHelperOptions = {
+      agent: params.agent,
+      effort: params.thinkingLevel ?? cfg.aiHelpers.effort,
+    };
+    const selectedModel =
+      params.model?.trim() || cfg.defaultModel?.[params.agent] || "";
+    if (selectedModel) {
+      helper.model = selectedModel;
+    }
+    return helper;
+  }
+
   list(): Task[] {
     return listTasks(this.db);
   }
@@ -202,6 +234,16 @@ export class TaskManager {
     return this.inputQueue.get(id)?.slice() ?? [];
   }
 
+  private publishQueue(taskId: string): string[] {
+    const queue = this.queuedInput(taskId);
+    this.bus.publish({
+      taskId,
+      event: { kind: "queue_updated", queue },
+      ts: Date.now(),
+    });
+    return queue;
+  }
+
   /**
    * Remove a single queued line by its current index. Used by the
    * timeline's queue strip — the operator can drop something they
@@ -216,7 +258,7 @@ export class TaskManager {
     cur.splice(index, 1);
     if (cur.length === 0) this.inputQueue.delete(taskId);
     else this.inputQueue.set(taskId, cur);
-    return cur.slice();
+    return this.publishQueue(taskId);
   }
 
   /**
@@ -377,9 +419,12 @@ export class TaskManager {
       } else if (params.branchName?.trim()) {
         branch = params.branchName.trim();
       } else {
-        const cfg = loadConfig(this.paths.root);
         const ai = await generateBranchName(params.prompt, {
-          helper: cfg.aiHelpers,
+          helper: this.helperForTask({
+            agent: params.agent,
+            model: params.model,
+            thinkingLevel: params.thinkingLevel,
+          }),
         });
         branch = `${ai.prefix}/${ai.slug}`;
       }
@@ -394,6 +439,29 @@ export class TaskManager {
         pullLatest: params.pullLatest ?? false,
       });
       worktreePath = result.worktreePath;
+      // PR task: switch the worktree onto the PR's branch so the agent
+      // sees the proposed changes (and any commits we add land back on
+      // the right branch). `gh pr checkout` resolves the head ref —
+      // including fork branches — and sets up the upstream tracking.
+      if (params.githubPr) {
+        const co = await checkoutPrInWorktree(worktreePath, params.githubPr);
+        if (!co.ok) {
+          throw new Error(
+            `gh pr checkout #${params.githubPr} failed: ${co.error ?? "unknown"}`,
+          );
+        }
+        // Pick up the new HEAD as the persisted branch name so the row
+        // reflects the PR branch rather than the agentd-generated one.
+        const headProc = Bun.spawn({
+          cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+          cwd: worktreePath,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const head = (await new Response(headProc.stdout).text()).trim();
+        await headProc.exited;
+        if (head) branch = head;
+      }
     }
     // Auto-create or look up the project for this repo path. Tasks belong
     // to projects so the sidebar can group them and surface what's new.
@@ -425,6 +493,8 @@ export class TaskManager {
       model: params.model ?? "",
       dependsOnTaskId: params.dependsOnTaskId ?? null,
       planGroupId: params.planGroupId ?? null,
+      githubIssue: params.githubIssue ?? null,
+      githubPr: params.githubPr ?? null,
     });
     touchProject(this.db, project.id);
     appendMessage(this.db, task.id, "user", params.prompt);
@@ -472,7 +542,6 @@ export class TaskManager {
     }
     const baseBranch =
       params.baseBranch ?? (await detectDefaultBranch(params.repoPath));
-    const cfg = loadConfig(this.paths.root);
     const project = ensureProjectForPath(this.db, params.repoPath);
     const planGroupId = newId("grp");
     const shareWorktree = params.shareWorktree ?? params.slices.length > 1;
@@ -480,16 +549,20 @@ export class TaskManager {
     let sharedWorktreePath: string | undefined;
     let sharedBranch: string | undefined;
     if (shareWorktree) {
-      const branchName =
-        params.branchName?.trim() ||
-        `feature/${
-          (
-            await generateBranchName(
-              params.titlePrefix || params.slices[0]!.prompt,
-              { helper: cfg.aiHelpers },
-            )
-          ).slug
-        }`;
+      let branchName = params.branchName?.trim();
+      if (!branchName) {
+        const ai = await (() => {
+          const first = params.slices[0]!;
+          return generateBranchName(params.titlePrefix || first.prompt, {
+            helper: this.helperForTask({
+              agent: first.agent ?? "claude",
+              model: first.model,
+              thinkingLevel: first.thinkingLevel,
+            }),
+          });
+        })();
+        branchName = `${ai.prefix}/${ai.slug}`;
+      }
       const result = await createWorktree({
         repoPath: params.repoPath,
         worktreeRoot: this.paths.worktrees,
@@ -654,6 +727,19 @@ export class TaskManager {
     await this.spawnRunner(task, text, true);
   }
 
+  async compact(taskId: string, focus?: string): Promise<string> {
+    const task = getTask(this.db, taskId);
+    if (!task) throw new Error("task not found");
+    const f = (focus ?? "").trim();
+    const directive = f
+      ? `Please summarize what you've done so far in this conversation in ~200 words, focusing on "${f}". Drop intermediate scratch work and continue from the compact summary.`
+      : "Please summarize what you've done so far in this conversation in ~200 words. Drop intermediate scratch work and continue from the compact summary.";
+    this.compacting.set(taskId, { startedAt: Date.now() });
+    await this.sendInput(taskId, directive);
+    markTaskCompacted(this.db, taskId);
+    return directive;
+  }
+
   /**
    * Steer modes:
    *   queue     — for live-input runners (claude), inject as the next
@@ -721,6 +807,7 @@ export class TaskManager {
       cur.splice(index, 1);
       if (cur.length === 0) this.inputQueue.delete(taskId);
       else this.inputQueue.set(taskId, cur);
+      this.publishQueue(taskId);
       appendMessage(this.db, taskId, "user", text);
       try {
         await session.runner.sendInput(text);
@@ -745,6 +832,7 @@ export class TaskManager {
       cur.splice(index, 1);
       if (cur.length === 0) this.inputQueue.delete(taskId);
       else this.inputQueue.set(taskId, cur);
+      this.publishQueue(taskId);
       appendMessage(this.db, taskId, "user", text);
       await this.spawnRunner(task, text, true);
       return this.inputQueue.get(taskId)?.slice() ?? [];
@@ -752,12 +840,13 @@ export class TaskManager {
 
     // Spawn-per-turn runner (codex) is running — promote fired item
     // to the front and SIGINT so the drain takes everything in
-    // queue order with the fired one leading. The user message is
-    // persisted now so the timeline reflects the operator's intent.
+    // queue order with the fired one leading. Do not persist here:
+    // runCompletionHooks drains and persists the joined queue after
+    // the runner exits, so persisting now would duplicate history.
     cur.splice(index, 1);
     cur.unshift(text);
     this.inputQueue.set(taskId, cur);
-    appendMessage(this.db, taskId, "user", text);
+    this.publishQueue(taskId);
     await this.stop(taskId).catch(() => {});
     return cur.slice();
   }
@@ -776,6 +865,7 @@ export class TaskManager {
     // Snapshot + clear up front so concurrent steers don't double-send.
     const items = cur.slice();
     this.inputQueue.delete(taskId);
+    this.publishQueue(taskId);
     for (const text of items) {
       appendMessage(this.db, taskId, "user", text);
       try {
@@ -812,6 +902,7 @@ export class TaskManager {
     const cur = this.inputQueue.get(taskId) ?? [];
     cur.push(text);
     this.inputQueue.set(taskId, cur);
+    this.publishQueue(taskId);
   }
 
 
@@ -819,7 +910,27 @@ export class TaskManager {
     const q = this.inputQueue.get(taskId);
     if (!q || q.length === 0) return null;
     this.inputQueue.delete(taskId);
+    this.publishQueue(taskId);
     return q.join("\n\n");
+  }
+
+  private finalizeCompaction(taskId: string): void {
+    const pending = this.compacting.get(taskId);
+    if (!pending) return;
+    this.compacting.delete(taskId);
+    const msgs = listMessages(this.db, taskId);
+    const summary = [...msgs]
+      .reverse()
+      .find((m) => m.role === "agent" && m.ts >= pending.startedAt);
+    pruneTaskMessagesBefore(this.db, taskId, summary?.ts ?? pending.startedAt);
+    markTaskCompacted(this.db, taskId);
+    setTaskCodexThreadId(this.db, taskId, null);
+    const fresh = getTask(this.db, taskId);
+    if (fresh) this.bus.publishSystem({ kind: "task_changed", task: fresh });
+    const session = this.running.get(taskId);
+    if (session?.runner.supportsLiveInput && session.runner.running) {
+      void session.runner.stop("SIGTERM").catch(() => {});
+    }
   }
 
   async stop(taskId: string): Promise<void> {
@@ -930,6 +1041,16 @@ export class TaskManager {
       if (projectInstructions && enabled) {
         appendParts.push(
           `# Project instructions\n\n${projectInstructions}\n\nYou can update this guidance with \`agentd-instructions write "<text>"\` if you discover something important worth persisting for future runs.`,
+        );
+      }
+    }
+    if (task.lastCompactedAt) {
+      const compactSummary = [...listMessages(this.db, task.id)]
+        .reverse()
+        .find((m) => m.role === "agent" && m.ts >= (task.lastCompactedAt ?? 0));
+      if (compactSummary?.content.trim()) {
+        appendParts.push(
+          `# Compacted conversation summary\n\n${compactSummary.content.trim()}`,
         );
       }
     }
@@ -1139,7 +1260,13 @@ export class TaskManager {
       // message — perfect moment to flush the queue. The per-row
       // Steer button is the manual mid-turn force; if the operator
       // just lets the queue sit, items drain themselves here.
+      if (status === "done" && this.compacting.has(taskId)) {
+        this.finalizeCompaction(taskId);
+      }
       if (status === "idle") {
+        if (this.compacting.has(taskId)) {
+          this.finalizeCompaction(taskId);
+        } else {
         const sess = this.running.get(taskId);
         if (sess?.runner.supportsLiveInput) {
           void this.autoDrainQueue(taskId);
@@ -1166,6 +1293,7 @@ export class TaskManager {
               });
             }
           }
+        }
         }
       }
     } else if (event.kind === "usage") {
@@ -1603,8 +1731,13 @@ export class TaskManager {
     const projectId = params.projectId ?? project?.id ?? null;
 
     const cfg = loadConfig(this.paths.root);
+    const firstMember = params.members[0]!;
     const ai = await generateBranchName(params.prompt, {
-      helper: cfg.aiHelpers,
+      helper: this.helperForTask({
+        agent: firstMember.agent,
+        model: firstMember.model,
+        thinkingLevel: firstMember.thinkingLevel,
+      }),
     });
     const baseSlug = ai.slug || "council";
 
@@ -1737,17 +1870,22 @@ export class TaskManager {
     const ai = await generateCommitMessage(task.worktreePath, {
       fallbackHint: task.title,
       baseRef: task.baseBranch,
-      helper: cfg.aiHelpers,
+      helper: this.helperForTask({
+        agent: task.agent,
+        model: task.model,
+        thinkingLevel: task.thinkingLevel,
+      }),
       ...(cfg.commitInstructions
         ? { extraInstructions: cfg.commitInstructions }
         : {}),
     });
+    const generated = ai.source === "claude" || ai.source === "codex";
     const subject =
-      ai.source === "claude"
+      generated
         ? ai.message.split("\n")[0]!.slice(0, 72)
         : task.title.slice(0, 72);
     const body =
-      ai.source === "claude" && ai.message.includes("\n")
+      generated && ai.message.includes("\n")
         ? ai.message.split("\n").slice(1).join("\n").trim() || undefined
         : (lastUserMsg ?? undefined);
     try {
@@ -1766,9 +1904,9 @@ export class TaskManager {
         this.bus.publish({
           taskId,
           event: {
-            kind: "raw",
-            stream: "stdout",
-            text: `[auto-commit ${result.sha?.slice(0, 7)}] ${result.message}`,
+            kind: "message",
+            role: "system",
+            text: `auto-committed ${result.sha?.slice(0, 7)}: ${result.message}`,
           },
           ts: Date.now(),
         });

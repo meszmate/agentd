@@ -25,6 +25,7 @@ import { useApp, useClient } from "@/AppContext";
 import { usePatchPrefs, useProjects, useTasks } from "@/queries";
 import { useStore } from "@/store";
 import { cn, formatCost, formatTokens, formatTs } from "@/lib/utils";
+import { TaskGithubBadge } from "@/components/ui/task-github-badge";
 
 const PALETTE = [
   "#DC2626",
@@ -279,6 +280,7 @@ function ProjectCard({
                 className="flex items-center gap-2 text-[12px]"
               >
                 <StatusDot status={t.status} />
+                <TaskGithubBadge task={t} size="xs" />
                 <span className="flex-1 truncate text-ink-700 dark:text-ink-200">
                   {t.title}
                 </span>

@@ -32,6 +32,10 @@ import {
   UpdateIdeaRequest,
   CreateTodoRequest,
   UpdateTodoRequest,
+  GithubSpawnRequest,
+  GithubPrActionRequest,
+  GithubListQuery,
+  type Task,
   type WsServerEvent,
 } from "@agentd/contracts";
 import { join, normalize, relative, resolve } from "node:path";
@@ -130,6 +134,7 @@ import {
   getSchedule,
   listSchedules,
   setScheduleEnabled,
+  type AiHelperOptions,
   type AgentdPaths,
   type Db,
   type PluginName,
@@ -143,7 +148,6 @@ import {
   writeSkillFile,
   deleteSkillFile,
   skillDirPath,
-  renderSkillsBudgeted,
   renderSkillsCatalog,
   renderRepoContext,
   getProjectById,
@@ -164,7 +168,22 @@ import {
   renameTmuxWindow,
   sendTmuxKeys,
   reorderTasks,
-  markTaskCompacted,
+  ghStatus,
+  ghRepo,
+  listIssues as ghListIssues,
+  listPrs as ghListPrs,
+  viewPr as ghViewPr,
+  viewIssue as ghViewIssue,
+  prComment as ghPrComment,
+  prReview as ghPrReview,
+  prMerge as ghPrMerge,
+  countOpenIssues as ghCountOpenIssues,
+  countOpenPrs as ghCountOpenPrs,
+  formatIssueConversation,
+  formatPrConversation,
+  renderConfigTemplate,
+  setTaskGithubMeta,
+  listTasks,
 } from "@agentd/core";
 import type { PluginManager } from "./pluginManager.ts";
 import { requireSession, bearerOrHeader } from "./auth.ts";
@@ -213,6 +232,17 @@ export function buildServer(opts: BuildServerOptions) {
   function pubTaskRemoved(taskId: string): void {
     bus.publishSystem({ kind: "task_removed", taskId });
   }
+  function helperForTask(task: Task): AiHelperOptions {
+    const cfg = loadConfig(paths.root);
+    const helper: AiHelperOptions = {
+      agent: task.agent,
+      effort: task.thinkingLevel ?? cfg.aiHelpers.effort,
+    };
+    const selectedModel =
+      task.model?.trim() || cfg.defaultModel?.[task.agent] || "";
+    if (selectedModel) helper.model = selectedModel;
+    return helper;
+  }
   function pubProjectChanged(projectId: string): void {
     const p = getProjectById(db, projectId);
     if (p) bus.publishSystem({ kind: "project_changed", project: p });
@@ -248,6 +278,15 @@ export function buildServer(opts: BuildServerOptions) {
       ideaId,
       projectId,
     });
+  }
+  /**
+   * GitHub state for a project shifted — issue/PR list refresh, spawn,
+   * PR action completed, status probe re-ran. Web invalidates the
+   * project's `github-issues` / `github-prs` queries on this so every
+   * connected client sees the new state without polling.
+   */
+  function pubGithubRefreshed(projectId: string): void {
+    bus.publishSystem({ kind: "github_refreshed", projectId });
   }
 
   /**
@@ -986,7 +1025,7 @@ export function buildServer(opts: BuildServerOptions) {
       ...(body.hint ? { hint: body.hint } : {}),
       fallbackHint: task.title,
       baseRef: task.baseBranch,
-      helper: cfg.aiHelpers,
+      helper: helperForTask(task),
       ...(cfg.commitInstructions
         ? { extraInstructions: cfg.commitInstructions }
         : {}),
@@ -1012,7 +1051,7 @@ export function buildServer(opts: BuildServerOptions) {
       ...(body.hint ? { hint: body.hint } : {}),
       fallbackHint: task.title,
       baseRef: task.baseBranch,
-      helper: cfg.aiHelpers,
+      helper: helperForTask(task),
       ...(cfg.commitInstructions
         ? { extraInstructions: cfg.commitInstructions }
         : {}),
@@ -1087,7 +1126,7 @@ export function buildServer(opts: BuildServerOptions) {
       baseRef: task.baseBranch,
       taskPrompt,
       taskTitle: task.title,
-      helper: cfg.aiHelpers,
+      helper: helperForTask(task),
       ...(cfg.prInstructions
         ? { extraInstructions: cfg.prInstructions }
         : {}),
@@ -1152,11 +1191,31 @@ export function buildServer(opts: BuildServerOptions) {
   api.post("/branch-name", async (c) => {
     const body = (await c.req.json().catch(() => null)) as {
       prompt?: string;
+      agent?: string;
+      model?: string;
+      thinkingLevel?: import("@agentd/contracts").ThinkingLevel;
     } | null;
     const prompt = (body?.prompt ?? "").trim();
     if (!prompt) return c.json({ error: "prompt required" }, 400);
     const cfg = loadConfig(paths.root);
-    const r = await generateBranchName(prompt, { helper: cfg.aiHelpers });
+    const agent =
+      body?.agent === "claude" || body?.agent === "codex"
+        ? body.agent
+        : null;
+    const helper: AiHelperOptions = agent
+      ? {
+          agent,
+          effort: body?.thinkingLevel ?? cfg.aiHelpers.effort,
+        }
+      : { ...cfg.aiHelpers };
+    if (agent) {
+      const selectedModel =
+        body?.model?.trim() || cfg.defaultModel?.[agent] || "";
+      if (selectedModel) helper.model = selectedModel;
+    } else if (body?.model?.trim()) {
+      helper.model = body.model.trim();
+    }
+    const r = await generateBranchName(prompt, { helper });
     return c.json(r);
   });
 
@@ -1176,7 +1235,7 @@ export function buildServer(opts: BuildServerOptions) {
       const ai = await generateCommitMessage(task.worktreePath, {
         fallbackHint: task.title,
         baseRef: task.baseBranch,
-        helper: cfg.aiHelpers,
+        helper: helperForTask(task),
         ...(cfg.commitInstructions
           ? { extraInstructions: cfg.commitInstructions }
           : {}),
@@ -1570,13 +1629,6 @@ export function buildServer(opts: BuildServerOptions) {
       });
     }
 
-    // Compute the trim that *would* apply if we re-rendered now.
-    const renderInfo = renderSkillsBudgeted(task.skills ?? [], {
-      agentdRoot: paths.root,
-      repoPath: task.repoPath,
-      maxTokens: cfg.maxContextTokens,
-    });
-
     // Read a repo-canonical instructions file if present.
     const candidateDocs = [
       ".agents/INSTRUCTIONS.md",
@@ -1613,8 +1665,11 @@ export function buildServer(opts: BuildServerOptions) {
         ? (task.latestTurnInputTokens ?? 0) + (task.latestTurnOutputTokens ?? 0)
         : null;
     const cumulativeTokens =
-      (task.totalInputTokens ?? 0) + (task.totalOutputTokens ?? 0);
-    const conversationTokens = liveTurnTokens ?? cumulativeTokens;
+      (task.totalInputTokens ?? 0) +
+      (task.totalOutputTokens ?? 0) +
+      (task.totalCacheReadTokens ?? 0) +
+      (task.totalCacheWriteTokens ?? 0);
+    const conversationTokens = liveTurnTokens ?? 0;
     // Per-agent context window. Claude Sonnet/Opus 4: 200K. Codex
     // (GPT-5 family) defaults to 200K too, though specific models
     // can run higher. Keep a single number for now; future work can
@@ -1630,17 +1685,33 @@ export function buildServer(opts: BuildServerOptions) {
 
     // Repo-context catalog — what we tell the agent about the worktree.
     const repoCtx = renderRepoContext({ worktreePath: task.worktreePath });
+    const project = task.projectId ? getProjectById(db, task.projectId) : null;
+    const projectInstructions =
+      project?.instructionsEnabled !== false
+        ? project?.instructions?.trim() || ""
+        : "";
+    const injectedParts = [
+      cfg.agentInstructions?.trim() || "",
+      projectInstructions
+        ? `# Project instructions\n\n${projectInstructions}`
+        : "",
+      skillsCatalog.text,
+      repoCtx.text,
+    ].filter((part) => part.trim().length > 0);
+    const injectedText = injectedParts.join("\n\n---\n\n");
+    const injectedTokens = Math.ceil(injectedText.length / 4);
 
     return c.json({
       agentInstructions: cfg.agentInstructions ?? "",
+      projectInstructions,
       skills,
       repoCanonical,
       // Suffix-prompt budget (skills + agentInstructions), trim metadata.
       suffix: {
         budget: cfg.maxContextTokens,
-        used: renderInfo.tokens,
-        kept: renderInfo.kept,
-        trimmed: renderInfo.trimmed,
+        used: injectedTokens,
+        kept: skillsCatalog.entries.map((e) => e.id),
+        trimmed: [],
       },
       // Progressive-disclosure catalogs — what the agent actually sees.
       catalogs: {
@@ -1650,10 +1721,9 @@ export function buildServer(opts: BuildServerOptions) {
       conversation: {
         used: conversationTokens,
         window: conversationWindow,
-        // True when we couldn't pin the most recent turn's footprint
-        // and fell back to the lifetime cumulative — the UI shows a
-        // hint so the operator knows the % is a worst-case estimate
-        // until the next turn rewrites the gauge.
+        // True when the current context gauge came from runner usage.
+        // False means there is no live reading yet, not that lifetime
+        // spend should be treated as context.
         liveTurn: liveTurnTokens != null,
         // Separate billing-style total — never decreases. Lets the
         // tab surface "current context" + "lifetime spend" without
@@ -1675,21 +1745,8 @@ export function buildServer(opts: BuildServerOptions) {
     const task = tasks.get(id);
     if (!task) return c.json({ error: "not found" }, 404);
     const body = (await c.req.json().catch(() => ({}))) as { focus?: string };
-    const focus = (body.focus ?? "").trim();
-    // Slash commands like `/compact` only work in claude-code's
-    // interactive mode. We're driving claude in stream-json input
-    // mode where everything is treated as a literal user message,
-    // so a textual directive is the only thing that actually
-    // compresses context. Same instruction works for codex too.
-    const directive = focus
-      ? `Please summarize what you've done so far in this conversation in ~200 words, focusing on "${focus}". Drop intermediate scratch work and continue from the compact summary.`
-      : "Please summarize what you've done so far in this conversation in ~200 words. Drop intermediate scratch work and continue from the compact summary.";
     try {
-      await tasks.sendInput(id, directive);
-      // Watermark — the web draws a "context compacted" divider in
-      // the timeline at this ts so the operator can tell which
-      // earlier messages are still in working memory.
-      markTaskCompacted(db, id);
+      const directive = await tasks.compact(id, body.focus);
       pubTaskChanged(id);
       return c.json({ ok: true, agent: task.agent, directive });
     } catch (e) {
@@ -2709,7 +2766,18 @@ export function buildServer(opts: BuildServerOptions) {
 
   // ── Projects ────────────────────────────────────────────────────────
   api.get("/projects", (c) => {
-    return c.json({ projects: listProjects(db) });
+    const list = listProjects(db);
+    // Lazy first-time fill of sidebar GitHub badges. Any project that
+    // has a known `githubRepo` but no cached counts yet kicks off a
+    // background refresh; the bus event flips badges on without a
+    // poll. Bounded fan-out via Promise.all but capped at the existing
+    // gh process limit (gh handles its own concurrency).
+    for (const p of list) {
+      if (p.githubRepo && p.openIssueCount == null && p.openPrCount == null) {
+        void refreshGithubCounts(p).catch(() => {});
+      }
+    }
+    return c.json({ projects: list });
   });
 
   api.get("/projects/:idOrSlug", (c) => {
@@ -4090,6 +4158,500 @@ export function buildServer(opts: BuildServerOptions) {
     } catch (e) {
       return c.json({ ok: false, error: (e as Error).message }, 500);
     }
+  });
+
+  // ── GitHub ──────────────────────────────────────────────────────────
+  //
+  // Thin shell-out layer over the operator's `gh` CLI. Auth is `gh`'s
+  // problem; we just reuse the operator's existing identity (no PATs,
+  // no Octokit). Every project-scoped call runs in the project's repo
+  // path so `gh` picks up the right remote from `.git/config`.
+
+  /**
+   * Global preflight — `gh --version` + `gh auth status`. Web's GitHub
+   * tab gates on this. Cheap (~150ms) so we don't cache.
+   */
+  api.get("/github/status", async (c) => {
+    const status = await ghStatus();
+    return c.json(status);
+  });
+
+  /**
+   * Resolve `owner/repo` for a project lazily and cache it on the
+   * project row. The web reads this to decide whether the GitHub tab
+   * makes sense (no GitHub remote → tab hidden). Re-runs `gh repo
+   * view` when the project doesn't have it cached yet, so the first
+   * visit pays a small cost and every visit after is free.
+   */
+  async function resolveProjectGithubRepo(project: {
+    id: string;
+    path: string;
+    githubRepo?: string | null;
+  }): Promise<string | null> {
+    if (project.githubRepo) return project.githubRepo;
+    const slug = await ghRepo(project.path);
+    if (slug) {
+      const next = updateProject(db, project.id, { githubRepo: slug });
+      if (next) pubProjectChanged(next.id);
+    }
+    return slug;
+  }
+
+  /**
+   * Refresh the cached open-issue/PR counts for a project. Runs both
+   * `gh` calls in parallel and writes the results back to the project
+   * row. Best-effort — a `gh` failure leaves the prior cached count in
+   * place (we only overwrite when the call succeeded). Publishes
+   * `project_changed` so every connected sidebar updates without
+   * polling. Safe to fire-and-forget; callers that need the result
+   * await it.
+   */
+  async function refreshGithubCounts(project: {
+    id: string;
+    path: string;
+    githubRepo?: string | null;
+  }): Promise<void> {
+    const slug = await resolveProjectGithubRepo(project);
+    if (!slug) return;
+    const [issues, prs] = await Promise.all([
+      ghCountOpenIssues(project.path),
+      ghCountOpenPrs(project.path),
+    ]);
+    const patch: {
+      openIssueCount?: number | null;
+      openPrCount?: number | null;
+      githubCountsAt?: number | null;
+    } = { githubCountsAt: Date.now() };
+    if (issues != null) patch.openIssueCount = issues;
+    if (prs != null) patch.openPrCount = prs;
+    const next = updateProject(db, project.id, patch);
+    if (next) pubProjectChanged(next.id);
+  }
+
+  /**
+   * Re-pull the live state (`OPEN` / `MERGED` / `CLOSED`, plus draft for
+   * PRs) for a single task from `gh` and persist it. Best-effort: a `gh`
+   * failure is swallowed so the prior cached state stays put. Publishes
+   * `task_changed` so the lifecycle icon updates everywhere without a
+   * poll. Used after PR actions and during project github refreshes.
+   */
+  async function refreshTaskGithubMeta(
+    taskId: string,
+    cwd: string,
+  ): Promise<void> {
+    const task = tasks.get(taskId);
+    if (!task) return;
+    if (task.githubPr) {
+      const r = await ghViewPr(cwd, task.githubPr);
+      if (!r.ok || !r.data) return;
+      const next = setTaskGithubMeta(db, taskId, {
+        githubPrState: r.data.state || null,
+        githubPrIsDraft: r.data.isDraft === true,
+      });
+      if (next) pubTaskChanged(taskId);
+    } else if (task.githubIssue) {
+      const r = await ghViewIssue(cwd, task.githubIssue);
+      if (!r.ok || !r.data) return;
+      const next = setTaskGithubMeta(db, taskId, {
+        githubIssueState: r.data.state || null,
+      });
+      if (next) pubTaskChanged(taskId);
+    }
+  }
+
+  /**
+   * Fan-out refresh: every task in this project that's tied to a
+   * GitHub issue or PR re-pulls its lifecycle state. Runs serially to
+   * stay friendly to `gh`'s implicit rate limiter (HTTP-cached, so
+   * cheap on the second hit). Fire-and-forget — callers don't wait.
+   */
+  async function refreshProjectTaskGithubMeta(project: {
+    id: string;
+    path: string;
+  }): Promise<void> {
+    const all = listTasks(db);
+    for (const t of all) {
+      if (t.projectId !== project.id) continue;
+      if (!t.githubPr && !t.githubIssue) continue;
+      await refreshTaskGithubMeta(t.id, project.path).catch(() => {});
+    }
+  }
+
+  api.get("/projects/:idOrSlug/github/repo", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const slug = await resolveProjectGithubRepo(project);
+    return c.json({ repo: slug });
+  });
+
+  /**
+   * Parse the GitHub list/search query string. Mirrors github.com's
+   * own filter UI: `state, q, label (repeatable), author, assignee,
+   * milestone, draft, base, limit`. The `q` param accepts the full
+   * github.com search syntax (`is:open author:foo label:bug
+   * in:title,body`) and is handed to `gh --search` verbatim.
+   */
+  function parseGithubListQuery(c: import("hono").Context): GithubListQuery {
+    const q = c.req.queries();
+    const out: GithubListQuery = {};
+    const state = c.req.query("state");
+    if (state === "open" || state === "closed" || state === "merged" || state === "all") {
+      out.state = state;
+    }
+    const search = c.req.query("q") ?? c.req.query("search");
+    if (search?.trim()) out.search = search.trim();
+    const labels = q.label ?? q.labels ?? [];
+    if (labels.length > 0) {
+      // Allow `?label=a&label=b` (repeated) or `?labels=a,b` (csv).
+      const flat: string[] = [];
+      for (const l of labels) {
+        for (const part of l.split(",")) {
+          if (part.trim()) flat.push(part.trim());
+        }
+      }
+      if (flat.length > 0) out.labels = flat;
+    }
+    const author = c.req.query("author");
+    if (author?.trim()) out.author = author.trim();
+    const assignee = c.req.query("assignee");
+    if (assignee?.trim()) out.assignee = assignee.trim();
+    const milestone = c.req.query("milestone");
+    if (milestone?.trim()) out.milestone = milestone.trim();
+    const base = c.req.query("base");
+    if (base?.trim()) out.base = base.trim();
+    if (c.req.query("draft") === "true") out.draft = true;
+    const limit = c.req.query("limit");
+    if (limit) {
+      const n = Number(limit);
+      if (Number.isFinite(n) && n > 0) out.limit = Math.min(500, Math.floor(n));
+    }
+    return out;
+  }
+
+  /**
+   * True when a `GithubListQuery` is the unfiltered "open" default —
+   * `state=open` (or unset) and no search/label/author/etc filters.
+   * The list endpoints use this to opportunistically update the
+   * cached open-count cache (and therefore the sidebar badges) from
+   * the response length without an extra `gh` round-trip. Filtered
+   * lists would give a misleading count, so we skip them.
+   */
+  function isNaturalOpenView(opts: GithubListQuery): boolean {
+    if (opts.state && opts.state !== "open") return false;
+    if (opts.search?.trim()) return false;
+    if (opts.labels && opts.labels.length > 0) return false;
+    if (opts.author?.trim()) return false;
+    if (opts.assignee?.trim()) return false;
+    if (opts.milestone?.trim()) return false;
+    if (opts.base?.trim()) return false;
+    if (opts.draft) return false;
+    return true;
+  }
+
+  api.get("/projects/:idOrSlug/github/issues", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const slug = await resolveProjectGithubRepo(project);
+    if (!slug) return c.json({ ok: false, repo: null, issues: [], error: "no GitHub remote" });
+    const opts = parseGithubListQuery(c);
+    const r = await ghListIssues(project.path, opts);
+    if (!r.ok) {
+      return c.json({ ok: false, repo: slug, issues: [], error: r.error ?? "gh failed" });
+    }
+    // Operator opened the GitHub tab — kick a background count
+    // refresh so the sidebar badges follow the same view.
+    // Fire-and-forget; the bus event flips badges without polling.
+    if (isNaturalOpenView(opts)) {
+      void refreshGithubCounts(project).catch(() => {});
+    }
+    return c.json({ ok: true, repo: slug, issues: r.data ?? [], query: opts });
+  });
+
+  api.get("/projects/:idOrSlug/github/prs", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const slug = await resolveProjectGithubRepo(project);
+    if (!slug) return c.json({ ok: false, repo: null, prs: [], error: "no GitHub remote" });
+    const opts = parseGithubListQuery(c);
+    const r = await ghListPrs(project.path, opts);
+    if (!r.ok) {
+      return c.json({ ok: false, repo: slug, prs: [], error: r.error ?? "gh failed" });
+    }
+    if (isNaturalOpenView(opts)) {
+      void refreshGithubCounts(project).catch(() => {});
+    }
+    return c.json({ ok: true, repo: slug, prs: r.data ?? [], query: opts });
+  });
+
+  /**
+   * Per-issue / per-PR detail. Returns the full conversation (body +
+   * comments + reviews + commits for PRs) so the web detail panel can
+   * render everything that happened on the item without leaving the
+   * tab. The spawn endpoint reuses the same fetch for prompt context.
+   */
+  api.get("/projects/:idOrSlug/github/issues/:number", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const num = Number(c.req.param("number"));
+    if (!Number.isFinite(num) || num < 1) return c.json({ error: "bad number" }, 400);
+    const slug = await resolveProjectGithubRepo(project);
+    if (!slug) return c.json({ ok: false, error: "no GitHub remote" }, 400);
+    const r = await ghViewIssue(project.path, num);
+    if (!r.ok || !r.data) {
+      return c.json({ ok: false, error: r.error ?? "gh issue view failed" }, 400);
+    }
+    return c.json({ ok: true, repo: slug, issue: r.data });
+  });
+
+  api.get("/projects/:idOrSlug/github/prs/:number", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const num = Number(c.req.param("number"));
+    if (!Number.isFinite(num) || num < 1) return c.json({ error: "bad number" }, 400);
+    const slug = await resolveProjectGithubRepo(project);
+    if (!slug) return c.json({ ok: false, error: "no GitHub remote" }, 400);
+    const r = await ghViewPr(project.path, num);
+    if (!r.ok || !r.data) {
+      return c.json({ ok: false, error: r.error ?? "gh pr view failed" }, 400);
+    }
+    return c.json({ ok: true, repo: slug, pr: r.data });
+  });
+
+  /**
+   * Manual refresh — kicks the WS bus so every connected client
+   * re-fetches without polling. The lists themselves come from the
+   * GET endpoints above; this is just the broadcast.
+   */
+  api.post("/projects/:idOrSlug/github/refresh", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    await refreshGithubCounts(project).catch(() => {});
+    void refreshProjectTaskGithubMeta(project).catch(() => {});
+    pubGithubRefreshed(project.id);
+    return c.json({ ok: true });
+  });
+
+  /**
+   * Spawn a task from a GitHub issue or PR. Prompt is assembled from
+   * the configured preset + the issue/PR body; for PR tasks the
+   * worktree is checked out onto the PR's branch via `gh pr checkout`
+   * (handled in TaskManager.create when `githubPr` is set).
+   */
+  api.post("/projects/:idOrSlug/github/spawn", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const body = await c.req.json().catch(() => null);
+    const parsed = GithubSpawnRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid request", issues: parsed.error.issues },
+        400,
+      );
+    }
+    const slug = await resolveProjectGithubRepo(project);
+    if (!slug) return c.json({ error: "project has no GitHub remote" }, 400);
+
+    const cfg = loadConfig(paths.root);
+    const presets = cfg.presets.github;
+
+    // Pull the full conversation so the agent's prompt includes every
+    // comment + review (PR) the operator could have read on github.com
+    // before kicking off the task. We render it into a structured
+    // markdown blob and substitute it as `{body}` in the preset
+    // template (the existing template uses `{body}` for "context to
+    // hand the agent"; replacing the bare body with the conversation
+    // is a strict superset of what was there before).
+    let prompt = parsed.data.prompt?.trim() ?? "";
+    let title = parsed.data.title?.trim() ?? "";
+    let conversation = "";
+    const spawnMeta: {
+      githubPrState?: string | null;
+      githubPrIsDraft?: boolean | null;
+      githubIssueState?: string | null;
+    } = {};
+    if (parsed.data.kind === "issue") {
+      const r = await ghViewIssue(project.path, parsed.data.number);
+      if (!r.ok || !r.data) {
+        return c.json(
+          { error: r.error ?? `gh issue view #${parsed.data.number} failed` },
+          400,
+        );
+      }
+      const issue = r.data;
+      conversation = formatIssueConversation(issue);
+      spawnMeta.githubIssueState = issue.state || "OPEN";
+      if (!title) title = `#${issue.number} ${issue.title}`.slice(0, 100);
+      if (parsed.data.preset === "fix-issue" || (!prompt && parsed.data.preset !== "freeform")) {
+        prompt = renderConfigTemplate(presets.fixIssue, {
+          number: String(issue.number),
+          title: issue.title,
+          body: conversation,
+          url: issue.url,
+          branch: "",
+        });
+      } else if (parsed.data.preset === "freeform" && prompt) {
+        // Freeform with operator-supplied prompt: append the full
+        // conversation as context so the agent still sees what
+        // happened on the issue without the operator pasting it.
+        prompt = `${prompt}\n\n---\n\n${conversation}`;
+      }
+      if (!prompt) prompt = conversation;
+    } else {
+      const r = await ghViewPr(project.path, parsed.data.number);
+      if (!r.ok || !r.data) {
+        return c.json(
+          { error: r.error ?? `gh pr view #${parsed.data.number} failed` },
+          400,
+        );
+      }
+      const pr = r.data;
+      conversation = formatPrConversation(pr);
+      spawnMeta.githubPrState = pr.state || "OPEN";
+      spawnMeta.githubPrIsDraft = pr.isDraft === true;
+      if (!title) title = `PR #${pr.number} ${pr.title}`.slice(0, 100);
+      if (parsed.data.preset === "review-pr" || (!prompt && parsed.data.preset !== "freeform")) {
+        prompt = renderConfigTemplate(presets.reviewPr, {
+          number: String(pr.number),
+          title: pr.title,
+          body: conversation,
+          url: pr.url,
+          branch: pr.headRefName,
+        });
+      } else if (parsed.data.preset === "freeform" && prompt) {
+        prompt = `${prompt}\n\n---\n\n${conversation}`;
+      }
+      if (!prompt) prompt = conversation;
+    }
+
+    try {
+      const task = await tasks.create({
+        agent: parsed.data.agent ?? "claude",
+        repoPath: project.path,
+        prompt,
+        title,
+        ...(parsed.data.permissionMode
+          ? { permissionMode: parsed.data.permissionMode }
+          : {}),
+        ...(parsed.data.thinkingLevel
+          ? { thinkingLevel: parsed.data.thinkingLevel }
+          : {}),
+        ...(parsed.data.model ? { model: parsed.data.model } : {}),
+        ...(parsed.data.kind === "issue"
+          ? { githubIssue: parsed.data.number }
+          : { githubPr: parsed.data.number }),
+        // PR tasks: skip the AI branch helper — the worktree gets
+        // switched onto the PR branch by `gh pr checkout`. Pass a
+        // placeholder branch name here; taskManager will overwrite it
+        // with the actual PR head once the checkout lands.
+        ...(parsed.data.kind === "pr"
+          ? { branchName: `gh-pr-${parsed.data.number}` }
+          : {}),
+      });
+      // Stamp the live PR/issue state from the gh view we already
+      // performed above so the lifecycle icon shows up immediately,
+      // without a second `gh` round-trip.
+      setTaskGithubMeta(db, task.id, spawnMeta);
+      pubTaskChanged(task.id);
+      void refreshGithubCounts(project).catch(() => {});
+      pubGithubRefreshed(project.id);
+      return c.json({ task });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  /**
+   * PR action bar — comment / review / merge. Reads `task.githubPr`
+   * (set at spawn time) so the operator can act on the PR from the
+   * task detail view without leaving agentd. `cwd` is the project
+   * path so `gh` resolves the right repo.
+   */
+  function loadPrTask(c: import("hono").Context): {
+    task: Task;
+    project: { id: string; path: string };
+    number: number;
+  } | { error: string; status: 400 | 404 } {
+    const id = c.req.param("id") ?? "";
+    const task = tasks.get(id);
+    if (!task) return { error: "task not found", status: 404 };
+    if (!task.githubPr) return { error: "task is not a PR task", status: 400 };
+    if (!task.projectId) return { error: "task has no project", status: 400 };
+    const project = getProjectById(db, task.projectId);
+    if (!project) return { error: "project missing", status: 404 };
+    return { task, project, number: task.githubPr };
+  }
+
+  api.post("/tasks/:id/github/comment", async (c) => {
+    const ctx = loadPrTask(c);
+    if ("error" in ctx) return c.json({ error: ctx.error }, ctx.status);
+    const body = await c.req.json().catch(() => null);
+    const parsed = GithubPrActionRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
+    }
+    const commentBody = parsed.data.body?.trim();
+    if (!commentBody) {
+      return c.json({ error: "body is required" }, 400);
+    }
+    const r = await ghPrComment(ctx.project.path, ctx.number, commentBody);
+    if (!r.ok) return c.json({ error: r.error ?? "gh pr comment failed" }, 400);
+    void refreshGithubCounts(ctx.project).catch(() => {});
+    void refreshTaskGithubMeta(ctx.task.id, ctx.project.path).catch(() => {});
+    pubGithubRefreshed(ctx.project.id);
+    return c.json({ ok: true });
+  });
+
+  api.post("/tasks/:id/github/review", async (c) => {
+    const ctx = loadPrTask(c);
+    if ("error" in ctx) return c.json({ error: ctx.error }, ctx.status);
+    const body = await c.req.json().catch(() => null);
+    const parsed = GithubPrActionRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
+    }
+    const event = parsed.data.event ?? "COMMENT";
+    const r = await ghPrReview(
+      ctx.project.path,
+      ctx.number,
+      event,
+      parsed.data.body,
+    );
+    if (!r.ok) return c.json({ error: r.error ?? "gh pr review failed" }, 400);
+    void refreshGithubCounts(ctx.project).catch(() => {});
+    void refreshTaskGithubMeta(ctx.task.id, ctx.project.path).catch(() => {});
+    pubGithubRefreshed(ctx.project.id);
+    return c.json({ ok: true });
+  });
+
+  api.post("/tasks/:id/github/merge", async (c) => {
+    const ctx = loadPrTask(c);
+    if ("error" in ctx) return c.json({ error: ctx.error }, ctx.status);
+    const body = await c.req.json().catch(() => null);
+    const parsed = GithubPrActionRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
+    }
+    const method = parsed.data.method ?? "squash";
+    const r = await ghPrMerge(ctx.project.path, ctx.number, method);
+    if (!r.ok) return c.json({ error: r.error ?? "gh pr merge failed" }, 400);
+    void refreshGithubCounts(ctx.project).catch(() => {});
+    void refreshTaskGithubMeta(ctx.task.id, ctx.project.path).catch(() => {});
+    pubGithubRefreshed(ctx.project.id);
+    return c.json({ ok: true });
   });
 
   // ── Skills ──────────────────────────────────────────────────────────

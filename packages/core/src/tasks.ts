@@ -1,4 +1,4 @@
-import { eq, desc } from "drizzle-orm";
+import { and, desc, eq, lt } from "drizzle-orm";
 import type {
   Message,
   MirrorTarget,
@@ -40,6 +40,14 @@ export interface CreateTaskInput {
   dependsOnTaskId?: string | null;
   /** Group key shared by every sibling slice in one plan. */
   planGroupId?: string | null;
+  /** Issue / PR number this task was spawned from, when applicable. */
+  githubIssue?: number | null;
+  githubPr?: number | null;
+  /** Live PR state captured at spawn from `gh pr view`. */
+  githubPrState?: string | null;
+  githubPrIsDraft?: boolean | null;
+  /** Live issue state captured at spawn from `gh issue view`. */
+  githubIssueState?: string | null;
 }
 
 function parseMirrorTo(raw: string | null): MirrorTarget | null {
@@ -113,6 +121,12 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     discordThreadId: row.discordThreadId ?? null,
     dependsOnTaskId: row.dependsOnTaskId ?? null,
     planGroupId: row.planGroupId ?? null,
+    githubIssue: row.githubIssue ?? null,
+    githubPr: row.githubPr ?? null,
+    githubPrState: row.githubPrState ?? null,
+    githubPrIsDraft:
+      row.githubPrIsDraft == null ? undefined : row.githubPrIsDraft === 1,
+    githubIssueState: row.githubIssueState ?? null,
   };
 }
 
@@ -147,6 +161,16 @@ export function markTaskCompacted(db: Db, id: string): Task | null {
     .where(eq(tasks.id, id))
     .run();
   return getTask(db, id);
+}
+
+export function pruneTaskMessagesBefore(
+  db: Db,
+  taskId: string,
+  ts: number,
+): void {
+  db.delete(messages)
+    .where(and(eq(messages.taskId, taskId), lt(messages.ts, ts)))
+    .run();
 }
 
 /** Mark a task as closed with an optional reason ("merged" / "abandoned" / etc.). */
@@ -227,9 +251,44 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       councilId: input.councilId ?? null,
       dependsOnTaskId: input.dependsOnTaskId ?? null,
       planGroupId: input.planGroupId ?? null,
+      githubIssue: input.githubIssue ?? null,
+      githubPr: input.githubPr ?? null,
+      githubPrState: input.githubPrState ?? null,
+      githubPrIsDraft:
+        input.githubPrIsDraft == null ? null : input.githubPrIsDraft ? 1 : 0,
+      githubIssueState: input.githubIssueState ?? null,
     })
     .run();
   return getTask(db, id)!;
+}
+
+/**
+ * Patch the live GitHub lifecycle state for a task — written after a PR
+ * action, after a github tab refresh, or whenever else the daemon
+ * re-pulls `gh pr view` / `gh issue view`. Skips updatedAt because the
+ * sidebar uses updatedAt for sort ordering and we don't want a passive
+ * background refresh to jostle the list.
+ */
+export function setTaskGithubMeta(
+  db: Db,
+  id: string,
+  patch: {
+    githubPrState?: string | null;
+    githubPrIsDraft?: boolean | null;
+    githubIssueState?: string | null;
+  },
+): Task | null {
+  const next: Record<string, unknown> = {};
+  if (patch.githubPrState !== undefined)
+    next.githubPrState = patch.githubPrState;
+  if (patch.githubPrIsDraft !== undefined)
+    next.githubPrIsDraft =
+      patch.githubPrIsDraft == null ? null : patch.githubPrIsDraft ? 1 : 0;
+  if (patch.githubIssueState !== undefined)
+    next.githubIssueState = patch.githubIssueState;
+  if (Object.keys(next).length === 0) return getTask(db, id);
+  db.update(tasks).set(next).where(eq(tasks.id, id)).run();
+  return getTask(db, id);
 }
 
 /**
@@ -389,7 +448,7 @@ export function setTaskPrUrl(db: Db, id: string, prUrl: string): void {
 export function setTaskCodexThreadId(
   db: Db,
   id: string,
-  threadId: string,
+  threadId: string | null,
 ): void {
   db.update(tasks)
     .set({ codexThreadId: threadId, updatedAt: Date.now() })
@@ -440,9 +499,15 @@ export function addTaskUsage(db: Db, id: string, delta: UsageDelta): void {
   // task shows "live context = 44" because the only uncached chunk
   // is the new user prompt — the rest came from the prompt cache.
   // Codex reports the same shape (`cached_input_tokens`).
-  if (delta.inputTokens != null || delta.cacheReadTokens != null) {
+  if (
+    delta.inputTokens != null ||
+    delta.cacheReadTokens != null ||
+    delta.cacheWriteTokens != null
+  ) {
     patch.latestTurnInputTokens =
-      (delta.inputTokens ?? 0) + (delta.cacheReadTokens ?? 0);
+      (delta.inputTokens ?? 0) +
+      (delta.cacheReadTokens ?? 0) +
+      (delta.cacheWriteTokens ?? 0);
   }
   if (delta.outputTokens != null) {
     patch.latestTurnOutputTokens = delta.outputTokens;

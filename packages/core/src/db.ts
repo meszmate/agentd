@@ -90,6 +90,30 @@ export const tasks = sqliteTable("tasks", {
    */
   latestTurnInputTokens: integer("latest_turn_input_tokens"),
   latestTurnOutputTokens: integer("latest_turn_output_tokens"),
+  /**
+   * When the task came from a GitHub issue, the issue number. Surfaced
+   * in the task header as a deep-link back to the issue and (alongside
+   * `githubPr`) keys the PR action bar visibility.
+   */
+  githubIssue: integer("github_issue"),
+  /**
+   * When the task came from a GitHub PR, the PR number. Triggers a
+   * `gh pr checkout <n>` step during worktree setup so the agent lands
+   * on the PR's branch, and unlocks the PR action bar (Comment /
+   * Approve / Request changes / Merge) on the task detail view.
+   */
+  githubPr: integer("github_pr"),
+  /**
+   * Live PR state ("OPEN" / "CLOSED" / "MERGED") refreshed from
+   * `gh pr view` on spawn, after each PR action, and on github tab
+   * reload. NULL when the task isn't a PR task or hasn't been refreshed
+   * yet. Drives the lifecycle icon shown next to the task title.
+   */
+  githubPrState: text("github_pr_state"),
+  /** True when the PR is marked draft on github.com. */
+  githubPrIsDraft: integer("github_pr_is_draft"),
+  /** Live issue state ("OPEN" / "CLOSED"); same refresh triggers as PR state. */
+  githubIssueState: text("github_issue_state"),
 });
 
 /**
@@ -268,6 +292,23 @@ export const projects = sqliteTable("projects", {
    * this project. The cron tick reads it once per minute.
    */
   brainstormAutoJson: text("brainstorm_auto_json"),
+  /**
+   * Resolved `owner/repo` from `gh repo view --json nameWithOwner`.
+   * Cached on the row the first time the GitHub status probe runs so
+   * subsequent issue/PR calls don't re-query gh just to learn the slug.
+   * NULL means either the repo has no GitHub remote or `gh` hasn't
+   * resolved one yet.
+   */
+  githubRepo: text("github_repo"),
+  /**
+   * Cached open issue / PR counts for the GitHub remote. NULL until the
+   * first `gh` probe. Refreshed on the `github/refresh` endpoint, on PR
+   * actions, on spawn, and lazily when the projects list is fetched.
+   * Surfaced as tiny badges on each sidebar project row.
+   */
+  openIssueCount: integer("open_issue_count"),
+  openPrCount: integer("open_pr_count"),
+  githubCountsAt: integer("github_counts_at"),
 });
 
 export const templates = sqliteTable("templates", {
@@ -619,6 +660,15 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE tasks ADD COLUMN plan_group_id TEXT",
   "ALTER TABLE tasks ADD COLUMN latest_turn_input_tokens INTEGER",
   "ALTER TABLE tasks ADD COLUMN latest_turn_output_tokens INTEGER",
+  "ALTER TABLE projects ADD COLUMN github_repo TEXT",
+  "ALTER TABLE tasks ADD COLUMN github_issue INTEGER",
+  "ALTER TABLE tasks ADD COLUMN github_pr INTEGER",
+  "ALTER TABLE projects ADD COLUMN open_issue_count INTEGER",
+  "ALTER TABLE projects ADD COLUMN open_pr_count INTEGER",
+  "ALTER TABLE projects ADD COLUMN github_counts_at INTEGER",
+  "ALTER TABLE tasks ADD COLUMN github_pr_state TEXT",
+  "ALTER TABLE tasks ADD COLUMN github_pr_is_draft INTEGER",
+  "ALTER TABLE tasks ADD COLUMN github_issue_state TEXT",
 ];
 
 function migrate(sqlite: Database): void {

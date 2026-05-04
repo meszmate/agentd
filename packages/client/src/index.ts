@@ -30,6 +30,11 @@ import type {
   RunTemplateRequest,
   Schedule,
   SendTerminalKeysRequest,
+  GithubIssue,
+  GithubListQuery,
+  GithubPr,
+  GithubStatus,
+  GithubSpawnRequest,
   Skill,
   Task,
   TelegramBotIdentity,
@@ -42,6 +47,7 @@ import type {
   UpdateProjectRequest,
   UpdateSkillRequest,
   WsServerEvent,
+  AgentKind,
 } from "@agentd/contracts";
 
 /**
@@ -183,6 +189,29 @@ export interface DiscordPluginPatch {
   botToken?: string;
   allowedUserIds?: string[];
   defaultRepo?: string | null;
+}
+
+/**
+ * Encode `GithubListQuery` as a URL query string. Repeats `?label=`
+ * once per label so the daemon's `parseGithubListQuery` reconstructs
+ * the array correctly.
+ */
+function githubListQs(opts?: GithubListQuery): string {
+  if (!opts) return "";
+  const sp = new URLSearchParams();
+  if (opts.state) sp.set("state", opts.state);
+  if (opts.search?.trim()) sp.set("q", opts.search.trim());
+  if (opts.author?.trim()) sp.set("author", opts.author.trim());
+  if (opts.assignee?.trim()) sp.set("assignee", opts.assignee.trim());
+  if (opts.milestone?.trim()) sp.set("milestone", opts.milestone.trim());
+  if (opts.base?.trim()) sp.set("base", opts.base.trim());
+  if (opts.draft) sp.set("draft", "true");
+  if (typeof opts.limit === "number") sp.set("limit", String(opts.limit));
+  for (const l of opts.labels ?? []) {
+    if (l.trim()) sp.append("label", l.trim());
+  }
+  const s = sp.toString();
+  return s ? `?${s}` : "";
 }
 
 export class AgentdClient {
@@ -1561,6 +1590,11 @@ export class AgentdClient {
   /** Suggest a conventional `<prefix>/<slug>` branch name from the task prompt. */
   async suggestBranchName(
     prompt: string,
+    opts: {
+      agent?: AgentKind;
+      model?: string;
+      thinkingLevel?: ThinkingLevel;
+    } = {},
   ): Promise<{
     prefix: "feature" | "fix" | "refactor" | "chore";
     slug: string;
@@ -1569,7 +1603,7 @@ export class AgentdClient {
   }> {
     return this.req("/api/branch-name", {
       method: "POST",
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, ...opts }),
     });
   }
 
@@ -1915,8 +1949,131 @@ export class AgentdClient {
     });
   }
 
+  // ── GitHub ──
+  async getGithubStatus(): Promise<GithubStatus> {
+    return this.req("/api/github/status");
+  }
+
+  async getProjectGithubRepo(
+    idOrSlug: string,
+  ): Promise<{ repo: string | null }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/repo`,
+    );
+  }
+
+  async listGithubIssues(
+    idOrSlug: string,
+    opts?: GithubListQuery,
+  ): Promise<{
+    ok: boolean;
+    repo: string | null;
+    issues: GithubIssue[];
+    error?: string;
+  }> {
+    const qs = githubListQs(opts);
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/issues${qs}`,
+    );
+  }
+
+  async listGithubPrs(
+    idOrSlug: string,
+    opts?: GithubListQuery,
+  ): Promise<{
+    ok: boolean;
+    repo: string | null;
+    prs: GithubPr[];
+    error?: string;
+  }> {
+    const qs = githubListQs(opts);
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/prs${qs}`,
+    );
+  }
+
+  async viewGithubIssue(
+    idOrSlug: string,
+    number: number,
+  ): Promise<{
+    ok: boolean;
+    repo?: string | null;
+    issue?: GithubIssue;
+    error?: string;
+  }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/issues/${number}`,
+    );
+  }
+
+  async viewGithubPr(
+    idOrSlug: string,
+    number: number,
+  ): Promise<{
+    ok: boolean;
+    repo?: string | null;
+    pr?: GithubPr;
+    error?: string;
+  }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/prs/${number}`,
+    );
+  }
+
+  async refreshGithub(idOrSlug: string): Promise<{ ok: true }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/refresh`,
+      { method: "POST" },
+    );
+  }
+
+  async spawnGithubTask(
+    idOrSlug: string,
+    req: GithubSpawnRequest,
+  ): Promise<{ task: Task }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/spawn`,
+      { method: "POST", body: JSON.stringify(req) },
+    );
+  }
+
+  async prComment(
+    taskId: string,
+    body: string,
+  ): Promise<{ ok: true }> {
+    return this.req(
+      `/api/tasks/${encodeURIComponent(taskId)}/github/comment`,
+      { method: "POST", body: JSON.stringify({ body }) },
+    );
+  }
+
+  async prReview(
+    taskId: string,
+    event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+    body?: string,
+  ): Promise<{ ok: true }> {
+    return this.req(
+      `/api/tasks/${encodeURIComponent(taskId)}/github/review`,
+      {
+        method: "POST",
+        body: JSON.stringify({ event, ...(body ? { body } : {}) }),
+      },
+    );
+  }
+
+  async prMerge(
+    taskId: string,
+    method: "merge" | "squash" | "rebase" = "squash",
+  ): Promise<{ ok: true }> {
+    return this.req(
+      `/api/tasks/${encodeURIComponent(taskId)}/github/merge`,
+      { method: "POST", body: JSON.stringify({ method }) },
+    );
+  }
+
   async getTaskContext(id: string): Promise<{
     agentInstructions: string;
+    projectInstructions: string;
     skills: { id: string; displayName: string; body: string }[];
     repoCanonical: { path: string; content: string } | null;
     suffix: {

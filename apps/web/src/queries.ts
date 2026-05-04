@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { AgentdClient } from "@agentd/client";
-import type { Task, WsServerEvent, AgentEvent } from "@agentd/contracts";
+import type {
+  Task,
+  WsServerEvent,
+  AgentEvent,
+  GithubListQuery,
+} from "@agentd/contracts";
 import { useClient } from "./AppContext";
 
 /**
@@ -30,7 +35,36 @@ export const qk = {
   savedIdeas: (projectIdOrSlug: string) =>
     ["saved-ideas", projectIdOrSlug] as const,
   idea: (id: string) => ["idea", id] as const,
+  githubStatus: () => ["github", "status"] as const,
+  githubIssues: (idOrSlug: string, opts?: GithubListQuery) =>
+    ["github", "issues", idOrSlug, githubKeyOpts(opts)] as const,
+  githubPrs: (idOrSlug: string, opts?: GithubListQuery) =>
+    ["github", "prs", idOrSlug, githubKeyOpts(opts)] as const,
+  githubIssue: (idOrSlug: string, number: number) =>
+    ["github", "issue", idOrSlug, number] as const,
+  githubPr: (idOrSlug: string, number: number) =>
+    ["github", "pr", idOrSlug, number] as const,
 };
+
+/**
+ * Stable cache-key projection of a list query. Sorts labels so two
+ * queries with the same filters in different label orders share one
+ * cache entry, drops empty values, and lower-cases keys.
+ */
+function githubKeyOpts(opts?: GithubListQuery): Record<string, unknown> {
+  if (!opts) return {};
+  const out: Record<string, unknown> = {};
+  if (opts.state) out.state = opts.state;
+  if (opts.search?.trim()) out.q = opts.search.trim();
+  if (opts.author?.trim()) out.author = opts.author.trim();
+  if (opts.assignee?.trim()) out.assignee = opts.assignee.trim();
+  if (opts.milestone?.trim()) out.milestone = opts.milestone.trim();
+  if (opts.base?.trim()) out.base = opts.base.trim();
+  if (opts.draft) out.draft = true;
+  if (typeof opts.limit === "number") out.limit = opts.limit;
+  if (opts.labels && opts.labels.length > 0) out.labels = [...opts.labels].sort();
+  return out;
+}
 
 export function useProjects() {
   const client = useClient();
@@ -271,18 +305,13 @@ export function useSendInput(taskId: string) {
   });
 }
 
-/**
- * Live snapshot of a task's running state + steer queue. Polls a small
- * tick because the queue mutates outside our control (chat plugin steer,
- * exit-time drain) and we don't want a stale UI.
- */
+/** Live snapshot of a task's running state + steer queue. */
 export function useTaskSteer(taskId: string) {
   const client = useClient();
   return useQuery({
     queryKey: ["task-steer", taskId] as const,
     queryFn: () => client.getTaskSteerState(taskId),
-    refetchInterval: 2_000,
-    staleTime: 1_500,
+    staleTime: 30_000,
     enabled: !!taskId,
   });
 }
@@ -805,6 +834,8 @@ export function useCompactTask(taskId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["taskContext", taskId] });
       void qc.invalidateQueries({ queryKey: qk.task(taskId) });
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+      void qc.invalidateQueries({ queryKey: ["task-steer", taskId] });
     },
   });
 }
@@ -1044,4 +1075,140 @@ export function useTaskStream(
   }, [client, taskId]);
 
   return { live };
+}
+
+// ── GitHub ─────────────────────────────────────────────────────────
+
+/**
+ * Global gh preflight — `gh --version` + `gh auth status`. Cheap
+ * (~150ms) and rarely changes; web's GitHub view gates on it.
+ */
+export function useGithubStatus() {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.githubStatus(),
+    queryFn: () => client.getGithubStatus(),
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * Project's issues from `gh issue list`. The `opts` accept the full
+ * github.com filter vocabulary (state / search / labels / author /
+ * assignee / milestone / limit) and are part of the cache key, so
+ * different filter combinations cache independently. Realtime bus
+ * invalidates on `github_refreshed`; no polling.
+ */
+export function useGithubIssues(
+  idOrSlug: string | null | undefined,
+  opts?: GithubListQuery,
+) {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.githubIssues(idOrSlug ?? "_none", opts),
+    queryFn: () => client.listGithubIssues(idOrSlug!, opts),
+    enabled: !!idOrSlug,
+    staleTime: 30_000,
+  });
+}
+
+export function useGithubPrs(
+  idOrSlug: string | null | undefined,
+  opts?: GithubListQuery,
+) {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.githubPrs(idOrSlug ?? "_none", opts),
+    queryFn: () => client.listGithubPrs(idOrSlug!, opts),
+    enabled: !!idOrSlug,
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * Single issue / PR detail — full conversation with comments and (for
+ * PRs) reviews + commits. Used by the in-app detail panel so the
+ * operator can read everything that happened without leaving the tab.
+ */
+export function useGithubIssue(
+  idOrSlug: string | null | undefined,
+  number: number | null | undefined,
+) {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.githubIssue(idOrSlug ?? "_none", number ?? 0),
+    queryFn: () => client.viewGithubIssue(idOrSlug!, number!),
+    enabled: !!idOrSlug && !!number,
+    staleTime: 30_000,
+  });
+}
+
+export function useGithubPr(
+  idOrSlug: string | null | undefined,
+  number: number | null | undefined,
+) {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.githubPr(idOrSlug ?? "_none", number ?? 0),
+    queryFn: () => client.viewGithubPr(idOrSlug!, number!),
+    enabled: !!idOrSlug && !!number,
+    staleTime: 30_000,
+  });
+}
+
+export function useRefreshGithub() {
+  const client = useClient();
+  return useMutation({
+    mutationFn: (idOrSlug: string) => client.refreshGithub(idOrSlug),
+  });
+}
+
+export function useSpawnGithubTask() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      idOrSlug,
+      req,
+    }: {
+      idOrSlug: string;
+      req: Parameters<AgentdClient["spawnGithubTask"]>[1];
+    }) => client.spawnGithubTask(idOrSlug, req),
+    onSuccess: (_data, vars) => {
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+      // Prefix-invalidate so every filter combo refetches, not just
+      // the empty-opts cache entry.
+      void qc.invalidateQueries({
+        queryKey: ["github", "issues", vars.idOrSlug],
+      });
+      void qc.invalidateQueries({
+        queryKey: ["github", "prs", vars.idOrSlug],
+      });
+    },
+  });
+}
+
+export function usePrComment(taskId: string) {
+  const client = useClient();
+  return useMutation({
+    mutationFn: (body: string) => client.prComment(taskId, body),
+  });
+}
+
+export function usePrReview(taskId: string) {
+  const client = useClient();
+  return useMutation({
+    mutationFn: (vars: {
+      event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
+      body?: string;
+    }) => client.prReview(taskId, vars.event, vars.body),
+  });
+}
+
+export function usePrMerge(taskId: string) {
+  const client = useClient();
+  return useMutation({
+    mutationFn: (method: "merge" | "squash" | "rebase" = "squash") =>
+      client.prMerge(taskId, method),
+  });
 }

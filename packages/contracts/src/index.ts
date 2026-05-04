@@ -295,6 +295,36 @@ export const Task = z.object({
    * shared lineage in the UI ("slice 2 of 3"). Empty for solo tasks.
    */
   planGroupId: z.string().nullable().optional(),
+  /**
+   * When the task was spawned from a GitHub issue, the issue number it
+   * came from. Carries no behavior on its own — surfaced in the task
+   * header so the operator can jump back to the source issue.
+   */
+  githubIssue: z.number().int().nullable().optional(),
+  /**
+   * When the task was spawned from a GitHub PR, the PR number. Drives
+   * the PR action bar (Comment / Approve / Request changes / Merge) on
+   * the task detail view and triggers `gh pr checkout <n>` during
+   * worktree setup so the agent lands on the PR's branch.
+   */
+  githubPr: z.number().int().nullable().optional(),
+  /**
+   * Live PR state from `gh pr view` — "OPEN" / "CLOSED" / "MERGED".
+   * Refreshed on spawn, on every PR action (comment / review / merge),
+   * and whenever the project's github tab is reloaded. Surfaced as a
+   * lifecycle icon next to the task title in lists.
+   */
+  githubPrState: z.string().nullable().optional(),
+  /**
+   * True for PRs marked draft on github.com. Pairs with `githubPrState`
+   * to pick the right icon (gray draft vs. green open).
+   */
+  githubPrIsDraft: z.boolean().optional(),
+  /**
+   * Live issue state from `gh issue view` — "OPEN" / "CLOSED".
+   * Refreshed on the same triggers as `githubPrState`.
+   */
+  githubIssueState: z.string().nullable().optional(),
 });
 export type Task = z.infer<typeof Task>;
 
@@ -440,6 +470,10 @@ export const AgentEvent = z.discriminatedUnion("kind", [
     cacheReadTokens: z.number().optional(),
     cacheWriteTokens: z.number().optional(),
     costUsd: z.number().optional(),
+  }),
+  z.object({
+    kind: z.literal("queue_updated"),
+    queue: z.array(z.string()),
   }),
   z.object({
     /**
@@ -1235,6 +1269,25 @@ export const Project = z.object({
   autoTaskThread: z.boolean().optional(),
   /** Per-project auto-brainstorm settings (cron-driven sweeps). */
   brainstormAuto: BrainstormAuto.nullable().optional(),
+  /**
+   * GitHub `owner/repo` resolved by `gh repo view --json nameWithOwner`
+   * the first time the project's GitHub status is probed. Used to label
+   * the GitHub tab and drive the spawn / list / PR action endpoints.
+   * Null means either no GitHub remote, or `gh` hasn't reported one yet.
+   */
+  githubRepo: z.string().nullable().optional(),
+  /**
+   * Cached counts of open issues / open PRs for the project's GitHub
+   * remote. Null until the first probe. Refreshed on
+   * `POST /projects/:id/github/refresh`, after PR actions, after spawning
+   * a task from an issue/PR, and lazily on first list. Drives the tiny
+   * badges on the sidebar project rows so operators see the at-a-glance
+   * count without opening the GitHub tab.
+   */
+  openIssueCount: z.number().int().nullable().optional(),
+  openPrCount: z.number().int().nullable().optional(),
+  /** Wall-clock of the last counts refresh. Used for staleness checks. */
+  githubCountsAt: z.number().nullable().optional(),
 });
 export type Project = z.infer<typeof Project>;
 
@@ -1258,8 +1311,201 @@ export const UpdateProjectRequest = z.object({
   /** Replaces the auto-brainstorm config wholesale. Pass null to
    *  disable; pass a partial-but-complete BrainstormAuto to enable. */
   brainstormAuto: BrainstormAuto.nullable().optional(),
+  /** Resolved `owner/repo` from `gh`. Set by the daemon's status probe. */
+  githubRepo: z.string().nullable().optional(),
 });
 export type UpdateProjectRequest = z.infer<typeof UpdateProjectRequest>;
+
+// ── GitHub ──────────────────────────────────────────────────────────
+//
+// Thin views over `gh issue list --json` / `gh pr list --json` output.
+// Field set is the minimum needed to render rows + drive a spawn; richer
+// detail is loaded per-issue/PR via a `view` endpoint when needed.
+
+export const GithubLabel = z.object({
+  name: z.string(),
+  color: z.string().nullable().optional(),
+});
+export type GithubLabel = z.infer<typeof GithubLabel>;
+
+export const GithubUser = z.object({
+  login: z.string(),
+});
+export type GithubUser = z.infer<typeof GithubUser>;
+
+/**
+ * One comment on an issue or PR. Both `gh issue view --json comments`
+ * and `gh pr view --json comments` return the same shape, so a single
+ * type covers both.
+ */
+export const GithubComment = z.object({
+  author: GithubUser.nullable().optional(),
+  body: z.string().default(""),
+  createdAt: z.string(),
+  url: z.string().optional(),
+});
+export type GithubComment = z.infer<typeof GithubComment>;
+
+/**
+ * One PR review (approval, request-changes, or comment). The optional
+ * `comments[]` are inline review comments on specific lines — useful
+ * for the agent to see what blockers reviewers flagged.
+ */
+export const GithubReview = z.object({
+  author: GithubUser.nullable().optional(),
+  state: z.string().default(""),
+  body: z.string().default(""),
+  submittedAt: z.string().optional(),
+  comments: z
+    .array(
+      z.object({
+        body: z.string().default(""),
+        path: z.string().optional(),
+        author: GithubUser.nullable().optional(),
+      }),
+    )
+    .default([]),
+});
+export type GithubReview = z.infer<typeof GithubReview>;
+
+export const GithubCommitRef = z.object({
+  oid: z.string(),
+  messageHeadline: z.string().default(""),
+  authoredDate: z.string().optional(),
+  authors: z.array(z.object({ login: z.string().nullable().optional(), name: z.string().nullable().optional() })).default([]),
+});
+export type GithubCommitRef = z.infer<typeof GithubCommitRef>;
+
+export const GithubIssue = z.object({
+  number: z.number().int(),
+  title: z.string(),
+  state: z.string(),
+  url: z.string(),
+  body: z.string().nullable().optional(),
+  author: GithubUser.nullable().optional(),
+  labels: z.array(GithubLabel).default([]),
+  assignees: z.array(GithubUser).default([]),
+  milestone: z
+    .object({ title: z.string().default("") })
+    .nullable()
+    .optional(),
+  commentCount: z.number().int().nullable().optional(),
+  /** Populated by the detail endpoint, omitted on list rows. */
+  comments: z.array(GithubComment).optional(),
+  closedAt: z.string().nullable().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type GithubIssue = z.infer<typeof GithubIssue>;
+
+export const GithubPr = z.object({
+  number: z.number().int(),
+  title: z.string(),
+  state: z.string(),
+  url: z.string(),
+  body: z.string().nullable().optional(),
+  author: GithubUser.nullable().optional(),
+  labels: z.array(GithubLabel).default([]),
+  assignees: z.array(GithubUser).default([]),
+  milestone: z
+    .object({ title: z.string().default("") })
+    .nullable()
+    .optional(),
+  isDraft: z.boolean().default(false),
+  baseRefName: z.string(),
+  headRefName: z.string(),
+  mergeable: z.string().nullable().optional(),
+  mergeStateStatus: z.string().nullable().optional(),
+  reviewDecision: z.string().nullable().optional(),
+  additions: z.number().int().nullable().optional(),
+  deletions: z.number().int().nullable().optional(),
+  changedFiles: z.number().int().nullable().optional(),
+  commentCount: z.number().int().nullable().optional(),
+  /** Populated by the detail endpoint, omitted on list rows. */
+  comments: z.array(GithubComment).optional(),
+  reviews: z.array(GithubReview).optional(),
+  commits: z.array(GithubCommitRef).optional(),
+  closedAt: z.string().nullable().optional(),
+  mergedAt: z.string().nullable().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type GithubPr = z.infer<typeof GithubPr>;
+
+/**
+ * Filter / search params for the list endpoints. Mirrors `gh issue list`
+ * and `gh pr list` flags one-to-one (state, labels, author, assignee,
+ * milestone, draft, base, search). `search` accepts the same query syntax
+ * github.com's search bar uses (`is:open author:foo label:bug in:title,body`,
+ * etc.) — the daemon hands it straight to `gh --search`.
+ */
+export const GithubListQuery = z.object({
+  state: z.enum(["open", "closed", "merged", "all"]).optional(),
+  search: z.string().optional(),
+  labels: z.array(z.string()).optional(),
+  author: z.string().optional(),
+  assignee: z.string().optional(),
+  milestone: z.string().optional(),
+  draft: z.boolean().optional(),
+  base: z.string().optional(),
+  limit: z.number().int().min(1).max(500).optional(),
+});
+export type GithubListQuery = z.infer<typeof GithubListQuery>;
+
+/**
+ * Result of the `gh --version` + `gh auth status` preflight. The
+ * project's GitHub tab is gated on this — if `ok` is false, the tab
+ * shows a setup card explaining why.
+ *
+ *   ghInstalled — `gh` resolves on $PATH.
+ *   authed      — `gh auth status` returned 0.
+ *   reason      — short human-readable failure reason when `ok=false`.
+ *   user        — login the operator's `gh` is authenticated as.
+ */
+export const GithubStatus = z.object({
+  ok: z.boolean(),
+  ghInstalled: z.boolean(),
+  authed: z.boolean(),
+  reason: z.string().nullable().optional(),
+  user: z.string().nullable().optional(),
+});
+export type GithubStatus = z.infer<typeof GithubStatus>;
+
+/**
+ * Body for `POST /api/projects/:id/github/spawn`. Spawns a task whose
+ * prompt is prefilled from the issue body or PR title+diff and (for PRs)
+ * runs `gh pr checkout <n>` inside the new worktree before the runner
+ * starts.
+ *
+ *   kind    — "issue" or "pr".
+ *   number  — the issue/PR number on GitHub.
+ *   preset  — picks the prompt template: "review-pr", "fix-issue",
+ *             or "freeform" (operator types it themselves).
+ *   prompt  — only required for "freeform"; ignored otherwise (the
+ *             daemon assembles from the preset + GitHub body).
+ */
+export const GithubSpawnRequest = z.object({
+  kind: z.enum(["issue", "pr"]),
+  number: z.number().int().min(1),
+  preset: z.enum(["review-pr", "fix-issue", "freeform"]).default("freeform"),
+  prompt: z.string().optional(),
+  agent: AgentKind.optional(),
+  model: z.string().optional(),
+  thinkingLevel: ThinkingLevel.optional(),
+  permissionMode: PermissionMode.optional(),
+  title: z.string().optional(),
+});
+export type GithubSpawnRequest = z.infer<typeof GithubSpawnRequest>;
+
+export const GithubPrActionRequest = z.object({
+  /** Body required for comment + review; ignored for merge. */
+  body: z.string().optional(),
+  /** Review action — only meaningful for /review. */
+  event: z.enum(["APPROVE", "REQUEST_CHANGES", "COMMENT"]).optional(),
+  /** Merge method — only meaningful for /merge. Defaults to squash. */
+  method: z.enum(["merge", "squash", "rebase"]).optional(),
+});
+export type GithubPrActionRequest = z.infer<typeof GithubPrActionRequest>;
 
 // ── Skills ──────────────────────────────────────────────────────────
 //
@@ -1512,6 +1758,16 @@ export const WsServerEvent = z.discriminatedUnion("type", [
     type: z.literal("saved_idea_removed"),
     ideaId: z.string(),
     projectId: z.string().nullable(),
+    ts: z.number(),
+  }),
+  // Fired when GitHub state for a project shifts in a way the issue / PR
+  // lists or status card need to know about — completed PR action,
+  // operator hit Refresh, status probe re-ran, etc. Web invalidates the
+  // project's github queries on this so every connected client picks up
+  // the new state without polling.
+  z.object({
+    type: z.literal("github_refreshed"),
+    projectId: z.string(),
     ts: z.number(),
   }),
 ]);
