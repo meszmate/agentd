@@ -1,35 +1,30 @@
-import { Fragment, useMemo } from "react";
+import { useMemo } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useDiff } from "@/queries";
-import { cn } from "@/lib/utils";
+import {
+  parseUnifiedDiff,
+  StructuredDiff,
+} from "@/components/structured-diff";
 
 export function TaskDiff({ taskId }: { taskId: string }) {
   const diffQ = useDiff(taskId);
 
-  const lines = useMemo(() => {
-    const text = diffQ.data?.diff ?? "";
-    if (!text) return [] as { kind: string; text: string }[];
-    return text.split("\n").map((line) => {
-      let kind = "ctx";
-      if (
-        line.startsWith("+++") ||
-        line.startsWith("---") ||
-        line.startsWith("diff --git") ||
-        line.startsWith("index ")
-      ) {
-        kind = "meta";
-      } else if (line.startsWith("@@")) {
-        kind = "hunk";
-      } else if (line.startsWith("+")) {
-        kind = "add";
-      } else if (line.startsWith("-")) {
-        kind = "del";
-      }
-      return { kind, text: line };
-    });
-  }, [diffQ.data?.diff]);
+  const files = useMemo(
+    () => parseUnifiedDiff(diffQ.data?.diff ?? ""),
+    [diffQ.data?.diff],
+  );
+
+  const totals = useMemo(() => {
+    let add = 0;
+    let del = 0;
+    for (const f of files) {
+      add += f.additions;
+      del += f.deletions;
+    }
+    return { add, del };
+  }, [files]);
 
   if (diffQ.isLoading) {
     return (
@@ -53,7 +48,7 @@ export function TaskDiff({ taskId }: { taskId: string }) {
   if (!diffQ.data) {
     return <Empty>No diff available.</Empty>;
   }
-  if (!diffQ.data.diff.trim()) {
+  if (!diffQ.data.diff.trim() || files.length === 0) {
     return (
       <Empty>
         <div className="text-ink-900 dark:text-ink-50 font-medium">
@@ -73,30 +68,18 @@ export function TaskDiff({ taskId }: { taskId: string }) {
         <Badge variant="outline" className="font-mono">
           vs {diffQ.data.baseRef}
         </Badge>
-        {diffQ.data.stat && (
-          <span className="font-mono text-2xs text-ink-500 dark:text-ink-400 truncate">
-            {diffQ.data.stat}
-          </span>
-        )}
+        <span className="font-mono text-2xs text-ink-500 dark:text-ink-400">
+          {files.length} file{files.length === 1 ? "" : "s"}
+        </span>
+        <span className="font-mono text-2xs tabular-nums text-emerald-600 dark:text-emerald-400">
+          +{totals.add}
+        </span>
+        <span className="font-mono text-2xs tabular-nums text-red-600 dark:text-red-400">
+          -{totals.del}
+        </span>
       </div>
       <ScrollArea className="flex-1 min-h-0">
-        <pre className="p-3 text-xs font-mono leading-snug">
-          {lines.map((l, i) => (
-            <Fragment key={i}>
-              <span
-                className={cn(
-                  "block",
-                  l.kind === "add" && "diff-add",
-                  l.kind === "del" && "diff-del",
-                  l.kind === "hunk" && "diff-hunk",
-                  l.kind === "meta" && "diff-meta",
-                )}
-              >
-                {l.text || " "}
-              </span>
-            </Fragment>
-          ))}
-        </pre>
+        <StructuredDiff files={files} />
       </ScrollArea>
     </div>
   );
