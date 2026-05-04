@@ -1007,6 +1007,29 @@ export class TaskManager {
         if (sess?.runner.supportsLiveInput) {
           void this.autoDrainQueue(taskId);
         }
+        // Plan-slice chain trigger for long-lived runners. Codex
+        // exits after each turn so its `exit` event drives the
+        // chain naturally; claude in stream-json mode just goes
+        // `idle` and waits for the next message — meaning a slice
+        // parent would never hand off to its child. When this
+        // claude task has pending dependents and the operator
+        // hasn't queued anything, gracefully close the runner so
+        // its `exit` fires `runCompletionHooks` → chain spawns the
+        // next slice. The drain logic above already short-circuited
+        // if there were queued items.
+        if (sess?.runner.supportsLiveInput) {
+          const queued = this.inputQueue.get(taskId)?.length ?? 0;
+          if (queued === 0) {
+            const dependents = getTasksDependingOn(this.db, taskId);
+            const hasPending = dependents.some((d) => d.status === "pending");
+            if (hasPending) {
+              void sess.runner.stop("SIGTERM").catch(() => {
+                // ignore — exit handler will still fire when the
+                // process actually dies, even on a stop error
+              });
+            }
+          }
+        }
       }
     } else if (event.kind === "usage") {
       addTaskUsage(this.db, taskId, {
@@ -1048,13 +1071,17 @@ export class TaskManager {
   private async runCompletionHooks(taskId: string): Promise<void> {
     const task = getTask(this.db, taskId);
     if (!task) return;
-    // Operator can disable auto-commit per-task — when off, leave the
-    // worktree dirty so they can hand-craft the commit themselves.
-    // Push also becomes a no-op because it needs a clean tree.
-    if (task.autoCommit === false) return;
-    const committed = await this.maybeAutoCommit(taskId, task);
-    if (committed && task.autoPush) {
-      await this.maybePush(taskId, task);
+    // Auto-commit + auto-push are operator-toggleable per task.
+    // Crucially, this gate ONLY skips git work — drain, council
+    // judging, and the slice chain hook below ALL still run when
+    // autoCommit is off. Earlier this was an early `return` for the
+    // whole function, which silently blocked plan-slice chains for
+    // any task with autoCommit disabled.
+    if (task.autoCommit !== false) {
+      const committed = await this.maybeAutoCommit(taskId, task);
+      if (committed && task.autoPush) {
+        await this.maybePush(taskId, task);
+      }
     }
     // Drain any messages the user queued mid-turn. Re-fetch the task so we
     // pick up any thinking-level change made while the previous turn ran.
