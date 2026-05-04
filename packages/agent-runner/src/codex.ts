@@ -11,10 +11,15 @@ import { readLines } from "./lineStream.ts";
  * Codex stream events (sampled from `codex exec --json`):
  *   {"type":"thread.started","thread_id":"<uuid>"}
  *   {"type":"turn.started"}
- *   {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"..."}}
- *   {"type":"item.completed","item":{"id":"...","type":"function_call",...}}
+ *   {"type":"item.started","item":{"id":"item_N","type":"command_execution","command":"...","status":"in_progress"}}
+ *   {"type":"item.completed","item":{"id":"item_N","type":"command_execution","command":"...","aggregated_output":"...","exit_code":N,"status":"completed"|"failed"}}
+ *   {"type":"item.completed","item":{"id":"item_N","type":"agent_message","text":"..."}}
+ *   {"type":"item.completed","item":{"id":"item_N","type":"function_call",...}}
+ *   {"type":"item.completed","item":{"id":"item_N","type":"reasoning","summary":"..."}}
  *   {"type":"turn.completed","usage":{"input_tokens":N,"cached_input_tokens":N,"output_tokens":N,"reasoning_output_tokens":N}}
- * Anything not in this set is surfaced as a `raw` event so we don't lose info.
+ *
+ * Anything not in this set is surfaced as a short `raw` annotation so
+ * we never dump unparsed JSON into the operator's timeline.
  */
 interface CodexStreamMessage {
   type?: string;
@@ -26,6 +31,13 @@ interface CodexStreamMessage {
     name?: string;
     arguments?: unknown;
     output?: unknown;
+    // Newer codex shells: command_execution items.
+    command?: string;
+    aggregated_output?: string;
+    exit_code?: number | null;
+    status?: string;
+    // Reasoning items expose a short summary string.
+    summary?: string;
   };
   usage?: {
     input_tokens?: number;
@@ -262,6 +274,9 @@ export class CodexRunner implements AgentRunner {
     try {
       parsed = JSON.parse(line) as CodexStreamMessage;
     } catch {
+      // Non-JSON line — codex sometimes writes a banner or progress
+      // hint that isn't JSON. Forward as raw stdout so it's preserved
+      // for diagnostics, but don't dress it as an agent reply.
       this.emit({ kind: "raw", stream: "stdout", text: line });
       return;
     }
@@ -277,21 +292,82 @@ export class CodexRunner implements AgentRunner {
       });
       return;
     }
-    if (t === "turn.started") {
-      // No-op; could surface as a status hint if needed.
+    if (t === "turn.started") return;
+
+    // `item.started` fires when codex begins a long-running item
+    // (typically a shell command). Surfacing it as a `tool_call` lets
+    // the timeline show the command IS happening before the output
+    // lands; the matching `item.completed` then emits the
+    // `tool_result`. Pairing is positional — we never emit a
+    // tool_call from item.completed for the same item, so the two
+    // events stay in lockstep.
+    if (t === "item.started" && parsed.item) {
+      const item = parsed.item;
+      if (
+        (item.type === "command_execution" || item.type === "local_shell_call") &&
+        typeof item.command === "string"
+      ) {
+        this.emit({
+          kind: "tool_call",
+          tool: "shell",
+          args: { command: item.command },
+        });
+      } else if (
+        (item.type === "function_call" || item.type === "tool_call") &&
+        typeof item.name === "string"
+      ) {
+        this.emit({
+          kind: "tool_call",
+          tool: item.name,
+          args: item.arguments ?? {},
+        });
+      }
+      // Other item.started types (agent_message, reasoning) carry no
+      // useful "starting" info — wait for item.completed.
       return;
     }
+
     if (t === "item.completed" && parsed.item) {
       const item = parsed.item;
       if (item.type === "agent_message" && typeof item.text === "string") {
         this.emit({ kind: "message", role: "agent", text: item.text });
-      } else if (item.type === "function_call" || item.type === "tool_call") {
+        return;
+      }
+      if (item.type === "command_execution" || item.type === "local_shell_call") {
+        // Shell command finishing — emit only `tool_result`. The
+        // matching `tool_call` was already emitted from item.started.
+        // We mark `ok` from exit_code and prefer a non-empty output
+        // so the timeline shows something even on silent successes.
+        const out =
+          typeof item.aggregated_output === "string" && item.aggregated_output
+            ? item.aggregated_output
+            : typeof item.output === "string"
+              ? item.output
+              : "";
+        const exit = typeof item.exit_code === "number" ? item.exit_code : null;
+        const ok = exit === 0 || (exit == null && item.status === "completed");
+        const display =
+          out ||
+          (item.status === "failed"
+            ? `(failed${exit != null ? `, exit ${exit}` : ""})`
+            : `(no output${exit != null ? `, exit ${exit}` : ""})`);
+        this.emit({
+          kind: "tool_result",
+          tool: "shell",
+          ok,
+          output: display,
+        });
+        return;
+      }
+      if (item.type === "function_call" || item.type === "tool_call") {
         this.emit({
           kind: "tool_call",
           tool: item.name ?? item.type,
           args: item.arguments ?? {},
         });
-      } else if (
+        return;
+      }
+      if (
         item.type === "function_call_output" ||
         item.type === "tool_call_output"
       ) {
@@ -305,11 +381,23 @@ export class CodexRunner implements AgentRunner {
           ok: true,
           output: out,
         });
-      } else {
-        this.emit({ kind: "raw", stream: "stdout", text: line });
+        return;
       }
+      if (item.type === "reasoning") {
+        // Codex's chain-of-thought summary. The timeline doesn't show
+        // model reasoning by design — drop silently.
+        return;
+      }
+      // Unknown item type — drop silently. Earlier versions emitted a
+      // `raw` event so we'd see something in the timeline, but the
+      // web's TaskDetail renders raw stdout as a system row, which
+      // meant unparsed codex shapes leaked into the chat as noise.
+      // Codex evolves its event vocabulary frequently; the safe
+      // default is to silently swallow anything we don't model
+      // explicitly here.
       return;
     }
+
     if (t === "turn.completed" && parsed.usage) {
       const u = parsed.usage;
       this.emit({
@@ -320,8 +408,9 @@ export class CodexRunner implements AgentRunner {
       });
       return;
     }
-    // Unknown — surface so we don't lose anything.
-    this.emit({ kind: "raw", stream: "stdout", text: line });
+
+    // Unknown event type — same reasoning as above: silently drop
+    // instead of emitting a raw event that would land in the chat.
   }
 
   async sendInput(_text: string): Promise<void> {

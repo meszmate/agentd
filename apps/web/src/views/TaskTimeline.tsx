@@ -655,6 +655,19 @@ function TimelineItem({ message: m }: { message: Message }) {
   if (m.role === "system") {
     const meta = parseSystemMessage(m.content);
     if (meta) return <StructuredItem ts={m.ts} {...meta} />;
+    // Hide leftover raw codex stream-json events from older runs that
+    // captured `item.started` / `item.completed` lines as system
+    // messages before the codex runner stopped emitting them. These
+    // look like `{"type":"item.started",...}` and add no signal — the
+    // structured tool rows above already cover what the agent did.
+    const trimmed = m.content.trim();
+    if (
+      /^\{"type":"(item|turn|thread|response)\.(started|completed|in_progress|done|created)"/.test(
+        trimmed,
+      )
+    ) {
+      return null;
+    }
     // Plain system rows (raw stderr, etc.) — single line, low key.
     return (
       <li className="flex items-start gap-2">
