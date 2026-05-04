@@ -1475,18 +1475,19 @@ function SpawnDialog({
   const defaults = modelsQ.data?.defaults;
   const agentModels = models ? models[agent] : [];
 
-  // When the agent selection changes, snap the model to either the
-  // server-side default for that agent, or the first model available.
+  // Keep the current model selection if it's still valid for the agent.
+  // Otherwise prefer the operator's saved default (`cfg.defaultModel`),
+  // and if that's unset, leave the field empty so we pass no `--model`
+  // flag to the runner. Each CLI then resolves its own latest (claude
+  // expands `opus`/`sonnet`/`haiku` family aliases at request time;
+  // codex uses its configured default). This avoids silently
+  // preselecting whichever id happens to sit at index 0 in the cache.
   useEffect(() => {
     if (!agentModels) return;
     if (model && agentModels.some((m) => m.id === model)) return;
     const def = defaults?.[agent];
-    setModel(
-      def && agentModels.some((m) => m.id === def)
-        ? def
-        : agentModels[0]?.id ?? "",
-    );
-  }, [agent, agentModels?.length]);
+    setModel(def && agentModels.some((m) => m.id === def) ? def : "");
+  }, [agent, agentModels, model, defaults]);
 
   // Snap the thinking level off `max` (claude-only) or `minimal`
   // (codex-only) when the operator switches agents — leave the empty
@@ -1787,9 +1788,21 @@ function SpawnDialog({
                     <FieldRow label="agent">
                       <Picker
                         value={activeSliceData.agent ?? "claude"}
-                        onChange={(v) =>
-                          updateSlice(activeSlice, { agent: v as AgentKind })
-                        }
+                        onChange={(v) => {
+                          // Clear the slice's model when its agent
+                          // changes so we don't carry a claude id into a
+                          // codex slice (or vice versa). Empty means
+                          // "let the CLI pick its own latest."
+                          const nextAgent = v as AgentKind;
+                          const cur = activeSliceData.model;
+                          const stillValid =
+                            cur != null &&
+                            modelSuggestions[nextAgent].includes(cur);
+                          updateSlice(activeSlice, {
+                            agent: nextAgent,
+                            ...(stillValid ? {} : { model: undefined }),
+                          });
+                        }}
                         disabled={submitting}
                         items={[
                           { value: "claude", label: "claude" },
@@ -1818,7 +1831,10 @@ function SpawnDialog({
                         }}
                         disabled={submitting}
                         items={[
-                          { value: "", label: "(inherit)" },
+                          {
+                            value: "",
+                            label: `auto · ${activeSliceData.agent ?? "claude"} picks latest`,
+                          },
                           ...modelSuggestions[
                             activeSliceData.agent ?? "claude"
                           ].map((id) => ({ value: id, label: id })),
@@ -1896,7 +1912,10 @@ function SpawnDialog({
                         }}
                         disabled={submitting}
                         items={[
-                          { value: "", label: "default" },
+                          {
+                            value: "",
+                            label: `auto · ${agent} picks latest`,
+                          },
                           ...(agentModels ?? []).map((m) => ({
                             value: m.id,
                             label: m.label || m.id,
