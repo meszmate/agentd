@@ -214,6 +214,16 @@ export const Task = z.object({
   totalCacheReadTokens: z.number().optional(),
   totalCacheWriteTokens: z.number().optional(),
   totalCostUsd: z.number().nullable().optional(),
+  /**
+   * Tokens reported by the *most recent* usage event from the runner —
+   * NOT a running sum. Each agent turn carries the full conversation
+   * context as input, so this is the live "context size" indicator
+   * the timeline's compact-banner reads. Cumulative sums double-count
+   * the context (every turn re-sends prior history) and never go
+   * down after /compact, which is why we track this separately.
+   */
+  latestTurnInputTokens: z.number().nullable().optional(),
+  latestTurnOutputTokens: z.number().nullable().optional(),
   // Skill identifiers (`scope:slug`) that were activated when this task spawned.
   skills: z.array(z.string()).optional(),
   permissionMode: PermissionMode.optional(),

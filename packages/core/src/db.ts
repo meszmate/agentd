@@ -81,6 +81,15 @@ export const tasks = sqliteTable("tasks", {
    * plan-slice spawn. NULL for solo tasks.
    */
   planGroupId: text("plan_group_id"),
+  /**
+   * Tokens from the runner's most recent `usage` event. Replaced (not
+   * summed) on every turn — this is the live context-size indicator
+   * the web app uses for the compact-banner. The cumulative
+   * `totalInputTokens` / `totalOutputTokens` columns above are the
+   * billing-style running totals.
+   */
+  latestTurnInputTokens: integer("latest_turn_input_tokens"),
+  latestTurnOutputTokens: integer("latest_turn_output_tokens"),
 });
 
 /**
@@ -608,6 +617,8 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE saved_ideas ADD COLUMN plan_slices TEXT",
   "ALTER TABLE tasks ADD COLUMN depends_on_task_id TEXT",
   "ALTER TABLE tasks ADD COLUMN plan_group_id TEXT",
+  "ALTER TABLE tasks ADD COLUMN latest_turn_input_tokens INTEGER",
+  "ALTER TABLE tasks ADD COLUMN latest_turn_output_tokens INTEGER",
 ];
 
 function migrate(sqlite: Database): void {

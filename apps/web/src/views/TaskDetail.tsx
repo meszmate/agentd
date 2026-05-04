@@ -261,10 +261,28 @@ export function TaskDetail({ task }: { task: Task }) {
 
   const { live } = useTaskStream(task.id, handleEvent);
 
+  // Cumulative billing-style total (never decreases) — shown in the
+  // task header chip + cost summaries.
   const totalTokens = useMemo(
     () => (task.totalInputTokens ?? 0) + (task.totalOutputTokens ?? 0),
     [task.totalInputTokens, task.totalOutputTokens],
   );
+  // Live context-size signal — the timeline's compact-banner reads
+  // this. Each runner usage event REPLACES `latestTurnInput/Output`,
+  // so this reflects the most recent turn's footprint (≈ current
+  // context). Falls back to the cumulative total only when no usage
+  // event has fired since this code shipped, so older data still
+  // shows a sensible-but-pessimistic value until the next turn.
+  const contextTokens = useMemo(() => {
+    const inT = task.latestTurnInputTokens;
+    const outT = task.latestTurnOutputTokens;
+    if (inT == null && outT == null) return totalTokens;
+    return (inT ?? 0) + (outT ?? 0);
+  }, [
+    task.latestTurnInputTokens,
+    task.latestTurnOutputTokens,
+    totalTokens,
+  ]);
   const isTerminal =
     task.status === "done" ||
     task.status === "failed" ||
@@ -382,8 +400,10 @@ export function TaskDetail({ task }: { task: Task }) {
 
         <Spacer />
 
-        {/* stats */}
-        <ContextUsage totalTokens={totalTokens} />
+        {/* stats — `ContextUsage` shows current context size (decays
+            after /compact); the `tok` chip next to it is the lifetime
+            total for billing context. */}
+        <ContextUsage totalTokens={contextTokens} />
         <span className="hidden md:flex items-center gap-3 font-mono text-[11px] tabular-nums text-ink-400 dark:text-ink-500">
           <span>{formatTokens(totalTokens)} tok</span>
           <span>{formatCost(task.totalCostUsd)}</span>
@@ -566,7 +586,7 @@ export function TaskDetail({ task }: { task: Task }) {
                 disabled={isRunning}
                 lastToolHint={lastToolHint}
                 streams={streams}
-                totalTokens={totalTokens}
+                totalTokens={contextTokens}
                 turn={turn}
                 plan={plan}
                 compactedAt={task.lastCompactedAt ?? null}
@@ -586,7 +606,7 @@ export function TaskDetail({ task }: { task: Task }) {
             disabled={isRunning}
             lastToolHint={lastToolHint}
             streams={streams}
-            totalTokens={totalTokens}
+            totalTokens={contextTokens}
             turn={turn}
             plan={plan}
           />

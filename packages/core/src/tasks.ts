@@ -94,6 +94,8 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     totalCacheReadTokens: row.totalCacheReadTokens ?? 0,
     totalCacheWriteTokens: row.totalCacheWriteTokens ?? 0,
     totalCostUsd: row.totalCostUsd != null ? Number(row.totalCostUsd) : null,
+    latestTurnInputTokens: row.latestTurnInputTokens ?? null,
+    latestTurnOutputTokens: row.latestTurnOutputTokens ?? null,
     skills: parsedSkills,
     permissionMode:
       (row.permissionMode as PermissionMode | undefined) ?? "bypassPermissions",
@@ -127,10 +129,21 @@ export function setTaskDiscordThread(
   return getTask(db, id);
 }
 
-/** Set or clear the `lastCompactedAt` watermark. */
+/**
+ * Set the `lastCompactedAt` watermark and zero out the latest-turn
+ * token gauge. The next agent turn will repopulate it with the
+ * post-compact summary's footprint, but in the meantime the timeline's
+ * compact-banner needs to clear immediately — otherwise the operator
+ * keeps seeing "context nearly full" right after they pressed compact.
+ */
 export function markTaskCompacted(db: Db, id: string): Task | null {
   db.update(tasks)
-    .set({ lastCompactedAt: Date.now(), updatedAt: Date.now() })
+    .set({
+      lastCompactedAt: Date.now(),
+      latestTurnInputTokens: 0,
+      latestTurnOutputTokens: 0,
+      updatedAt: Date.now(),
+    })
     .where(eq(tasks.id, id))
     .run();
   return getTask(db, id);
@@ -384,17 +397,32 @@ export function addTaskUsage(db: Db, id: string, delta: UsageDelta): void {
   const cacheW = (cur.totalCacheWriteTokens ?? 0) + (delta.cacheWriteTokens ?? 0);
   const costPrev = cur.totalCostUsd ?? 0;
   const costNext = delta.costUsd != null ? costPrev + delta.costUsd : costPrev;
-  db.update(tasks)
-    .set({
-      totalInputTokens: inT,
-      totalOutputTokens: outT,
-      totalCacheReadTokens: cacheR,
-      totalCacheWriteTokens: cacheW,
-      totalCostUsd: delta.costUsd != null ? String(costNext) : cur.totalCostUsd != null ? String(cur.totalCostUsd) : null,
-      updatedAt: Date.now(),
-    })
-    .where(eq(tasks.id, id))
-    .run();
+  // Latest-turn fields REPLACE rather than sum — each runner usage event
+  // already reports the full input/output for that turn (the API charges
+  // for the entire conversation context as input on each call), so we
+  // want this to reflect the most recent turn's footprint, not a
+  // running total. Read by the timeline's compact-banner so it tracks
+  // the actual context size and decays after /compact.
+  const patch: Record<string, unknown> = {
+    totalInputTokens: inT,
+    totalOutputTokens: outT,
+    totalCacheReadTokens: cacheR,
+    totalCacheWriteTokens: cacheW,
+    totalCostUsd:
+      delta.costUsd != null
+        ? String(costNext)
+        : cur.totalCostUsd != null
+          ? String(cur.totalCostUsd)
+          : null,
+    updatedAt: Date.now(),
+  };
+  if (delta.inputTokens != null) {
+    patch.latestTurnInputTokens = delta.inputTokens;
+  }
+  if (delta.outputTokens != null) {
+    patch.latestTurnOutputTokens = delta.outputTokens;
+  }
+  db.update(tasks).set(patch).where(eq(tasks.id, id)).run();
 }
 
 export function getTask(db: Db, id: string): Task | null {
