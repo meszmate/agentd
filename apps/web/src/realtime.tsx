@@ -422,6 +422,23 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           void qc.invalidateQueries({ queryKey: ["models"] });
           return;
         }
+        if (msg.type === "github_refreshed") {
+          // Project's GitHub state shifted — issue/PR list refresh,
+          // spawn, PR action completed, status probe re-ran. Web
+          // refetches every project-scoped github query so every
+          // connected client picks up the new state without polling.
+          void qc.invalidateQueries({
+            queryKey: ["github", "issues", msg.projectId],
+          });
+          void qc.invalidateQueries({
+            queryKey: ["github", "prs", msg.projectId],
+          });
+          // Project itself may have had `githubRepo` cached in this
+          // tick — invalidate the project queries so the GitHub link
+          // reflects the resolved owner/repo.
+          void qc.invalidateQueries({ queryKey: ["project", msg.projectId] });
+          return;
+        }
         if (
           msg.type === "discord_test_send" ||
           msg.type === "discord_create_thread" ||

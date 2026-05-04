@@ -16,6 +16,7 @@ import {
   FileText,
   FolderGit2,
   GitBranch,
+  GitFork,
   Hash,
   Lightbulb,
   Loader2,
@@ -222,6 +223,14 @@ export function ProjectDetail() {
           </>
         )}
         <Spacer />
+        <Link
+          to={`/projects/${project.slug}/github`}
+          className="inline-flex items-center gap-1 h-7 px-2 rounded text-[11px] text-ink-500 hover:text-ember-700 hover:bg-ember-500/10 dark:text-ink-400 dark:hover:text-ember-300 transition-colors"
+          title="GitHub issues + PRs"
+        >
+          <GitFork className="h-3 w-3" />
+          GitHub
+        </Link>
         <ProjectActions project={project} onDeleted={() => navigate("/projects")} />
       </PageTopbar>
 

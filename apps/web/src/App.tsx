@@ -60,6 +60,11 @@ const ProjectBrainstorm = lazy(() =>
     default: m.ProjectBrainstorm,
   })),
 );
+const ProjectGithub = lazy(() =>
+  import("@/views/ProjectGithub").then((m) => ({
+    default: m.ProjectGithub,
+  })),
+);
 const IdeaWorkshop = lazy(() =>
   import("@/views/IdeaWorkshop").then((m) => ({
     default: m.IdeaWorkshop,
@@ -159,6 +164,14 @@ const router = createBrowserRouter([
         element: (
           <ViewSuspense>
             <ProjectBrainstorm />
+          </ViewSuspense>
+        ),
+      },
+      {
+        path: "projects/:slug/github",
+        element: (
+          <ViewSuspense>
+            <ProjectGithub />
           </ViewSuspense>
         ),
       },

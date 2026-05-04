@@ -17,6 +17,7 @@ import {
   addTaskUsage,
   appendMessage,
   autoCommit,
+  checkoutPrInWorktree,
   createTask,
   deleteTask,
   detectDefaultBranch,
@@ -110,6 +111,15 @@ export interface CreateTaskParams {
    * branch the worktree is checked out on.
    */
   sharedBranch?: string;
+  /**
+   * GitHub-spawn metadata. When `githubPr` is set, the manager runs
+   * `gh pr checkout <n>` inside the freshly-created worktree before
+   * the runner starts, so the agent lands on the PR's branch instead
+   * of an agentd-named one. Both ids are persisted on the task row
+   * for the UI's PR action bar / issue deep link.
+   */
+  githubIssue?: number | null;
+  githubPr?: number | null;
 }
 
 export class TaskManager {
@@ -429,6 +439,29 @@ export class TaskManager {
         pullLatest: params.pullLatest ?? false,
       });
       worktreePath = result.worktreePath;
+      // PR task: switch the worktree onto the PR's branch so the agent
+      // sees the proposed changes (and any commits we add land back on
+      // the right branch). `gh pr checkout` resolves the head ref —
+      // including fork branches — and sets up the upstream tracking.
+      if (params.githubPr) {
+        const co = await checkoutPrInWorktree(worktreePath, params.githubPr);
+        if (!co.ok) {
+          throw new Error(
+            `gh pr checkout #${params.githubPr} failed: ${co.error ?? "unknown"}`,
+          );
+        }
+        // Pick up the new HEAD as the persisted branch name so the row
+        // reflects the PR branch rather than the agentd-generated one.
+        const headProc = Bun.spawn({
+          cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+          cwd: worktreePath,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const head = (await new Response(headProc.stdout).text()).trim();
+        await headProc.exited;
+        if (head) branch = head;
+      }
     }
     // Auto-create or look up the project for this repo path. Tasks belong
     // to projects so the sidebar can group them and surface what's new.
@@ -460,6 +493,8 @@ export class TaskManager {
       model: params.model ?? "",
       dependsOnTaskId: params.dependsOnTaskId ?? null,
       planGroupId: params.planGroupId ?? null,
+      githubIssue: params.githubIssue ?? null,
+      githubPr: params.githubPr ?? null,
     });
     touchProject(this.db, project.id);
     appendMessage(this.db, task.id, "user", params.prompt);

@@ -2,17 +2,21 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Check,
   CheckSquare,
   ExternalLink,
   GitBranchPlus,
+  GitMerge,
   Hash,
   Loader2,
+  MessageSquare,
   MoreHorizontal,
   PanelRight,
   PanelRightClose,
   RotateCcw,
   Sparkles,
   Square,
+  ThumbsDown,
   Trash2,
   Zap,
 } from "lucide-react";
@@ -49,6 +53,9 @@ import {
   useModels,
   usePatchPrefs,
   usePrefs,
+  usePrComment,
+  usePrMerge,
+  usePrReview,
   useProject,
   useRemoveTask,
   useSpawnSiblingTask,
@@ -613,6 +620,10 @@ export function TaskDetail({ task }: { task: Task }) {
           </>
         )}
       </div>
+
+      {task.githubPr && (
+        <PrActionBar task={task} disabled={isRunning} onError={onError} />
+      )}
 
       {/* Body */}
       <div className="flex-1 min-h-0">
@@ -1790,6 +1801,169 @@ function FieldRowSibling({
         {label}
       </span>
       {children}
+    </div>
+  );
+}
+
+/**
+ * GitHub PR action bar — comment, review (approve / request changes /
+ * comment), merge. Mounted on the task detail when `task.githubPr` is
+ * set (i.e. the task was spawned from a PR via the GitHub view). All
+ * actions shell out to `gh` daemon-side, then the WS bus refreshes
+ * the project's lists. Disabled while the agent is mid-turn so the
+ * operator doesn't race the runner.
+ */
+function PrActionBar({
+  task,
+  disabled,
+  onError,
+}: {
+  task: Task;
+  disabled: boolean;
+  onError: (m: string) => void;
+}) {
+  const { toast } = useApp();
+  const [mode, setMode] = useState<
+    "idle" | "comment" | "approve" | "request-changes"
+  >("idle");
+  const [body, setBody] = useState("");
+  const comment = usePrComment(task.id);
+  const review = usePrReview(task.id);
+  const merge = usePrMerge(task.id);
+
+  const submit = async () => {
+    try {
+      if (mode === "comment") {
+        if (!body.trim()) {
+          onError("comment body is required");
+          return;
+        }
+        await comment.mutateAsync(body);
+        toast(`commented on PR #${task.githubPr}`);
+      } else if (mode === "approve") {
+        await review.mutateAsync({ event: "APPROVE", body: body.trim() || undefined });
+        toast(`approved PR #${task.githubPr}`);
+      } else if (mode === "request-changes") {
+        if (!body.trim()) {
+          onError("review body is required");
+          return;
+        }
+        await review.mutateAsync({ event: "REQUEST_CHANGES", body });
+        toast(`requested changes on PR #${task.githubPr}`);
+      }
+      setMode("idle");
+      setBody("");
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
+
+  const onMerge = async () => {
+    if (!confirm(`Merge PR #${task.githubPr} (squash)?`)) return;
+    try {
+      await merge.mutateAsync("squash");
+      toast(`merged PR #${task.githubPr}`);
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
+
+  const busy = comment.isPending || review.isPending || merge.isPending;
+
+  return (
+    <div className="border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-ember-500/[0.04] px-5 py-2 shrink-0">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ember-700 dark:text-ember-300">
+          PR #{task.githubPr}
+        </span>
+        <span className="text-ink-300 dark:text-ink-600">·</span>
+        <Button
+          size="xs"
+          variant="outline"
+          onClick={() => setMode(mode === "comment" ? "idle" : "comment")}
+          disabled={disabled || busy}
+        >
+          <MessageSquare className="h-3 w-3" />
+          Comment
+        </Button>
+        <Button
+          size="xs"
+          variant="outline"
+          onClick={() => setMode(mode === "approve" ? "idle" : "approve")}
+          disabled={disabled || busy}
+        >
+          <Check className="h-3 w-3" />
+          Approve
+        </Button>
+        <Button
+          size="xs"
+          variant="outline"
+          onClick={() =>
+            setMode(mode === "request-changes" ? "idle" : "request-changes")
+          }
+          disabled={disabled || busy}
+        >
+          <ThumbsDown className="h-3 w-3" />
+          Request changes
+        </Button>
+        <Button
+          size="xs"
+          variant="outline"
+          onClick={onMerge}
+          disabled={disabled || busy}
+        >
+          {merge.isPending ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <GitMerge className="h-3 w-3" />
+          )}
+          Merge
+        </Button>
+        {disabled && (
+          <span className="ml-auto font-mono text-[10px] text-ink-400 dark:text-ink-500">
+            agent running — actions paused
+          </span>
+        )}
+      </div>
+      {mode !== "idle" && (
+        <div className="mt-2 space-y-2">
+          <Textarea
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            rows={3}
+            placeholder={
+              mode === "comment"
+                ? "Comment body…"
+                : mode === "approve"
+                  ? "Optional approval message…"
+                  : "Why are you requesting changes?"
+            }
+            className="text-[12.5px]"
+          />
+          <div className="flex items-center gap-2">
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() => {
+                setMode("idle");
+                setBody("");
+              }}
+            >
+              Cancel
+            </Button>
+            <Button size="xs" onClick={submit} disabled={busy}>
+              {busy ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : null}
+              {mode === "comment"
+                ? "Post comment"
+                : mode === "approve"
+                  ? "Approve"
+                  : "Request changes"}
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

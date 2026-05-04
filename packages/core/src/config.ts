@@ -60,6 +60,43 @@ export const DEFAULT_COMMIT_INSTRUCTIONS = "";
 export const DEFAULT_PR_INSTRUCTIONS = "";
 
 /**
+ * Prompt templates the GitHub spawn flow assembles into a fresh task's
+ * first user message. `{number}`, `{title}`, `{body}`, `{url}`, and
+ * `{branch}` get substituted. Operators can override per install via
+ * `cfg.presets.github.*`. Newlines preserved.
+ */
+export const DEFAULT_GITHUB_REVIEW_PR_PROMPT = [
+  "Review PR #{number} — {title}",
+  "",
+  "URL: {url}",
+  "Branch: {branch}",
+  "",
+  "Read the diff (`git diff origin/main...HEAD`), think about correctness, design, and risk, and post a review.",
+  "Use the PR action bar on this task to post the review (Approve / Request changes / Comment).",
+  "",
+  "PR description:",
+  "{body}",
+].join("\n");
+
+export const DEFAULT_GITHUB_FIX_ISSUE_PROMPT = [
+  "Fix issue #{number} — {title}",
+  "",
+  "URL: {url}",
+  "",
+  "Issue body:",
+  "{body}",
+  "",
+  "Investigate, implement the fix, commit, and push. Open a PR when done.",
+].join("\n");
+
+export const GithubPresets = z.object({
+  reviewPr: z.string().default(DEFAULT_GITHUB_REVIEW_PR_PROMPT),
+  fixIssue: z.string().default(DEFAULT_GITHUB_FIX_ISSUE_PROMPT),
+});
+export type GithubPresets = z.infer<typeof GithubPresets>;
+export const DEFAULT_GITHUB_PRESETS: GithubPresets = GithubPresets.parse({});
+
+/**
  * One model the user can pick in any agent picker. The registry lives
  * in `cfg.models` and is fully overridable from `~/.agentd/config.json`
  * — adding a new model is a config edit + daemon restart, no code.
@@ -396,6 +433,16 @@ export const AgentdConfig = z.object({
       codex: z.enum(["minimal", "low", "medium", "high", "xhigh"]).default("high"),
     })
     .default({ claude: "xhigh", codex: "high" }),
+  /**
+   * Prompt presets the GitHub spawn flow uses. Operator-overridable
+   * via `cfg.presets.github.{reviewPr,fixIssue}`; same `{placeholder}`
+   * interpolation as commit/PR templates.
+   */
+  presets: z
+    .object({
+      github: GithubPresets.default(DEFAULT_GITHUB_PRESETS),
+    })
+    .default({ github: DEFAULT_GITHUB_PRESETS }),
   plugins: z
     .object({
       telegram: TelegramPluginConfig.default({

@@ -32,6 +32,8 @@ import {
   UpdateIdeaRequest,
   CreateTodoRequest,
   UpdateTodoRequest,
+  GithubSpawnRequest,
+  GithubPrActionRequest,
   type Task,
   type WsServerEvent,
 } from "@agentd/contracts";
@@ -165,6 +167,16 @@ import {
   renameTmuxWindow,
   sendTmuxKeys,
   reorderTasks,
+  ghStatus,
+  ghRepo,
+  listIssues as ghListIssues,
+  listPrs as ghListPrs,
+  viewPr as ghViewPr,
+  viewIssue as ghViewIssue,
+  prComment as ghPrComment,
+  prReview as ghPrReview,
+  prMerge as ghPrMerge,
+  renderConfigTemplate,
 } from "@agentd/core";
 import type { PluginManager } from "./pluginManager.ts";
 import { requireSession, bearerOrHeader } from "./auth.ts";
@@ -259,6 +271,15 @@ export function buildServer(opts: BuildServerOptions) {
       ideaId,
       projectId,
     });
+  }
+  /**
+   * GitHub state for a project shifted — issue/PR list refresh, spawn,
+   * PR action completed, status probe re-ran. Web invalidates the
+   * project's `github-issues` / `github-prs` queries on this so every
+   * connected client sees the new state without polling.
+   */
+  function pubGithubRefreshed(projectId: string): void {
+    bus.publishSystem({ kind: "github_refreshed", projectId });
   }
 
   /**
@@ -4119,6 +4140,272 @@ export function buildServer(opts: BuildServerOptions) {
     } catch (e) {
       return c.json({ ok: false, error: (e as Error).message }, 500);
     }
+  });
+
+  // ── GitHub ──────────────────────────────────────────────────────────
+  //
+  // Thin shell-out layer over the operator's `gh` CLI. Auth is `gh`'s
+  // problem; we just reuse the operator's existing identity (no PATs,
+  // no Octokit). Every project-scoped call runs in the project's repo
+  // path so `gh` picks up the right remote from `.git/config`.
+
+  /**
+   * Global preflight — `gh --version` + `gh auth status`. Web's GitHub
+   * tab gates on this. Cheap (~150ms) so we don't cache.
+   */
+  api.get("/github/status", async (c) => {
+    const status = await ghStatus();
+    return c.json(status);
+  });
+
+  /**
+   * Resolve `owner/repo` for a project lazily and cache it on the
+   * project row. The web reads this to decide whether the GitHub tab
+   * makes sense (no GitHub remote → tab hidden). Re-runs `gh repo
+   * view` when the project doesn't have it cached yet, so the first
+   * visit pays a small cost and every visit after is free.
+   */
+  async function resolveProjectGithubRepo(project: {
+    id: string;
+    path: string;
+    githubRepo?: string | null;
+  }): Promise<string | null> {
+    if (project.githubRepo) return project.githubRepo;
+    const slug = await ghRepo(project.path);
+    if (slug) {
+      const next = updateProject(db, project.id, { githubRepo: slug });
+      if (next) pubProjectChanged(next.id);
+    }
+    return slug;
+  }
+
+  api.get("/projects/:idOrSlug/github/repo", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const slug = await resolveProjectGithubRepo(project);
+    return c.json({ repo: slug });
+  });
+
+  api.get("/projects/:idOrSlug/github/issues", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const slug = await resolveProjectGithubRepo(project);
+    if (!slug) return c.json({ ok: false, repo: null, issues: [], error: "no GitHub remote" });
+    const r = await ghListIssues(project.path);
+    if (!r.ok) {
+      return c.json({ ok: false, repo: slug, issues: [], error: r.error ?? "gh failed" });
+    }
+    return c.json({ ok: true, repo: slug, issues: r.data ?? [] });
+  });
+
+  api.get("/projects/:idOrSlug/github/prs", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const slug = await resolveProjectGithubRepo(project);
+    if (!slug) return c.json({ ok: false, repo: null, prs: [], error: "no GitHub remote" });
+    const r = await ghListPrs(project.path);
+    if (!r.ok) {
+      return c.json({ ok: false, repo: slug, prs: [], error: r.error ?? "gh failed" });
+    }
+    return c.json({ ok: true, repo: slug, prs: r.data ?? [] });
+  });
+
+  /**
+   * Manual refresh — kicks the WS bus so every connected client
+   * re-fetches without polling. The lists themselves come from the
+   * GET endpoints above; this is just the broadcast.
+   */
+  api.post("/projects/:idOrSlug/github/refresh", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    pubGithubRefreshed(project.id);
+    return c.json({ ok: true });
+  });
+
+  /**
+   * Spawn a task from a GitHub issue or PR. Prompt is assembled from
+   * the configured preset + the issue/PR body; for PR tasks the
+   * worktree is checked out onto the PR's branch via `gh pr checkout`
+   * (handled in TaskManager.create when `githubPr` is set).
+   */
+  api.post("/projects/:idOrSlug/github/spawn", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const body = await c.req.json().catch(() => null);
+    const parsed = GithubSpawnRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid request", issues: parsed.error.issues },
+        400,
+      );
+    }
+    const slug = await resolveProjectGithubRepo(project);
+    if (!slug) return c.json({ error: "project has no GitHub remote" }, 400);
+
+    const cfg = loadConfig(paths.root);
+    const presets = cfg.presets.github;
+
+    // Pull the source object so we can interpolate placeholders. For
+    // freeform we still need the title/url for context, but the
+    // operator's prompt wins.
+    let prompt = parsed.data.prompt?.trim() ?? "";
+    let title = parsed.data.title?.trim() ?? "";
+    if (parsed.data.kind === "issue") {
+      const r = await ghViewIssue(project.path, parsed.data.number);
+      if (!r.ok || !r.data) {
+        return c.json(
+          { error: r.error ?? `gh issue view #${parsed.data.number} failed` },
+          400,
+        );
+      }
+      const issue = r.data;
+      if (!title) title = `#${issue.number} ${issue.title}`.slice(0, 100);
+      if (parsed.data.preset === "fix-issue" || (!prompt && parsed.data.preset !== "freeform")) {
+        prompt = renderConfigTemplate(presets.fixIssue, {
+          number: String(issue.number),
+          title: issue.title,
+          body: issue.body ?? "(no description)",
+          url: issue.url,
+          branch: "",
+        });
+      }
+      if (!prompt) prompt = `Issue #${issue.number}: ${issue.title}\n\n${issue.body ?? ""}`;
+    } else {
+      const r = await ghViewPr(project.path, parsed.data.number);
+      if (!r.ok || !r.data) {
+        return c.json(
+          { error: r.error ?? `gh pr view #${parsed.data.number} failed` },
+          400,
+        );
+      }
+      const pr = r.data;
+      if (!title) title = `PR #${pr.number} ${pr.title}`.slice(0, 100);
+      if (parsed.data.preset === "review-pr" || (!prompt && parsed.data.preset !== "freeform")) {
+        prompt = renderConfigTemplate(presets.reviewPr, {
+          number: String(pr.number),
+          title: pr.title,
+          body: pr.body ?? "(no description)",
+          url: pr.url,
+          branch: pr.headRefName,
+        });
+      }
+      if (!prompt) prompt = `PR #${pr.number}: ${pr.title}\n\n${pr.body ?? ""}`;
+    }
+
+    try {
+      const task = await tasks.create({
+        agent: parsed.data.agent ?? "claude",
+        repoPath: project.path,
+        prompt,
+        title,
+        ...(parsed.data.permissionMode
+          ? { permissionMode: parsed.data.permissionMode }
+          : {}),
+        ...(parsed.data.thinkingLevel
+          ? { thinkingLevel: parsed.data.thinkingLevel }
+          : {}),
+        ...(parsed.data.model ? { model: parsed.data.model } : {}),
+        ...(parsed.data.kind === "issue"
+          ? { githubIssue: parsed.data.number }
+          : { githubPr: parsed.data.number }),
+        // PR tasks: skip the AI branch helper — the worktree gets
+        // switched onto the PR branch by `gh pr checkout`. Pass a
+        // placeholder branch name here; taskManager will overwrite it
+        // with the actual PR head once the checkout lands.
+        ...(parsed.data.kind === "pr"
+          ? { branchName: `gh-pr-${parsed.data.number}` }
+          : {}),
+      });
+      pubTaskChanged(task.id);
+      pubGithubRefreshed(project.id);
+      return c.json({ task });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  /**
+   * PR action bar — comment / review / merge. Reads `task.githubPr`
+   * (set at spawn time) so the operator can act on the PR from the
+   * task detail view without leaving agentd. `cwd` is the project
+   * path so `gh` resolves the right repo.
+   */
+  function loadPrTask(c: import("hono").Context): {
+    task: Task;
+    project: { id: string; path: string };
+    number: number;
+  } | { error: string; status: 400 | 404 } {
+    const id = c.req.param("id") ?? "";
+    const task = tasks.get(id);
+    if (!task) return { error: "task not found", status: 404 };
+    if (!task.githubPr) return { error: "task is not a PR task", status: 400 };
+    if (!task.projectId) return { error: "task has no project", status: 400 };
+    const project = getProjectById(db, task.projectId);
+    if (!project) return { error: "project missing", status: 404 };
+    return { task, project, number: task.githubPr };
+  }
+
+  api.post("/tasks/:id/github/comment", async (c) => {
+    const ctx = loadPrTask(c);
+    if ("error" in ctx) return c.json({ error: ctx.error }, ctx.status);
+    const body = await c.req.json().catch(() => null);
+    const parsed = GithubPrActionRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
+    }
+    const commentBody = parsed.data.body?.trim();
+    if (!commentBody) {
+      return c.json({ error: "body is required" }, 400);
+    }
+    const r = await ghPrComment(ctx.project.path, ctx.number, commentBody);
+    if (!r.ok) return c.json({ error: r.error ?? "gh pr comment failed" }, 400);
+    pubGithubRefreshed(ctx.project.id);
+    return c.json({ ok: true });
+  });
+
+  api.post("/tasks/:id/github/review", async (c) => {
+    const ctx = loadPrTask(c);
+    if ("error" in ctx) return c.json({ error: ctx.error }, ctx.status);
+    const body = await c.req.json().catch(() => null);
+    const parsed = GithubPrActionRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
+    }
+    const event = parsed.data.event ?? "COMMENT";
+    const r = await ghPrReview(
+      ctx.project.path,
+      ctx.number,
+      event,
+      parsed.data.body,
+    );
+    if (!r.ok) return c.json({ error: r.error ?? "gh pr review failed" }, 400);
+    pubGithubRefreshed(ctx.project.id);
+    return c.json({ ok: true });
+  });
+
+  api.post("/tasks/:id/github/merge", async (c) => {
+    const ctx = loadPrTask(c);
+    if ("error" in ctx) return c.json({ error: ctx.error }, ctx.status);
+    const body = await c.req.json().catch(() => null);
+    const parsed = GithubPrActionRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
+    }
+    const method = parsed.data.method ?? "squash";
+    const r = await ghPrMerge(ctx.project.path, ctx.number, method);
+    if (!r.ok) return c.json({ error: r.error ?? "gh pr merge failed" }, 400);
+    pubGithubRefreshed(ctx.project.id);
+    return c.json({ ok: true });
   });
 
   // ── Skills ──────────────────────────────────────────────────────────

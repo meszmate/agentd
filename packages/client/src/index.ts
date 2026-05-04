@@ -30,6 +30,10 @@ import type {
   RunTemplateRequest,
   Schedule,
   SendTerminalKeysRequest,
+  GithubIssue,
+  GithubPr,
+  GithubStatus,
+  GithubSpawnRequest,
   Skill,
   Task,
   TelegramBotIdentity,
@@ -1919,6 +1923,92 @@ export class AgentdClient {
     return this.req(`/api/projects/${encodeURIComponent(idOrSlug)}/pull`, {
       method: "POST",
     });
+  }
+
+  // ── GitHub ──
+  async getGithubStatus(): Promise<GithubStatus> {
+    return this.req("/api/github/status");
+  }
+
+  async getProjectGithubRepo(
+    idOrSlug: string,
+  ): Promise<{ repo: string | null }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/repo`,
+    );
+  }
+
+  async listGithubIssues(idOrSlug: string): Promise<{
+    ok: boolean;
+    repo: string | null;
+    issues: GithubIssue[];
+    error?: string;
+  }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/issues`,
+    );
+  }
+
+  async listGithubPrs(idOrSlug: string): Promise<{
+    ok: boolean;
+    repo: string | null;
+    prs: GithubPr[];
+    error?: string;
+  }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/prs`,
+    );
+  }
+
+  async refreshGithub(idOrSlug: string): Promise<{ ok: true }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/refresh`,
+      { method: "POST" },
+    );
+  }
+
+  async spawnGithubTask(
+    idOrSlug: string,
+    req: GithubSpawnRequest,
+  ): Promise<{ task: Task }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/spawn`,
+      { method: "POST", body: JSON.stringify(req) },
+    );
+  }
+
+  async prComment(
+    taskId: string,
+    body: string,
+  ): Promise<{ ok: true }> {
+    return this.req(
+      `/api/tasks/${encodeURIComponent(taskId)}/github/comment`,
+      { method: "POST", body: JSON.stringify({ body }) },
+    );
+  }
+
+  async prReview(
+    taskId: string,
+    event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+    body?: string,
+  ): Promise<{ ok: true }> {
+    return this.req(
+      `/api/tasks/${encodeURIComponent(taskId)}/github/review`,
+      {
+        method: "POST",
+        body: JSON.stringify({ event, ...(body ? { body } : {}) }),
+      },
+    );
+  }
+
+  async prMerge(
+    taskId: string,
+    method: "merge" | "squash" | "rebase" = "squash",
+  ): Promise<{ ok: true }> {
+    return this.req(
+      `/api/tasks/${encodeURIComponent(taskId)}/github/merge`,
+      { method: "POST", body: JSON.stringify({ method }) },
+    );
   }
 
   async getTaskContext(id: string): Promise<{

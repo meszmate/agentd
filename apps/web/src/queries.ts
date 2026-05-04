@@ -30,6 +30,10 @@ export const qk = {
   savedIdeas: (projectIdOrSlug: string) =>
     ["saved-ideas", projectIdOrSlug] as const,
   idea: (id: string) => ["idea", id] as const,
+  githubStatus: () => ["github", "status"] as const,
+  githubIssues: (idOrSlug: string) =>
+    ["github", "issues", idOrSlug] as const,
+  githubPrs: (idOrSlug: string) => ["github", "prs", idOrSlug] as const,
 };
 
 export function useProjects() {
@@ -1041,4 +1045,94 @@ export function useTaskStream(
   }, [client, taskId]);
 
   return { live };
+}
+
+// ── GitHub ─────────────────────────────────────────────────────────
+
+/**
+ * Global gh preflight — `gh --version` + `gh auth status`. Cheap
+ * (~150ms) and rarely changes; web's GitHub view gates on it.
+ */
+export function useGithubStatus() {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.githubStatus(),
+    queryFn: () => client.getGithubStatus(),
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * Project's open issues, surfaced from `gh issue list`. Realtime bus
+ * invalidates on `github_refreshed`; no polling.
+ */
+export function useGithubIssues(idOrSlug: string | null | undefined) {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.githubIssues(idOrSlug ?? "_none"),
+    queryFn: () => client.listGithubIssues(idOrSlug!),
+    enabled: !!idOrSlug,
+    staleTime: 30_000,
+  });
+}
+
+export function useGithubPrs(idOrSlug: string | null | undefined) {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.githubPrs(idOrSlug ?? "_none"),
+    queryFn: () => client.listGithubPrs(idOrSlug!),
+    enabled: !!idOrSlug,
+    staleTime: 30_000,
+  });
+}
+
+export function useRefreshGithub() {
+  const client = useClient();
+  return useMutation({
+    mutationFn: (idOrSlug: string) => client.refreshGithub(idOrSlug),
+  });
+}
+
+export function useSpawnGithubTask() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      idOrSlug,
+      req,
+    }: {
+      idOrSlug: string;
+      req: Parameters<AgentdClient["spawnGithubTask"]>[1];
+    }) => client.spawnGithubTask(idOrSlug, req),
+    onSuccess: (_data, vars) => {
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+      void qc.invalidateQueries({ queryKey: qk.githubIssues(vars.idOrSlug) });
+      void qc.invalidateQueries({ queryKey: qk.githubPrs(vars.idOrSlug) });
+    },
+  });
+}
+
+export function usePrComment(taskId: string) {
+  const client = useClient();
+  return useMutation({
+    mutationFn: (body: string) => client.prComment(taskId, body),
+  });
+}
+
+export function usePrReview(taskId: string) {
+  const client = useClient();
+  return useMutation({
+    mutationFn: (vars: {
+      event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
+      body?: string;
+    }) => client.prReview(taskId, vars.event, vars.body),
+  });
+}
+
+export function usePrMerge(taskId: string) {
+  const client = useClient();
+  return useMutation({
+    mutationFn: (method: "merge" | "squash" | "rebase" = "squash") =>
+      client.prMerge(taskId, method),
+  });
 }
