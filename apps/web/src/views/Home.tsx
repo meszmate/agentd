@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowUpRight,
@@ -9,11 +9,9 @@ import {
   Sparkles,
 } from "lucide-react";
 import type {
-  AgentEvent,
   PermissionMode,
   Project,
   Task,
-  WsServerEvent,
 } from "@agentd/contracts";
 import {
   Kicker,
@@ -35,7 +33,7 @@ import {
   defaultWorkspaceSetup,
   type WorkspaceSetupValue,
 } from "@/components/workspace-setup";
-import { useApp, useClient } from "@/AppContext";
+import { useApp } from "@/AppContext";
 import {
   useCreateTask,
   usePatchPrefs,
@@ -44,6 +42,7 @@ import {
   useSchedules,
   useTasks,
 } from "@/queries";
+import { useRealtime } from "@/realtime";
 import {
   cn,
   formatCost,
@@ -52,15 +51,6 @@ import {
   shortId,
 } from "@/lib/utils";
 
-
-interface ActivityEntry {
-  id: string;
-  taskId: string;
-  taskTitle: string;
-  text: string;
-  kind: AgentEvent["kind"];
-  ts: number;
-}
 
 function startOfToday(): number {
   const d = new Date();
@@ -666,65 +656,16 @@ function ProjectsRail({ projects }: { projects: Project[] }) {
 /* ── Activity ticker ────────────────────────────────────────────── */
 
 function ActivityTicker({ tasks }: { tasks: Task[] }) {
-  const client = useClient();
-  const [entries, setEntries] = useState<ActivityEntry[]>([]);
-  const titleByIdRef = useRef(new Map<string, string>());
-
-  useEffect(() => {
-    const m = titleByIdRef.current;
-    for (const t of tasks) m.set(t.id, t.title);
-  }, [tasks]);
-
-  useEffect(() => {
-    let ws: WebSocket | null = null;
-    let closed = false;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const open = () => {
-      ws = client.watch(null, (msg: WsServerEvent) => {
-        if (msg.type !== "event") return;
-        const ev = msg.event;
-        const title = titleByIdRef.current.get(msg.taskId) ?? "task";
-        let text: string | null = null;
-        if (ev.kind === "message") {
-          text = (ev.text || "").replace(/\s+/g, " ").trim();
-          if (text.length > 100) text = text.slice(0, 97) + "…";
-        } else if (ev.kind === "tool_call") {
-          text = `→ ${ev.tool}`;
-        } else if (ev.kind === "status") {
-          text = `→ ${ev.status}`;
-        } else if (ev.kind === "exit") {
-          text = `exit ${ev.code ?? "?"}`;
-        }
-        if (!text) return;
-        setEntries((prev) => {
-          const next: ActivityEntry = {
-            id: `${msg.taskId}-${msg.ts}-${Math.random().toString(36).slice(2, 6)}`,
-            taskId: msg.taskId,
-            taskTitle: title,
-            text,
-            kind: ev.kind,
-            ts: msg.ts,
-          };
-          return [next, ...prev].slice(0, 10);
-        });
-      });
-      ws.addEventListener("close", () => {
-        if (closed) return;
-        reconnectTimer = setTimeout(open, 2000);
-      });
-    };
-    open();
-    return () => {
-      closed = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      try {
-        ws?.close();
-      } catch {
-        // already closed
-      }
-    };
-  }, [client]);
+  void tasks;
+  // Reuse the app-wide realtime bus instead of opening a second WS — the
+  // RealtimeProvider already maintains a `recent` buffer of meaningful
+  // events. Filter to task-scoped entries (skip brainstorm suggestions
+  // which carry no taskId) and trim to the last 10 for the home rail.
+  const { recent } = useRealtime();
+  const entries = useMemo(
+    () => recent.filter((e) => e.taskId).slice(0, 10),
+    [recent],
+  );
 
   if (entries.length === 0) {
     return (
