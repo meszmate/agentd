@@ -51,6 +51,11 @@ async function main() {
     });
   }
   const tasks = new TaskManager(db, bus, paths, baseUrl, agentSessionToken);
+  // Sweep up tasks that were mid-run when the daemon last died.
+  // Their runner processes went with the daemon; the rows stayed
+  // at `running`/`waiting_*`/`idle` and the UI would draw "agent is
+  // thinking…" forever otherwise.
+  tasks.recoverOrphans();
 
   const plugins = new PluginManager(paths.root, baseUrl, db);
 

@@ -134,6 +134,45 @@ export class TaskManager {
     private readonly agentSessionToken: string,
   ) {}
 
+  /**
+   * Reset orphaned tasks at startup. When the daemon dies mid-turn the
+   * runner subprocess goes with it, but the task's row stays at
+   * `running` / `waiting_input` / `waiting_perm` / `idle` in the DB.
+   * After restart the UI keeps drawing "agent is thinking…" and the
+   * Stop button can't kill anything because there's no process. Sweep
+   * those rows back to `stopped`, drop a system breadcrumb so the
+   * operator knows what happened, and publish a status event so any
+   * connected client repaints. Called once from the daemon entry
+   * after the TaskManager is constructed.
+   */
+  recoverOrphans(): void {
+    const orphaned = listTasks(this.db).filter(
+      (t) =>
+        t.status === "running" ||
+        t.status === "waiting_input" ||
+        t.status === "waiting_perm" ||
+        t.status === "idle",
+    );
+    for (const t of orphaned) {
+      updateTaskStatus(this.db, t.id, "stopped");
+      try {
+        appendMessage(
+          this.db,
+          t.id,
+          "system",
+          "[daemon restarted — turn interrupted; send a new message to resume]",
+        );
+      } catch {
+        // never let a logging hiccup block startup
+      }
+      this.bus.publish({
+        taskId: t.id,
+        event: { kind: "status", status: "stopped" },
+        ts: Date.now(),
+      });
+    }
+  }
+
   list(): Task[] {
     return listTasks(this.db);
   }
