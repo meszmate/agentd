@@ -754,6 +754,23 @@ export function useSpawnTasksMulti() {
   });
 }
 
+export function useSpawnSiblingTask() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      parentId,
+      ...body
+    }: {
+      parentId: string;
+    } & Parameters<AgentdClient["spawnSiblingTask"]>[1]) =>
+      client.spawnSiblingTask(parentId, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+    },
+  });
+}
+
 export function useUpdateSavedIdeaSlices() {
   const client = useClient();
   const qc = useQueryClient();

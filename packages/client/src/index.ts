@@ -833,6 +833,31 @@ export class AgentdClient {
       body: JSON.stringify(body),
     });
   }
+
+  /**
+   * Add a sibling task to an existing one — same worktree + branch,
+   * chained sequentially via dependsOnTaskId. Used by the task page's
+   * "Spawn related task" action so the operator can drop another
+   * agent (different model / different concern) on the same checkout.
+   */
+  async spawnSiblingTask(
+    parentId: string,
+    body: {
+      agent: "claude" | "codex";
+      prompt: string;
+      title?: string;
+      model?: string;
+      thinkingLevel?: ThinkingLevel;
+      permissionMode?: "bypassPermissions" | "acceptEdits" | "plan";
+      autoCommit?: boolean;
+      autoPush?: boolean;
+    },
+  ): Promise<{ task: Task }> {
+    return this.req(`/api/tasks/${encodeURIComponent(parentId)}/spawn-sibling`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
   async getSuggestion(id: string): Promise<{ suggestion: Suggestion }> {
     return this.req(`/api/suggestions/${encodeURIComponent(id)}`);
   }

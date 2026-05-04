@@ -4,13 +4,17 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckSquare,
   ExternalLink,
+  GitBranchPlus,
   Hash,
+  Loader2,
   MoreHorizontal,
   PanelRight,
   PanelRightClose,
   RotateCcw,
+  Sparkles,
   Square,
   Trash2,
+  Zap,
 } from "lucide-react";
 import {
   Panel,
@@ -47,6 +51,7 @@ import {
   usePrefs,
   useProject,
   useRemoveTask,
+  useSpawnSiblingTask,
   useStopTask,
   useTask,
   useTaskStream,
@@ -62,6 +67,20 @@ import {
 import { TaskTimeline } from "@/views/TaskTimeline";
 import { TaskWorkspace } from "@/views/TaskWorkspace";
 import { ShipMenu } from "@/components/ship-menu";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import type {
+  AgentKind,
+  ThinkingLevel,
+} from "@agentd/contracts";
 import type { TaskPlanItem } from "@/views/TaskPlan";
 
 export function TaskDetail({ task }: { task: Task }) {
@@ -72,7 +91,9 @@ export function TaskDetail({ task }: { task: Task }) {
   const taskQ = useTask(task.id);
   const stop = useStopTask(task.id);
   const remove = useRemoveTask();
+  const spawnSibling = useSpawnSiblingTask();
   const qc = useQueryClient();
+  const [siblingOpen, setSiblingOpen] = useState(false);
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
@@ -466,6 +487,10 @@ export function TaskDetail({ task }: { task: Task }) {
           <DropdownMenuContent align="end" className="min-w-[14rem]">
             <DropdownMenuLabel>Task</DropdownMenuLabel>
             <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => setSiblingOpen(true)}>
+              <GitBranchPlus /> Spawn related task on this worktree
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             {task.closedAt ? (
               <DropdownMenuItem onClick={onReopen}>
                 <RotateCcw /> Reopen
@@ -612,6 +637,14 @@ export function TaskDetail({ task }: { task: Task }) {
           />
         )}
       </div>
+      <SpawnSiblingDialog
+        open={siblingOpen}
+        onOpenChange={setSiblingOpen}
+        parentTask={task}
+        spawnSibling={spawnSibling}
+        onError={onError}
+        toast={toast}
+      />
     </div>
   );
 }
@@ -1479,5 +1512,263 @@ function DiscordThreadChip({
         <Hash className="h-3 w-3" /> {label}
       </a>
     </Button>
+  );
+}
+
+/**
+ * Compact dialog for adding a sibling task on the parent's worktree.
+ * Picks an agent + model + thinking level + prompt; the new task
+ * chains via `dependsOnTaskId` so it runs after the parent's current
+ * turn finishes (sequential is the only safe option on a shared
+ * checkout). Both end up in the same `planGroupId` so the sidebar
+ * groups them visually.
+ */
+function SpawnSiblingDialog({
+  open,
+  onOpenChange,
+  parentTask,
+  spawnSibling,
+  onError,
+  toast,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  parentTask: Task;
+  spawnSibling: ReturnType<typeof useSpawnSiblingTask>;
+  onError: (m: string) => void;
+  toast: (m: string, isError?: boolean) => void;
+}) {
+  const navigate = useNavigate();
+  const modelsQ = useModels();
+  const [agent, setAgent] = useState<AgentKind>(parentTask.agent);
+  const [model, setModel] = useState<string>("");
+  const [thinking, setThinking] = useState<ThinkingLevel | "">("");
+  const [prompt, setPrompt] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  // Reset on open so a stale draft doesn't leak between sessions.
+  useEffect(() => {
+    if (open) {
+      setAgent(parentTask.agent);
+      setModel("");
+      setThinking("");
+      setPrompt("");
+    }
+  }, [open, parentTask.agent]);
+
+  // Snap thinking off invalid agent values when switching agents.
+  useEffect(() => {
+    setThinking((cur) => {
+      if (cur === "") return cur;
+      if (agent === "claude" && cur === "minimal") return "low";
+      if (agent === "codex" && cur === "max") return "xhigh";
+      return cur;
+    });
+  }, [agent]);
+
+  const defaultThinking = modelsQ.data?.defaultThinking;
+  const agentModels = modelsQ.data?.models?.[agent] ?? [];
+  const thinkLevels: ThinkingLevel[] =
+    agent === "claude"
+      ? ["low", "medium", "high", "xhigh", "max"]
+      : ["minimal", "low", "medium", "high", "xhigh"];
+
+  const launch = async () => {
+    if (!prompt.trim()) {
+      toast("prompt is empty", true);
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const r = await spawnSibling.mutateAsync({
+        parentId: parentTask.id,
+        agent,
+        prompt: prompt.trim(),
+        ...(model ? { model } : {}),
+        ...(thinking ? { thinkingLevel: thinking as ThinkingLevel } : {}),
+      });
+      toast(`queued sibling ${shortId(r.task.id)} on ${agent}`);
+      onOpenChange(false);
+      navigate(`/tasks/${r.task.id}`);
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const NONE = "__none";
+  return (
+    <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay
+          className={cn(
+            "fixed inset-0 z-50 bg-ink-900/30 backdrop-blur-sm",
+            "data-[state=open]:animate-in data-[state=closed]:animate-out",
+            "data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+          )}
+        />
+        <DialogPrimitive.Content
+          className={cn(
+            "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
+            "w-[96vw] max-w-[640px] max-h-[88vh] flex flex-col",
+            "rounded-xl border border-ink-900/10 bg-paper-50 shadow-deep dark:border-ink-50/10 dark:bg-ink-900",
+            "overflow-hidden",
+            "data-[state=open]:animate-in data-[state=closed]:animate-out",
+            "data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+            "data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+          )}
+        >
+          <DialogPrimitive.Title className="sr-only">
+            Spawn related task on this worktree
+          </DialogPrimitive.Title>
+          <header className="flex items-center gap-2 px-4 py-2.5 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06]">
+            <GitBranchPlus className="h-3.5 w-3.5 text-ember-500" />
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ember-700 dark:text-ember-300">
+              Spawn related
+            </span>
+            <span className="text-ink-300 dark:text-ink-600">·</span>
+            <span className="font-mono text-[11px] text-ink-700 dark:text-ink-200 truncate">
+              {parentTask.branch}
+            </span>
+            <span className="ml-auto" />
+          </header>
+          <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3.5">
+            <p className="text-[11.5px] text-ink-500 dark:text-ink-400 leading-relaxed">
+              Adds a task to the same worktree + branch as
+              <span className="font-mono mx-1 text-ink-700 dark:text-ink-200">
+                {parentTask.title.slice(0, 60)}
+              </span>
+              . Runs sequentially after this task's current turn so they don't race on the same files.
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              <FieldRowSibling label="agent">
+                <Select
+                  value={agent}
+                  onValueChange={(v) => setAgent(v as AgentKind)}
+                  disabled={submitting}
+                >
+                  <SelectTrigger className="h-8 text-[12px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="claude">claude</SelectItem>
+                    <SelectItem value="codex">codex</SelectItem>
+                  </SelectContent>
+                </Select>
+              </FieldRowSibling>
+              <FieldRowSibling label="model">
+                <Select
+                  value={
+                    model && agentModels.some((m) => m.id === model)
+                      ? model
+                      : NONE
+                  }
+                  onValueChange={(v) => setModel(v === NONE ? "" : v)}
+                  disabled={submitting}
+                >
+                  <SelectTrigger className="h-8 text-[12px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NONE}>auto · {agent} latest</SelectItem>
+                    {agentModels.map((m) => (
+                      <SelectItem key={m.id} value={m.id}>
+                        {m.label || m.id}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </FieldRowSibling>
+              <FieldRowSibling label="think">
+                <Select
+                  value={thinking || NONE}
+                  onValueChange={(v) =>
+                    setThinking(v === NONE ? "" : (v as ThinkingLevel))
+                  }
+                  disabled={submitting}
+                >
+                  <SelectTrigger className="h-8 text-[12px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NONE}>
+                      auto · {defaultThinking?.[agent] ?? (agent === "claude" ? "xhigh" : "high")}
+                    </SelectItem>
+                    {thinkLevels.map((lvl) => (
+                      <SelectItem key={lvl} value={lvl}>
+                        {lvl}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </FieldRowSibling>
+            </div>
+            <div className="space-y-1.5">
+              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+                Prompt
+              </span>
+              <Textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder={`What should ${agent} do on this worktree?`}
+                disabled={submitting}
+                rows={Math.min(12, Math.max(5, prompt.split("\n").length + 2))}
+                className="text-[12px] font-mono leading-relaxed resize-y"
+                autoFocus
+              />
+            </div>
+          </div>
+          <footer className="flex items-center gap-2 px-4 py-2.5 border-t border-ink-900/[0.06] dark:border-ink-50/[0.06]">
+            <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+              chains after this task's current turn
+            </span>
+            <span className="ml-auto" />
+            <button
+              type="button"
+              onClick={() => onOpenChange(false)}
+              disabled={submitting}
+              className="inline-flex items-center h-7 px-2.5 rounded font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-ink-900 dark:hover:text-ink-50 disabled:opacity-50"
+            >
+              cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void launch()}
+              disabled={submitting || !prompt.trim()}
+              className={cn(
+                "inline-flex items-center gap-1.5 h-7 px-3 rounded font-mono text-[10px] uppercase tracking-[0.08em]",
+                "border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300",
+                "hover:bg-ember-500/20 disabled:opacity-40 disabled:cursor-not-allowed",
+              )}
+            >
+              {submitting ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <Zap className="h-3 w-3" />
+              )}
+              spawn
+            </button>
+          </footer>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
+  );
+}
+
+function FieldRowSibling({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1">
+      <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+        {label}
+      </span>
+      {children}
+    </div>
   );
 }

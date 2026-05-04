@@ -27,6 +27,7 @@ import {
   ResolveSuggestionRequest,
   SaveIdeaRequest,
   SpawnMultiRequest,
+  SpawnSiblingRequest,
   SpawnTasksMultiRequest,
   UpdateIdeaRequest,
   CreateTodoRequest,
@@ -3838,6 +3839,51 @@ export function buildServer(opts: BuildServerOptions) {
       });
       for (const t of created) pubTaskChanged(t.id);
       return c.json({ tasks: created });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  /**
+   * Spawn a sibling task on an existing task's worktree + branch. The
+   * new task chains via `dependsOnTaskId` so it runs after the parent
+   * finishes its current turn. Used by the task page's "Spawn related
+   * task" action — lets the operator drop a second agent (different
+   * model, different scope) onto the same checkout. Both end up in
+   * the same `planGroupId`, so the sidebar shows them as one cluster.
+   */
+  api.post("/tasks/:id/spawn-sibling", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => null);
+    const parsed = SpawnSiblingRequest.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "invalid body", issues: parsed.error.issues },
+        400,
+      );
+    }
+    try {
+      const sibling = await tasks.addSiblingTask(id, {
+        agent: parsed.data.agent,
+        prompt: parsed.data.prompt,
+        ...(parsed.data.title ? { title: parsed.data.title } : {}),
+        ...(parsed.data.model ? { model: parsed.data.model } : {}),
+        ...(parsed.data.thinkingLevel
+          ? { thinkingLevel: parsed.data.thinkingLevel }
+          : {}),
+        ...(parsed.data.permissionMode
+          ? { permissionMode: parsed.data.permissionMode }
+          : {}),
+        ...(parsed.data.autoCommit != null
+          ? { autoCommit: parsed.data.autoCommit }
+          : {}),
+        ...(parsed.data.autoPush != null
+          ? { autoPush: parsed.data.autoPush }
+          : {}),
+      });
+      pubTaskChanged(sibling.id);
+      pubTaskChanged(id);
+      return c.json({ task: sibling });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }

@@ -51,6 +51,7 @@ import {
   removeWorktree,
   syncAgentPlan,
   setTaskCodexThreadId,
+  setTaskPlanGroupId,
   updateTaskStatus,
   createWorktree,
   type AgentdPaths,
@@ -527,6 +528,73 @@ export class TaskManager {
     return created;
   }
 
+  /**
+   * Add a sibling task to an existing one, sharing the parent's
+   * worktree + branch. The new task chains via `dependsOnTaskId`
+   * (sequential, runs after the parent finishes its current turn) so
+   * it never races on the shared checkout. The parent's planGroupId
+   * is reused (or assigned now if the parent was solo) so the
+   * sidebar clusters them as siblings — the operator visually sees
+   * "these tasks live on the same branch."
+   *
+   * Use case: drop a different agent on the same checkout to handle
+   * a different concern (codex picks up a refactor while claude
+   * worked on the feature, etc.).
+   */
+  async addSiblingTask(
+    parentId: string,
+    params: {
+      agent: AgentKind;
+      prompt: string;
+      title?: string;
+      model?: string;
+      thinkingLevel?: ThinkingLevel;
+      permissionMode?: PermissionMode;
+      autoCommit?: boolean;
+      autoPush?: boolean;
+    },
+  ): Promise<Task> {
+    const parent = getTask(this.db, parentId);
+    if (!parent) throw new Error("parent task not found");
+
+    // Promote a solo parent into a planGroup — the sidebar cluster
+    // logic groups by planGroupId, so without this the sibling would
+    // sit alone in the list.
+    let groupId = parent.planGroupId;
+    if (!groupId) {
+      groupId = newId("grp");
+      setTaskPlanGroupId(this.db, parent.id, groupId);
+    }
+
+    const titleBase =
+      params.title?.trim() || params.prompt.split("\n")[0]!.slice(0, 60);
+
+    return this.create({
+      agent: params.agent,
+      repoPath: parent.repoPath,
+      baseBranch: parent.baseBranch,
+      prompt: params.prompt,
+      title: titleBase,
+      ...(params.model ? { model: params.model } : {}),
+      ...(params.thinkingLevel ? { thinkingLevel: params.thinkingLevel } : {}),
+      ...(params.permissionMode
+        ? { permissionMode: params.permissionMode }
+        : {}),
+      ...(params.autoCommit != null ? { autoCommit: params.autoCommit } : {}),
+      ...(params.autoPush != null ? { autoPush: params.autoPush } : {}),
+      // Always chain — concurrent runners on a shared worktree race
+      // on the same files. The chain hook spawns this once the parent
+      // reaches done/idle.
+      dependsOnTaskId: parent.id,
+      planGroupId: groupId,
+      // Share the parent's existing worktree + branch verbatim. No
+      // new checkout, no new branch — the agent appears on the same
+      // commit history as everything else in this group.
+      sharedWorktreePath: parent.worktreePath,
+      sharedBranch: parent.branch,
+    });
+  }
+
   async sendInput(taskId: string, text: string): Promise<void> {
     const task = getTask(this.db, taskId);
     if (!task) throw new Error("task not found");
@@ -953,11 +1021,18 @@ export class TaskManager {
     if (event.kind === "message" && event.role === "agent") {
       appendMessage(this.db, taskId, "agent", event.text);
     } else if (event.kind === "tool_call") {
+      // Persist the full args JSON. The old 500-char cap was small
+      // enough that any non-trivial Edit/MultiEdit/Write call had its
+      // JSON sliced mid-string — the web's parser fell back to a
+      // truncated raw blob (no file_path → row showed "?"). 32K
+      // covers virtually every real edit; pathological mega-edits
+      // (a write of an entire 100KB file) still get clamped, but
+      // the leading file_path stays intact so the row renders.
       appendMessage(
         this.db,
         taskId,
         "tool",
-        `[call ${event.tool}] ${JSON.stringify(event.args).slice(0, 500)}`,
+        `[call ${event.tool}] ${JSON.stringify(event.args).slice(0, 32_000)}`,
       );
       // TodoWrite (claude) / update_plan (codex) carries the agent's
       // current plan. Mirror it into the todos table tagged source=agent

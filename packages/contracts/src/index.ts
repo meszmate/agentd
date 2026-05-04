@@ -800,6 +800,26 @@ export const SpawnTasksMultiRequest = z.object({
 export type SpawnTasksMultiRequest = z.infer<typeof SpawnTasksMultiRequest>;
 
 /**
+ * Body for `POST /api/tasks/:id/spawn-sibling` — adds a new task to
+ * the parent's worktree + branch. Sequential (chains via
+ * `dependsOnTaskId`), so the new agent runs once the parent finishes
+ * its current turn. Lets the operator drop a different agent / model
+ * onto the same checkout for a different concern (e.g. claude built
+ * the feature, codex follows up with a refactor on the same files).
+ */
+export const SpawnSiblingRequest = z.object({
+  agent: AgentKind,
+  prompt: z.string().min(1),
+  title: z.string().optional(),
+  model: z.string().optional(),
+  thinkingLevel: ThinkingLevel.optional(),
+  permissionMode: PermissionMode.optional(),
+  autoCommit: z.boolean().optional(),
+  autoPush: z.boolean().optional(),
+});
+export type SpawnSiblingRequest = z.infer<typeof SpawnSiblingRequest>;
+
+/**
  * Tool-call activity captured during the agent's turn — persisted
  * with the agent message so the workshop can replay the exploration
  * timeline after reload, matching how task pages show their history.

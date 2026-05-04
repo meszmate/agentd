@@ -262,6 +262,23 @@ export function listTasksByPlanGroup(db: Db, planGroupId: string): Task[] {
 }
 
 /**
+ * Promote a solo task into a plan group (or move it between groups).
+ * Used by `addSiblingTask` so the new sibling can join an existing
+ * group rather than orphaning the parent.
+ */
+export function setTaskPlanGroupId(
+  db: Db,
+  id: string,
+  planGroupId: string | null,
+): Task | null {
+  db.update(tasks)
+    .set({ planGroupId, updatedAt: Date.now() })
+    .where(eq(tasks.id, id))
+    .run();
+  return getTask(db, id);
+}
+
+/**
  * Set status without bumping updatedAt (used by the chain hook
  * when a parent fails — children should record the cancel reason
  * but not jostle list ordering).
