@@ -530,6 +530,30 @@ export const AgentEvent = z.discriminatedUnion("kind", [
      */
     kind: z.literal("todos_updated"),
   }),
+  z.object({
+    /**
+     * Account-wide rate-limit signal forwarded by the runner. Today only
+     * Claude emits this (one event per session at start, one per
+     * `rate_limit_event` reported mid-stream). The data is per-account,
+     * not per-task — the daemon mirrors it onto a singleton row keyed by
+     * provider and broadcasts as a system event so the global header
+     * chip updates everywhere.
+     *
+     *   status                — "allowed" | "warn" | "exceeded" | …
+     *   rateLimitType         — "five_hour" | "weekly_limit" | …
+     *   resetsAt              — unix seconds when the window rolls over
+     *   overageStatus         — "allowed" | "rejected" | undefined
+     *   overageDisabledReason — why overage is off, when it is
+     *   isUsingOverage        — currently consuming overage credits
+     */
+    kind: z.literal("rate_limit"),
+    status: z.string(),
+    rateLimitType: z.string(),
+    resetsAt: z.number(),
+    overageStatus: z.string().optional(),
+    overageDisabledReason: z.string().optional(),
+    isUsingOverage: z.boolean().optional(),
+  }),
 ]);
 export type AgentEvent = z.infer<typeof AgentEvent>;
 
@@ -1625,6 +1649,50 @@ export type RenameTerminalWindowRequest = z.infer<
   typeof RenameTerminalWindowRequest
 >;
 
+/**
+ * Per-window snapshot of an account's plan rate-limit state. Today only
+ * the claude CLI exposes this (it emits a `rate_limit_event` JSON line
+ * on its public stream-json output). The window covers a fixed time
+ * range — for claude that's `five_hour` and `weekly_limit`. Codex's
+ * equivalent (`codex.rate_limits` with `used_percent`) only ships over
+ * an internal websocket today, not on `codex exec --json`, so it isn't
+ * wired up.
+ *
+ *   status        — "allowed" | "warn" | "exceeded" | …
+ *   resetsAt      — unix seconds when the window rolls over
+ *   overageStatus — "allowed" | "rejected" | undefined
+ *   overageReason — why overage is disabled, when it is
+ *   usingOverage  — currently consuming overage credits
+ *   updatedAt     — ms when this window was last refreshed
+ */
+export const ProviderRateLimitWindow = z.object({
+  status: z.string(),
+  resetsAt: z.number(),
+  overageStatus: z.string().optional(),
+  overageReason: z.string().optional(),
+  usingOverage: z.boolean().optional(),
+  updatedAt: z.number(),
+});
+export type ProviderRateLimitWindow = z.infer<typeof ProviderRateLimitWindow>;
+
+/**
+ * Singleton row per provider holding the latest known rate-limit
+ * snapshot. Mirrored into the daemon DB on every `rate_limit` runner
+ * event and broadcast over `/ws` as `provider_rate_limit_updated` so
+ * the web header chip refreshes without polling.
+ */
+export const ProviderRateLimit = z.object({
+  provider: AgentKind,
+  /**
+   * Map keyed by `rateLimitType` (e.g. `five_hour`, `weekly_limit`).
+   * Open-ended on purpose — claude can introduce new windows without
+   * a contract change.
+   */
+  windows: z.record(z.string(), ProviderRateLimitWindow),
+  updatedAt: z.number(),
+});
+export type ProviderRateLimit = z.infer<typeof ProviderRateLimit>;
+
 export const SendTerminalKeysRequest = z.object({
   text: z.string(),
   enter: z.boolean().optional(),
@@ -1768,6 +1836,14 @@ export const WsServerEvent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("github_refreshed"),
     projectId: z.string(),
+    ts: z.number(),
+  }),
+  // Fired when the runner reports a fresh `rate_limit_event` (claude
+  // only today). Carries the full snapshot so the web header chip
+  // patches its cache without a refetch.
+  z.object({
+    type: z.literal("provider_rate_limit_updated"),
+    rateLimit: ProviderRateLimit,
     ts: z.number(),
   }),
 ]);

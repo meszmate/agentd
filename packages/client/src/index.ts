@@ -24,6 +24,7 @@ import type {
   PairExchangeResponse,
   Project,
   ProjectBridgeSummary,
+  ProviderRateLimit,
   BridgeDeliveryStats,
   RenameTerminalSessionRequest,
   RenameTerminalWindowRequest,
@@ -324,6 +325,17 @@ export class AgentdClient {
     };
   }> {
     return this.req("/api/models");
+  }
+
+  // ── rate limits ──
+  /**
+   * Per-provider rate-limit snapshots — populated today by claude's
+   * `rate_limit_event` stream JSON. Initial fetch only; the realtime
+   * bus patches the cache off `provider_rate_limit_updated` after
+   * mount, no polling needed.
+   */
+  async listRateLimits(): Promise<{ rateLimits: ProviderRateLimit[] }> {
+    return this.req("/api/rate-limits");
   }
 
   // ── suggestions ──

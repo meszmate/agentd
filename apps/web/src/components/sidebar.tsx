@@ -22,6 +22,7 @@ import type { Project, Task } from "@agentd/contracts";
 import { cn, formatTs } from "@/lib/utils";
 import { Wordmark } from "@/components/wordmark";
 import { ServerCard } from "@/components/server-card";
+import { RateLimitChip } from "@/components/rate-limit-chip";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Kbd } from "@/components/ui/kbd";
 import { TaskGithubBadge } from "@/components/ui/task-github-badge";
@@ -113,8 +114,9 @@ export function Sidebar({
 
   return (
     <aside className="flex h-full w-60 flex-col border-r border-ink-900/10 bg-paper-50 dark:border-ink-50/10 dark:bg-ink-800">
-      <div className="flex h-12 items-center px-5 border-b border-ink-900/10 dark:border-ink-50/10 shrink-0">
+      <div className="flex h-12 items-center justify-between gap-2 px-5 border-b border-ink-900/10 dark:border-ink-50/10 shrink-0">
         <Wordmark />
+        <RateLimitChip />
       </div>
 
       <div className="px-3 pt-3 pb-2 shrink-0">

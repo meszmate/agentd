@@ -414,8 +414,43 @@ export class ClaudeRunner implements AgentRunner {
       return;
     }
     if (type === "rate_limit_event") {
-      // Pure rate-limit telemetry from the CLI — no info the operator
-      // can act on. Suppress.
+      // Account-wide window snapshot — claude emits one per session at
+      // start and an extra one when status flips (allowed → warn →
+      // exceeded). Forward as a structured event so the daemon can
+      // mirror it onto the singleton row keyed by provider and the
+      // global header chip refreshes everywhere.
+      const info = parsed.rate_limit_info as
+        | {
+            status?: unknown;
+            rateLimitType?: unknown;
+            resetsAt?: unknown;
+            overageStatus?: unknown;
+            overageDisabledReason?: unknown;
+            isUsingOverage?: unknown;
+          }
+        | undefined;
+      if (
+        info &&
+        typeof info.status === "string" &&
+        typeof info.rateLimitType === "string" &&
+        typeof info.resetsAt === "number"
+      ) {
+        this.emit({
+          kind: "rate_limit",
+          status: info.status,
+          rateLimitType: info.rateLimitType,
+          resetsAt: info.resetsAt,
+          ...(typeof info.overageStatus === "string"
+            ? { overageStatus: info.overageStatus }
+            : {}),
+          ...(typeof info.overageDisabledReason === "string"
+            ? { overageDisabledReason: info.overageDisabledReason }
+            : {}),
+          ...(typeof info.isUsingOverage === "boolean"
+            ? { isUsingOverage: info.isUsingOverage }
+            : {}),
+        });
+      }
       return;
     }
     // Unknown event type — surface as raw for visibility.

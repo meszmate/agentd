@@ -11,6 +11,7 @@ import type { ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type {
   AgentEvent,
+  ProviderRateLimit,
   Task,
   TaskStatus,
   TerminalSession,
@@ -131,6 +132,12 @@ function describe(ev: AgentEvent): string | null {
       return `❓ ${ev.prompt.slice(0, 140)}`;
     case "answer":
       return `↳ ${ev.answer.slice(0, 140)}`;
+    case "rate_limit":
+      // Account-wide event — already drives the global header chip.
+      // Rendering it once per session in the activity ticker would
+      // crowd the per-task signal without telling the operator
+      // anything they don't already see.
+      return null;
     // Streaming partials are too noisy for the activity ticker — drop them.
     case "message_delta":
     case "message_end":
@@ -469,6 +476,25 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           msg.type === "discord_archive_thread"
         ) {
           // Web ignores these — they're meant for the discord subprocess.
+          return;
+        }
+        if (msg.type === "provider_rate_limit_updated") {
+          // Replace the entry for this provider in the cached list,
+          // appending if it's the first time we've seen it. Falling
+          // back to invalidate is fine but the patch is one ms and
+          // keeps the chip from flickering while react-query refetches.
+          qc.setQueryData<{ rateLimits: ProviderRateLimit[] }>(
+            qk.rateLimits(),
+            (prev) => {
+              const next = prev?.rateLimits ? [...prev.rateLimits] : [];
+              const i = next.findIndex(
+                (r) => r.provider === msg.rateLimit.provider,
+              );
+              if (i >= 0) next[i] = msg.rateLimit;
+              else next.push(msg.rateLimit);
+              return { rateLimits: next };
+            },
+          );
           return;
         }
         if (msg.type === "terminal_sessions") {

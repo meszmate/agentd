@@ -53,6 +53,7 @@ import {
   touchProject,
   pushBranch,
   removeWorktree,
+  setProviderRateLimitWindow,
   syncAgentPlan,
   setTaskCodexThreadId,
   setTaskPlanGroupId,
@@ -1304,6 +1305,36 @@ export class TaskManager {
         cacheWriteTokens: event.cacheWriteTokens,
         costUsd: event.costUsd,
       });
+    } else if (event.kind === "rate_limit") {
+      // Account-wide signal — mirror onto the singleton row keyed by
+      // provider and broadcast as a system event so the global header
+      // chip refreshes everywhere. Per-task fan-out is suppressed
+      // (return below) because operators don't want this row in every
+      // task's timeline.
+      const session = this.running.get(taskId);
+      const provider = session?.runner.kind ?? "claude";
+      const snapshot = setProviderRateLimitWindow(
+        this.db,
+        provider,
+        event.rateLimitType,
+        {
+          status: event.status,
+          resetsAt: event.resetsAt,
+          ...(event.overageStatus ? { overageStatus: event.overageStatus } : {}),
+          ...(event.overageDisabledReason
+            ? { overageReason: event.overageDisabledReason }
+            : {}),
+          ...(event.isUsingOverage != null
+            ? { usingOverage: event.isUsingOverage }
+            : {}),
+          updatedAt: Date.now(),
+        },
+      );
+      this.bus.publishSystem({
+        kind: "provider_rate_limit_updated",
+        rateLimit: snapshot,
+      });
+      return;
     } else if (event.kind === "exit") {
       const session = this.running.get(taskId);
       if (session) {
