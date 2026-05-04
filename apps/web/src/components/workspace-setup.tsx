@@ -299,8 +299,10 @@ function NewBranchInput({
     setGenerating(true);
     try {
       const r = await client.suggestBranchName(p);
-      // Preserve whatever prefix the user already chose (or default to feature/).
-      const prefix = detected ?? "feature";
+      // Preserve whatever prefix the user already chose; otherwise take
+      // the AI's inferred one (fix/refactor/chore/feature) so a "fix the
+      // X bug" prompt doesn't get jammed under feature/.
+      const prefix = detected ?? r.prefix;
       onChange(`${prefix}/${r.slug}`);
     } catch {
       // best-effort — leave field as-is

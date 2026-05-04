@@ -268,36 +268,48 @@ export function TaskTimeline({
             </div>
           ) : (
             <ol className="space-y-5">
-              {groups.map((g, gi) => {
-                // /compact divider sits at the BOUNDARY between
-                // pre-compact and post-compact messages. If every
-                // group is after the watermark (e.g. the operator
-                // compacted at the start of the conversation, or
-                // the daemon was restarted before any pre-compact
-                // chatter persisted) there's no meaningful boundary
-                // to mark, so we suppress it instead of pinning a
-                // permanent "context compacted · …ago" banner above
-                // an otherwise-normal timeline.
-                const firstTs = g.firstTs;
-                const prevGroup = groups[gi - 1];
-                const showDivider =
-                  compactedAt != null &&
-                  firstTs >= compactedAt &&
-                  !!prevGroup &&
-                  prevGroup.firstTs < compactedAt;
-                return (
-                  <Fragment key={g.key}>
-                    {showDivider && <CompactDivider ts={compactedAt!} />}
-                    {g.kind === "tools" ? (
-                      <li>
-                        <WorkCard pairs={g.pairs} />
-                      </li>
-                    ) : (
-                      <TimelineItem message={g.message} />
-                    )}
-                  </Fragment>
-                );
-              })}
+              {(() => {
+                // Index of the final tools group — only THAT card's
+                // last pair is allowed to spin, and only while the
+                // task is mid-turn. Older tool groups are settled.
+                // Computed inline against the memoized `groups`.
+                let lastToolsIdx = -1;
+                for (let i = groups.length - 1; i >= 0; i--) {
+                  if (groups[i]!.kind === "tools") {
+                    lastToolsIdx = i;
+                    break;
+                  }
+                }
+                return groups.map((g, gi) => {
+                  // /compact divider sits at the BOUNDARY between
+                  // pre-compact and post-compact messages. If every
+                  // group is after the watermark (no real boundary
+                  // exists), suppress the divider instead of pinning
+                  // a permanent "context compacted · …ago" banner.
+                  const firstTs = g.firstTs;
+                  const prevGroup = groups[gi - 1];
+                  const showDivider =
+                    compactedAt != null &&
+                    firstTs >= compactedAt &&
+                    !!prevGroup &&
+                    prevGroup.firstTs < compactedAt;
+                  return (
+                    <Fragment key={g.key}>
+                      {showDivider && <CompactDivider ts={compactedAt!} />}
+                      {g.kind === "tools" ? (
+                        <li>
+                          <WorkCard
+                            pairs={g.pairs}
+                            liveTrailing={disabled && gi === lastToolsIdx}
+                          />
+                        </li>
+                      ) : (
+                        <TimelineItem message={g.message} />
+                      )}
+                    </Fragment>
+                  );
+                });
+              })()}
               {/* In-flight streaming bubbles — same prefix style as
                   the persisted agent rows, with a blinking λ. */}
               {streamEntries.map(([streamId, text]) => (

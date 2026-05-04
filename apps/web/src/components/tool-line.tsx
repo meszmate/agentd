@@ -529,9 +529,11 @@ export function ToolRow({
  * Returns objects shaped for direct `<ToolLine>` use:
  *   `{ name, input, output, ok, running }`
  *
- * Pass `running=true` for the final pair when the agent is still
- * working so its row spins. Stable across `IdeaChatEvent` and
- * `IdeationEvent` since both have the same kind discriminators.
+ * `running` is always false here — pairing has no view of task
+ * status, so a trailing unmatched tool_use could just as easily
+ * mean "the agent stopped" as "still working." The caller passes
+ * `liveTrailing` to `<WorkCard>` when it knows the agent is still
+ * streaming, and that flag drives the spinner on the last row.
  */
 export function pairToolEvents(
   events: ReadonlyArray<{
@@ -565,8 +567,7 @@ export function pairToolEvents(
       input: ev.input,
       output: matched?.preview ?? null,
       ok: matched?.ok !== false,
-      // The most recent tool_use without a paired result is "running".
-      running: !matched && i === events.length - 1,
+      running: false,
     });
   }
   return out;

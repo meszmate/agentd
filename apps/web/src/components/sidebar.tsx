@@ -434,8 +434,13 @@ interface ProjectGroup {
   id: string;
   /** null for untracked — synthesizes a "Untracked" group. */
   project: Project | null;
-  active: Task[];
-  recent: Task[];
+  /** Merged list — sortOrder (drag) wins, then `updatedAt` desc.
+   *  Done/failed tasks live in the same list as running ones so a
+   *  finishing task doesn't leap into a separate section below. */
+  tasks: Task[];
+  /** Count of tasks currently mid-flight — drives the live dot
+   *  + the per-project "N live" indicator. */
+  liveCount: number;
   total: number;
 }
 
@@ -498,25 +503,21 @@ function ProjectsTreeSection() {
     }
 
     const buildGroup = (id: string, p: Project | null, list: Task[]): ProjectGroup => {
-      // Explicit sortOrder (set by drag-drop) wins for the active
-      // tasks — operators want their reordered list to stay put.
-      // Tasks without sortOrder fall back to recency. Recent (closed
-      // / done in the past) stays time-sorted.
-      const active = list
-        .filter(isActive)
-        .sort((a, b) => {
-          const ao = a.sortOrder;
-          const bo = b.sortOrder;
-          if (ao != null && bo != null) return ao - bo;
-          if (ao != null) return -1;
-          if (bo != null) return 1;
-          return b.updatedAt - a.updatedAt;
-        });
-      const recent = list
-        .filter((t) => !isActive(t))
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-        .slice(0, 5);
-      return { id, project: p, active, recent, total: list.length };
+      // One unified list. Drag-set `sortOrder` pins a task to a
+      // chosen slot; everything else falls back to `updatedAt` desc
+      // so the most-recently-touched task stays on top regardless of
+      // status. Done tasks no longer migrate to a separate section
+      // when they finish.
+      const tasks = [...list].sort((a, b) => {
+        const ao = a.sortOrder;
+        const bo = b.sortOrder;
+        if (ao != null && bo != null) return ao - bo;
+        if (ao != null) return -1;
+        if (bo != null) return 1;
+        return b.updatedAt - a.updatedAt;
+      });
+      const liveCount = list.reduce((n, t) => (isActive(t) ? n + 1 : n), 0);
+      return { id, project: p, tasks, liveCount, total: list.length };
     };
 
     const out: ProjectGroup[] = [];
@@ -534,15 +535,15 @@ function ProjectsTreeSection() {
     }
     // Sort: groups with active tasks first, then by total task count.
     out.sort((a, b) => {
-      if ((a.active.length > 0) !== (b.active.length > 0)) {
-        return a.active.length > 0 ? -1 : 1;
+      if ((a.liveCount > 0) !== (b.liveCount > 0)) {
+        return a.liveCount > 0 ? -1 : 1;
       }
       return b.total - a.total;
     });
     return out;
   }, [tasks, projects]);
 
-  const totalActive = groups.reduce((s, g) => s + g.active.length, 0);
+  const totalActive = groups.reduce((s, g) => s + g.liveCount, 0);
 
   return (
     <div>
@@ -567,7 +568,7 @@ function ProjectsTreeSection() {
           </div>
         ) : (
           groups.map((g) => {
-            const open = openMap[g.id] ?? g.active.length > 0;
+            const open = openMap[g.id] ?? g.liveCount > 0;
             return (
               <ProjectGroupRow
                 key={g.id}
@@ -612,18 +613,18 @@ function ProjectGroupRow({
   unread: number;
   onToggle: () => void;
 }) {
-  const { project, active, recent } = group;
+  const { project, tasks } = group;
   const id = project?.id ?? group.id;
   const color = project ? colorForProject(project.id, project.color) : "#71717A";
   const name = project?.name ?? "Untracked";
   const total = group.total;
-  const liveTasks = active.length;
+  const liveTasks = group.liveCount;
   // Brainstorm / plan-it events flash the same ember dot used for
   // live tasks — single visual cue covers both kinds of activity.
   const brainstormHot = useProjectPulse(project?.id);
   // Always populate so the collapse animation has content to shrink.
   // The wrapper grid track + opacity drives visibility.
-  const visible = active.length + recent.length;
+  const visible = tasks.length;
 
   // One integrated row: clicking the chevron area toggles, clicking
   // the rest navigates to the project (or just toggles for untracked).
@@ -757,23 +758,18 @@ function ProjectGroupRow({
         aria-hidden={!open}
       >
         <div className="min-h-0 overflow-hidden">
-          <SidebarTaskList active={active} recent={recent} />
+          <SidebarTaskList tasks={tasks} />
         </div>
       </div>
     </div>
   );
 }
 
-function SidebarTaskList({
-  active,
-  recent,
-}: {
-  active: Task[];
-  recent: Task[];
-}) {
-  // FLIP-animate row reorder (auto-animate) PLUS @dnd-kit for the
-  // active section so the operator can drag-prioritize tasks within
-  // a project. Recent (closed/done) rows stay time-sorted, no drag.
+function SidebarTaskList({ tasks }: { tasks: Task[] }) {
+  // FLIP-animate row reorder (auto-animate) + @dnd-kit so the
+  // operator can drag any task — running or done — to a new
+  // slot. One unified list, sorted by drag-set sortOrder then
+  // updatedAt.
   const [ref] = useAutoAnimate<HTMLUListElement>({
     duration: 380,
     easing: "cubic-bezier(0.16, 1, 0.3, 1)",
@@ -785,19 +781,19 @@ function SidebarTaskList({
   );
   const reorder = useReorderTasks();
   const [orderOverride, setOrderOverride] = useState<string[] | null>(null);
-  // Live ordering is the override (if a drag just happened) else the
-  // server-supplied order; rebuild from `active` whenever the server
-  // confirms.
-  const liveActive = orderOverride
+  // Live ordering is the override (if a drag just happened) else
+  // the server-supplied order; rebuild from `tasks` whenever the
+  // server confirms.
+  const liveTasks = orderOverride
     ? orderOverride
-        .map((id) => active.find((t) => t.id === id))
+        .map((id) => tasks.find((t) => t.id === id))
         .filter((t): t is Task => !!t)
-    : active;
+    : tasks;
 
   const onDragEnd = (e: DragEndEvent) => {
     const { active: dragged, over } = e;
     if (!over || dragged.id === over.id) return;
-    const ids = liveActive.map((t) => t.id);
+    const ids = liveTasks.map((t) => t.id);
     const fromIdx = ids.indexOf(String(dragged.id));
     const toIdx = ids.indexOf(String(over.id));
     if (fromIdx < 0 || toIdx < 0) return;
@@ -811,12 +807,11 @@ function SidebarTaskList({
   // Group consecutive sidebar rows that share a `planGroupId` so the
   // operator visually sees plan-slice siblings as one cluster (shared
   // worktree / branch). Tasks without a group render solo. Drag-
-  // ordering still works inside the active list — when an operator
-  // drags a slice, the sibling cluster moves together because they
-  // sit adjacent in the list. Across-group drag just reorders the
-  // group's anchor position.
-  const groupedActive = clusterByPlanGroup(liveActive);
-  const groupedRecent = clusterByPlanGroup(recent);
+  // ordering still works because cluster siblings sit adjacent in
+  // the input list — moving the cluster's anchor moves the whole
+  // group together. Main folded active + recent into a single
+  // `tasks` list, so we cluster that one list.
+  const grouped = clusterByPlanGroup(liveTasks);
 
   return (
     <ul
@@ -829,10 +824,10 @@ function SidebarTaskList({
         onDragEnd={onDragEnd}
       >
         <SortableContext
-          items={liveActive.map((t) => t.id)}
+          items={liveTasks.map((t) => t.id)}
           strategy={verticalListSortingStrategy}
         >
-          {groupedActive.map((cluster) =>
+          {grouped.map((cluster) =>
             cluster.tasks.length > 1 ? (
               <SliceCluster
                 key={cluster.key}
@@ -855,27 +850,6 @@ function SidebarTaskList({
           )}
         </SortableContext>
       </DndContext>
-      {groupedRecent.map((cluster) =>
-        cluster.tasks.length > 1 ? (
-          <SliceCluster
-            key={cluster.key}
-            tasks={cluster.tasks}
-            rowFor={(t, i) => (
-              <SidebarTaskRow
-                key={t.id}
-                task={t}
-                sliceIndex={i + 1}
-                sliceTotal={cluster.tasks.length}
-              />
-            )}
-          />
-        ) : (
-          <SidebarTaskRow
-            key={cluster.tasks[0]!.id}
-            task={cluster.tasks[0]!}
-          />
-        ),
-      )}
     </ul>
   );
 }

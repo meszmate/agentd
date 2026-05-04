@@ -18,6 +18,7 @@ import {
   appendMessage,
   autoCommit,
   createTask,
+  deleteTask,
   detectDefaultBranch,
   EventBus,
   getTask,
@@ -116,6 +117,15 @@ export class TaskManager {
    * joined with blank lines so they read like one continuous note.
    */
   private inputQueue = new Map<string, string[]>();
+  /**
+   * Tasks whose agent signaled clean completion via `agentd-progress
+   * --done`. The runner closes stdin in response, but claude's CLI may
+   * still exit with a non-zero code (the EOF lands mid-turn before the
+   * final result settles). Treat any "failed" status emitted after a
+   * done-signal as "done" so successful work doesn't show up red.
+   * Cleared on exit so a future steer starts fresh.
+   */
+  private completedSignaled = new Set<string>();
 
   constructor(
     private readonly db: Db,
@@ -230,6 +240,10 @@ export class TaskManager {
     // → completion hooks fire (commit, push, PR). Without this the
     // runner would idle forever waiting for the next stdin line.
     if (done) {
+      // Remember that this run completed cleanly so the runner's exit
+      // doesn't get classified as "failed" if the CLI returns a
+      // non-zero code on stdin EOF.
+      this.completedSignaled.add(taskId);
       const session = this.running.get(taskId);
       if (session?.runner.supportsLiveInput && session.runner.running) {
         // Fire-and-forget — `stop` closes stdin then waits for exit.
@@ -351,12 +365,13 @@ export class TaskManager {
       worktreePath = params.sharedWorktreePath;
       branch = params.sharedBranch;
     } else {
-      // Auto-name the branch when the caller didn't provide one. We try the
-      // AI helper first because the prompt usually has a clear intent ("fix
-      // X", "add Y") that maps to a much tighter slug than the title.
-      // Falls back to a deterministic slug if Claude isn't available — and
-      // we never include the task id, so names look like `feature/auth-rate-limit`
-      // instead of the old `feature/<long-title>-7a5a4a`.
+      // Auto-name the branch when the caller didn't provide one. The
+      // AI helper picks both the conventional prefix (feature/fix/
+      // refactor/chore) and a tight slug, so a "fix the worktree
+      // delete bug" prompt becomes `fix/worktree-delete` rather than
+      // getting jammed under `feature/`. Falls back to a heuristic
+      // prefix + deterministic slug if Claude isn't available — and
+      // we never include the task id, so names stay short.
       if (branchMode === "existing") {
         branch = params.branchName?.trim() || baseBranch;
       } else if (params.branchName?.trim()) {
@@ -366,7 +381,7 @@ export class TaskManager {
         const ai = await generateBranchName(params.prompt, {
           helper: cfg.aiHelpers,
         });
-        branch = `feature/${ai.slug}`;
+        branch = `${ai.prefix}/${ai.slug}`;
       }
       const result = await createWorktree({
         repoPath: params.repoPath,
@@ -854,6 +869,7 @@ export class TaskManager {
         // best-effort
       }
     }
+    deleteTask(this.db, taskId);
   }
 
   private async spawnRunner(
@@ -865,6 +881,9 @@ export class TaskManager {
       task.agent === "claude" ? new ClaudeRunner() : new CodexRunner();
     const unsubscribe = runner.on((event) => this.handleEvent(task.id, event));
     this.running.set(task.id, { runner, unsubscribe });
+    // A new run starts fresh — drop any stale done-signal from a prior
+    // spawn so this run's exit is classified on its own merits.
+    this.completedSignaled.delete(task.id);
     updateTaskStatus(this.db, task.id, "running");
     this.bus.publish({
       taskId: task.id,
@@ -1104,14 +1123,23 @@ export class TaskManager {
         : `[result ${event.tool} ${okFlag}]`;
       appendMessage(this.db, taskId, "tool", `${header} ${trimmed}`);
     } else if (event.kind === "status") {
-      updateTaskStatus(this.db, taskId, event.status);
+      // When the agent signaled clean completion via `agentd-progress
+      // --done`, treat any subsequent "failed" emit as "done" — the
+      // runner closes stdin in response and claude's CLI may exit
+      // non-zero from the mid-turn EOF even though the work succeeded.
+      let status = event.status;
+      if (status === "failed" && this.completedSignaled.has(taskId)) {
+        status = "done";
+        event = { kind: "status", status };
+      }
+      updateTaskStatus(this.db, taskId, status);
       // Auto-fire any queued items at the turn boundary for
       // long-lived runners (claude). `idle` means the agent
       // finished its turn and is waiting for the next stdin
       // message — perfect moment to flush the queue. The per-row
       // Steer button is the manual mid-turn force; if the operator
       // just lets the queue sit, items drain themselves here.
-      if (event.status === "idle") {
+      if (status === "idle") {
         const sess = this.running.get(taskId);
         if (sess?.runner.supportsLiveInput) {
           void this.autoDrainQueue(taskId);
@@ -1154,6 +1182,8 @@ export class TaskManager {
         session.unsubscribe();
         this.running.delete(taskId);
       }
+      // Reset the done-signal flag so a future steer starts fresh.
+      this.completedSignaled.delete(taskId);
       // Fire-and-forget; commit + push + PR all run after the agent exits.
       void this.runCompletionHooks(taskId);
     } else if (event.kind === "raw" && event.stream === "stdout") {
@@ -1600,7 +1630,7 @@ export class TaskManager {
         .slice(0, 24);
       memberLabels.push(label);
       const taskId = newId("task");
-      const branch = `feature/${baseSlug}-${safeLabel}-${taskId.slice(-4)}`;
+      const branch = `${ai.prefix}/${baseSlug}-${safeLabel}-${taskId.slice(-4)}`;
       const { worktreePath } = await createWorktree({
         repoPath: params.repoPath,
         worktreeRoot: this.paths.worktrees,

@@ -2777,11 +2777,38 @@ export async function runJudge(
 
 /* ── Branch-name generator ─────────────────────────────────────────── */
 
+/**
+ * Conventional branch prefixes the auto-namer is allowed to choose from.
+ * Kept tight on purpose — the prefix is a coarse hint, not a taxonomy.
+ * The web prefix-chip UI mirrors this list (plus a manual `wip` chip
+ * the AI never picks for itself).
+ */
+export const BRANCH_PREFIXES = ["feature", "fix", "refactor", "chore"] as const;
+export type BranchPrefix = (typeof BRANCH_PREFIXES)[number];
+
 export interface BranchNameResult {
+  /** Conventional prefix inferred from the prompt (feature/fix/…). */
+  prefix: BranchPrefix;
   /** Generated kebab-case slug, no prefix (e.g. "worktree-option"). */
   slug: string;
   source: "claude" | "fallback";
   error?: string;
+}
+
+/**
+ * Cheap heuristic prefix: "fix the X bug" → fix, "refactor Y" → refactor,
+ * "chore: bump deps" → chore, anything else → feature. Used both as the
+ * fallback when the AI helper is unavailable AND as a sanity-check
+ * against an AI response that returns an off-list prefix.
+ */
+function heuristicPrefix(prompt: string): BranchPrefix {
+  const p = prompt.toLowerCase();
+  if (/\b(fix|bug|broken|crash|regression|hotfix|patch)\b/.test(p)) return "fix";
+  if (/\brefactor(?:ing)?\b|\brewrite\b|\brestructure\b|\bcleanup\b/.test(p))
+    return "refactor";
+  if (/\bchore\b|\bbump\b|\bdeps?\b|\bdependenc(?:y|ies)\b|\bupgrade\b/.test(p))
+    return "chore";
+  return "feature";
 }
 
 const STOPWORDS = new Set([
@@ -2887,22 +2914,31 @@ export async function* streamProjectInstructionsDraft(
 }
 
 /**
- * Ask Claude for a tight feature-branch slug. Returns just the slug — no
- * `feature/` prefix, no leading/trailing punctuation. Falls back to a
- * deterministic slug when Claude is unavailable or empty.
+ * Ask Claude for a tight branch name in `<prefix>/<slug>` form. The prefix
+ * is constrained to the conventional set ({@link BRANCH_PREFIXES}) so the
+ * caller can trust it without further validation. Falls back to a
+ * heuristic-prefixed deterministic slug when Claude is unavailable or
+ * returns garbage.
  */
 export async function generateBranchName(
   prompt: string,
   opts: { helper?: AiHelperOptions } = {},
 ): Promise<BranchNameResult> {
   const trimmed = prompt.trim();
-  if (!trimmed) return { slug: "task", source: "fallback" };
+  if (!trimmed) return { prefix: "feature", slug: "task", source: "fallback" };
   const ask =
-    `Suggest a short kebab-case feature branch name for this task. ` +
-    `Output ONLY the slug (lowercase letters, digits, hyphens). 2-5 words, ` +
-    `under 35 characters total. No prefix like "feature/". No quotes, no extra text.\n\n` +
+    `Suggest a conventional git branch name for this task in the form <prefix>/<slug>.\n\n` +
+    `Rules:\n` +
+    `  - prefix MUST be exactly one of: feature, fix, refactor, chore.\n` +
+    `      • fix      — bug fixes, regressions, broken behavior\n` +
+    `      • refactor — restructuring without behavior change\n` +
+    `      • chore    — deps bumps, tooling, housekeeping\n` +
+    `      • feature  — anything else (new functionality, enhancements)\n` +
+    `  - slug is kebab-case, 2-5 words, under 35 chars, lowercase letters/digits/hyphens only.\n` +
+    `  - Output ONLY <prefix>/<slug>. No quotes, no backticks, no extra text.\n\n` +
     `Task: ${trimmed.slice(0, 800)}`;
   const argv = buildAiHelperArgv(opts.helper ?? {}, ask);
+  const fallbackPrefix = heuristicPrefix(trimmed);
   try {
     const proc = Bun.spawn({
       cmd: argv,
@@ -2914,22 +2950,42 @@ export async function generateBranchName(
     });
     const out = await new Response(proc.stdout).text();
     await proc.exited;
-    const cleaned = out
+    const raw = out
       .trim()
       .replace(/^```[a-z]*\n?|```$/g, "")
       .replace(/^["'`]|["'`]$/g, "")
       .trim()
-      .toLowerCase()
-      .replace(/^feature\//, "")
-      .replace(/^[a-z]+\//, "")
+      .toLowerCase();
+    // Split off the prefix if the model gave us one. We accept any
+    // single-segment prefix, then validate it against the allowlist —
+    // anything off-list (or no prefix at all) defers to the heuristic.
+    const slashIdx = raw.indexOf("/");
+    let aiPrefix: string | null = null;
+    let slugPart = raw;
+    if (slashIdx > 0) {
+      aiPrefix = raw.slice(0, slashIdx);
+      slugPart = raw.slice(slashIdx + 1);
+    }
+    const prefix: BranchPrefix = (BRANCH_PREFIXES as readonly string[]).includes(
+      aiPrefix ?? "",
+    )
+      ? (aiPrefix as BranchPrefix)
+      : fallbackPrefix;
+    const cleaned = slugPart
       .replace(/[^a-z0-9-]+/g, "-")
       .replace(/-+/g, "-")
       .replace(/^-+|-+$/g, "")
       .slice(0, 40);
-    if (!cleaned) return { slug: deterministicSlug(trimmed), source: "fallback" };
-    return { slug: cleaned, source: "claude" };
+    if (!cleaned)
+      return {
+        prefix: fallbackPrefix,
+        slug: deterministicSlug(trimmed),
+        source: "fallback",
+      };
+    return { prefix, slug: cleaned, source: "claude" };
   } catch (e) {
     return {
+      prefix: fallbackPrefix,
       slug: deterministicSlug(trimmed),
       source: "fallback",
       error: (e as Error).message,

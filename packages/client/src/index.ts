@@ -1558,10 +1558,15 @@ export class AgentdClient {
     });
   }
 
-  /** Suggest a kebab-case branch slug from the task prompt. */
+  /** Suggest a conventional `<prefix>/<slug>` branch name from the task prompt. */
   async suggestBranchName(
     prompt: string,
-  ): Promise<{ slug: string; source: string; error?: string }> {
+  ): Promise<{
+    prefix: "feature" | "fix" | "refactor" | "chore";
+    slug: string;
+    source: string;
+    error?: string;
+  }> {
     return this.req("/api/branch-name", {
       method: "POST",
       body: JSON.stringify({ prompt }),
