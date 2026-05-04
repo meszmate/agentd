@@ -26,6 +26,7 @@ import type {
   PlanSlice,
   ThinkingLevel,
 } from "@agentd/contracts";
+import { stripPlanSlicesBlock } from "@agentd/contracts";
 import { PlanSlicesEditor } from "@/components/plan-slices-editor";
 import {
   Kicker,
@@ -164,7 +165,26 @@ export function IdeaWorkshop() {
   const threadRef = useRef<HTMLDivElement>(null);
   const planScrollRef = useRef<HTMLDivElement>(null);
 
-  const idea = ideaQ.data?.idea ?? null;
+  // Defensive client-side strip: if the daemon hasn't yet been
+  // restarted with the new core build (or somehow returns a plan
+  // with the raw fence still in it), normalise on the client so the
+  // UI never shows the json-slices block in the plan textarea and
+  // the spawn dialog gets seeded with the recovered slices.
+  const idea = useMemo(() => {
+    const raw = ideaQ.data?.idea ?? null;
+    if (!raw) return null;
+    const stripped = raw.planDraft
+      ? stripPlanSlicesBlock(raw.planDraft)
+      : { plan: "", slices: [] as PlanSlice[] };
+    const cleanedDraft = raw.planDraft ? stripped.plan || null : raw.planDraft;
+    const colSlices = raw.planSlices ?? [];
+    const merged = colSlices.length > 0 ? colSlices : stripped.slices;
+    return {
+      ...raw,
+      planDraft: cleanedDraft,
+      ...(merged.length > 0 ? { planSlices: merged } : {}),
+    };
+  }, [ideaQ.data?.idea]);
   const messages = ideaQ.data?.messages ?? [];
   const project = projectQ.data?.project ?? null;
 
