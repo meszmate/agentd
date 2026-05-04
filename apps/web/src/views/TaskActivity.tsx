@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import type { Message } from "@agentd/contracts";
 import { Activity } from "lucide-react";
-import { ToolRow } from "@/components/tool-line";
+import { ToolLine } from "@/components/tool-line";
 import { LiveToolCard } from "@/components/live-tool-card";
 
 /**
@@ -84,7 +84,7 @@ export function TaskActivity({
             );
           }
           return (
-            <ToolRow
+            <ToolLine
               key={e.key}
               content={`[call ${e.name}] ${JSON.stringify(e.input ?? {})}`}
               output={e.output}
