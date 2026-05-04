@@ -655,16 +655,18 @@ function TimelineItem({ message: m }: { message: Message }) {
   if (m.role === "system") {
     const meta = parseSystemMessage(m.content);
     if (meta) return <StructuredItem ts={m.ts} {...meta} />;
-    // Hide leftover raw codex stream-json events from older runs that
-    // captured `item.started` / `item.completed` lines as system
-    // messages before the codex runner stopped emitting them. These
-    // look like `{"type":"item.started",...}` and add no signal — the
-    // structured tool rows above already cover what the agent did.
+    // Hide leftover codex internal markers from older runs.
+    //  - `{"type":"item.started",…}` — raw stream-json envelopes the
+    //    runner used to forward when it didn't recognize an event.
+    //  - `[codex thread] <uuid>` — the carrier the runner emits with
+    //    the codex thread id so the daemon can save it for resume.
+    //    Internal plumbing; never useful in the chat.
     const trimmed = m.content.trim();
     if (
       /^\{"type":"(item|turn|thread|response)\.(started|completed|in_progress|done|created)"/.test(
         trimmed,
-      )
+      ) ||
+      /^\[codex thread\] [0-9a-f-]{36}$/i.test(trimmed)
     ) {
       return null;
     }

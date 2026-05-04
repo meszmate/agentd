@@ -309,7 +309,7 @@ export class CodexRunner implements AgentRunner {
       ) {
         this.emit({
           kind: "tool_call",
-          tool: "shell",
+          tool: "Bash",
           args: { command: item.command },
         });
       } else if (
@@ -353,7 +353,7 @@ export class CodexRunner implements AgentRunner {
             : `(no output${exit != null ? `, exit ${exit}` : ""})`);
         this.emit({
           kind: "tool_result",
-          tool: "shell",
+          tool: "Bash",
           ok,
           output: display,
         });

@@ -989,7 +989,10 @@ export class TaskManager {
       // CodexRunner emits a `[codex thread] <uuid>` marker the first
       // time it sees `thread.started`. Persist the id on the task so
       // every subsequent steer can call `codex exec resume <uuid>`
-      // and keep AGENTS.md/MCP/conversation context.
+      // and keep AGENTS.md/MCP/conversation context. Suppress the
+      // event after we consume it — it's an internal carrier and
+      // would otherwise render as a `[codex thread] …` system row in
+      // every connected client's timeline.
       const m = /^\[codex thread\] ([0-9a-f-]{36})$/i.exec(event.text.trim());
       if (m) {
         const tid = m[1]!;
@@ -997,6 +1000,7 @@ export class TaskManager {
         if (cur && cur.codexThreadId !== tid) {
           setTaskCodexThreadId(this.db, taskId, tid);
         }
+        return;
       }
     }
     this.bus.publish({ taskId, event, ts: Date.now() });
