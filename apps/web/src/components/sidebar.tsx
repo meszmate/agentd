@@ -837,14 +837,13 @@ function SidebarTaskList({
               <SliceCluster
                 key={cluster.key}
                 tasks={cluster.tasks}
-                rowFor={(t) => (
-                  <SortableSidebarTaskRow key={t.id} task={t} sliceIndex={
-                    cluster.tasks.findIndex((c) => c.id === t.id) + 1
-                  } sliceTotal={cluster.tasks.length} />
-                )}
+                rowFor={(t) => <SortableSidebarTaskRow key={t.id} task={t} />}
               />
             ) : (
-              <SortableSidebarTaskRow key={cluster.tasks[0]!.id} task={cluster.tasks[0]!} />
+              <SortableSidebarTaskRow
+                key={cluster.tasks[0]!.id}
+                task={cluster.tasks[0]!}
+              />
             ),
           )}
         </SortableContext>
@@ -854,14 +853,13 @@ function SidebarTaskList({
           <SliceCluster
             key={cluster.key}
             tasks={cluster.tasks}
-            rowFor={(t) => (
-              <SidebarTaskRow key={t.id} task={t} sliceIndex={
-                cluster.tasks.findIndex((c) => c.id === t.id) + 1
-              } sliceTotal={cluster.tasks.length} />
-            )}
+            rowFor={(t) => <SidebarTaskRow key={t.id} task={t} />}
           />
         ) : (
-          <SidebarTaskRow key={cluster.tasks[0]!.id} task={cluster.tasks[0]!} />
+          <SidebarTaskRow
+            key={cluster.tasks[0]!.id}
+            task={cluster.tasks[0]!}
+          />
         ),
       )}
     </ul>
@@ -913,11 +911,8 @@ function SliceCluster({
   rowFor: (t: Task) => React.ReactNode;
 }) {
   return (
-    <li className="relative -ml-2 pl-2 my-0.5 rounded-r border-l-2 border-ember-500/30 bg-ember-500/[0.025]">
-      <div className="absolute -top-1 left-1.5 inline-flex items-center h-3.5 px-1 rounded-full font-mono text-[8.5px] font-semibold tabular-nums uppercase tracking-[0.06em] bg-ember-500/15 text-ember-700 dark:text-ember-300 ring-1 ring-ember-500/25">
-        {tasks.length} slices
-      </div>
-      <ul className="py-0.5 space-y-0.5">
+    <li className="-ml-2 pl-2 rounded-r border-l-2 border-ember-500/30 bg-ember-500/[0.025]">
+      <ul className="space-y-0.5">
         {tasks.map((t) => (
           <li key={t.id}>{rowFor(t)}</li>
         ))}
@@ -926,15 +921,7 @@ function SliceCluster({
   );
 }
 
-function SortableSidebarTaskRow({
-  task,
-  sliceIndex,
-  sliceTotal,
-}: {
-  task: Task;
-  sliceIndex?: number;
-  sliceTotal?: number;
-}) {
+function SortableSidebarTaskRow({ task }: { task: Task }) {
   const {
     attributes,
     listeners,
@@ -955,8 +942,6 @@ function SortableSidebarTaskRow({
       dragStyle={style}
       dragHandleProps={{ ...attributes, ...listeners }}
       isDragging={isDragging}
-      sliceIndex={sliceIndex}
-      sliceTotal={sliceTotal}
     />
   );
 }
@@ -967,18 +952,12 @@ function SidebarTaskRow({
   dragStyle,
   dragHandleProps,
   isDragging,
-  sliceIndex,
-  sliceTotal,
 }: {
   task: Task;
   dragRef?: (el: HTMLElement | null) => void;
   dragStyle?: React.CSSProperties;
   dragHandleProps?: React.HTMLAttributes<HTMLButtonElement>;
   isDragging?: boolean;
-  /** Position within a plan-slice cluster (1-based). Undefined for solo tasks. */
-  sliceIndex?: number;
-  /** Total slice count in the cluster — paired with sliceIndex. */
-  sliceTotal?: number;
 }) {
   const { latestByTask } = useRealtime();
   const liveEvent = latestByTask[t.id];
@@ -1050,11 +1029,6 @@ function SidebarTaskRow({
         <span className={cn("h-1.5 w-1.5 rounded-full mt-1.5 shrink-0", dot)} />
         <span className="flex-1 min-w-0">
           <span className="block truncate text-ink-900 dark:text-ink-50">
-            {sliceIndex != null && sliceTotal != null && (
-              <span className="mr-1.5 inline-flex items-center h-3.5 px-1 rounded-full font-mono text-[8.5px] font-semibold tabular-nums text-ember-700 bg-ember-500/10 ring-1 ring-ember-500/20 dark:text-ember-300 align-middle">
-                {sliceIndex}/{sliceTotal}
-              </span>
-            )}
             {t.title}
           </span>
           {showLive && liveEvent && (
