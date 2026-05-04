@@ -433,6 +433,14 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           void qc.invalidateQueries({
             queryKey: ["github", "prs", msg.projectId],
           });
+          // Detail panels (single issue/PR) too — a PR action that
+          // posted a comment/review should refresh the open detail.
+          void qc.invalidateQueries({
+            queryKey: ["github", "issue", msg.projectId],
+          });
+          void qc.invalidateQueries({
+            queryKey: ["github", "pr", msg.projectId],
+          });
           // Project itself may have had `githubRepo` cached in this
           // tick — invalidate the project queries so the GitHub link
           // reflects the resolved owner/repo.

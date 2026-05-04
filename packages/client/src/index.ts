@@ -31,6 +31,7 @@ import type {
   Schedule,
   SendTerminalKeysRequest,
   GithubIssue,
+  GithubListQuery,
   GithubPr,
   GithubStatus,
   GithubSpawnRequest,
@@ -188,6 +189,29 @@ export interface DiscordPluginPatch {
   botToken?: string;
   allowedUserIds?: string[];
   defaultRepo?: string | null;
+}
+
+/**
+ * Encode `GithubListQuery` as a URL query string. Repeats `?label=`
+ * once per label so the daemon's `parseGithubListQuery` reconstructs
+ * the array correctly.
+ */
+function githubListQs(opts?: GithubListQuery): string {
+  if (!opts) return "";
+  const sp = new URLSearchParams();
+  if (opts.state) sp.set("state", opts.state);
+  if (opts.search?.trim()) sp.set("q", opts.search.trim());
+  if (opts.author?.trim()) sp.set("author", opts.author.trim());
+  if (opts.assignee?.trim()) sp.set("assignee", opts.assignee.trim());
+  if (opts.milestone?.trim()) sp.set("milestone", opts.milestone.trim());
+  if (opts.base?.trim()) sp.set("base", opts.base.trim());
+  if (opts.draft) sp.set("draft", "true");
+  if (typeof opts.limit === "number") sp.set("limit", String(opts.limit));
+  for (const l of opts.labels ?? []) {
+    if (l.trim()) sp.append("label", l.trim());
+  }
+  const s = sp.toString();
+  return s ? `?${s}` : "";
 }
 
 export class AgentdClient {
@@ -1938,25 +1962,61 @@ export class AgentdClient {
     );
   }
 
-  async listGithubIssues(idOrSlug: string): Promise<{
+  async listGithubIssues(
+    idOrSlug: string,
+    opts?: GithubListQuery,
+  ): Promise<{
     ok: boolean;
     repo: string | null;
     issues: GithubIssue[];
     error?: string;
   }> {
+    const qs = githubListQs(opts);
     return this.req(
-      `/api/projects/${encodeURIComponent(idOrSlug)}/github/issues`,
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/issues${qs}`,
     );
   }
 
-  async listGithubPrs(idOrSlug: string): Promise<{
+  async listGithubPrs(
+    idOrSlug: string,
+    opts?: GithubListQuery,
+  ): Promise<{
     ok: boolean;
     repo: string | null;
     prs: GithubPr[];
     error?: string;
   }> {
+    const qs = githubListQs(opts);
     return this.req(
-      `/api/projects/${encodeURIComponent(idOrSlug)}/github/prs`,
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/prs${qs}`,
+    );
+  }
+
+  async viewGithubIssue(
+    idOrSlug: string,
+    number: number,
+  ): Promise<{
+    ok: boolean;
+    repo?: string | null;
+    issue?: GithubIssue;
+    error?: string;
+  }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/issues/${number}`,
+    );
+  }
+
+  async viewGithubPr(
+    idOrSlug: string,
+    number: number,
+  ): Promise<{
+    ok: boolean;
+    repo?: string | null;
+    pr?: GithubPr;
+    error?: string;
+  }> {
+    return this.req(
+      `/api/projects/${encodeURIComponent(idOrSlug)}/github/prs/${number}`,
     );
   }
 

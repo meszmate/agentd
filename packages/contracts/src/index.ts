@@ -1304,6 +1304,49 @@ export const GithubUser = z.object({
 });
 export type GithubUser = z.infer<typeof GithubUser>;
 
+/**
+ * One comment on an issue or PR. Both `gh issue view --json comments`
+ * and `gh pr view --json comments` return the same shape, so a single
+ * type covers both.
+ */
+export const GithubComment = z.object({
+  author: GithubUser.nullable().optional(),
+  body: z.string().default(""),
+  createdAt: z.string(),
+  url: z.string().optional(),
+});
+export type GithubComment = z.infer<typeof GithubComment>;
+
+/**
+ * One PR review (approval, request-changes, or comment). The optional
+ * `comments[]` are inline review comments on specific lines — useful
+ * for the agent to see what blockers reviewers flagged.
+ */
+export const GithubReview = z.object({
+  author: GithubUser.nullable().optional(),
+  state: z.string().default(""),
+  body: z.string().default(""),
+  submittedAt: z.string().optional(),
+  comments: z
+    .array(
+      z.object({
+        body: z.string().default(""),
+        path: z.string().optional(),
+        author: GithubUser.nullable().optional(),
+      }),
+    )
+    .default([]),
+});
+export type GithubReview = z.infer<typeof GithubReview>;
+
+export const GithubCommitRef = z.object({
+  oid: z.string(),
+  messageHeadline: z.string().default(""),
+  authoredDate: z.string().optional(),
+  authors: z.array(z.object({ login: z.string().nullable().optional(), name: z.string().nullable().optional() })).default([]),
+});
+export type GithubCommitRef = z.infer<typeof GithubCommitRef>;
+
 export const GithubIssue = z.object({
   number: z.number().int(),
   title: z.string(),
@@ -1312,6 +1355,15 @@ export const GithubIssue = z.object({
   body: z.string().nullable().optional(),
   author: GithubUser.nullable().optional(),
   labels: z.array(GithubLabel).default([]),
+  assignees: z.array(GithubUser).default([]),
+  milestone: z
+    .object({ title: z.string().default("") })
+    .nullable()
+    .optional(),
+  commentCount: z.number().int().nullable().optional(),
+  /** Populated by the detail endpoint, omitted on list rows. */
+  comments: z.array(GithubComment).optional(),
+  closedAt: z.string().nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -1325,14 +1377,51 @@ export const GithubPr = z.object({
   body: z.string().nullable().optional(),
   author: GithubUser.nullable().optional(),
   labels: z.array(GithubLabel).default([]),
+  assignees: z.array(GithubUser).default([]),
+  milestone: z
+    .object({ title: z.string().default("") })
+    .nullable()
+    .optional(),
   isDraft: z.boolean().default(false),
   baseRefName: z.string(),
   headRefName: z.string(),
   mergeable: z.string().nullable().optional(),
+  mergeStateStatus: z.string().nullable().optional(),
+  reviewDecision: z.string().nullable().optional(),
+  additions: z.number().int().nullable().optional(),
+  deletions: z.number().int().nullable().optional(),
+  changedFiles: z.number().int().nullable().optional(),
+  commentCount: z.number().int().nullable().optional(),
+  /** Populated by the detail endpoint, omitted on list rows. */
+  comments: z.array(GithubComment).optional(),
+  reviews: z.array(GithubReview).optional(),
+  commits: z.array(GithubCommitRef).optional(),
+  closedAt: z.string().nullable().optional(),
+  mergedAt: z.string().nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 export type GithubPr = z.infer<typeof GithubPr>;
+
+/**
+ * Filter / search params for the list endpoints. Mirrors `gh issue list`
+ * and `gh pr list` flags one-to-one (state, labels, author, assignee,
+ * milestone, draft, base, search). `search` accepts the same query syntax
+ * github.com's search bar uses (`is:open author:foo label:bug in:title,body`,
+ * etc.) — the daemon hands it straight to `gh --search`.
+ */
+export const GithubListQuery = z.object({
+  state: z.enum(["open", "closed", "merged", "all"]).optional(),
+  search: z.string().optional(),
+  labels: z.array(z.string()).optional(),
+  author: z.string().optional(),
+  assignee: z.string().optional(),
+  milestone: z.string().optional(),
+  draft: z.boolean().optional(),
+  base: z.string().optional(),
+  limit: z.number().int().min(1).max(500).optional(),
+});
+export type GithubListQuery = z.infer<typeof GithubListQuery>;
 
 /**
  * Result of the `gh --version` + `gh auth status` preflight. The

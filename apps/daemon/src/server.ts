@@ -34,6 +34,7 @@ import {
   UpdateTodoRequest,
   GithubSpawnRequest,
   GithubPrActionRequest,
+  GithubListQuery,
   type Task,
   type WsServerEvent,
 } from "@agentd/contracts";
@@ -176,6 +177,8 @@ import {
   prComment as ghPrComment,
   prReview as ghPrReview,
   prMerge as ghPrMerge,
+  formatIssueConversation,
+  formatPrConversation,
   renderConfigTemplate,
 } from "@agentd/core";
 import type { PluginManager } from "./pluginManager.ts";
@@ -4188,6 +4191,50 @@ export function buildServer(opts: BuildServerOptions) {
     return c.json({ repo: slug });
   });
 
+  /**
+   * Parse the GitHub list/search query string. Mirrors github.com's
+   * own filter UI: `state, q, label (repeatable), author, assignee,
+   * milestone, draft, base, limit`. The `q` param accepts the full
+   * github.com search syntax (`is:open author:foo label:bug
+   * in:title,body`) and is handed to `gh --search` verbatim.
+   */
+  function parseGithubListQuery(c: import("hono").Context): GithubListQuery {
+    const q = c.req.queries();
+    const out: GithubListQuery = {};
+    const state = c.req.query("state");
+    if (state === "open" || state === "closed" || state === "merged" || state === "all") {
+      out.state = state;
+    }
+    const search = c.req.query("q") ?? c.req.query("search");
+    if (search?.trim()) out.search = search.trim();
+    const labels = q.label ?? q.labels ?? [];
+    if (labels.length > 0) {
+      // Allow `?label=a&label=b` (repeated) or `?labels=a,b` (csv).
+      const flat: string[] = [];
+      for (const l of labels) {
+        for (const part of l.split(",")) {
+          if (part.trim()) flat.push(part.trim());
+        }
+      }
+      if (flat.length > 0) out.labels = flat;
+    }
+    const author = c.req.query("author");
+    if (author?.trim()) out.author = author.trim();
+    const assignee = c.req.query("assignee");
+    if (assignee?.trim()) out.assignee = assignee.trim();
+    const milestone = c.req.query("milestone");
+    if (milestone?.trim()) out.milestone = milestone.trim();
+    const base = c.req.query("base");
+    if (base?.trim()) out.base = base.trim();
+    if (c.req.query("draft") === "true") out.draft = true;
+    const limit = c.req.query("limit");
+    if (limit) {
+      const n = Number(limit);
+      if (Number.isFinite(n) && n > 0) out.limit = Math.min(500, Math.floor(n));
+    }
+    return out;
+  }
+
   api.get("/projects/:idOrSlug/github/issues", async (c) => {
     const key = c.req.param("idOrSlug");
     const project =
@@ -4195,11 +4242,12 @@ export function buildServer(opts: BuildServerOptions) {
     if (!project) return c.json({ error: "not found" }, 404);
     const slug = await resolveProjectGithubRepo(project);
     if (!slug) return c.json({ ok: false, repo: null, issues: [], error: "no GitHub remote" });
-    const r = await ghListIssues(project.path);
+    const opts = parseGithubListQuery(c);
+    const r = await ghListIssues(project.path, opts);
     if (!r.ok) {
       return c.json({ ok: false, repo: slug, issues: [], error: r.error ?? "gh failed" });
     }
-    return c.json({ ok: true, repo: slug, issues: r.data ?? [] });
+    return c.json({ ok: true, repo: slug, issues: r.data ?? [], query: opts });
   });
 
   api.get("/projects/:idOrSlug/github/prs", async (c) => {
@@ -4209,11 +4257,50 @@ export function buildServer(opts: BuildServerOptions) {
     if (!project) return c.json({ error: "not found" }, 404);
     const slug = await resolveProjectGithubRepo(project);
     if (!slug) return c.json({ ok: false, repo: null, prs: [], error: "no GitHub remote" });
-    const r = await ghListPrs(project.path);
+    const opts = parseGithubListQuery(c);
+    const r = await ghListPrs(project.path, opts);
     if (!r.ok) {
       return c.json({ ok: false, repo: slug, prs: [], error: r.error ?? "gh failed" });
     }
-    return c.json({ ok: true, repo: slug, prs: r.data ?? [] });
+    return c.json({ ok: true, repo: slug, prs: r.data ?? [], query: opts });
+  });
+
+  /**
+   * Per-issue / per-PR detail. Returns the full conversation (body +
+   * comments + reviews + commits for PRs) so the web detail panel can
+   * render everything that happened on the item without leaving the
+   * tab. The spawn endpoint reuses the same fetch for prompt context.
+   */
+  api.get("/projects/:idOrSlug/github/issues/:number", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const num = Number(c.req.param("number"));
+    if (!Number.isFinite(num) || num < 1) return c.json({ error: "bad number" }, 400);
+    const slug = await resolveProjectGithubRepo(project);
+    if (!slug) return c.json({ ok: false, error: "no GitHub remote" }, 400);
+    const r = await ghViewIssue(project.path, num);
+    if (!r.ok || !r.data) {
+      return c.json({ ok: false, error: r.error ?? "gh issue view failed" }, 400);
+    }
+    return c.json({ ok: true, repo: slug, issue: r.data });
+  });
+
+  api.get("/projects/:idOrSlug/github/prs/:number", async (c) => {
+    const key = c.req.param("idOrSlug");
+    const project =
+      getProjectById(db, key) ?? getProjectBySlug(db, key);
+    if (!project) return c.json({ error: "not found" }, 404);
+    const num = Number(c.req.param("number"));
+    if (!Number.isFinite(num) || num < 1) return c.json({ error: "bad number" }, 400);
+    const slug = await resolveProjectGithubRepo(project);
+    if (!slug) return c.json({ ok: false, error: "no GitHub remote" }, 400);
+    const r = await ghViewPr(project.path, num);
+    if (!r.ok || !r.data) {
+      return c.json({ ok: false, error: r.error ?? "gh pr view failed" }, 400);
+    }
+    return c.json({ ok: true, repo: slug, pr: r.data });
   });
 
   /**
@@ -4255,11 +4342,16 @@ export function buildServer(opts: BuildServerOptions) {
     const cfg = loadConfig(paths.root);
     const presets = cfg.presets.github;
 
-    // Pull the source object so we can interpolate placeholders. For
-    // freeform we still need the title/url for context, but the
-    // operator's prompt wins.
+    // Pull the full conversation so the agent's prompt includes every
+    // comment + review (PR) the operator could have read on github.com
+    // before kicking off the task. We render it into a structured
+    // markdown blob and substitute it as `{body}` in the preset
+    // template (the existing template uses `{body}` for "context to
+    // hand the agent"; replacing the bare body with the conversation
+    // is a strict superset of what was there before).
     let prompt = parsed.data.prompt?.trim() ?? "";
     let title = parsed.data.title?.trim() ?? "";
+    let conversation = "";
     if (parsed.data.kind === "issue") {
       const r = await ghViewIssue(project.path, parsed.data.number);
       if (!r.ok || !r.data) {
@@ -4269,17 +4361,23 @@ export function buildServer(opts: BuildServerOptions) {
         );
       }
       const issue = r.data;
+      conversation = formatIssueConversation(issue);
       if (!title) title = `#${issue.number} ${issue.title}`.slice(0, 100);
       if (parsed.data.preset === "fix-issue" || (!prompt && parsed.data.preset !== "freeform")) {
         prompt = renderConfigTemplate(presets.fixIssue, {
           number: String(issue.number),
           title: issue.title,
-          body: issue.body ?? "(no description)",
+          body: conversation,
           url: issue.url,
           branch: "",
         });
+      } else if (parsed.data.preset === "freeform" && prompt) {
+        // Freeform with operator-supplied prompt: append the full
+        // conversation as context so the agent still sees what
+        // happened on the issue without the operator pasting it.
+        prompt = `${prompt}\n\n---\n\n${conversation}`;
       }
-      if (!prompt) prompt = `Issue #${issue.number}: ${issue.title}\n\n${issue.body ?? ""}`;
+      if (!prompt) prompt = conversation;
     } else {
       const r = await ghViewPr(project.path, parsed.data.number);
       if (!r.ok || !r.data) {
@@ -4289,17 +4387,20 @@ export function buildServer(opts: BuildServerOptions) {
         );
       }
       const pr = r.data;
+      conversation = formatPrConversation(pr);
       if (!title) title = `PR #${pr.number} ${pr.title}`.slice(0, 100);
       if (parsed.data.preset === "review-pr" || (!prompt && parsed.data.preset !== "freeform")) {
         prompt = renderConfigTemplate(presets.reviewPr, {
           number: String(pr.number),
           title: pr.title,
-          body: pr.body ?? "(no description)",
+          body: conversation,
           url: pr.url,
           branch: pr.headRefName,
         });
+      } else if (parsed.data.preset === "freeform" && prompt) {
+        prompt = `${prompt}\n\n---\n\n${conversation}`;
       }
-      if (!prompt) prompt = `PR #${pr.number}: ${pr.title}\n\n${pr.body ?? ""}`;
+      if (!prompt) prompt = conversation;
     }
 
     try {
