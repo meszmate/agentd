@@ -114,15 +114,13 @@ export function Sidebar({
 
   return (
     <aside className="flex h-full w-60 flex-col border-r border-ink-900/10 bg-paper-50 dark:border-ink-50/10 dark:bg-ink-800">
-      <div className="flex h-12 items-center px-5 border-b border-ink-900/10 dark:border-ink-50/10 shrink-0">
+      <div className="flex h-12 items-center justify-between gap-2 px-5 border-b border-ink-900/10 dark:border-ink-50/10 shrink-0">
         <Wordmark />
+        <RateLimitChip />
       </div>
 
-      <div className="flex items-center gap-2 px-3 pt-3 pb-2 shrink-0">
-        <div className="min-w-0 flex-1">
-          <ServerCard />
-        </div>
-        <RateLimitChip />
+      <div className="px-3 pt-3 pb-2 shrink-0">
+        <ServerCard />
       </div>
 
       <div className="px-3 pb-2 flex flex-col gap-1 shrink-0">
