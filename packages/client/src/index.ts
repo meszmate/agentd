@@ -1,4 +1,5 @@
 import type {
+  ActiveIdeaTurn,
   Council,
   CreateCouncilRequest,
   CreateTodoRequest,
@@ -637,6 +638,31 @@ export class AgentdClient {
     return this.req(`/api/saved-ideas/${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
+  }
+
+  /**
+   * Snapshot of an idea's currently-running turn (if any). Used on
+   * IdeaWorkshop mount to seed the live streaming state when the
+   * operator opens the page mid-stream — agent could be drafting a
+   * plan that was kicked off from another device or a prior session.
+   */
+  async getActiveIdeaTurn(
+    id: string,
+  ): Promise<{ turn: ActiveIdeaTurn | null }> {
+    return this.req(
+      `/api/saved-ideas/${encodeURIComponent(id)}/active-turn`,
+    );
+  }
+
+  /**
+   * Cancel an in-flight idea turn. Idempotent — returns `{ ok: true }`
+   * even when nothing's running for that idea.
+   */
+  async cancelIdeaTurn(id: string): Promise<{ ok: true }> {
+    return this.req(
+      `/api/saved-ideas/${encodeURIComponent(id)}/cancel-turn`,
+      { method: "POST" },
+    );
   }
 
   /**

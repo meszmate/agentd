@@ -36,6 +36,7 @@ export const qk = {
   savedIdeas: (projectIdOrSlug: string) =>
     ["saved-ideas", projectIdOrSlug] as const,
   idea: (id: string) => ["idea", id] as const,
+  ideaActiveTurn: (id: string) => ["idea-active-turn", id] as const,
   githubStatus: () => ["github", "status"] as const,
   githubIssues: (idOrSlug: string, opts?: GithubListQuery) =>
     ["github", "issues", idOrSlug, githubKeyOpts(opts)] as const,
@@ -701,6 +702,30 @@ export function useIdea(id: string | null | undefined) {
     queryFn: () => client.getIdea(id!),
     enabled: !!id,
     staleTime: 5_000,
+  });
+}
+
+/**
+ * Snapshot of any in-flight chat / plan / challenge turn for the idea.
+ * Resolves once on mount; the realtime layer patches the cache off
+ * `idea_turn` WS events (no polling). Lets the workshop seed its
+ * streaming state when the operator opens an idea mid-stream — e.g.
+ * plan drafting kicked off on phone, opened on laptop.
+ */
+export function useIdeaActiveTurn(id: string | null | undefined) {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.ideaActiveTurn(id ?? "_none"),
+    queryFn: () => client.getActiveIdeaTurn(id!),
+    enabled: !!id,
+    staleTime: 60_000,
+  });
+}
+
+export function useCancelIdeaTurn() {
+  const client = useClient();
+  return useMutation({
+    mutationFn: (id: string) => client.cancelIdeaTurn(id),
   });
 }
 

@@ -406,12 +406,13 @@ function BridgeRow({
         className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-paper-100 dark:hover:bg-ink-700 transition-colors"
       >
         <div
-          className="h-9 w-9 shrink-0 rounded-md grid place-items-center font-mono text-[12px] font-semibold text-white"
-          style={{
-            background: configured ? meta.brandHex : "transparent",
-            border: configured ? "none" : "1px dashed rgba(0,0,0,0.15)",
-            color: configured ? "white" : undefined,
-          }}
+          className={cn(
+            "h-9 w-9 shrink-0 rounded-md grid place-items-center font-mono text-[12px] font-semibold",
+            configured
+              ? "text-white"
+              : "border border-dashed border-ink-900/20 dark:border-ink-50/20",
+          )}
+          style={configured ? { background: meta.brandHex } : undefined}
         >
           {configured ? meta.initials : <span className="text-ink-400 dark:text-ink-500">{meta.initials}</span>}
         </div>

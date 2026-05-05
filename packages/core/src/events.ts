@@ -1,4 +1,5 @@
 import type {
+  ActiveIdeaTurn,
   AgentEvent,
   Project,
   ProviderRateLimit,
@@ -108,6 +109,14 @@ export type SystemEvent =
       ideaId: string;
       projectId: string | null;
     }
+  /**
+   * Live progress for an in-flight idea turn (chat / plan / challenge).
+   * Throttled by the daemon and broadcast over the WS bus so any open
+   * surface sees deltas without holding the original streaming HTTP
+   * request — the helper keeps running even after the operator
+   * navigates away. `turn: null` means the turn just ended.
+   */
+  | { kind: "idea_turn"; ideaId: string; turn: ActiveIdeaTurn | null }
   /**
    * GitHub state for a project shifted — operator triggered a refresh,
    * a PR action just completed, the status probe re-ran, etc. Web
