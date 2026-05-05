@@ -1083,6 +1083,12 @@ export class TaskManager {
     // diff. The daemon-side post-hook still runs as a safety net (it
     // becomes a no-op when there's nothing left to commit / push).
     const finishParts: string[] = [
+      // Scope-effort hint, first so it lands before the operational
+      // junk below. Without this, models on `xhigh` thinking will
+      // spend tens of thousands of tokens "investigating" before
+      // doing a one-line edit. The operator complaint that drove
+      // this: "I asked it to change a title and it took forever."
+      "Match effort to the task. For trivial / one-line changes (rename, typo, copy edit, single-file tweak), just make the change directly — do NOT pre-read CLAUDE.md / AGENTS.md / package.json, do NOT survey the codebase, do NOT run grep/find unless something is genuinely ambiguous. Read the target file, edit it, commit. Reserve deep exploration for tasks that actually require it (multi-file refactors, debugging, anything cross-cutting).",
       "You have three small Bash tools for talking to the operator. They are the ONLY way they see what you're doing when away from the laptop.",
       "  - `agentd-progress \"<text>\"`  — past-tense status. Run it after every meaningful step (file edit, successful build, useful tool result). One short line each.",
       "  - `agentd-share \"<text>\"`     — forward-looking thought, non-blocking. Use it BEFORE big moves (\"thinking we should X first then Y\") so the operator can nudge before you commit. Don't wait for an answer.",

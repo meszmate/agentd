@@ -212,7 +212,7 @@ export function renderRepoContext(opts: {
       key: "toolchain",
       title: "Toolchain pins",
       intro:
-        "This project pins specific language / tool versions. Use them, not the system defaults.",
+        "This project pins specific language / tool versions. When you actually need to invoke one, use these instead of the system defaults.",
       entries: toolchain,
     });
   }
@@ -221,7 +221,7 @@ export function renderRepoContext(opts: {
       key: "services",
       title: "Service stack & tasks",
       intro:
-        "Files describing how to bring services up and run common tasks. Prefer existing recipes over inventing your own.",
+        "If you need to run something, prefer the existing recipe over inventing your own.",
       entries: services,
     });
   }
@@ -234,7 +234,7 @@ export function renderRepoContext(opts: {
   lines.push("# Repo context");
   lines.push("");
   lines.push(
-    "These files exist in the worktree. They are short, high-signal, and cost nothing to Read on demand. Only commit to one when it's relevant to what's being asked.",
+    "These files exist in the worktree. They are short, high-signal, and cost nothing to Read on demand. Only open one when it's relevant to what's being asked — don't pre-read them for trivial tasks (rename, typo, one-line change).",
   );
   for (const s of sections) {
     lines.push("");
