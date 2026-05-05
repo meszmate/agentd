@@ -400,11 +400,26 @@ export class CodexRunner implements AgentRunner {
     if (t === "turn.started") return;
     if (t === "turn.completed" && parsed.usage) {
       const u = parsed.usage;
+      // Codex's `input_tokens` ALREADY INCLUDES `cached_input_tokens`
+      // (see codex-rs/protocol/src/protocol.rs::TokenUsage —
+      // `non_cached_input()` is `input_tokens - cached_input_tokens`).
+      // Claude's `input_tokens` EXCLUDES cache. The daemon's
+      // addTaskUsage sums input + cache_read to compute the live
+      // context size, which gives the right answer for claude but
+      // double-counts the cached portion for codex. That's why the
+      // operator saw "702.5k / 200.0k" on a task whose actual prompt
+      // was ~360k. Convert here to claude's shape: split codex's
+      // total `input_tokens` into non-cached + cached so the daemon's
+      // sum lands on the real prompt size, not 2x of it.
+      const total = typeof u.input_tokens === "number" ? u.input_tokens : 0;
+      const cached =
+        typeof u.cached_input_tokens === "number" ? u.cached_input_tokens : 0;
+      const nonCached = Math.max(0, total - cached);
       this.emit({
         kind: "usage",
-        inputTokens: u.input_tokens,
+        inputTokens: nonCached,
         outputTokens: u.output_tokens,
-        cacheReadTokens: u.cached_input_tokens,
+        cacheReadTokens: cached,
       });
       return;
     }

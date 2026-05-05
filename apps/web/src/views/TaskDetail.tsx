@@ -375,6 +375,13 @@ export function TaskDetail({ task }: { task: Task }) {
     if (inT == null && outT == null) return 0;
     return (inT ?? 0) + (outT ?? 0);
   }, [task.latestTurnInputTokens, task.latestTurnOutputTokens]);
+  // Per-agent context window. Claude family is 200k. Codex's GPT-5
+  // default is 400k. Without this, a codex task running at a healthy
+  // 250k looks like 125% on the meter and the operator (rightly)
+  // panics. We don't try to be precise per model — the registry isn't
+  // wired through to the web yet — but agent-level is enough to stop
+  // the meter from reading "100%+" on every codex run.
+  const contextWindow = task.agent === "codex" ? 400_000 : 200_000;
   const isTerminal =
     task.status === "done" ||
     task.status === "failed" ||
@@ -515,7 +522,7 @@ export function TaskDetail({ task }: { task: Task }) {
         {/* stats — `ContextUsage` shows current context size (decays
             after /compact); the `tok` chip next to it is the lifetime
             total for billing context. */}
-        <ContextUsage totalTokens={contextTokens} />
+        <ContextUsage totalTokens={contextTokens} window={contextWindow} />
         <span className="hidden md:flex items-center gap-3 font-mono text-[11px] tabular-nums text-ink-400 dark:text-ink-500">
           <span>{formatTokens(totalTokens)} tok</span>
           <span>{formatCost(task.totalCostUsd)}</span>
@@ -707,6 +714,7 @@ export function TaskDetail({ task }: { task: Task }) {
                 lastToolHint={lastToolHint}
                 streams={streams}
                 totalTokens={contextTokens}
+                contextWindow={contextWindow}
                 turn={turn}
                 plan={plan}
                 compactedAt={task.lastCompactedAt ?? null}
@@ -733,6 +741,7 @@ export function TaskDetail({ task }: { task: Task }) {
             lastToolHint={lastToolHint}
             streams={streams}
             totalTokens={contextTokens}
+            contextWindow={contextWindow}
             turn={turn}
             plan={plan}
           />
@@ -1399,8 +1408,13 @@ function LiveBadge({ live, terminal }: { live: boolean; terminal: boolean }) {
   );
 }
 
-function ContextUsage({ totalTokens }: { totalTokens: number }) {
-  const window = 200_000;
+function ContextUsage({
+  totalTokens,
+  window = 200_000,
+}: {
+  totalTokens: number;
+  window?: number;
+}) {
   const pct = Math.min(100, Math.round((totalTokens / window) * 100));
   const tone: "danger" | "warn" | "ok" =
     pct >= 80 ? "danger" : pct >= 60 ? "warn" : "ok";
