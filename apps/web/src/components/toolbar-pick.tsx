@@ -58,7 +58,7 @@ export type CommitMode = "none" | "commit" | "commit+push";
 
 export function commitModeLabel(autoCommit: boolean, autoPush: boolean): string {
   if (!autoCommit) return "off";
-  return autoPush ? "+push" : "only";
+  return autoPush ? "auto" : "only";
 }
 
 export function parseCommitMode(v: string): {

@@ -745,15 +745,6 @@ function ProjectComposer({
           ]}
           onSelect={setModel}
         />
-        <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
-          base
-        </span>
-        <input
-          value={base}
-          onChange={(e) => setBase(e.target.value)}
-          spellCheck={false}
-          className="font-mono text-[11px] bg-transparent border-0 outline-none focus:ring-0 text-ink-900 dark:text-ink-50 placeholder:text-ink-400 w-24"
-        />
         <ToolbarPick
           label={`commit:${commitModeLabel(autoCommit, autoPush)}`}
           options={[
@@ -766,6 +757,15 @@ function ProjectComposer({
             setAutoCommit(next.autoCommit);
             setAutoPush(next.autoPush);
           }}
+        />
+        <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+          base
+        </span>
+        <input
+          value={base}
+          onChange={(e) => setBase(e.target.value)}
+          spellCheck={false}
+          className="font-mono text-[11px] bg-transparent border-0 outline-none focus:ring-0 text-ink-900 dark:text-ink-50 placeholder:text-ink-400 w-24"
         />
         <Spacer />
         <Button

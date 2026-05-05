@@ -75,6 +75,12 @@ const MODE_OPTIONS = [
   { value: "phase", label: "phase · sequential slices" },
 ];
 
+const COMMIT_OPTIONS = [
+  { value: "none", label: "no commit" },
+  { value: "commit", label: "commit only" },
+  { value: "commit+push", label: "commit + push (default)" },
+];
+
 export function SpawnSheet({
   open,
   onClose,
@@ -315,6 +321,11 @@ export function SpawnSheet({
     }))),
   ];
 
+  const councilMembers = (modelsQ.data?.models[agent] ?? [])
+    .slice(0, 5)
+    .map((m) => m.label || m.id)
+    .join(" / ");
+
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogPrimitive.Portal>
@@ -327,7 +338,7 @@ export function SpawnSheet({
         <DialogPrimitive.Content
           className={cn(
             "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
-            "w-[96vw] max-w-[720px] max-h-[88vh]",
+            "w-[96vw] max-w-[1080px] h-[88vh] max-h-[760px]",
             "flex flex-col",
             "border border-ink-900/10 bg-paper-50 shadow-deep dark:border-ink-50/10 dark:bg-ink-800",
             "sm:rounded-xl overflow-hidden",
@@ -338,7 +349,7 @@ export function SpawnSheet({
             New task
           </DialogPrimitive.Title>
 
-          <header className="flex items-center gap-2 px-4 py-3 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] shrink-0">
+          <header className="flex items-center gap-2 px-5 py-3 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] shrink-0">
             <Rocket className="h-3.5 w-3.5 text-ember-500" />
             <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
               new task
@@ -357,176 +368,204 @@ export function SpawnSheet({
             </button>
           </header>
 
-          <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
-            <ProjectPicker
-              value={projectId}
-              onChange={(p) => {
-                setProjectId(p.id);
-                setRepoPath(p.path);
-              }}
-              autoFocus
-            />
-
-            <Input
-              placeholder="Title (optional, auto-derived from prompt)"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-            />
-
-            {!phaseMode && (
-              <Textarea
-                rows={10}
-                placeholder="Tell the agent what to do…"
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                onKeyDown={(e) => {
-                  if (
-                    (e.metaKey || e.ctrlKey) &&
-                    e.key === "Enter" &&
-                    !isPending
-                  ) {
-                    e.preventDefault();
-                    void submit();
-                  }
-                }}
-                className="resize-none font-mono text-[12.5px] leading-relaxed"
-              />
-            )}
-
-            {phaseMode && (
-              <PlanSlicesEditor
-                slices={slices}
-                onChange={setSlices}
-                modelSuggestions={{
-                  claude: (modelsQ.data?.models.claude ?? []).map((m) => m.id),
-                  codex: (modelsQ.data?.models.codex ?? []).map((m) => m.id),
-                }}
-                disabled={spawnMulti.isPending}
-              />
-            )}
-
-            {/* Compact toolbar — same dropdown style as the project composer. */}
-            <div className="flex flex-wrap items-center gap-2 rounded-md border border-ink-900/10 bg-paper-100/40 px-2 py-2 dark:border-ink-50/10 dark:bg-ink-900/30">
-              <ToolbarPick
-                label={`mode: ${spawnMode}`}
-                options={MODE_OPTIONS}
-                onSelect={(v) => setMode(v as SpawnMode)}
-              />
-              <ToolbarPick
-                label={`agent: ${agent}`}
-                options={[
-                  { value: "claude", label: "claude" },
-                  { value: "codex", label: "codex" },
-                ]}
-                onSelect={(v) => setAgent(v as "claude" | "codex")}
-              />
-              {!phaseMode && !councilMode && (
-                <>
-                  <ToolbarPick
-                    label={`perms: ${permissionLabel(permissionMode)}`}
-                    options={PERMISSION_OPTIONS}
-                    onSelect={(v) => setPermissionMode(v as PermissionMode)}
-                  />
-                  <ToolbarPick
-                    label={`think: ${thinkingLevel}`}
-                    options={THINKING_LEVELS_BY_AGENT[agent].map((v) => ({
-                      value: v,
-                      label: v,
-                    }))}
-                    onSelect={(v) => setThinkingLevel(v as ThinkingLevel)}
-                  />
-                  <ToolbarPick
-                    label={`model: ${model || "default"}`}
-                    options={modelOptions}
-                    onSelect={setModel}
-                  />
-                </>
-              )}
-              <ToolbarPick
-                label={`commit:${commitModeLabel(autoCommit, autoPush)}`}
-                options={[
-                  { value: "none", label: "no commit" },
-                  { value: "commit", label: "commit only" },
-                  {
-                    value: "commit+push",
-                    label: "commit + push (default)",
-                  },
-                ]}
-                onSelect={(v) => {
-                  const next = parseCommitMode(v);
-                  setAutoCommit(next.autoCommit);
-                  setAutoPush(next.autoPush);
-                }}
-              />
-              {councilMode && (
-                <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 ml-auto">
-                  members:{" "}
-                  {(modelsQ.data?.models[agent] ?? [])
-                    .slice(0, 5)
-                    .map((m) => m.label || m.id)
-                    .join(" / ") || "(none configured)"}
-                </span>
-              )}
-            </div>
-
-            <WorkspaceSetup
-              value={workspace}
-              onChange={(next) => {
-                setWorkspace(next);
-                setBaseBranch(next.baseBranch);
-              }}
-              projectIdOrSlug={projectId || null}
-              prompt={prompt}
-              agent={agent}
-              model={model}
-              thinkingLevel={thinkingLevel}
-              compact
-            />
-
-            {availableSkills.length > 0 && (
-              <div className="space-y-1.5">
-                <div className="flex items-center gap-1.5">
-                  <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
-                    skills · {activeSkills.length} active
-                  </span>
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {availableSkills.map((s) => {
-                    const id = `${s.scope}:${s.slug}`;
-                    const on = activeSkills.includes(id);
-                    return (
-                      <button
-                        key={id}
-                        type="button"
-                        onClick={() =>
-                          setActiveSkills((cur) =>
-                            cur.includes(id)
-                              ? cur.filter((x) => x !== id)
-                              : [...cur, id],
-                          )
-                        }
-                        title={s.description ?? s.name}
-                        className={cn(
-                          "inline-flex items-center gap-1.5 h-6 px-2 rounded-md border font-mono text-[11px] transition-colors",
-                          on
-                            ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
-                            : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
-                        )}
-                      >
-                        <BookText className="h-3 w-3" />
-                        <span>{s.displayName ?? s.name}</span>
-                        <span className="font-mono text-[9px] text-ink-400 dark:text-ink-500">
-                          {s.scope}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
+          <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_360px]">
+            {/* Left pane — composer. Project + title up top, prompt fills the rest. */}
+            <section className="flex flex-col min-h-0 border-r border-ink-900/[0.06] dark:border-ink-50/[0.06]">
+              <div className="px-6 pt-5 space-y-3 shrink-0">
+                <ProjectPicker
+                  value={projectId}
+                  onChange={(p) => {
+                    setProjectId(p.id);
+                    setRepoPath(p.path);
+                  }}
+                  autoFocus
+                />
+                <Input
+                  placeholder="Title (optional, auto-derived from prompt)"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  className="h-9"
+                />
               </div>
-            )}
+
+              <div className="flex-1 min-h-0 flex flex-col px-6 pt-3 pb-5">
+                {!phaseMode && (
+                  <Textarea
+                    placeholder="Tell the agent what to do…"
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (
+                        (e.metaKey || e.ctrlKey) &&
+                        e.key === "Enter" &&
+                        !isPending
+                      ) {
+                        e.preventDefault();
+                        void submit();
+                      }
+                    }}
+                    className="flex-1 min-h-0 resize-none font-mono text-[13px] leading-relaxed"
+                  />
+                )}
+                {phaseMode && (
+                  <div className="flex-1 min-h-0 overflow-y-auto">
+                    <PlanSlicesEditor
+                      slices={slices}
+                      onChange={setSlices}
+                      modelSuggestions={{
+                        claude: (modelsQ.data?.models.claude ?? []).map(
+                          (m) => m.id,
+                        ),
+                        codex: (modelsQ.data?.models.codex ?? []).map(
+                          (m) => m.id,
+                        ),
+                      }}
+                      disabled={spawnMulti.isPending}
+                    />
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* Right pane — settings. Vertical list of label/control rows. */}
+            <section className="flex flex-col min-h-0 bg-paper-100/40 dark:bg-ink-900/40">
+              <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-6">
+                <div className="space-y-3">
+                  <SettingRow label="mode">
+                    <ToolbarPick
+                      label={spawnMode}
+                      options={MODE_OPTIONS}
+                      align="end"
+                      onSelect={(v) => setMode(v as SpawnMode)}
+                    />
+                  </SettingRow>
+                  <SettingRow label="agent">
+                    <ToolbarPick
+                      label={agent}
+                      options={[
+                        { value: "claude", label: "claude" },
+                        { value: "codex", label: "codex" },
+                      ]}
+                      align="end"
+                      onSelect={(v) => setAgent(v as "claude" | "codex")}
+                    />
+                  </SettingRow>
+                  {councilMode && (
+                    <p className="font-mono text-[10px] text-ink-400 dark:text-ink-500 leading-relaxed">
+                      members: {councilMembers || "(no models configured)"}
+                    </p>
+                  )}
+                  {!phaseMode && !councilMode && (
+                    <>
+                      <SettingRow label="permissions">
+                        <ToolbarPick
+                          label={permissionLabel(permissionMode)}
+                          options={PERMISSION_OPTIONS}
+                          align="end"
+                          onSelect={(v) =>
+                            setPermissionMode(v as PermissionMode)
+                          }
+                        />
+                      </SettingRow>
+                      <SettingRow label="thinking">
+                        <ToolbarPick
+                          label={thinkingLevel}
+                          options={THINKING_LEVELS_BY_AGENT[agent].map(
+                            (v) => ({ value: v, label: v }),
+                          )}
+                          align="end"
+                          onSelect={(v) =>
+                            setThinkingLevel(v as ThinkingLevel)
+                          }
+                        />
+                      </SettingRow>
+                      <SettingRow label="model">
+                        <ToolbarPick
+                          label={model || "default"}
+                          options={modelOptions}
+                          align="end"
+                          onSelect={setModel}
+                        />
+                      </SettingRow>
+                    </>
+                  )}
+                  {!phaseMode && (
+                    <SettingRow label="commit">
+                      <ToolbarPick
+                        label={commitModeLabel(autoCommit, autoPush)}
+                        options={COMMIT_OPTIONS}
+                        align="end"
+                        onSelect={(v) => {
+                          const next = parseCommitMode(v);
+                          setAutoCommit(next.autoCommit);
+                          setAutoPush(next.autoPush);
+                        }}
+                      />
+                    </SettingRow>
+                  )}
+                </div>
+
+                <div className="space-y-2.5">
+                  <SectionHeading>workspace</SectionHeading>
+                  <WorkspaceSetup
+                    value={workspace}
+                    onChange={(next) => {
+                      setWorkspace(next);
+                      setBaseBranch(next.baseBranch);
+                    }}
+                    projectIdOrSlug={projectId || null}
+                    prompt={prompt}
+                    agent={agent}
+                    model={model}
+                    thinkingLevel={thinkingLevel}
+                    compact
+                  />
+                </div>
+
+                {availableSkills.length > 0 && (
+                  <div className="space-y-2.5">
+                    <SectionHeading>
+                      skills · {activeSkills.length} active
+                    </SectionHeading>
+                    <div className="flex flex-wrap gap-1.5">
+                      {availableSkills.map((s) => {
+                        const id = `${s.scope}:${s.slug}`;
+                        const on = activeSkills.includes(id);
+                        return (
+                          <button
+                            key={id}
+                            type="button"
+                            onClick={() =>
+                              setActiveSkills((cur) =>
+                                cur.includes(id)
+                                  ? cur.filter((x) => x !== id)
+                                  : [...cur, id],
+                              )
+                            }
+                            title={s.description ?? s.name}
+                            className={cn(
+                              "inline-flex items-center gap-1.5 h-6 px-2 rounded-md border font-mono text-[11px] transition-colors",
+                              on
+                                ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+                                : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
+                            )}
+                          >
+                            <BookText className="h-3 w-3" />
+                            <span>{s.displayName ?? s.name}</span>
+                            <span className="font-mono text-[9px] text-ink-400 dark:text-ink-500">
+                              {s.scope}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
           </div>
 
-          <footer className="flex items-center gap-1.5 px-4 py-3 border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] shrink-0">
+          <footer className="flex items-center gap-1.5 px-5 py-3 border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] shrink-0">
             <button
               type="button"
               onClick={onClose}
@@ -557,5 +596,30 @@ export function SpawnSheet({
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
+  );
+}
+
+function SettingRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+        {label}
+      </span>
+      {children}
+    </div>
+  );
+}
+
+function SectionHeading({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+      {children}
+    </div>
   );
 }
