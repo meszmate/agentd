@@ -10,6 +10,7 @@
   "dependencies": {
     "@agentd/contracts": "workspace:*",
     "@agentd/client": "workspace:*",
+    "@agentd/bot-core": "workspace:*",
     "grammy": "^1.32.0"
   }
 }

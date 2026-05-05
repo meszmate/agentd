@@ -41,6 +41,7 @@
       "name": "@agentd/discord",
       "version": "0.0.1",
       "dependencies": {
+        "@agentd/bot-core": "workspace:*",
         "@agentd/client": "workspace:*",
         "@agentd/contracts": "workspace:*",
         "discord.js": "^14.16.3",
@@ -50,6 +51,7 @@
       "name": "@agentd/telegram",
       "version": "0.0.1",
       "dependencies": {
+        "@agentd/bot-core": "workspace:*",
         "@agentd/client": "workspace:*",
         "@agentd/contracts": "workspace:*",
         "grammy": "^1.32.0",
@@ -114,6 +116,14 @@
         "@agentd/contracts": "workspace:*",
       },
     },
+    "packages/bot-core": {
+      "name": "@agentd/bot-core",
+      "version": "0.0.1",
+      "dependencies": {
+        "@agentd/client": "workspace:*",
+        "@agentd/contracts": "workspace:*",
+      },
+    },
     "packages/client": {
       "name": "@agentd/client",
       "version": "0.0.1",
@@ -140,6 +150,8 @@
   },
   "packages": {
     "@agentd/agent-runner": ["@agentd/agent-runner@workspace:packages/agent-runner"],
+
+    "@agentd/bot-core": ["@agentd/bot-core@workspace:packages/bot-core"],
 
     "@agentd/cli": ["@agentd/cli@workspace:apps/cli"],
 
