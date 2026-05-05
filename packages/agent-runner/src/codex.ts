@@ -6,6 +6,9 @@ import type {
   RunnerStartOptions,
 } from "./types.ts";
 import { readLines } from "./lineStream.ts";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 /**
  * Codex stream events. Source of truth lives at
@@ -108,6 +111,195 @@ interface CodexStreamMessage {
   [key: string]: unknown;
 }
 
+interface CodexUsage {
+  input_tokens?: number;
+  cached_input_tokens?: number;
+  output_tokens?: number;
+  reasoning_output_tokens?: number;
+}
+
+/**
+ * Pull a human-readable one-liner out of one of codex's fatal stream
+ * messages (`turn.failed` / `error`). The runner stuffs upstream API
+ * errors into either `parsed.message` as a stringified JSON blob, or
+ * `parsed.error` as a structured object — both eventually look like
+ * the OpenAI shape `{type, error: {type, message, param}, status}`.
+ * We unwrap that one level so the timeline shows a real sentence
+ * instead of a multi-line JSON dump, and append a `Hint:` line for
+ * the handful of patterns operators can fix without reading docs.
+ *
+ * Returns the full `[codex] …` line (so the caller doesn't repeat the
+ * prefix and we can assert dedupe on the exact emitted text).
+ */
+function formatCodexError(
+  parsed: CodexStreamMessage,
+  fallback: string,
+): string {
+  const detail = extractCodexErrorDetail(parsed) ?? {
+    type: null,
+    message: null,
+  };
+  const message = detail.message?.trim() || fallback;
+  const head = detail.type ? `${detail.type}: ${message}` : message;
+  const hint = codexErrorHint(detail.type, message);
+  return hint ? `[codex] ${head}\nHint: ${hint}` : `[codex] ${head}`;
+}
+
+interface CodexErrorDetail {
+  type: string | null;
+  message: string | null;
+}
+
+function extractCodexErrorDetail(
+  parsed: CodexStreamMessage,
+): CodexErrorDetail | null {
+  // `parsed.error` is the structured form. Codex sometimes nests the
+  // upstream OpenAI error under it as `{error: {type, message, param}}`,
+  // and sometimes flattens it as `{type, message, param}`. Try both.
+  const err = parsed.error as
+    | { type?: unknown; message?: unknown; error?: unknown }
+    | undefined;
+  if (err && typeof err === "object") {
+    const inner = (err as { error?: unknown }).error;
+    if (inner && typeof inner === "object") {
+      const t = (inner as { type?: unknown }).type;
+      const m = (inner as { message?: unknown }).message;
+      if (typeof m === "string") {
+        return { type: typeof t === "string" ? t : null, message: m };
+      }
+    }
+    const t = err.type;
+    const m = err.message;
+    if (typeof m === "string") {
+      return { type: typeof t === "string" ? t : null, message: m };
+    }
+  }
+  // `parsed.message` is the stringified form. If it parses as JSON
+  // and looks like an upstream error, recurse into it. Otherwise treat
+  // it as plain text.
+  if (typeof parsed.message === "string") {
+    const trimmed = parsed.message.trim();
+    if (trimmed.startsWith("{")) {
+      try {
+        const obj = JSON.parse(trimmed) as CodexStreamMessage;
+        const nested = extractCodexErrorDetail(obj);
+        if (nested) return nested;
+      } catch {
+        // not JSON after all — fall through
+      }
+    }
+    return { type: null, message: trimmed };
+  }
+  return null;
+}
+
+function codexErrorHint(
+  type: string | null,
+  message: string,
+): string | null {
+  const m = message.toLowerCase();
+  // The exact 400 we keep hitting at minimal effort: gpt-5.x rejects
+  // `image_gen` / `web_search` registrations when reasoning effort is
+  // minimal. Tell the operator how to fix it without making them grep
+  // OpenAI's docs.
+  if (m.includes("reasoning.effort") && m.includes("minimal")) {
+    return "Codex's `minimal` thinking level can't run alongside web_search/image_gen. Bump the task's thinking level to `low` or higher.";
+  }
+  if (type === "rate_limit_error" || m.includes("rate limit")) {
+    return "Rate limited by the model provider. Wait a moment, then steer to retry.";
+  }
+  if (
+    type === "authentication_error" ||
+    m.includes("invalid api key") ||
+    m.includes("incorrect api key")
+  ) {
+    return "Auth failed. Check your `codex login` session or OPENAI_API_KEY.";
+  }
+  if (
+    type === "permission_error" ||
+    m.includes("does not have access") ||
+    m.includes("not allowed")
+  ) {
+    return "Your account/org lacks access to this model. Pick a different model in task settings.";
+  }
+  if (
+    type === "not_found_error" ||
+    (m.includes("model") && m.includes("not found"))
+  ) {
+    return "Model not found — check the codex models cache or switch model in task settings.";
+  }
+  if (m.includes("context") && m.includes("length")) {
+    return "Context window full. Run `/compact` (or steer with a fresh task) to reset.";
+  }
+  if (
+    type === "internal_error" ||
+    m.includes("server_error") ||
+    m.includes("503") ||
+    m.includes("502")
+  ) {
+    return "Upstream server flake. Steer to retry.";
+  }
+  if (m.includes("quota") || m.includes("billing")) {
+    return "Billing/quota issue. Check your provider dashboard.";
+  }
+  return null;
+}
+
+function findCodexSessionFile(threadId: string): string | null {
+  const root = join(homedir(), ".codex", "sessions");
+  if (!threadId || !existsSync(root)) return null;
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(path);
+      } else if (entry.isFile() && entry.name.includes(threadId)) {
+        return path;
+      }
+    }
+  }
+  return null;
+}
+
+function readCodexLastTokenUsage(threadId: string | null): CodexUsage | null {
+  if (!threadId) return null;
+  const file = findCodexSessionFile(threadId);
+  if (!file) return null;
+  let last: CodexUsage | null = null;
+  try {
+    for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const parsed = JSON.parse(line) as {
+        type?: string;
+        payload?: {
+          type?: string;
+          info?: {
+            last_token_usage?: CodexUsage;
+          } | null;
+        };
+      };
+      if (
+        parsed.type === "event_msg" &&
+        parsed.payload?.type === "token_count" &&
+        parsed.payload.info?.last_token_usage
+      ) {
+        last = parsed.payload.info.last_token_usage;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return last;
+}
+
 export interface CodexRunnerOptions {
   binary?: string;
   defaultPermissionMode?: PermissionMode;
@@ -174,6 +366,15 @@ export class CodexRunner implements AgentRunner {
   private threadId: string | null = null;
   private suppressRouterErrorContinuation = false;
   /**
+   * The last fatal-error text we emitted on this run. Codex frequently
+   * fires both `turn.failed` and a top-level `error` event for a single
+   * underlying failure (e.g. a 400 from the upstream API hits both
+   * pathways). We dedupe by remembering the last formatted message and
+   * dropping a second emission of the exact same text. Cleared on
+   * `proc.exited`, so the next spawn starts fresh.
+   */
+  private lastFatalErrorText: string | null = null;
+  /**
    * Token usage from the previous resumed turn, captured from the
    * caller via {@link RunnerStartOptions.priorInputTokens}. Codex's
    * `exec --json` mode silently drops the `context_compaction` item
@@ -212,6 +413,26 @@ export class CodexRunner implements AgentRunner {
         // listener errors are swallowed
       }
     }
+  }
+
+  /**
+   * Format a fatal stream message into a single readable line and
+   * emit it as `[codex] …` stderr — deduped against the most recent
+   * fatal so codex's `turn.failed` + `error` double-fire doesn't show
+   * the same text twice. The default fallback (`stream error` / `turn
+   * failed`) is used when neither shape carries anything readable.
+   *
+   * Codex stuffs upstream-API error responses into either `parsed.message`
+   * (as a JSON string) or `parsed.error.message`. We unwrap one level
+   * of JSON when present so the operator reads "invalid_request_error:
+   * The following tools…" instead of a 400-line pretty-printed dump,
+   * and we tack on an actionable hint for the few patterns we recognise.
+   */
+  private emitFatalError(parsed: CodexStreamMessage, fallback: string): void {
+    const text = formatCodexError(parsed, fallback);
+    if (text === this.lastFatalErrorText) return;
+    this.lastFatalErrorText = text;
+    this.emit({ kind: "raw", stream: "stderr", text });
   }
 
   async start(opts: RunnerStartOptions): Promise<void> {
@@ -346,6 +567,7 @@ export class CodexRunner implements AgentRunner {
       });
       this.emit({ kind: "exit", code: code ?? null });
       if (this.proc === proc) this.proc = null;
+      this.lastFatalErrorText = null;
       void Promise.allSettled([this.streamTask, stderrTask]);
     })();
   }
@@ -423,7 +645,30 @@ export class CodexRunner implements AgentRunner {
     }
     if (t === "turn.started") return;
     if (t === "turn.completed" && parsed.usage) {
-      const u = parsed.usage;
+      const lastUsage = readCodexLastTokenUsage(this.threadId);
+      const u = lastUsage ?? parsed.usage;
+      // Codex exec's JSON event uses thread-lifetime `total` token
+      // usage, while its session JSONL also records the app-server
+      // `last_token_usage` entries that drive Codex/T3's own context
+      // meter. Prefer that last-turn reading when available. Fall
+      // back to marking the exec event cumulative so the daemon can
+      // at least subtract totals across resumed exec processes.
+      //
+      // Codex's `input_tokens` ALREADY INCLUDES `cached_input_tokens`
+      // (see codex-rs/protocol/src/protocol.rs::TokenUsage —
+      // `non_cached_input()` is `input_tokens - cached_input_tokens`).
+      // Claude's `input_tokens` EXCLUDES cache. The daemon's
+      // addTaskUsage sums input + cache_read to compute the live
+      // context size, which gives the right answer for claude but
+      // double-counts the cached portion for codex. That's why the
+      // operator saw "702.5k / 200.0k" on a task whose actual prompt
+      // was ~360k. Convert here to claude's shape: split codex's
+      // total `input_tokens` into non-cached + cached so the daemon's
+      // sum lands on the real prompt size, not 2x of it.
+      const total = typeof u.input_tokens === "number" ? u.input_tokens : 0;
+      const cached =
+        typeof u.cached_input_tokens === "number" ? u.cached_input_tokens : 0;
+      const nonCached = Math.max(0, total - cached);
       // Auto-compact heuristic. Codex's --json output doesn't carry the
       // ContextCompaction item (filtered out in
       // event_processor_with_jsonl_output.rs::map_item_with_id, which
@@ -438,9 +683,7 @@ export class CodexRunner implements AgentRunner {
       // packages/core/src/tasks.ts addTaskUsage), and we sum here
       // before comparing.
       const prev = this.priorInputTokens;
-      const curSummed =
-        (typeof u.input_tokens === "number" ? u.input_tokens : 0) +
-        (typeof u.cached_input_tokens === "number" ? u.cached_input_tokens : 0);
+      const curSummed = total;
       if (
         !this.compactionEmitted &&
         prev != null &&
@@ -457,9 +700,10 @@ export class CodexRunner implements AgentRunner {
       }
       this.emit({
         kind: "usage",
-        inputTokens: u.input_tokens,
+        inputTokens: nonCached,
         outputTokens: u.output_tokens,
-        cacheReadTokens: u.cached_input_tokens,
+        cacheReadTokens: cached,
+        ...(lastUsage ? {} : { cumulative: true }),
       });
       return;
     }
@@ -467,19 +711,12 @@ export class CodexRunner implements AgentRunner {
       // The model errored out mid-turn (rate limit, network, etc.).
       // Surface as stderr so the task page shows a red banner; the
       // process will exit afterward and the runner emits status.
-      const msg =
-        parsed.error?.message ??
-        (typeof parsed.message === "string" ? parsed.message : "turn failed");
-      this.emit({ kind: "raw", stream: "stderr", text: `[codex] ${msg}` });
+      this.emitFatalError(parsed, "turn failed");
       return;
     }
     if (t === "error") {
       // Fatal stream error before/around the agent.
-      const msg =
-        (typeof parsed.message === "string" ? parsed.message : null) ??
-        parsed.error?.message ??
-        "stream error";
-      this.emit({ kind: "raw", stream: "stderr", text: `[codex] ${msg}` });
+      this.emitFatalError(parsed, "stream error");
       return;
     }
 
@@ -527,6 +764,7 @@ export class CodexRunner implements AgentRunner {
           kind: "tool_call",
           tool: "Bash",
           args: { command: ci.command },
+          toolUseId: itemId,
         });
       }
       if (isCompleted) {
@@ -545,6 +783,7 @@ export class CodexRunner implements AgentRunner {
           tool: "Bash",
           ok,
           output: display,
+          ...(itemId ? { toolUseId: itemId } : {}),
         });
       }
       return;
@@ -564,47 +803,44 @@ export class CodexRunner implements AgentRunner {
           tool: "Edit",
           ok: fci.status !== "failed",
           output: fci.status === "failed" ? "(patch failed)" : "(no changes)",
+          ...(itemId ? { toolUseId: itemId } : {}),
         });
         return;
       }
-      // For one change, emit a single Write/Edit pair so it renders
-      // as a normal file-edit row. For multiple, emit one MultiEdit
-      // pair with a synthesized summary so the operator sees the full
-      // set of paths. Either way the matching tool_result reflects
-      // success/failure of the whole patch.
-      if (changes.length === 1) {
-        const c = changes[0]!;
-        const tool = c.kind === "add" ? "Write" : c.kind === "delete" ? "Edit" : "Edit";
+      // Emit one tool_call per file regardless of how many files the
+      // patch touched. Codex's `apply_patch` is atomic over the whole
+      // set, but presenting the result as N separate Edit/Write rows
+      // lines up with the inline-diff renderer (one DiffFile per row)
+      // and gives the operator a per-file +N/-M pill — same shape
+      // claude's Edit/Write rows already use. The matching
+      // tool_result on each row carries the same overall status,
+      // since the patch succeeded or failed as a unit.
+      //
+      // toolUseId is per-file (`<item.id>_f<idx>`) so the web's
+      // pair-by-id can match each row's call to its own result. If
+      // we shared item.id across rows, only the first row would
+      // pair by id and the rest would fall back to positional.
+      // Underscore separator (not `#`) so the daemon's persisted
+      // `[result … u:<id>]` regex (`[A-Za-z0-9_-]+`) round-trips
+      // the id back on reload.
+      const ok = fci.status !== "failed";
+      changes.forEach((c, idx) => {
+        const tool = c.kind === "add" ? "Write" : "Edit";
+        const rowId = itemId ? `${itemId}_f${idx}` : "";
         this.emit({
           kind: "tool_call",
           tool,
           args: { file_path: c.path, codex_change_kind: c.kind },
+          ...(rowId ? { toolUseId: rowId } : {}),
         });
         this.emit({
           kind: "tool_result",
           tool,
-          ok: fci.status !== "failed",
-          output: fci.status === "failed" ? "(patch failed)" : `${c.kind} ${c.path}`,
+          ok,
+          output: ok ? `${c.kind} ${c.path}` : `(patch failed) ${c.kind} ${c.path}`,
+          ...(rowId ? { toolUseId: rowId } : {}),
         });
-      } else {
-        const summary = changes
-          .map((c) => `${c.kind} ${c.path}`)
-          .join("\n");
-        this.emit({
-          kind: "tool_call",
-          tool: "MultiEdit",
-          args: {
-            file_paths: changes.map((c) => c.path),
-            codex_changes: changes,
-          },
-        });
-        this.emit({
-          kind: "tool_result",
-          tool: "MultiEdit",
-          ok: fci.status !== "failed",
-          output: fci.status === "failed" ? `(patch failed)\n${summary}` : summary,
-        });
-      }
+      });
       return;
     }
 
@@ -618,6 +854,7 @@ export class CodexRunner implements AgentRunner {
           kind: "tool_call",
           tool: "WebSearch",
           args: { query: ws.query ?? "", action: ws.action ?? null },
+          toolUseId: itemId,
         });
       }
       if (isCompleted) {
@@ -626,6 +863,7 @@ export class CodexRunner implements AgentRunner {
           tool: "WebSearch",
           ok: true,
           output: ws.query ? `searched: ${ws.query}` : "(searched)",
+          ...(itemId ? { toolUseId: itemId } : {}),
         });
       }
       return;
@@ -649,6 +887,7 @@ export class CodexRunner implements AgentRunner {
         kind: "tool_call",
         tool: "TodoWrite",
         args: { todos },
+        ...(itemId ? { toolUseId: itemId } : {}),
       });
       if (isCompleted) {
         this.emit({
@@ -656,6 +895,7 @@ export class CodexRunner implements AgentRunner {
           tool: "TodoWrite",
           ok: true,
           output: `${todos.length} todo${todos.length === 1 ? "" : "s"}`,
+          ...(itemId ? { toolUseId: itemId } : {}),
         });
       }
       return;
@@ -673,6 +913,7 @@ export class CodexRunner implements AgentRunner {
           kind: "tool_call",
           tool: toolName,
           args: mc.arguments ?? {},
+          toolUseId: itemId,
         });
       }
       if (isCompleted) {
@@ -682,9 +923,15 @@ export class CodexRunner implements AgentRunner {
             tool: toolName,
             ok: false,
             output: mc.error.message,
+            ...(itemId ? { toolUseId: itemId } : {}),
           });
         } else {
-          // Best-effort string render of the result content.
+          // Best-effort string render of the result content. We cap
+          // structured_content/content arrays at ~6KB before they hit
+          // the bus (and another 1500-char clamp at persist time in
+          // taskManager) — uncapped, a single MCP call returning a
+          // big JSON blob can blow up the operator's context budget
+          // without giving them anything useful to read.
           let out = "";
           if (mc.result?.structured_content != null) {
             out = JSON.stringify(mc.result.structured_content, null, 2);
@@ -697,11 +944,15 @@ export class CodexRunner implements AgentRunner {
           } else {
             out = mc.status === "failed" ? "(failed)" : "(ok)";
           }
+          if (out.length > 6000) {
+            out = out.slice(0, 6000) + `\n… (${out.length - 6000} more chars truncated)`;
+          }
           this.emit({
             kind: "tool_result",
             tool: toolName,
             ok: mc.status !== "failed",
             output: out,
+            ...(itemId ? { toolUseId: itemId } : {}),
           });
         }
       }
@@ -720,6 +971,7 @@ export class CodexRunner implements AgentRunner {
             kind: "tool_call",
             tool: "Error",
             args: {},
+            toolUseId: itemId,
           });
         }
         this.emit({
@@ -727,6 +979,7 @@ export class CodexRunner implements AgentRunner {
           tool: "Error",
           ok: false,
           output: ie.message ?? "error",
+          ...(itemId ? { toolUseId: itemId } : {}),
         });
       }
       return;
@@ -744,6 +997,7 @@ export class CodexRunner implements AgentRunner {
           kind: "tool_call",
           tool: generic.type,
           args: generic,
+          toolUseId: itemId,
         });
       }
       if (isCompleted) {
@@ -752,6 +1006,7 @@ export class CodexRunner implements AgentRunner {
           tool: generic.type,
           ok: true,
           output: "(completed)",
+          ...(itemId ? { toolUseId: itemId } : {}),
         });
       }
     }

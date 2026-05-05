@@ -1,7 +1,7 @@
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./assets/logo-dark.svg">
-    <img src="./assets/logo.svg" alt="agentd" width="380">
+    <img src="./assets/logo.svg" alt="agnt" width="380">
   </picture>
 
   <p>

@@ -38,7 +38,7 @@ import {
   type Task,
   type WsServerEvent,
 } from "@agentd/contracts";
-import { join, normalize, relative, resolve } from "node:path";
+import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 import {
   existsSync,
   statSync,
@@ -118,6 +118,7 @@ import {
   loadCodexCache,
   mergeModelLists,
   DEFAULT_MODEL_REGISTRY,
+  resolveAgentContextWindow,
   saveConfig,
   AiHelperConfig,
   TelegramPluginConfig,
@@ -737,6 +738,9 @@ export function buildServer(opts: BuildServerOptions) {
         baseBranch: parsed.data.baseBranch,
         prompt: parsed.data.prompt,
         ...(parsed.data.title ? { title: parsed.data.title } : {}),
+        ...(parsed.data.autoCommit != null
+          ? { autoCommit: parsed.data.autoCommit }
+          : {}),
         ...(parsed.data.autoPush != null ? { autoPush: parsed.data.autoPush } : {}),
         ...(parsed.data.skills?.length ? { skills: parsed.data.skills } : {}),
         ...(parsed.data.permissionMode
@@ -1665,12 +1669,20 @@ export function buildServer(opts: BuildServerOptions) {
       (task.totalCacheReadTokens ?? 0) +
       (task.totalCacheWriteTokens ?? 0);
     const conversationTokens = liveTurnTokens ?? 0;
-    // Per-agent context window. Claude Sonnet/Opus 4: 200K. Codex
-    // (GPT-5 family) defaults to 200K too, though specific models
-    // can run higher. Keep a single number for now; future work can
-    // resolve from cfg.models metadata if operators want to express
-    // a non-standard window.
-    const conversationWindow = task.agent === "codex" ? 200_000 : 200_000;
+    const codexCache = loadCodexCache();
+    const modelRegistry = {
+      claude: mergeModelLists(
+        cfg.models.claude,
+        DEFAULT_MODEL_REGISTRY.claude,
+      ),
+      codex: mergeModelLists(cfg.models.codex, codexCache.models),
+    };
+    const conversationWindow = resolveAgentContextWindow(
+      task.agent,
+      task.model,
+      modelRegistry,
+      cfg.defaultModel,
+    );
 
     // The catalog actually injected at spawn time (names + paths, no bodies).
     const skillsCatalog = renderSkillsCatalog(task.skills ?? [], {
@@ -5233,8 +5245,16 @@ export function buildServer(opts: BuildServerOptions) {
 }
 
 function resolveSafePath(root: string, requested: string): string | null {
-  const joined = normalize(join(root, requested));
-  const rel = relative(root, joined);
+  // Tool calls (Edit / Write) pass `file_path` as an absolute path,
+  // while the file tree passes relative paths. Accept both: when the
+  // input is absolute, resolve it directly so we don't accidentally
+  // double-prefix it onto the worktree root. Either way the final
+  // path must stay inside `root`.
+  const absoluteRoot = resolve(root);
+  const joined = isAbsolute(requested)
+    ? normalize(requested)
+    : normalize(join(absoluteRoot, requested));
+  const rel = relative(absoluteRoot, joined);
   if (rel.startsWith("..") || rel === "" || rel.startsWith("/")) return null;
   return joined;
 }

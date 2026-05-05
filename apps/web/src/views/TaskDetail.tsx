@@ -25,7 +25,12 @@ import {
   PanelGroup,
   PanelResizeHandle,
 } from "react-resizable-panels";
-import type { AgentEvent, Message, Task } from "@agentd/contracts";
+import {
+  agentContextWindow,
+  type AgentEvent,
+  type Message,
+  type Task,
+} from "@agentd/contracts";
 import { Button } from "@/components/ui/button";
 import {
   PageTopbar,
@@ -97,6 +102,7 @@ export function TaskDetail({ task }: { task: Task }) {
   const onError = useCallback((m: string) => toast(m, true), [toast]);
 
   const taskQ = useTask(task.id);
+  const modelsQ = useModels();
   const stop = useStopTask(task.id);
   const remove = useRemoveTask();
   const spawnSibling = useSpawnSiblingTask();
@@ -172,7 +178,7 @@ export function TaskDetail({ task }: { task: Task }) {
     // until the server-side version arrives. Server-persisted
     // messages always replace tmp_ duplicates with the same ts/role.
     setMessages((prev) => {
-      const serverMsgs = taskQ.data.messages;
+      const serverMsgs = taskQ.data.messages ?? [];
       const tmpPending = prev.filter(
         (m) =>
           m.id.startsWith("tmp_") &&
@@ -272,9 +278,31 @@ export function TaskDetail({ task }: { task: Task }) {
           "tool",
           `[call ${event.tool}] ${JSON.stringify(liveArgs ?? {}).slice(0, 32_000)}`,
         );
-        // tool_result events are intentionally dropped from the timeline —
-        // the result of "Read foo.ts" is the file contents, which was the
-        // noise we just got rid of. Failures still surface via raw stderr.
+      } else if (event.kind === "tool_result") {
+        // Append the result in the same `[result <tool> ok|err <meta>]
+        // <output>` shape the daemon persists. Without this, the Live
+        // tab's call-to-result pairing has nothing to match against
+        // until the task exits and the messages query refetches —
+        // which is the bug operators saw as "tool calls stay loading
+        // until the task finishes". TaskTimeline already groups these
+        // rows under their tool card, so the chat side stays clean.
+        const okFlag = event.ok ? "ok" : "err";
+        const meta = [
+          event.parentToolUseId ? `p:${event.parentToolUseId}` : null,
+          event.toolUseId ? `u:${event.toolUseId}` : null,
+        ]
+          .filter(Boolean)
+          .join(" ");
+        const header = meta
+          ? `[result ${event.tool} ${okFlag} ${meta}]`
+          : `[result ${event.tool} ${okFlag}]`;
+        const PERSIST_LIMIT = 1500;
+        const raw = event.output;
+        const trimmed =
+          raw.length > PERSIST_LIMIT
+            ? `${raw.slice(0, PERSIST_LIMIT)}\n… (${raw.length - PERSIST_LIMIT} more chars truncated)`
+            : raw;
+        appendLocal("tool", `${header} ${trimmed}`);
       } else if (event.kind === "raw") {
         appendLocal("system", event.text);
       } else if (event.kind === "status") {
@@ -353,6 +381,22 @@ export function TaskDetail({ task }: { task: Task }) {
     if (inT == null && outT == null) return 0;
     return (inT ?? 0) + (outT ?? 0);
   }, [task.latestTurnInputTokens, task.latestTurnOutputTokens]);
+  const contextWindow = useMemo(() => {
+    const agent = task.agent as "claude" | "codex";
+    const resolved = (
+      task.model?.trim() ||
+      modelsQ.data?.defaults?.[agent]?.trim() ||
+      ""
+    ).toLowerCase();
+    const entry = resolved
+      ? (modelsQ.data?.models?.[agent] ?? []).find(
+          (m) =>
+            m.id.toLowerCase() === resolved ||
+            m.aliases?.some((a) => a.toLowerCase() === resolved),
+        )
+      : undefined;
+    return entry?.contextWindow ?? agentContextWindow(task.agent);
+  }, [modelsQ.data, task.agent, task.model]);
   const isTerminal =
     task.status === "done" ||
     task.status === "failed" ||
@@ -493,7 +537,7 @@ export function TaskDetail({ task }: { task: Task }) {
         {/* stats — `ContextUsage` shows current context size (decays
             after /compact); the `tok` chip next to it is the lifetime
             total for billing context. */}
-        <ContextUsage totalTokens={contextTokens} />
+        <ContextUsage totalTokens={contextTokens} window={contextWindow} />
         <span className="hidden md:flex items-center gap-3 font-mono text-[11px] tabular-nums text-ink-400 dark:text-ink-500">
           <span>{formatTokens(totalTokens)} tok</span>
           <span>{formatCost(task.totalCostUsd)}</span>
@@ -685,6 +729,7 @@ export function TaskDetail({ task }: { task: Task }) {
                 lastToolHint={lastToolHint}
                 streams={streams}
                 totalTokens={contextTokens}
+                contextWindow={contextWindow}
                 turn={turn}
                 plan={plan}
                 compactedAt={task.lastCompactedAt ?? null}
@@ -692,7 +737,13 @@ export function TaskDetail({ task }: { task: Task }) {
             </Panel>
             <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-ember-500/40 transition-colors dark:bg-ink-50/10" />
             <Panel id={`ws-${task.id}`} defaultSize={48} minSize={28}>
-              <TaskWorkspace task={task} onError={onError} plan={plan} planUpdatedAt={planUpdatedAt} />
+              <TaskWorkspace
+                task={task}
+                onError={onError}
+                plan={plan}
+                planUpdatedAt={planUpdatedAt}
+                messages={messages}
+              />
             </Panel>
           </PanelGroup>
         ) : (
@@ -705,6 +756,7 @@ export function TaskDetail({ task }: { task: Task }) {
             lastToolHint={lastToolHint}
             streams={streams}
             totalTokens={contextTokens}
+            contextWindow={contextWindow}
             turn={turn}
             plan={plan}
           />
@@ -1371,8 +1423,13 @@ function LiveBadge({ live, terminal }: { live: boolean; terminal: boolean }) {
   );
 }
 
-function ContextUsage({ totalTokens }: { totalTokens: number }) {
-  const window = 200_000;
+function ContextUsage({
+  totalTokens,
+  window = 200_000,
+}: {
+  totalTokens: number;
+  window?: number;
+}) {
   const pct = Math.min(100, Math.round((totalTokens / window) * 100));
   const tone: "danger" | "warn" | "ok" =
     pct >= 80 ? "danger" : pct >= 60 ? "warn" : "ok";

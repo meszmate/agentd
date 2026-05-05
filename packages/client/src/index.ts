@@ -61,6 +61,7 @@ export interface AgentdModelEntry {
   label: string;
   aliases: string[];
   tier?: "fast" | "balanced" | "deep" | "deepest";
+  contextWindow?: number;
 }
 
 export interface AgentdModelRegistry {
@@ -78,8 +79,8 @@ export interface AgentdUserPrefs {
   lastBase: string;
   lastRepo: string;
   lastProjectId: string;
+  lastAutoCommit: boolean;
   lastAutoPush: boolean;
-  lastAutoPr: boolean;
   lastPermissionMode: "bypassPermissions" | "acceptEdits" | "plan";
   lastThinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   lastModelClaude: string;

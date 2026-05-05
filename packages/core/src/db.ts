@@ -21,7 +21,6 @@ export const tasks = sqliteTable("tasks", {
   scheduleId: text("schedule_id"),
   projectId: text("project_id"),
   autoPush: integer("auto_push").notNull().default(0),
-  autoPr: integer("auto_pr").notNull().default(0),
   /**
    * Whether the post-turn hook should auto-commit any uncommitted
    * work at the end of every agent turn. Defaults to 1 (true) to
@@ -331,7 +330,6 @@ export const templates = sqliteTable("templates", {
   baseBranch: text("base_branch").notNull(),
   promptTemplate: text("prompt_template").notNull(),
   autoPush: integer("auto_push").notNull().default(0),
-  autoPr: integer("auto_pr").notNull().default(0),
   /** Per-task knobs the template carries forward; same vocab as Task. */
   permissionMode: text("permission_mode").notNull().default("bypassPermissions"),
   thinkingLevel: text("thinking_level").notNull().default("high"),

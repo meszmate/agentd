@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
+import { agentContextWindow, type AgentKind } from "@agentd/contracts";
 
 export const TelegramPluginConfig = z.object({
   enabled: z.boolean().default(false),
@@ -106,6 +107,8 @@ export const DEFAULT_GITHUB_PRESETS: GithubPresets = GithubPresets.parse({});
  *   aliases  — nicknames the AI router accepts ("opus", "claude-opus").
  *   tier     — optional UI grouping. The deepest tier is shown as the
  *              "max thinking" pair; fast tiers are flagged in the UI.
+ *   contextWindow — effective model context window when the upstream
+ *              registry exposes one. Codex reports this in its model cache.
  */
 export const ModelEntry = z.object({
   id: z.string().min(1),
@@ -114,6 +117,7 @@ export const ModelEntry = z.object({
   tier: z
     .enum(["fast", "balanced", "deep", "deepest"])
     .optional(),
+  contextWindow: z.number().int().positive().optional(),
 });
 export type ModelEntry = z.infer<typeof ModelEntry>;
 
@@ -198,6 +202,8 @@ export function loadCodexCache(): CodexCache {
       description?: string;
       visibility?: string;
       priority?: number;
+      context_window?: number;
+      effective_context_window_percent?: number;
     }
     const data = JSON.parse(readFileSync(path, "utf8")) as {
       models?: CachedModel[];
@@ -218,6 +224,7 @@ export function loadCodexCache(): CodexCache {
       models: visible.map((m): ModelEntry => {
         const slug = m.slug!;
         const lower = slug.toLowerCase();
+        const contextWindow = effectiveContextWindow(m);
         // Best-effort tier guess from the slug. Operators can override
         // via cfg.models.codex in config.json if they care.
         const tier: "fast" | "balanced" | "deep" = lower.includes("mini")
@@ -230,6 +237,7 @@ export function loadCodexCache(): CodexCache {
           label: m.display_name ?? slug,
           aliases: [lower],
           tier,
+          ...(contextWindow != null ? { contextWindow } : {}),
         };
       }),
       fetchedAt,
@@ -237,6 +245,43 @@ export function loadCodexCache(): CodexCache {
   } catch {
     return { models: [], fetchedAt: null };
   }
+}
+
+function effectiveContextWindow(m: {
+  context_window?: number;
+  effective_context_window_percent?: number;
+}): number | null {
+  const raw = m.context_window;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
+    return null;
+  }
+  const pct = m.effective_context_window_percent;
+  if (typeof pct === "number" && Number.isFinite(pct) && pct > 0) {
+    return Math.floor((raw * pct) / 100);
+  }
+  return Math.floor(raw);
+}
+
+export function resolveAgentContextWindow(
+  agent: AgentKind,
+  model: string | null | undefined,
+  models: ModelRegistry,
+  defaults?: Partial<Record<AgentKind, string>>,
+): number {
+  const resolved = (
+    model?.trim() ||
+    defaults?.[agent]?.trim() ||
+    ""
+  ).toLowerCase();
+  const entries = models[agent] ?? [];
+  const entry = resolved
+    ? entries.find(
+        (m) =>
+          m.id.toLowerCase() === resolved ||
+          m.aliases.some((a) => a.toLowerCase() === resolved),
+      )
+    : undefined;
+  return entry?.contextWindow ?? agentContextWindow(agent);
 }
 
 /**
@@ -336,6 +381,7 @@ export const UserPrefs = z.object({
   lastBase: z.string().default("main"),
   lastRepo: z.string().default(""),
   lastProjectId: z.string().default(""),
+  lastAutoCommit: z.boolean().default(true),
   lastAutoPush: z.boolean().default(true),
   lastPermissionMode: z
     .enum(["bypassPermissions", "acceptEdits", "plan"])

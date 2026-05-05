@@ -69,6 +69,16 @@ import {
   CodexRunner,
   type AgentRunner,
 } from "@agentd/agent-runner";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import {
+  isAbsolute,
+  join as pjoin,
+  normalize,
+  relative,
+  resolve,
+} from "node:path";
 
 interface RunningSession {
   runner: AgentRunner;
@@ -81,6 +91,7 @@ export interface CreateTaskParams {
   baseBranch?: string;
   prompt: string;
   title?: string;
+  autoCommit?: boolean;
   autoPush?: boolean;
   templateId?: string | null;
   scheduleId?: string | null;
@@ -152,6 +163,17 @@ export class TaskManager {
    * Cleared on exit so a future steer starts fresh.
    */
   private completedSignaled = new Set<string>();
+  /**
+   * Per-task in-memory snapshot of file content captured AFTER each
+   * codex `file_change`. Codex's JSONL stream only carries `{path,
+   * kind}` for edits — to render the same inline-diff claude rows
+   * use, we reconstruct each per-edit unified diff by comparing the
+   * post-edit disk content against the prior snapshot (or HEAD on
+   * first sighting). The snapshot is updated to the post-edit
+   * content so the next edit to the same file diffs against the
+   * right baseline. Cleared on task `exit`.
+   */
+  private codexFileSnapshots = new Map<string, Map<string, string>>();
 
   constructor(
     private readonly db: Db,
@@ -451,6 +473,12 @@ export class TaskManager {
         pullLatest: params.pullLatest ?? false,
       });
       worktreePath = result.worktreePath;
+      // `result.branch` may have been auto-suffixed (`-2`, `-3`, …) when
+      // the AI's chosen name collided with an existing branch. Persist
+      // the actual one so the task row, PR generator, and `git push`
+      // line all reference the real ref. The PR-checkout block below
+      // can still override this for `params.githubPr` runs.
+      branch = result.branch;
       // PR task: switch the worktree onto the PR's branch so the agent
       // sees the proposed changes (and any commits we add land back on
       // the right branch). `gh pr checkout` resolves the head ref —
@@ -489,9 +517,10 @@ export class TaskManager {
       templateId: params.templateId ?? null,
       scheduleId: params.scheduleId ?? null,
       projectId: project.id,
-      // Default ON: the agent commits + pushes when done; the post-hook
-      // is a safety net. Pull requests are always opened manually from
-      // the Ship menu.
+      // Default ON for commit + push (the agent commits + pushes when
+      // done; the post-hook is a safety net). Pull requests stay manual
+      // from the Ship menu.
+      autoCommit: params.autoCommit ?? true,
       autoPush: params.autoPush ?? true,
       skills: params.skills ?? [],
       permissionMode: params.permissionMode ?? "bypassPermissions",
@@ -1121,6 +1150,12 @@ export class TaskManager {
     // diff. The daemon-side post-hook still runs as a safety net (it
     // becomes a no-op when there's nothing left to commit / push).
     const finishParts: string[] = [
+      // Scope-effort hint, first so it lands before the operational
+      // junk below. Without this, models on `xhigh` thinking will
+      // spend tens of thousands of tokens "investigating" before
+      // doing a one-line edit. The operator complaint that drove
+      // this: "I asked it to change a title and it took forever."
+      "Match effort to the task. For trivial / one-line changes (rename, typo, copy edit, single-file tweak), just make the change directly — do NOT pre-read CLAUDE.md / AGENTS.md / package.json, do NOT survey the codebase, do NOT run grep/find unless something is genuinely ambiguous. Read the target file, edit it, commit. Reserve deep exploration for tasks that actually require it (multi-file refactors, debugging, anything cross-cutting).",
       "You have three small Bash tools for talking to the operator. They are the ONLY way they see what you're doing when away from the laptop.",
       "  - `agentd-progress \"<text>\"`  — past-tense status. Run it after every meaningful step (file edit, successful build, useful tool result). One short line each.",
       "  - `agentd-share \"<text>\"`     — forward-looking thought, non-blocking. Use it BEFORE big moves (\"thinking we should X first then Y\") so the operator can nudge before you commit. Don't wait for an answer.",
@@ -1237,6 +1272,14 @@ export class TaskManager {
   }
 
   private handleEvent(taskId: string, event: AgentEvent): void {
+    // Codex enrichment runs first so every consumer below — DB
+    // append, plan sync, bus publish — sees the args with
+    // `codex_diff` already attached. The web's `parseToolCall`
+    // picks that up to mount the same `<EditDiffPreview>` claude
+    // edits use.
+    if (event.kind === "tool_call") {
+      event = this.enrichCodexToolCall(taskId, event);
+    }
     if (event.kind === "message" && event.role === "agent") {
       appendMessage(this.db, taskId, "agent", event.text);
     } else if (event.kind === "tool_call") {
@@ -1255,24 +1298,37 @@ export class TaskManager {
       // switch cases keep working untouched. Lets the timeline
       // group sub-agent tool_uses under their dispatching Task /
       // collab tool row instead of laying them flat.
-      const augmentedArgs =
-        (event.parentToolUseId || event.toolUseId) &&
+      //
+      // `codex_diff` (the synthetic unified-diff text the codex
+      // enrichment attaches for inline diff rendering) gets dropped
+      // from the persisted body — it can be ~30KB per file edit and
+      // anything that reads message history end-to-end (the `agentd
+      // show` / `agentd attach` history dump, future MCP servers,
+      // operator-side LLMs ingesting via stdout) was inhaling those
+      // diffs and blowing past its context window. The live bus
+      // event below still carries `codex_diff` so the web's inline
+      // diff renders during the run; on reload we just lose the
+      // inline body for codex rows, which falls back to a plain
+      // file-edit row with the +N/-M pill.
+      const persistedArgs =
         event.args &&
         typeof event.args === "object" &&
         !Array.isArray(event.args)
-          ? {
-              ...(event.args as Record<string, unknown>),
-              ...(event.parentToolUseId
-                ? { _agentdParent: event.parentToolUseId }
-                : {}),
-              ...(event.toolUseId ? { _agentdToolId: event.toolUseId } : {}),
-            }
+          ? (() => {
+              const { codex_diff: _diff, ...rest } = event.args as Record<
+                string,
+                unknown
+              >;
+              if (event.parentToolUseId) rest._agentdParent = event.parentToolUseId;
+              if (event.toolUseId) rest._agentdToolId = event.toolUseId;
+              return rest;
+            })()
           : event.args;
       appendMessage(
         this.db,
         taskId,
         "tool",
-        `[call ${event.tool}] ${JSON.stringify(augmentedArgs).slice(0, 32_000)}`,
+        `[call ${event.tool}] ${JSON.stringify(persistedArgs).slice(0, 32_000)}`,
       );
       // TodoWrite (claude) / update_plan (codex) carries the agent's
       // current plan. Mirror it into the todos table tagged source=agent
@@ -1303,8 +1359,21 @@ export class TaskManager {
       // <tool> ok|err] <output>`. Optional `p:<parentId>` /
       // `u:<toolUseId>` segments carry swarm-tree info — they're
       // strict regex-anchored so legacy rows still parse cleanly.
+      //
+      // The persisted output is clamped to 1500 chars (down from 4000)
+      // so a codex run that fires ~100+ tool calls doesn't push the
+      // task's persisted history into the hundreds-of-KB range. A
+      // typical bash stdout, MCP result, or error blurb fits well
+      // under this; large compile/test dumps get a clear `(N more
+      // chars truncated)` marker so the operator knows to scroll the
+      // live event for the full text.
       const okFlag = event.ok ? "ok" : "err";
-      const trimmed = event.output.slice(0, 4000);
+      const PERSIST_LIMIT = 1500;
+      const raw = event.output;
+      const trimmed =
+        raw.length > PERSIST_LIMIT
+          ? `${raw.slice(0, PERSIST_LIMIT)}\n… (${raw.length - PERSIST_LIMIT} more chars truncated)`
+          : raw;
       const meta = [
         event.parentToolUseId ? `p:${event.parentToolUseId}` : null,
         event.toolUseId ? `u:${event.toolUseId}` : null,
@@ -1382,6 +1451,7 @@ export class TaskManager {
         outputTokens: event.outputTokens,
         cacheReadTokens: event.cacheReadTokens,
         cacheWriteTokens: event.cacheWriteTokens,
+        cumulative: event.cumulative,
         costUsd: event.costUsd,
       });
     } else if (event.kind === "auto_compacted") {
@@ -1432,6 +1502,9 @@ export class TaskManager {
       }
       // Reset the done-signal flag so a future steer starts fresh.
       this.completedSignaled.delete(taskId);
+      // Drop the codex per-file snapshots — a fresh run rebuilds them
+      // from HEAD on first sighting.
+      this.codexFileSnapshots.delete(taskId);
       // The turn is over — drop the cached start time so it doesn't
       // leak across spawns. The next runner will stamp a fresh value
       // on its first `status:running`.
@@ -1887,13 +1960,13 @@ export class TaskManager {
         .slice(0, 24);
       memberLabels.push(label);
       const taskId = newId("task");
-      const branch = `${ai.prefix}/${baseSlug}-${safeLabel}-${taskId.slice(-4)}`;
-      const { worktreePath } = await createWorktree({
+      const requestedBranch = `${ai.prefix}/${baseSlug}-${safeLabel}-${taskId.slice(-4)}`;
+      const { worktreePath, branch: actualBranch } = await createWorktree({
         repoPath: params.repoPath,
         worktreeRoot: this.paths.worktrees,
         taskId,
         baseBranch,
-        branchName: branch,
+        branchName: requestedBranch,
         workspaceMode: "worktree",
         branchMode: "new",
         pullLatest: false,
@@ -1904,7 +1977,7 @@ export class TaskManager {
         agent: m.agent,
         repoPath: params.repoPath,
         worktreePath,
-        branch,
+        branch: actualBranch,
         baseBranch,
         projectId,
         // Council members default to no auto-push — the operator picks
@@ -2056,6 +2129,92 @@ export class TaskManager {
     }
   }
 
+  /**
+   * Codex's `file_change` items only carry `{path, kind}` — no patch
+   * body. To render the same inline diff claude's Edit/Write rows
+   * use, we synthesize a unified diff at observation time:
+   *
+   *   pre  = prior in-memory snapshot for this path, or HEAD blob on
+   *          first sighting (so the very first edit diffs against
+   *          what was committed)
+   *   post = current on-disk file content (codex applies the patch
+   *          before emitting `item.completed`, so the disk state IS
+   *          the post-edit state)
+   *
+   * The diff is computed via `git diff --no-index` against two
+   * tempfiles, the headers rewritten to point at the real path so
+   * the web's `parseUnifiedDiff` ends up with a sensible
+   * `displayPath`, and the result stuffed into args under
+   * `codex_diff`. The post-edit content is then cached as the next
+   * snapshot so a follow-up edit to the same file diffs correctly
+   * against its actual prior state instead of cumulatively against
+   * HEAD.
+   *
+   * No-op for events that don't carry `codex_change_kind` (i.e.
+   * everything claude emits, plus codex tool calls that aren't
+   * file edits).
+   */
+  private enrichCodexToolCall(taskId: string, event: AgentEvent): AgentEvent {
+    if (event.kind !== "tool_call") return event;
+    const args = event.args;
+    if (!args || typeof args !== "object" || Array.isArray(args)) return event;
+    const a = args as Record<string, unknown>;
+    const ckind =
+      typeof a.codex_change_kind === "string" ? a.codex_change_kind : null;
+    if (!ckind) return event;
+    const filePath = typeof a.file_path === "string" ? a.file_path : null;
+    if (!filePath) return event;
+    const task = getTask(this.db, taskId);
+    if (!task?.worktreePath) return event;
+
+    const root = task.worktreePath;
+    const abs = resolveCodexEditPath(root, filePath);
+    if (!abs) return event;
+
+    // Display path: prefer the path relative to the worktree root so
+    // the rendered diff header reads `apps/web/src/x.ts` instead of
+    // a noisy absolute path. Falls back to whatever codex sent.
+    let displayPath = filePath;
+    try {
+      const rel = relative(resolve(root), abs);
+      if (rel && !rel.startsWith("..") && !isAbsolute(rel)) displayPath = rel;
+    } catch {
+      // keep filePath as-is
+    }
+
+    let snaps = this.codexFileSnapshots.get(taskId);
+    if (!snaps) {
+      snaps = new Map();
+      this.codexFileSnapshots.set(taskId, snaps);
+    }
+
+    let pre: string;
+    if (snaps.has(filePath)) {
+      pre = snaps.get(filePath) ?? "";
+    } else {
+      pre = readGitHeadBlob(root, displayPath) ?? "";
+    }
+
+    let post = "";
+    if (ckind !== "delete") {
+      try {
+        post = readFileSync(abs, "utf8");
+      } catch {
+        post = "";
+      }
+    }
+
+    snaps.set(filePath, post);
+
+    const diff = computeUnifiedDiff(pre, post, displayPath);
+    if (!diff) return event;
+
+    return {
+      ...event,
+      args: { ...a, codex_diff: diff },
+    };
+  }
+
 }
 
 function findLastUserMessage(db: Db, taskId: string): string | null {
@@ -2117,4 +2276,117 @@ function parseAgentPlan(
     out.push({ text, status });
   }
   return out;
+}
+
+/**
+ * Resolve a codex-supplied file_path against the task worktree.
+ * Codex sometimes emits relative paths and sometimes absolute ones;
+ * either is fine as long as the final path stays inside the
+ * worktree. Returns null otherwise so we never read files outside
+ * the agent's sandbox.
+ */
+function resolveCodexEditPath(root: string, requested: string): string | null {
+  const absRoot = resolve(root);
+  const joined = isAbsolute(requested)
+    ? normalize(requested)
+    : normalize(pjoin(absRoot, requested));
+  const rel = relative(absRoot, joined);
+  if (rel.startsWith("..") || rel === "" || isAbsolute(rel)) return null;
+  return joined;
+}
+
+/**
+ * Read a file at the worktree's HEAD via `git show`. Used as the
+ * fallback "pre-edit" content the first time we see a path edited
+ * in this task. Returns null when the path doesn't exist at HEAD
+ * (e.g. it's being newly added) or git errors for any reason.
+ */
+function readGitHeadBlob(root: string, relPath: string): string | null {
+  try {
+    const r = spawnSync("git", ["show", `HEAD:${relPath}`], {
+      cwd: root,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    if (r.status === 0 && r.stdout) return r.stdout.toString("utf8");
+  } catch {
+    // ignore — null falls through to "no prior content"
+  }
+  return null;
+}
+
+/**
+ * Run `git diff --no-index` between two strings and return a
+ * unified-diff text whose `diff --git` / `---` / `+++` headers
+ * have been rewritten to point at `displayPath`. The web's
+ * `parseUnifiedDiff` keys off `a/<path>` and `b/<path>` for the
+ * header parsing — without the rewrite it'd display the temp dir
+ * path. Returns "" when the diff fails or the inputs are
+ * identical (caller decides what to do with that).
+ */
+function computeUnifiedDiff(
+  pre: string,
+  post: string,
+  displayPath: string,
+): string {
+  if (pre === post) return "";
+  const tmp = mkdtempSync(pjoin(tmpdir(), "agentd-codex-diff-"));
+  try {
+    const oldFile = pjoin(tmp, "pre");
+    const newFile = pjoin(tmp, "post");
+    writeFileSync(oldFile, pre);
+    writeFileSync(newFile, post);
+    // `--no-index` makes git diff arbitrary files (no repo
+    // required); exit codes: 0 = identical, 1 = differ, ≥2 = error.
+    const r = spawnSync(
+      "git",
+      ["diff", "--no-index", "--no-color", "--unified=3", oldFile, newFile],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    if (r.status !== 0 && r.status !== 1) return "";
+    const text = r.stdout ? r.stdout.toString("utf8") : "";
+    if (!text) return "";
+    return rewriteDiffPaths(text, displayPath);
+  } catch {
+    return "";
+  } finally {
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // ignore — tmpdir cleanup is best-effort
+    }
+  }
+}
+
+/**
+ * Replace the temp-file paths in a `git diff --no-index` output's
+ * `diff --git` / `---` / `+++` headers with `displayPath`. Leaves
+ * the body untouched — only the first three header lines need
+ * rewriting for `parseUnifiedDiff` to come out with the right
+ * `displayPath`.
+ */
+function rewriteDiffPaths(diff: string, displayPath: string): string {
+  const lines = diff.split("\n");
+  let seenDiff = false;
+  let seenMinus = false;
+  let seenPlus = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (!seenDiff && line.startsWith("diff --git ")) {
+      lines[i] = `diff --git a/${displayPath} b/${displayPath}`;
+      seenDiff = true;
+      continue;
+    }
+    if (!seenMinus && line.startsWith("--- ")) {
+      lines[i] = `--- a/${displayPath}`;
+      seenMinus = true;
+      continue;
+    }
+    if (!seenPlus && line.startsWith("+++ ")) {
+      lines[i] = `+++ b/${displayPath}`;
+      seenPlus = true;
+      continue;
+    }
+    if (seenDiff && seenMinus && seenPlus) break;
+  }
+  return lines.join("\n");
 }
