@@ -25,7 +25,12 @@ import {
   PanelGroup,
   PanelResizeHandle,
 } from "react-resizable-panels";
-import type { AgentEvent, Message, Task } from "@agentd/contracts";
+import {
+  agentContextWindow,
+  type AgentEvent,
+  type Message,
+  type Task,
+} from "@agentd/contracts";
 import { Button } from "@/components/ui/button";
 import {
   PageTopbar,
@@ -97,6 +102,7 @@ export function TaskDetail({ task }: { task: Task }) {
   const onError = useCallback((m: string) => toast(m, true), [toast]);
 
   const taskQ = useTask(task.id);
+  const modelsQ = useModels();
   const stop = useStopTask(task.id);
   const remove = useRemoveTask();
   const spawnSibling = useSpawnSiblingTask();
@@ -172,7 +178,7 @@ export function TaskDetail({ task }: { task: Task }) {
     // until the server-side version arrives. Server-persisted
     // messages always replace tmp_ duplicates with the same ts/role.
     setMessages((prev) => {
-      const serverMsgs = taskQ.data.messages;
+      const serverMsgs = taskQ.data.messages ?? [];
       const tmpPending = prev.filter(
         (m) =>
           m.id.startsWith("tmp_") &&
@@ -375,13 +381,22 @@ export function TaskDetail({ task }: { task: Task }) {
     if (inT == null && outT == null) return 0;
     return (inT ?? 0) + (outT ?? 0);
   }, [task.latestTurnInputTokens, task.latestTurnOutputTokens]);
-  // Per-agent context window. Claude family is 200k. Codex's GPT-5
-  // default is 400k. Without this, a codex task running at a healthy
-  // 250k looks like 125% on the meter and the operator (rightly)
-  // panics. We don't try to be precise per model — the registry isn't
-  // wired through to the web yet — but agent-level is enough to stop
-  // the meter from reading "100%+" on every codex run.
-  const contextWindow = task.agent === "codex" ? 400_000 : 200_000;
+  const contextWindow = useMemo(() => {
+    const agent = task.agent as "claude" | "codex";
+    const resolved = (
+      task.model?.trim() ||
+      modelsQ.data?.defaults?.[agent]?.trim() ||
+      ""
+    ).toLowerCase();
+    const entry = resolved
+      ? (modelsQ.data?.models?.[agent] ?? []).find(
+          (m) =>
+            m.id.toLowerCase() === resolved ||
+            m.aliases?.some((a) => a.toLowerCase() === resolved),
+        )
+      : undefined;
+    return entry?.contextWindow ?? agentContextWindow(task.agent);
+  }, [modelsQ.data, task.agent, task.model]);
   const isTerminal =
     task.status === "done" ||
     task.status === "failed" ||

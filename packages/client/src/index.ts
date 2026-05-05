@@ -60,6 +60,7 @@ export interface AgentdModelEntry {
   label: string;
   aliases: string[];
   tier?: "fast" | "balanced" | "deep" | "deepest";
+  contextWindow?: number;
 }
 
 export interface AgentdModelRegistry {

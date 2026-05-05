@@ -117,6 +117,7 @@ import {
   loadCodexCache,
   mergeModelLists,
   DEFAULT_MODEL_REGISTRY,
+  resolveAgentContextWindow,
   saveConfig,
   AiHelperConfig,
   TelegramPluginConfig,
@@ -1657,12 +1658,20 @@ export function buildServer(opts: BuildServerOptions) {
       (task.totalCacheReadTokens ?? 0) +
       (task.totalCacheWriteTokens ?? 0);
     const conversationTokens = liveTurnTokens ?? 0;
-    // Per-agent context window. Claude Sonnet/Opus 4: 200K. Codex
-    // (GPT-5 family) defaults to 200K too, though specific models
-    // can run higher. Keep a single number for now; future work can
-    // resolve from cfg.models metadata if operators want to express
-    // a non-standard window.
-    const conversationWindow = task.agent === "codex" ? 200_000 : 200_000;
+    const codexCache = loadCodexCache();
+    const modelRegistry = {
+      claude: mergeModelLists(
+        cfg.models.claude,
+        DEFAULT_MODEL_REGISTRY.claude,
+      ),
+      codex: mergeModelLists(cfg.models.codex, codexCache.models),
+    };
+    const conversationWindow = resolveAgentContextWindow(
+      task.agent,
+      task.model,
+      modelRegistry,
+      cfg.defaultModel,
+    );
 
     // The catalog actually injected at spawn time (names + paths, no bodies).
     const skillsCatalog = renderSkillsCatalog(task.skills ?? [], {

@@ -3,6 +3,15 @@ import { z } from "zod";
 export const AgentKind = z.enum(["claude", "codex"]);
 export type AgentKind = z.infer<typeof AgentKind>;
 
+export const AGENT_CONTEXT_WINDOWS: Record<AgentKind, number> = {
+  claude: 200_000,
+  codex: 400_000,
+};
+
+export function agentContextWindow(agent: AgentKind): number {
+  return AGENT_CONTEXT_WINDOWS[agent] ?? 200_000;
+}
+
 /**
  * How the agent should handle tool-permission decisions.
  *
@@ -469,6 +478,7 @@ export const AgentEvent = z.discriminatedUnion("kind", [
     outputTokens: z.number().optional(),
     cacheReadTokens: z.number().optional(),
     cacheWriteTokens: z.number().optional(),
+    cumulative: z.boolean().optional(),
     costUsd: z.number().optional(),
   }),
   z.object({
@@ -540,9 +550,7 @@ export const CreateTaskRequest = z.object({
   prompt: z.string().min(1),
   title: z.string().optional(),
   // Pre-spawn toggles for what happens after the agent finishes a turn.
-  // commit + push default ON, PR defaults OFF (PRs were historically
-  // opened manually from the Ship menu) — passing `false` opts out per
-  // task, passing `true` for autoPr opts in.
+  // Commit + push default on. PRs default off and require explicit opt-in.
   autoCommit: z.boolean().optional(),
   autoPush: z.boolean().optional(),
   autoPr: z.boolean().optional(),

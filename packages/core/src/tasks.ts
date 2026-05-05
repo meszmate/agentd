@@ -462,24 +462,48 @@ export interface UsageDelta {
   outputTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  /**
+   * True when the runner reports thread-lifetime totals instead of
+   * per-turn usage. Codex `exec --json` currently does this: its
+   * `turn.completed.usage` is sourced from `token_usage.total`.
+   */
+  cumulative?: boolean;
   costUsd?: number;
 }
 
 export function addTaskUsage(db: Db, id: string, delta: UsageDelta): void {
   const cur = getTask(db, id);
   if (!cur) return;
-  const inT = (cur.totalInputTokens ?? 0) + (delta.inputTokens ?? 0);
-  const outT = (cur.totalOutputTokens ?? 0) + (delta.outputTokens ?? 0);
-  const cacheR = (cur.totalCacheReadTokens ?? 0) + (delta.cacheReadTokens ?? 0);
-  const cacheW = (cur.totalCacheWriteTokens ?? 0) + (delta.cacheWriteTokens ?? 0);
+  const prevIn = cur.totalInputTokens ?? 0;
+  const prevOut = cur.totalOutputTokens ?? 0;
+  const prevCacheR = cur.totalCacheReadTokens ?? 0;
+  const prevCacheW = cur.totalCacheWriteTokens ?? 0;
+  const inT = delta.cumulative
+    ? delta.inputTokens ?? prevIn
+    : prevIn + (delta.inputTokens ?? 0);
+  const outT = delta.cumulative
+    ? delta.outputTokens ?? prevOut
+    : prevOut + (delta.outputTokens ?? 0);
+  const cacheR = delta.cumulative
+    ? delta.cacheReadTokens ?? prevCacheR
+    : prevCacheR + (delta.cacheReadTokens ?? 0);
+  const cacheW = delta.cumulative
+    ? delta.cacheWriteTokens ?? prevCacheW
+    : prevCacheW + (delta.cacheWriteTokens ?? 0);
   const costPrev = cur.totalCostUsd ?? 0;
-  const costNext = delta.costUsd != null ? costPrev + delta.costUsd : costPrev;
+  const costNext =
+    delta.costUsd != null
+      ? delta.cumulative
+        ? delta.costUsd
+        : costPrev + delta.costUsd
+      : costPrev;
   // Latest-turn fields REPLACE rather than sum — each runner usage event
-  // already reports the full input/output for that turn (the API charges
-  // for the entire conversation context as input on each call), so we
-  // want this to reflect the most recent turn's footprint, not a
-  // running total. Read by the timeline's compact-banner so it tracks
-  // the actual context size and decays after /compact.
+  // usually reports the full input/output for that turn (the API charges
+  // for the entire conversation context as input on each call). Codex
+  // `exec --json` reports thread-lifetime totals instead, so the
+  // cumulative branch below first subtracts the previous persisted
+  // total. Either way, these fields reflect the most recent turn's
+  // footprint, not a running total.
   const patch: Record<string, unknown> = {
     totalInputTokens: inT,
     totalOutputTokens: outT,
@@ -499,19 +523,29 @@ export function addTaskUsage(db: Db, id: string, delta: UsageDelta): void {
   // `cache_read_input_tokens`. Without summing them, an early-turn
   // task shows "live context = 44" because the only uncached chunk
   // is the new user prompt — the rest came from the prompt cache.
-  // Codex reports the same shape (`cached_input_tokens`).
+  // Codex's runner normalizes `cached_input_tokens` to this shape
+  // before marking the event cumulative.
   if (
     delta.inputTokens != null ||
     delta.cacheReadTokens != null ||
     delta.cacheWriteTokens != null
   ) {
+    const turnIn = delta.cumulative
+      ? Math.max(0, inT - prevIn)
+      : delta.inputTokens ?? 0;
+    const turnCacheR = delta.cumulative
+      ? Math.max(0, cacheR - prevCacheR)
+      : delta.cacheReadTokens ?? 0;
+    const turnCacheW = delta.cumulative
+      ? Math.max(0, cacheW - prevCacheW)
+      : delta.cacheWriteTokens ?? 0;
     patch.latestTurnInputTokens =
-      (delta.inputTokens ?? 0) +
-      (delta.cacheReadTokens ?? 0) +
-      (delta.cacheWriteTokens ?? 0);
+      turnIn + turnCacheR + turnCacheW;
   }
   if (delta.outputTokens != null) {
-    patch.latestTurnOutputTokens = delta.outputTokens;
+    patch.latestTurnOutputTokens = delta.cumulative
+      ? Math.max(0, outT - prevOut)
+      : delta.outputTokens;
   }
   db.update(tasks).set(patch).where(eq(tasks.id, id)).run();
 }

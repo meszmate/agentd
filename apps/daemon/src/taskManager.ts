@@ -1374,6 +1374,7 @@ export class TaskManager {
         outputTokens: event.outputTokens,
         cacheReadTokens: event.cacheReadTokens,
         cacheWriteTokens: event.cacheWriteTokens,
+        cumulative: event.cumulative,
         costUsd: event.costUsd,
       });
     } else if (event.kind === "exit") {

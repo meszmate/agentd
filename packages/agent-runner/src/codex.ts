@@ -6,6 +6,9 @@ import type {
   RunnerStartOptions,
 } from "./types.ts";
 import { readLines } from "./lineStream.ts";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 /**
  * Codex stream events. Source of truth lives at
@@ -106,6 +109,13 @@ interface CodexStreamMessage {
   error?: { message?: string };
   message?: string;
   [key: string]: unknown;
+}
+
+interface CodexUsage {
+  input_tokens?: number;
+  cached_input_tokens?: number;
+  output_tokens?: number;
+  reasoning_output_tokens?: number;
 }
 
 /**
@@ -233,6 +243,61 @@ function codexErrorHint(
     return "Billing/quota issue. Check your provider dashboard.";
   }
   return null;
+}
+
+function findCodexSessionFile(threadId: string): string | null {
+  const root = join(homedir(), ".codex", "sessions");
+  if (!threadId || !existsSync(root)) return null;
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(path);
+      } else if (entry.isFile() && entry.name.includes(threadId)) {
+        return path;
+      }
+    }
+  }
+  return null;
+}
+
+function readCodexLastTokenUsage(threadId: string | null): CodexUsage | null {
+  if (!threadId) return null;
+  const file = findCodexSessionFile(threadId);
+  if (!file) return null;
+  let last: CodexUsage | null = null;
+  try {
+    for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const parsed = JSON.parse(line) as {
+        type?: string;
+        payload?: {
+          type?: string;
+          info?: {
+            last_token_usage?: CodexUsage;
+          } | null;
+        };
+      };
+      if (
+        parsed.type === "event_msg" &&
+        parsed.payload?.type === "token_count" &&
+        parsed.payload.info?.last_token_usage
+      ) {
+        last = parsed.payload.info.last_token_usage;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return last;
 }
 
 export interface CodexRunnerOptions {
@@ -556,7 +621,15 @@ export class CodexRunner implements AgentRunner {
     }
     if (t === "turn.started") return;
     if (t === "turn.completed" && parsed.usage) {
-      const u = parsed.usage;
+      const lastUsage = readCodexLastTokenUsage(this.threadId);
+      const u = lastUsage ?? parsed.usage;
+      // Codex exec's JSON event uses thread-lifetime `total` token
+      // usage, while its session JSONL also records the app-server
+      // `last_token_usage` entries that drive Codex/T3's own context
+      // meter. Prefer that last-turn reading when available. Fall
+      // back to marking the exec event cumulative so the daemon can
+      // at least subtract totals across resumed exec processes.
+      //
       // Codex's `input_tokens` ALREADY INCLUDES `cached_input_tokens`
       // (see codex-rs/protocol/src/protocol.rs::TokenUsage —
       // `non_cached_input()` is `input_tokens - cached_input_tokens`).
@@ -577,6 +650,7 @@ export class CodexRunner implements AgentRunner {
         inputTokens: nonCached,
         outputTokens: u.output_tokens,
         cacheReadTokens: cached,
+        ...(lastUsage ? {} : { cumulative: true }),
       });
       return;
     }
