@@ -112,6 +112,13 @@ export interface PendingPick {
 export interface BotState {
   /** chatId → focused taskId. Set by `/use` or implicitly by `/new`. */
   focus: Map<string, string>;
+  /**
+   * chatId → focused projectId. Set by `/project <id>`. When set,
+   * project-targeted verbs (`/new`, `/brainstorm`, `/plan`, `/issues`,
+   * `/prs`, `/ideas`) skip the picker and operate on this project.
+   * Cleared by `/project clear`.
+   */
+  focusProject: Map<string, string>;
   /** picker id → pending verb+prompt. Set on `/new` etc, drained on tap. */
   pending: Map<string, PendingPick>;
   /** "chatId:msgId" of one of our messages → the taskId it referred to. */
@@ -131,6 +138,7 @@ export interface BotState {
 export function createState(): BotState {
   return {
     focus: new Map(),
+    focusProject: new Map(),
     pending: new Map(),
     replyMap: new Map(),
     suggestionReplyMap: new Map(),
