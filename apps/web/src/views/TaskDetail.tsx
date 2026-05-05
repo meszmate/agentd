@@ -272,9 +272,31 @@ export function TaskDetail({ task }: { task: Task }) {
           "tool",
           `[call ${event.tool}] ${JSON.stringify(liveArgs ?? {}).slice(0, 32_000)}`,
         );
-        // tool_result events are intentionally dropped from the timeline —
-        // the result of "Read foo.ts" is the file contents, which was the
-        // noise we just got rid of. Failures still surface via raw stderr.
+      } else if (event.kind === "tool_result") {
+        // Append the result in the same `[result <tool> ok|err <meta>]
+        // <output>` shape the daemon persists. Without this, the Live
+        // tab's call-to-result pairing has nothing to match against
+        // until the task exits and the messages query refetches —
+        // which is the bug operators saw as "tool calls stay loading
+        // until the task finishes". TaskTimeline already groups these
+        // rows under their tool card, so the chat side stays clean.
+        const okFlag = event.ok ? "ok" : "err";
+        const meta = [
+          event.parentToolUseId ? `p:${event.parentToolUseId}` : null,
+          event.toolUseId ? `u:${event.toolUseId}` : null,
+        ]
+          .filter(Boolean)
+          .join(" ");
+        const header = meta
+          ? `[result ${event.tool} ${okFlag} ${meta}]`
+          : `[result ${event.tool} ${okFlag}]`;
+        const PERSIST_LIMIT = 1500;
+        const raw = event.output;
+        const trimmed =
+          raw.length > PERSIST_LIMIT
+            ? `${raw.slice(0, PERSIST_LIMIT)}\n… (${raw.length - PERSIST_LIMIT} more chars truncated)`
+            : raw;
+        appendLocal("tool", `${header} ${trimmed}`);
       } else if (event.kind === "raw") {
         appendLocal("system", event.text);
       } else if (event.kind === "status") {
