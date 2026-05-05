@@ -725,7 +725,11 @@ export function buildServer(opts: BuildServerOptions) {
         baseBranch: parsed.data.baseBranch,
         prompt: parsed.data.prompt,
         ...(parsed.data.title ? { title: parsed.data.title } : {}),
+        ...(parsed.data.autoCommit != null
+          ? { autoCommit: parsed.data.autoCommit }
+          : {}),
         ...(parsed.data.autoPush != null ? { autoPush: parsed.data.autoPush } : {}),
+        ...(parsed.data.autoPr != null ? { autoPr: parsed.data.autoPr } : {}),
         ...(parsed.data.skills?.length ? { skills: parsed.data.skills } : {}),
         ...(parsed.data.permissionMode
           ? { permissionMode: parsed.data.permissionMode }

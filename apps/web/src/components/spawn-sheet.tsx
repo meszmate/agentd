@@ -141,9 +141,13 @@ export function SpawnSheet({
   const [agent, setAgent] = useState<"claude" | "codex">("claude");
   const [prompt, setPrompt] = useState("");
   const [title, setTitle] = useState("");
-  // Default ON: the agent is told to commit + push when done. Opening
-  // a PR is always manual via the Ship menu — never automatic.
+  // Defaults: commit + push ON, PR OFF (PRs were historically opened
+  // manually from the Ship menu — keep that as the default but let the
+  // operator opt in per task). All three persist to prefs on submit so
+  // the same selections come back on the next spawn.
+  const [autoCommit, setAutoCommit] = useState(true);
   const [autoPush, setAutoPush] = useState(true);
+  const [autoPr, setAutoPr] = useState(false);
   const [permissionMode, setPermissionMode] =
     useState<PermissionMode>("bypassPermissions");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("high");
@@ -166,7 +170,9 @@ export function SpawnSheet({
     setRepoPath(p.lastRepo);
     setBaseBranch(p.lastBase || "main");
     setAgent(p.lastAgent);
+    setAutoCommit(p.lastAutoCommit);
     setAutoPush(p.lastAutoPush);
+    setAutoPr(p.lastAutoPr);
     setPermissionMode(p.lastPermissionMode);
     setThinkingLevel(clampThinkingLevel(p.lastAgent, p.lastThinkingLevel));
     setModel(
@@ -331,7 +337,9 @@ export function SpawnSheet({
         baseBranch: finalBase,
         prompt: prompt.trim(),
         title: title.trim() || undefined,
+        autoCommit,
         autoPush,
+        autoPr,
         permissionMode,
         thinkingLevel,
         ...(model.trim() ? { model: model.trim() } : {}),
@@ -351,7 +359,9 @@ export function SpawnSheet({
         lastProjectId: projectId,
         lastBase: finalBase,
         lastAgent: agent,
+        lastAutoCommit: autoCommit,
         lastAutoPush: autoPush,
+        lastAutoPr: autoPr,
         lastPermissionMode: permissionMode,
         lastThinkingLevel: thinkingLevel,
         ...(agent === "claude"
@@ -591,16 +601,43 @@ export function SpawnSheet({
               </Field>
             )}
 
-            <div className="flex items-center justify-between rounded-md border border-ink-900/10 bg-paper-50 dark:border-ink-50/10 dark:bg-ink-800 p-3">
-              <div>
-                <Label className="text-xs normal-case tracking-normal text-foreground">
-                  Auto-push
-                </Label>
-                <p className="text-2xs text-muted-foreground">
-                  Push the branch when the agent completes.
-                </p>
+            <div className="rounded-md border border-ink-900/10 bg-paper-50 dark:border-ink-50/10 dark:bg-ink-800 divide-y divide-ink-900/10 dark:divide-ink-50/10">
+              <div className="flex items-center justify-between p-3">
+                <div>
+                  <Label className="text-xs normal-case tracking-normal text-foreground">
+                    Auto-commit
+                  </Label>
+                  <p className="text-2xs text-muted-foreground">
+                    Commit any leftover changes when the agent finishes.
+                  </p>
+                </div>
+                <Switch
+                  checked={autoCommit}
+                  onCheckedChange={setAutoCommit}
+                />
               </div>
-              <Switch checked={autoPush} onCheckedChange={setAutoPush} />
+              <div className="flex items-center justify-between p-3">
+                <div>
+                  <Label className="text-xs normal-case tracking-normal text-foreground">
+                    Auto-push
+                  </Label>
+                  <p className="text-2xs text-muted-foreground">
+                    Push the branch when the agent completes.
+                  </p>
+                </div>
+                <Switch checked={autoPush} onCheckedChange={setAutoPush} />
+              </div>
+              <div className="flex items-center justify-between p-3">
+                <div>
+                  <Label className="text-xs normal-case tracking-normal text-foreground">
+                    Auto-PR
+                  </Label>
+                  <p className="text-2xs text-muted-foreground">
+                    Open a pull request after the first push (default off).
+                  </p>
+                </div>
+                <Switch checked={autoPr} onCheckedChange={setAutoPr} />
+              </div>
             </div>
 
             {!phaseMode && (

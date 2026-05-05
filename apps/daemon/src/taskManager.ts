@@ -89,7 +89,9 @@ export interface CreateTaskParams {
   baseBranch?: string;
   prompt: string;
   title?: string;
+  autoCommit?: boolean;
   autoPush?: boolean;
+  autoPr?: boolean;
   templateId?: string | null;
   scheduleId?: string | null;
   skills?: string[];
@@ -504,10 +506,13 @@ export class TaskManager {
       templateId: params.templateId ?? null,
       scheduleId: params.scheduleId ?? null,
       projectId: project.id,
-      // Default ON: the agent commits + pushes when done; the post-hook
-      // is a safety net. Pull requests are always opened manually from
-      // the Ship menu.
+      // Default ON for commit + push (the agent commits + pushes when
+      // done; the post-hook is a safety net). autoPr defaults OFF —
+      // historically PRs are always opened manually from the Ship menu,
+      // but the spawn form can opt in per task.
+      autoCommit: params.autoCommit ?? true,
       autoPush: params.autoPush ?? true,
+      autoPr: params.autoPr ?? false,
       skills: params.skills ?? [],
       permissionMode: params.permissionMode ?? "bypassPermissions",
       workspaceMode,

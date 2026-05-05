@@ -25,6 +25,7 @@ export interface CreateTaskInput {
   projectId?: string | null;
   autoCommit?: boolean;
   autoPush?: boolean;
+  autoPr?: boolean;
   skills?: string[];
   permissionMode?: PermissionMode;
   workspaceMode?: WorkspaceMode;
@@ -235,7 +236,7 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       projectId: input.projectId ?? null,
       autoCommit: input.autoCommit === false ? 0 : 1,
       autoPush: input.autoPush ? 1 : 0,
-      autoPr: 0,
+      autoPr: input.autoPr ? 1 : 0,
       prUrl: null,
       totalInputTokens: 0,
       totalOutputTokens: 0,

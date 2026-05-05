@@ -77,6 +77,7 @@ export interface AgentdUserPrefs {
   lastBase: string;
   lastRepo: string;
   lastProjectId: string;
+  lastAutoCommit: boolean;
   lastAutoPush: boolean;
   lastAutoPr: boolean;
   lastPermissionMode: "bypassPermissions" | "acceptEdits" | "plan";
