@@ -57,6 +57,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  ToolbarPick,
+  commitModeLabel,
+  parseCommitMode,
+} from "@/components/toolbar-pick";
+import {
   useBridgeSummary,
   useCreateTask,
   useDeleteProject,
@@ -594,6 +599,7 @@ function ProjectComposer({
   const [model, setModel] = useState<string>("");
   const [base, setBase] = useState("main");
   const [autoCommit, setAutoCommit] = useState(true);
+  const [autoPush, setAutoPush] = useState(true);
   const [busy, setBusy] = useState(false);
   const [hydrated, setHydrated] = useState(false);
 
@@ -610,6 +616,7 @@ function ProjectComposer({
     );
     setBase(p.lastBase || "main");
     setAutoCommit(p.lastAutoCommit);
+    setAutoPush(p.lastAutoPush);
     setHydrated(true);
   }, [prefsQ.data, hydrated]);
 
@@ -643,6 +650,7 @@ function ProjectComposer({
         baseBranch: base.trim() || "main",
         prompt: p,
         autoCommit,
+        autoPush,
         permissionMode,
         thinkingLevel,
         ...(model.trim() ? { model: model.trim() } : {}),
@@ -653,6 +661,7 @@ function ProjectComposer({
         lastPermissionMode: permissionMode,
         lastThinkingLevel: thinkingLevel,
         lastAutoCommit: autoCommit,
+        lastAutoPush: autoPush,
         ...(agent === "claude"
           ? { lastModelClaude: model.trim() }
           : { lastModelCodex: model.trim() }),
@@ -745,23 +754,19 @@ function ProjectComposer({
           spellCheck={false}
           className="font-mono text-[11px] bg-transparent border-0 outline-none focus:ring-0 text-ink-900 dark:text-ink-50 placeholder:text-ink-400 w-24"
         />
-        <button
-          type="button"
-          onClick={() => setAutoCommit((v) => !v)}
-          className={cn(
-            "inline-flex h-7 items-center rounded border px-2 font-mono text-[11px] transition-colors",
-            autoCommit
-              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-              : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400",
-          )}
-          title={
-            autoCommit
-              ? "Auto-commit is on. Click to leave changes uncommitted."
-              : "Auto-commit is off. Click to let the agent commit."
-          }
-        >
-          commit:{autoCommit ? "on" : "off"}
-        </button>
+        <ToolbarPick
+          label={`commit:${commitModeLabel(autoCommit, autoPush)}`}
+          options={[
+            { value: "none", label: "no commit" },
+            { value: "commit", label: "commit only" },
+            { value: "commit+push", label: "commit + push (default)" },
+          ]}
+          onSelect={(v) => {
+            const next = parseCommitMode(v);
+            setAutoCommit(next.autoCommit);
+            setAutoPush(next.autoPush);
+          }}
+        />
         <Spacer />
         <Button
           size="sm"
@@ -777,37 +782,6 @@ function ProjectComposer({
         </Button>
       </div>
     </section>
-  );
-}
-
-function ToolbarPick({
-  label,
-  options,
-  onSelect,
-}: {
-  label: string;
-  options: { value: string; label: string }[];
-  onSelect: (v: string) => void;
-}) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="inline-flex items-center gap-1 h-7 px-2 rounded border border-ink-900/10 bg-paper-50 font-mono text-[11px] text-ink-700 hover:border-ink-900/25 hover:bg-paper-100 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-200 dark:hover:bg-ink-700 transition-colors"
-        >
-          {label}
-          <ChevronDown className="h-3 w-3 opacity-60" />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-[200px]">
-        {options.map((o) => (
-          <DropdownMenuItem key={o.value} onClick={() => onSelect(o.value)}>
-            <span className="font-mono text-[12px]">{o.label}</span>
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }
 

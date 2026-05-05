@@ -5,7 +5,6 @@ import type { PlanSlice } from "@agentd/contracts";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Switch } from "@/components/ui/switch";
 import {
   useCreateCouncil,
   useCreateTask,
@@ -23,6 +22,11 @@ import {
   defaultWorkspaceSetup,
   type WorkspaceSetupValue,
 } from "@/components/workspace-setup";
+import {
+  ToolbarPick,
+  commitModeLabel,
+  parseCommitMode,
+} from "@/components/toolbar-pick";
 import { cn } from "@/lib/utils";
 
 type PermissionMode = "bypassPermissions" | "acceptEdits" | "plan";
@@ -34,32 +38,6 @@ type ThinkingLevel =
   | "xhigh"
   | "max";
 type SpawnMode = "solo" | "council" | "phase";
-
-// Per-agent thinking-level choices. Claude's CLI takes `--effort` and
-// accepts low|medium|high|xhigh|max (no `minimal`). Codex's CLI takes
-// `-c model_reasoning_effort=` and accepts minimal|low|medium|high|xhigh
-// (no `max`). The UI hides values that aren't valid for the selected
-// agent so the operator doesn't pick something the runner has to clamp.
-const THINKING_LEVEL_META: Record<
-  ThinkingLevel,
-  { label: string; hint: string }
-> = {
-  minimal: {
-    label: "minimal",
-    hint: "codex-only — lightest reasoning tier; near-zero think time",
-  },
-  low: { label: "low", hint: "fastest — quick edits / small refactors" },
-  medium: { label: "medium", hint: "balanced — most everyday tasks" },
-  high: { label: "high", hint: "default — solid for multi-step engineering" },
-  xhigh: {
-    label: "xhigh",
-    hint: "deepest tier — gnarly debugging / architecture",
-  },
-  max: {
-    label: "max",
-    hint: "claude-only — extended thinking budget; slower, deeper",
-  },
-};
 
 const THINKING_LEVELS_BY_AGENT: Record<
   "claude" | "codex",
@@ -79,38 +57,23 @@ function clampThinkingLevel(
   return "high";
 }
 
-const PERMISSION_MODES: { value: PermissionMode; label: string; hint: string }[] = [
-  {
-    value: "bypassPermissions",
-    label: "bypass",
-    hint: "auto-allow every tool — fastest, default for unattended runs",
-  },
-  {
-    value: "acceptEdits",
-    label: "accept-edits",
-    hint: "auto-allow file edits, refuse other tools (Bash, web, …)",
-  },
-  {
-    value: "plan",
-    label: "plan",
-    hint: "read-only — agent produces a plan but doesn't change files",
-  },
+const PERMISSION_OPTIONS = [
+  { value: "bypassPermissions", label: "bypass · auto-allow" },
+  { value: "acceptEdits", label: "accept-edits · edits only" },
+  { value: "plan", label: "plan · read-only" },
 ];
 
-const SPAWN_MODE_META: Record<SpawnMode, { label: string; hint: string }> = {
-  solo: {
-    label: "solo",
-    hint: "single task on a fresh worktree — the default",
-  },
-  council: {
-    label: "council",
-    hint: "run the same prompt across all configured models in parallel; a judge picks the best diff",
-  },
-  phase: {
-    label: "phase",
-    hint: "split work into N sequential slices on a shared branch — each slice picks its own agent / model",
-  },
-};
+function permissionLabel(m: PermissionMode): string {
+  if (m === "bypassPermissions") return "bypass";
+  if (m === "acceptEdits") return "accept-edits";
+  return "plan";
+}
+
+const MODE_OPTIONS = [
+  { value: "solo", label: "solo · single task" },
+  { value: "council", label: "council · all models in parallel" },
+  { value: "phase", label: "phase · sequential slices" },
+];
 
 export function SpawnSheet({
   open,
@@ -132,9 +95,6 @@ export function SpawnSheet({
   const prefsQ = usePrefs();
   const patchPrefs = usePatchPrefs();
 
-  // Form state — initialized to safe defaults, then hydrated from the
-  // server-stored prefs once they arrive. Subsequent edits stay local
-  // until the user hits Spawn, at which point we patch prefs.
   const [projectId, setProjectId] = useState<string>("");
   const [repoPath, setRepoPath] = useState("");
   const [baseBranch, setBaseBranch] = useState("main");
@@ -154,7 +114,6 @@ export function SpawnSheet({
   const [autoFilledForPath, setAutoFilledForPath] = useState<string>("");
   const [hydrated, setHydrated] = useState(false);
 
-  // One-shot hydration from server prefs. Subsequent edits stay local.
   useEffect(() => {
     if (hydrated) return;
     const p = prefsQ.data?.prefs;
@@ -180,8 +139,6 @@ export function SpawnSheet({
     setHydrated(true);
   }, [prefsQ.data, hydrated]);
 
-  // Whenever the agent flips after hydration, swap model to that
-  // agent's last-picked value from prefs.
   useEffect(() => {
     if (!hydrated || !prefsQ.data) return;
     setModel(
@@ -191,9 +148,6 @@ export function SpawnSheet({
     );
   }, [agent, hydrated, prefsQ.data]);
 
-  // Clamp thinking level whenever the operator switches agents so an
-  // inapplicable choice (e.g. `max` on codex, `minimal` on claude)
-  // doesn't get persisted or sent to the runner.
   useEffect(() => {
     setThinkingLevel((cur) => clampThinkingLevel(agent, cur));
   }, [agent]);
@@ -201,9 +155,6 @@ export function SpawnSheet({
   const skillsQ = useSkills(repoPath || undefined);
   const availableSkills = skillsQ.data?.skills ?? [];
 
-  // Auto-pre-fill local skills when repo path changes — they're
-  // per-project, the user almost certainly wants them on. The user can
-  // deselect any of them before spawning.
   useEffect(() => {
     if (!skillsQ.data) return;
     if (!repoPath) return;
@@ -356,6 +307,14 @@ export function SpawnSheet({
       ? "spawn council"
       : "spawn task";
 
+  const modelOptions = [
+    { value: "", label: "(default)" },
+    ...((modelsQ.data?.models[agent] ?? []).map((m) => ({
+      value: m.id,
+      label: m.label || m.id,
+    }))),
+  ];
+
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogPrimitive.Portal>
@@ -368,7 +327,7 @@ export function SpawnSheet({
         <DialogPrimitive.Content
           className={cn(
             "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
-            "w-[96vw] h-[88vh] max-w-[1100px]",
+            "w-[96vw] max-w-[720px] max-h-[88vh]",
             "flex flex-col",
             "border border-ink-900/10 bg-paper-50 shadow-deep dark:border-ink-50/10 dark:bg-ink-800",
             "sm:rounded-xl overflow-hidden",
@@ -379,8 +338,7 @@ export function SpawnSheet({
             New task
           </DialogPrimitive.Title>
 
-          {/* Top header bar */}
-          <header className="flex items-center gap-2 px-4 py-3 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900 shrink-0">
+          <header className="flex items-center gap-2 px-4 py-3 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] shrink-0">
             <Rocket className="h-3.5 w-3.5 text-ember-500" />
             <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
               new task
@@ -399,295 +357,176 @@ export function SpawnSheet({
             </button>
           </header>
 
-          {/* Body — two pane */}
-          <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-            {/* ── LEFT: intent ──────────────────────────────── */}
-            <section className="flex flex-col min-w-0 border-r border-ink-900/[0.06] dark:border-ink-50/[0.06] overflow-hidden">
-              <header className="flex items-center gap-2 px-4 py-2.5 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900 shrink-0">
-                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
-                  intent
+          <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
+            <ProjectPicker
+              value={projectId}
+              onChange={(p) => {
+                setProjectId(p.id);
+                setRepoPath(p.path);
+              }}
+              autoFocus
+            />
+
+            <Input
+              placeholder="Title (optional, auto-derived from prompt)"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+            />
+
+            {!phaseMode && (
+              <Textarea
+                rows={10}
+                placeholder="Tell the agent what to do…"
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={(e) => {
+                  if (
+                    (e.metaKey || e.ctrlKey) &&
+                    e.key === "Enter" &&
+                    !isPending
+                  ) {
+                    e.preventDefault();
+                    void submit();
+                  }
+                }}
+                className="resize-none font-mono text-[12.5px] leading-relaxed"
+              />
+            )}
+
+            {phaseMode && (
+              <PlanSlicesEditor
+                slices={slices}
+                onChange={setSlices}
+                modelSuggestions={{
+                  claude: (modelsQ.data?.models.claude ?? []).map((m) => m.id),
+                  codex: (modelsQ.data?.models.codex ?? []).map((m) => m.id),
+                }}
+                disabled={spawnMulti.isPending}
+              />
+            )}
+
+            {/* Compact toolbar — same dropdown style as the project composer. */}
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-ink-900/10 bg-paper-100/40 px-2 py-2 dark:border-ink-50/10 dark:bg-ink-900/30">
+              <ToolbarPick
+                label={`mode: ${spawnMode}`}
+                options={MODE_OPTIONS}
+                onSelect={(v) => setMode(v as SpawnMode)}
+              />
+              <ToolbarPick
+                label={`agent: ${agent}`}
+                options={[
+                  { value: "claude", label: "claude" },
+                  { value: "codex", label: "codex" },
+                ]}
+                onSelect={(v) => setAgent(v as "claude" | "codex")}
+              />
+              {!phaseMode && !councilMode && (
+                <>
+                  <ToolbarPick
+                    label={`perms: ${permissionLabel(permissionMode)}`}
+                    options={PERMISSION_OPTIONS}
+                    onSelect={(v) => setPermissionMode(v as PermissionMode)}
+                  />
+                  <ToolbarPick
+                    label={`think: ${thinkingLevel}`}
+                    options={THINKING_LEVELS_BY_AGENT[agent].map((v) => ({
+                      value: v,
+                      label: v,
+                    }))}
+                    onSelect={(v) => setThinkingLevel(v as ThinkingLevel)}
+                  />
+                  <ToolbarPick
+                    label={`model: ${model || "default"}`}
+                    options={modelOptions}
+                    onSelect={setModel}
+                  />
+                </>
+              )}
+              <ToolbarPick
+                label={`commit:${commitModeLabel(autoCommit, autoPush)}`}
+                options={[
+                  { value: "none", label: "no commit" },
+                  { value: "commit", label: "commit only" },
+                  {
+                    value: "commit+push",
+                    label: "commit + push (default)",
+                  },
+                ]}
+                onSelect={(v) => {
+                  const next = parseCommitMode(v);
+                  setAutoCommit(next.autoCommit);
+                  setAutoPush(next.autoPush);
+                }}
+              />
+              {councilMode && (
+                <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 ml-auto">
+                  members:{" "}
+                  {(modelsQ.data?.models[agent] ?? [])
+                    .slice(0, 5)
+                    .map((m) => m.label || m.id)
+                    .join(" / ") || "(none configured)"}
                 </span>
-              </header>
+              )}
+            </div>
 
-              <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-4">
-                <Field>
-                  <FieldLabel>project</FieldLabel>
-                  <ProjectPicker
-                    value={projectId}
-                    onChange={(p) => {
-                      setProjectId(p.id);
-                      setRepoPath(p.path);
-                    }}
-                    autoFocus
-                  />
-                  <FieldHint>
-                    Pick a saved project or hit "Add project" to register a new one.
-                  </FieldHint>
-                </Field>
+            <WorkspaceSetup
+              value={workspace}
+              onChange={(next) => {
+                setWorkspace(next);
+                setBaseBranch(next.baseBranch);
+              }}
+              projectIdOrSlug={projectId || null}
+              prompt={prompt}
+              agent={agent}
+              model={model}
+              thinkingLevel={thinkingLevel}
+              compact
+            />
 
-                <Field>
-                  <FieldLabel>title (optional)</FieldLabel>
-                  <Input
-                    placeholder="auto-derived from prompt"
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                  />
-                </Field>
-
-                {!phaseMode && (
-                  <Field>
-                    <FieldLabel>prompt</FieldLabel>
-                    <Textarea
-                      rows={14}
-                      placeholder="Describe what the agent should do…"
-                      value={prompt}
-                      onChange={(e) => setPrompt(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (
-                          (e.metaKey || e.ctrlKey) &&
-                          e.key === "Enter" &&
-                          !isPending
-                        ) {
-                          e.preventDefault();
-                          void submit();
+            {availableSkills.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+                    skills · {activeSkills.length} active
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {availableSkills.map((s) => {
+                    const id = `${s.scope}:${s.slug}`;
+                    const on = activeSkills.includes(id);
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() =>
+                          setActiveSkills((cur) =>
+                            cur.includes(id)
+                              ? cur.filter((x) => x !== id)
+                              : [...cur, id],
+                          )
                         }
-                      }}
-                      className="resize-none font-mono text-[12.5px] leading-relaxed"
-                    />
-                    <p className="text-[10px] font-mono text-ink-400 dark:text-ink-500 mt-1 inline-flex items-center gap-1.5">
-                      <kbd className="px-1 py-0.5 rounded border border-ink-900/10 dark:border-ink-50/10 font-mono text-[9px]">
-                        ⌘↵
-                      </kbd>
-                      to spawn
-                    </p>
-                  </Field>
-                )}
-
-                {phaseMode && (
-                  <Field>
-                    <FieldLabel>
-                      slices · {slices.length}
-                    </FieldLabel>
-                    <PlanSlicesEditor
-                      slices={slices}
-                      onChange={setSlices}
-                      modelSuggestions={{
-                        claude: (modelsQ.data?.models.claude ?? []).map(
-                          (m) => m.id,
-                        ),
-                        codex: (modelsQ.data?.models.codex ?? []).map((m) => m.id),
-                      }}
-                      disabled={spawnMulti.isPending}
-                    />
-                    <FieldHint>
-                      Slices run in order on a shared branch. Each lands its own
-                      commit; per-slice agent / model / thinking override the
-                      spawn defaults.
-                    </FieldHint>
-                  </Field>
-                )}
-              </div>
-            </section>
-
-            {/* ── RIGHT: configuration ──────────────────────── */}
-            <section className="flex flex-col min-w-0 bg-paper-100/40 dark:bg-ink-900/40 overflow-hidden">
-              <header className="flex items-center gap-2 px-4 py-2.5 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900 shrink-0">
-                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
-                  configuration
-                </span>
-              </header>
-
-              <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-4">
-                <Field>
-                  <FieldLabel>mode</FieldLabel>
-                  <ChipGroup>
-                    {(["solo", "council", "phase"] as SpawnMode[]).map((m) => (
-                      <Chip
-                        key={m}
-                        on={spawnMode === m}
-                        onClick={() => setMode(m)}
-                        title={SPAWN_MODE_META[m].hint}
+                        title={s.description ?? s.name}
+                        className={cn(
+                          "inline-flex items-center gap-1.5 h-6 px-2 rounded-md border font-mono text-[11px] transition-colors",
+                          on
+                            ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+                            : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
+                        )}
                       >
-                        {SPAWN_MODE_META[m].label}
-                      </Chip>
-                    ))}
-                  </ChipGroup>
-                  <FieldHint>{SPAWN_MODE_META[spawnMode].hint}</FieldHint>
-                </Field>
-
-                <Field>
-                  <FieldLabel>agent</FieldLabel>
-                  <ChipGroup>
-                    {(["claude", "codex"] as const).map((a) => (
-                      <Chip
-                        key={a}
-                        on={agent === a}
-                        onClick={() => setAgent(a)}
-                      >
-                        {a}
-                      </Chip>
-                    ))}
-                  </ChipGroup>
-                  {councilMode && (
-                    <FieldHint>
-                      Council members:{" "}
-                      <span className="font-mono">
-                        {(modelsQ.data?.models[agent] ?? [])
-                          .slice(0, 5)
-                          .map((m) => m.label || m.id)
-                          .join(" / ") || "(no models configured)"}
-                      </span>
-                    </FieldHint>
-                  )}
-                </Field>
-
-                <Field>
-                  <FieldLabel>workspace</FieldLabel>
-                  <WorkspaceSetup
-                    value={workspace}
-                    onChange={(next) => {
-                      setWorkspace(next);
-                      setBaseBranch(next.baseBranch);
-                    }}
-                    projectIdOrSlug={projectId || null}
-                    prompt={prompt}
-                    agent={agent}
-                    model={model}
-                    thinkingLevel={thinkingLevel}
-                  />
-                </Field>
-
-                {!phaseMode && (
-                  <>
-                    <Field>
-                      <FieldLabel>permissions</FieldLabel>
-                      <ChipGroup>
-                        {PERMISSION_MODES.map((m) => (
-                          <Chip
-                            key={m.value}
-                            on={permissionMode === m.value}
-                            onClick={() => setPermissionMode(m.value)}
-                            title={m.hint}
-                          >
-                            {m.label}
-                          </Chip>
-                        ))}
-                      </ChipGroup>
-                      <FieldHint>
-                        {
-                          PERMISSION_MODES.find((m) => m.value === permissionMode)
-                            ?.hint
-                        }
-                      </FieldHint>
-                    </Field>
-
-                    <Field>
-                      <FieldLabel>thinking</FieldLabel>
-                      <ChipGroup>
-                        {THINKING_LEVELS_BY_AGENT[agent].map((value) => {
-                          const meta = THINKING_LEVEL_META[value];
-                          return (
-                            <Chip
-                              key={value}
-                              on={thinkingLevel === value}
-                              onClick={() => setThinkingLevel(value)}
-                              title={meta.hint}
-                            >
-                              {meta.label}
-                            </Chip>
-                          );
-                        })}
-                      </ChipGroup>
-                      <FieldHint>
-                        {THINKING_LEVEL_META[thinkingLevel].hint}
-                      </FieldHint>
-                    </Field>
-
-                    <Field>
-                      <FieldLabel>model</FieldLabel>
-                      <Input
-                        value={model}
-                        onChange={(e) => setModel(e.target.value)}
-                        placeholder={(() => {
-                          const first = modelsQ.data?.models[agent]?.[0];
-                          return first
-                            ? `(default) e.g. ${first.id}`
-                            : "(default)";
-                        })()}
-                        spellCheck={false}
-                        className="font-mono text-xs"
-                      />
-                      <FieldHint>
-                        Empty falls back to your Settings → Models default.
-                        Per-task override only.
-                      </FieldHint>
-                    </Field>
-                  </>
-                )}
-
-                {availableSkills.length > 0 && (
-                  <Field>
-                    <FieldLabel>
-                      skills · {activeSkills.length} active
-                    </FieldLabel>
-                    <ChipGroup>
-                      {availableSkills.map((s) => {
-                        const id = `${s.scope}:${s.slug}`;
-                        const on = activeSkills.includes(id);
-                        const auto = s.scope === "local";
-                        return (
-                          <Chip
-                            key={id}
-                            on={on}
-                            onClick={() =>
-                              setActiveSkills((cur) =>
-                                cur.includes(id)
-                                  ? cur.filter((x) => x !== id)
-                                  : [...cur, id],
-                              )
-                            }
-                            title={s.description ?? s.name}
-                          >
-                            <BookText className="h-3 w-3" />
-                            <span>{s.displayName ?? s.name}</span>
-                            <span className="font-mono text-[9px] text-ink-400 dark:text-ink-500">
-                              {s.scope}
-                            </span>
-                            {auto && on && (
-                              <span className="font-mono text-[9px] uppercase tracking-[0.06em] text-ember-700 dark:text-ember-300">
-                                auto
-                              </span>
-                            )}
-                          </Chip>
-                        );
-                      })}
-                    </ChipGroup>
-                    <FieldHint>
-                      Selected skills get appended to the agent's system prompt.
-                    </FieldHint>
-                  </Field>
-                )}
-
-                <div className="rounded-md border border-ink-900/10 bg-paper-50 dark:border-ink-50/10 dark:bg-ink-800 divide-y divide-ink-900/[0.06] dark:divide-ink-50/[0.06]">
-                  <SwitchRow
-                    label="auto-commit"
-                    hint="Commit any leftover changes when the agent finishes."
-                    checked={autoCommit}
-                    onChange={setAutoCommit}
-                  />
-                  <SwitchRow
-                    label="auto-push"
-                    hint="Push the branch when the agent completes."
-                    checked={autoPush}
-                    onChange={setAutoPush}
-                  />
+                        <BookText className="h-3 w-3" />
+                        <span>{s.displayName ?? s.name}</span>
+                        <span className="font-mono text-[9px] text-ink-400 dark:text-ink-500">
+                          {s.scope}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
-            </section>
+            )}
           </div>
 
-          {/* Footer */}
-          <footer className="flex items-center gap-1.5 px-4 py-3 border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] bg-paper-50 dark:bg-ink-900 shrink-0">
+          <footer className="flex items-center gap-1.5 px-4 py-3 border-t border-ink-900/[0.06] dark:border-ink-50/[0.06] shrink-0">
             <button
               type="button"
               onClick={onClose}
@@ -695,7 +534,12 @@ export function SpawnSheet({
             >
               cancel
             </button>
-            <span className="ml-auto" />
+            <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 ml-auto inline-flex items-center gap-1.5">
+              <kbd className="px-1 py-0.5 rounded border border-ink-900/10 dark:border-ink-50/10 font-mono text-[9px]">
+                ⌘↵
+              </kbd>
+              to spawn
+            </span>
             <button
               type="button"
               onClick={() => void submit()}
@@ -713,83 +557,5 @@ export function SpawnSheet({
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
-  );
-}
-
-function Field({ children }: { children: React.ReactNode }) {
-  return <div className="space-y-1.5">{children}</div>;
-}
-
-function FieldLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <label className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400 block">
-      {children}
-    </label>
-  );
-}
-
-function FieldHint({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-[10px] text-ink-400 dark:text-ink-500 leading-relaxed">
-      {children}
-    </p>
-  );
-}
-
-function ChipGroup({ children }: { children: React.ReactNode }) {
-  return <div className="flex flex-wrap gap-1.5">{children}</div>;
-}
-
-function Chip({
-  on,
-  onClick,
-  title,
-  children,
-}: {
-  on: boolean;
-  onClick: () => void;
-  title?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      className={cn(
-        "inline-flex items-center gap-1.5 h-6 px-2 rounded-md border font-mono text-[11px] transition-colors",
-        on
-          ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
-          : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function SwitchRow({
-  label,
-  hint,
-  checked,
-  onChange,
-}: {
-  label: string;
-  hint: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <div className="flex items-center justify-between p-3">
-      <div className="pr-3">
-        <span className="font-mono text-[11px] text-ink-700 dark:text-ink-200">
-          {label}
-        </span>
-        <p className="text-[10px] text-ink-400 dark:text-ink-500 leading-relaxed mt-0.5">
-          {hint}
-        </p>
-      </div>
-      <Switch checked={checked} onCheckedChange={onChange} />
-    </div>
   );
 }
