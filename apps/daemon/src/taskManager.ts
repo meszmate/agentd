@@ -1716,7 +1716,7 @@ export class TaskManager {
     if (sug.status !== "pending") {
       throw new Error(`suggestion is ${sug.status}, not pending`);
     }
-    let chosenText: string;
+    let chosenText: string | null = null;
     let chosenIndex: number | null = null;
     if (typeof pick.index === "number") {
       if (pick.index < 0 || pick.index >= sug.options.length) {
@@ -1724,9 +1724,14 @@ export class TaskManager {
       }
       chosenIndex = pick.index;
       chosenText = sug.options[pick.index]!;
-    } else if (pick.text && pick.text.trim()) {
+    }
+    // `text` (e.g. an edited plan) wins over the original option when both
+    // are sent: the UI passes `index` to record which seed was picked but
+    // `text` is the actual prompt the operator wants to spawn with.
+    if (pick.text && pick.text.trim()) {
       chosenText = pick.text.trim();
-    } else {
+    }
+    if (chosenText == null) {
       throw new Error("provide index or text");
     }
     // Resolve the project to a real repo path. If the template had no
