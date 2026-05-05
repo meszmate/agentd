@@ -186,6 +186,29 @@ async function localBranchExists(
   return r.exitCode === 0;
 }
 
+/**
+ * Walk `<branch>`, `<branch>-2`, `<branch>-3`, … until we land on a name
+ * that is NOT a local branch. Used by `createWorktree` in the `new`
+ * branch mode so two tasks with the same AI-suggested slug don't
+ * collide on `git worktree add -b` — the second one quietly becomes
+ * `feature/foo-2` instead of bouncing a 400 to the operator. Capped at
+ * 999 attempts so a runaway loop surfaces as an explicit error rather
+ * than spinning forever.
+ */
+async function pickFreeBranchName(
+  repoPath: string,
+  branchName: string,
+): Promise<string> {
+  if (!(await localBranchExists(repoPath, branchName))) return branchName;
+  for (let n = 2; n <= 999; n++) {
+    const candidate = `${branchName}-${n}`;
+    if (!(await localBranchExists(repoPath, candidate))) return candidate;
+  }
+  throw new Error(
+    `unable to find a free branch name after 999 tries (base: ${branchName})`,
+  );
+}
+
 async function currentBranchAt(repoPath: string): Promise<string | null> {
   const r = await run(
     ["git", "symbolic-ref", "--short", "-q", "HEAD"],
@@ -248,16 +271,20 @@ export async function createWorktree(
         );
       }
     } else {
-      // new branch from baseBranch
+      // new branch from baseBranch — auto-suffix if the chosen name is
+      // already taken so two tasks with the same AI-suggested slug don't
+      // bounce a 400 at the operator.
+      const free = await pickFreeBranchName(repoPath, branchName);
       const r = await run(
-        ["git", "checkout", "-b", branchName, baseBranch],
+        ["git", "checkout", "-b", free, baseBranch],
         repoPath,
       );
       if (r.exitCode !== 0) {
         throw new Error(
-          `git checkout -b ${branchName} failed: ${r.stderr || r.stdout}`,
+          `git checkout -b ${free} failed: ${r.stderr || r.stdout}`,
         );
       }
+      return { worktreePath: repoPath, branch: free };
     }
     return { worktreePath: repoPath, branch: branchName };
   }
@@ -316,8 +343,14 @@ export async function createWorktree(
     }
     return { worktreePath, branch: branchName };
   }
+  // Default `new` mode: auto-suffix `-2`, `-3`, … if the AI-chosen
+  // branch name is already taken (a prior task with the same slug,
+  // a leftover from a force-killed run, etc.). Without this, two
+  // tasks spawned with similar prompts hit a 400 because git refuses
+  // to recreate an existing branch.
+  const free = await pickFreeBranchName(repoPath, branchName);
   const r = await run(
-    ["git", "worktree", "add", "-b", branchName, worktreePath, baseBranch],
+    ["git", "worktree", "add", "-b", free, worktreePath, baseBranch],
     repoPath,
   );
   if (r.exitCode !== 0) {
@@ -325,7 +358,7 @@ export async function createWorktree(
       `git worktree add failed (exit ${r.exitCode}): ${r.stderr || r.stdout}`,
     );
   }
-  return { worktreePath, branch: branchName };
+  return { worktreePath, branch: free };
 }
 
 export async function removeWorktree(

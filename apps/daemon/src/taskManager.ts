@@ -460,6 +460,12 @@ export class TaskManager {
         pullLatest: params.pullLatest ?? false,
       });
       worktreePath = result.worktreePath;
+      // `result.branch` may have been auto-suffixed (`-2`, `-3`, …) when
+      // the AI's chosen name collided with an existing branch. Persist
+      // the actual one so the task row, PR generator, and `git push`
+      // line all reference the real ref. The PR-checkout block below
+      // can still override this for `params.githubPr` runs.
+      branch = result.branch;
       // PR task: switch the worktree onto the PR's branch so the agent
       // sees the proposed changes (and any commits we add land back on
       // the right branch). `gh pr checkout` resolves the head ref —
@@ -1827,13 +1833,13 @@ export class TaskManager {
         .slice(0, 24);
       memberLabels.push(label);
       const taskId = newId("task");
-      const branch = `${ai.prefix}/${baseSlug}-${safeLabel}-${taskId.slice(-4)}`;
-      const { worktreePath } = await createWorktree({
+      const requestedBranch = `${ai.prefix}/${baseSlug}-${safeLabel}-${taskId.slice(-4)}`;
+      const { worktreePath, branch: actualBranch } = await createWorktree({
         repoPath: params.repoPath,
         worktreeRoot: this.paths.worktrees,
         taskId,
         baseBranch,
-        branchName: branch,
+        branchName: requestedBranch,
         workspaceMode: "worktree",
         branchMode: "new",
         pullLatest: false,
@@ -1844,7 +1850,7 @@ export class TaskManager {
         agent: m.agent,
         repoPath: params.repoPath,
         worktreePath,
-        branch,
+        branch: actualBranch,
         baseBranch,
         projectId,
         // Council members default to no auto-push — the operator picks
