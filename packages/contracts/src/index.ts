@@ -550,10 +550,9 @@ export const CreateTaskRequest = z.object({
   prompt: z.string().min(1),
   title: z.string().optional(),
   // Pre-spawn toggles for what happens after the agent finishes a turn.
-  // Commit + push default on. PRs default off and require explicit opt-in.
+  // Commit + push default on. Pull requests stay manual from Ship.
   autoCommit: z.boolean().optional(),
   autoPush: z.boolean().optional(),
-  autoPr: z.boolean().optional(),
   // Skill ids of the form `scope:slug` to activate on spawn.
   skills: z.array(z.string()).optional(),
   permissionMode: PermissionMode.optional(),

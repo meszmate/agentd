@@ -141,13 +141,9 @@ export function SpawnSheet({
   const [agent, setAgent] = useState<"claude" | "codex">("claude");
   const [prompt, setPrompt] = useState("");
   const [title, setTitle] = useState("");
-  // Defaults: commit + push ON, PR OFF (PRs were historically opened
-  // manually from the Ship menu — keep that as the default but let the
-  // operator opt in per task). All three persist to prefs on submit so
-  // the same selections come back on the next spawn.
+  // Defaults: commit + push ON. Pull requests stay manual from Ship.
   const [autoCommit, setAutoCommit] = useState(true);
   const [autoPush, setAutoPush] = useState(true);
-  const [autoPr, setAutoPr] = useState(false);
   const [permissionMode, setPermissionMode] =
     useState<PermissionMode>("bypassPermissions");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("high");
@@ -172,7 +168,6 @@ export function SpawnSheet({
     setAgent(p.lastAgent);
     setAutoCommit(p.lastAutoCommit);
     setAutoPush(p.lastAutoPush);
-    setAutoPr(p.lastAutoPr);
     setPermissionMode(p.lastPermissionMode);
     setThinkingLevel(clampThinkingLevel(p.lastAgent, p.lastThinkingLevel));
     setModel(
@@ -339,7 +334,6 @@ export function SpawnSheet({
         title: title.trim() || undefined,
         autoCommit,
         autoPush,
-        autoPr,
         permissionMode,
         thinkingLevel,
         ...(model.trim() ? { model: model.trim() } : {}),
@@ -361,7 +355,6 @@ export function SpawnSheet({
         lastAgent: agent,
         lastAutoCommit: autoCommit,
         lastAutoPush: autoPush,
-        lastAutoPr: autoPr,
         lastPermissionMode: permissionMode,
         lastThinkingLevel: thinkingLevel,
         ...(agent === "claude"
@@ -626,17 +619,6 @@ export function SpawnSheet({
                   </p>
                 </div>
                 <Switch checked={autoPush} onCheckedChange={setAutoPush} />
-              </div>
-              <div className="flex items-center justify-between p-3">
-                <div>
-                  <Label className="text-xs normal-case tracking-normal text-foreground">
-                    Auto-PR
-                  </Label>
-                  <p className="text-2xs text-muted-foreground">
-                    Open a pull request after the first push (default off).
-                  </p>
-                </div>
-                <Switch checked={autoPr} onCheckedChange={setAutoPr} />
               </div>
             </div>
 

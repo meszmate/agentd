@@ -80,7 +80,6 @@ export interface AgentdUserPrefs {
   lastProjectId: string;
   lastAutoCommit: boolean;
   lastAutoPush: boolean;
-  lastAutoPr: boolean;
   lastPermissionMode: "bypassPermissions" | "acceptEdits" | "plan";
   lastThinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   lastModelClaude: string;

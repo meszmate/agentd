@@ -25,7 +25,6 @@ const LEGACY_KEYS = [
   "agentd.lastBase",
   "agentd.lastAgent",
   "agentd.lastAutoPush",
-  "agentd.lastAutoPr",
   "agentd.lastPermissionMode",
   "agentd.lastThinkingLevel",
   "agentd.lastModelClaude",
@@ -82,7 +81,6 @@ function buildPatch(): Partial<AgentdUserPrefs> | null {
   set("lastBase", localStorage.getItem("agentd.lastBase") ?? undefined);
   set("lastAgent", readEnum("agentd.lastAgent", ["claude", "codex"] as const));
   set("lastAutoPush", readBool("agentd.lastAutoPush"));
-  set("lastAutoPr", readBool("agentd.lastAutoPr"));
   set(
     "lastPermissionMode",
     readEnum("agentd.lastPermissionMode", [

@@ -77,7 +77,6 @@ export function createTemplate(db: Db, input: CreateTemplateInput): Template {
       baseBranch: input.baseBranch,
       promptTemplate: input.promptTemplate,
       autoPush: input.autoPush ? 1 : 0,
-      autoPr: 0,
       permissionMode: input.permissionMode ?? "bypassPermissions",
       thinkingLevel: input.thinkingLevel ?? "high",
       model: input.model ?? "",

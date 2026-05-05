@@ -593,6 +593,7 @@ function ProjectComposer({
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("high");
   const [model, setModel] = useState<string>("");
   const [base, setBase] = useState("main");
+  const [autoCommit, setAutoCommit] = useState(true);
   const [busy, setBusy] = useState(false);
   const [hydrated, setHydrated] = useState(false);
 
@@ -608,6 +609,7 @@ function ProjectComposer({
       p.lastAgent === "claude" ? p.lastModelClaude : p.lastModelCodex,
     );
     setBase(p.lastBase || "main");
+    setAutoCommit(p.lastAutoCommit);
     setHydrated(true);
   }, [prefsQ.data, hydrated]);
 
@@ -640,6 +642,7 @@ function ProjectComposer({
         repoPath: project.path,
         baseBranch: base.trim() || "main",
         prompt: p,
+        autoCommit,
         permissionMode,
         thinkingLevel,
         ...(model.trim() ? { model: model.trim() } : {}),
@@ -649,6 +652,7 @@ function ProjectComposer({
         lastAgent: agent,
         lastPermissionMode: permissionMode,
         lastThinkingLevel: thinkingLevel,
+        lastAutoCommit: autoCommit,
         ...(agent === "claude"
           ? { lastModelClaude: model.trim() }
           : { lastModelCodex: model.trim() }),
@@ -741,6 +745,23 @@ function ProjectComposer({
           spellCheck={false}
           className="font-mono text-[11px] bg-transparent border-0 outline-none focus:ring-0 text-ink-900 dark:text-ink-50 placeholder:text-ink-400 w-24"
         />
+        <button
+          type="button"
+          onClick={() => setAutoCommit((v) => !v)}
+          className={cn(
+            "inline-flex h-7 items-center rounded border px-2 font-mono text-[11px] transition-colors",
+            autoCommit
+              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+              : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400",
+          )}
+          title={
+            autoCommit
+              ? "Auto-commit is on. Click to leave changes uncommitted."
+              : "Auto-commit is off. Click to let the agent commit."
+          }
+        >
+          commit:{autoCommit ? "on" : "off"}
+        </button>
         <Spacer />
         <Button
           size="sm"
