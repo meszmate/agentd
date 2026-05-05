@@ -21,6 +21,8 @@ import {
   ThinkingLevel,
   MirrorTarget,
   CreateCouncilRequest,
+  type ActiveIdeaTurn,
+  type IdeaMessageEvent,
   IdeaChatRequest,
   IdeateRequest,
   PlanSuggestionRequest,
@@ -279,6 +281,51 @@ export function buildServer(opts: BuildServerOptions) {
       ideaId,
       projectId,
     });
+  }
+
+  /**
+   * In-flight idea-turn tracking. Each entry holds the running snapshot
+   * of an idea's chat / plan / challenge agent run — the partial reply,
+   * partial plan, accumulated tool events, plus an `abort()` so callers
+   * can cancel. Lives in process memory; clears when the helper finishes
+   * (or the daemon restarts). Surfaces that have the idea open subscribe
+   * to `idea_turn` WS events for live deltas, and can pull the current
+   * snapshot from `GET /saved-ideas/:id/active-turn` when they navigate
+   * in mid-stream.
+   */
+  type ActiveIdeaTurnRecord = ActiveIdeaTurn & {
+    abort: () => void;
+    lastBroadcast: number;
+  };
+  const activeIdeaTurns = new Map<string, ActiveIdeaTurnRecord>();
+  const IDEA_TURN_BROADCAST_MS = 250;
+
+  function pubIdeaTurn(ideaId: string, turn: ActiveIdeaTurn | null): void {
+    bus.publishSystem({ kind: "idea_turn", ideaId, turn });
+  }
+
+  function snapshotTurn(rec: ActiveIdeaTurnRecord): ActiveIdeaTurn {
+    return {
+      ideaId: rec.ideaId,
+      mode: rec.mode,
+      startedAt: rec.startedAt,
+      userMessage: rec.userMessage,
+      partialReply: rec.partialReply,
+      partialPlan: rec.partialPlan,
+      events: rec.events,
+      ...(rec.agent ? { agent: rec.agent } : {}),
+      ...(rec.model ? { model: rec.model } : {}),
+    };
+  }
+
+  function maybeBroadcastTurn(
+    rec: ActiveIdeaTurnRecord,
+    force = false,
+  ): void {
+    const now = Date.now();
+    if (!force && now - rec.lastBroadcast < IDEA_TURN_BROADCAST_MS) return;
+    rec.lastBroadcast = now;
+    pubIdeaTurn(rec.ideaId, snapshotTurn(rec));
   }
   /**
    * GitHub state for a project shifted — issue/PR list refresh, spawn,
@@ -3574,6 +3621,12 @@ export function buildServer(opts: BuildServerOptions) {
     if (mode === "chat" && !userMessage) {
       return c.json({ error: "text required for chat mode" }, 400);
     }
+    // Refuse to start a second turn while one is mid-flight for this
+    // idea — the operator must Stop or wait. Prevents two helpers
+    // racing to mutate the same idea's plan + thread.
+    if (activeIdeaTurns.has(id)) {
+      return c.json({ error: "a turn is already in flight" }, 409);
+    }
     // Persist the operator's turn before spawning the helper so the
     // thread always reflects truth even if the helper never responds.
     if ((mode === "chat" || mode === "validate") && userMessage) {
@@ -3613,9 +3666,58 @@ export function buildServer(opts: BuildServerOptions) {
       role: m.role,
       content: m.content,
     }));
+    // Active-turn record. Updated on every helper event; broadcast
+    // throttled over the WS bus so any other open surface follows
+    // along live, and persisted at the end. The HTTP response is
+    // best-effort — if the operator navigates away, the helper keeps
+    // running and the WS bus + DB carry the result.
+    const it = streamIdeaConversation(project.path, {
+      title: idea.text,
+      description: idea.description,
+      planDraft: idea.planDraft,
+      history,
+      ...(userMessage ? { userMessage } : {}),
+      mode,
+      helper,
+    });
+    const aborted = { value: false };
+    const turnRec: ActiveIdeaTurnRecord = {
+      ideaId: id,
+      mode,
+      startedAt: Date.now(),
+      userMessage: userMessage || null,
+      partialReply: "",
+      partialPlan: "",
+      events: [],
+      ...(parsed.data.agent ? { agent: parsed.data.agent } : {}),
+      ...(parsed.data.model ? { model: parsed.data.model } : {}),
+      lastBroadcast: 0,
+      abort: () => {
+        aborted.value = true;
+        try {
+          void it.return?.(undefined as never);
+        } catch {
+          // helper iterators don't always implement return — best effort
+        }
+      },
+    };
+    activeIdeaTurns.set(id, turnRec);
+    pubIdeaTurn(id, snapshotTurn(turnRec));
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         const enc = new TextEncoder();
+        // The HTTP response is decorative — the source of truth is the
+        // active-turn record + the WS bus. Wrap controller.enqueue so a
+        // disconnected client never crashes the iteration loop. The
+        // helper keeps running, results land in the DB, and the bus
+        // carries the deltas to whatever surface the operator's now on.
+        const safeEnqueue = (chunk: Uint8Array): void => {
+          try {
+            controller.enqueue(chunk);
+          } catch {
+            // client gone — keep iterating regardless
+          }
+        };
         // We accumulate the agent's tool-call events so they can
         // be persisted on the agent message — the workshop replays
         // the activity timeline from this on reload, like task pages.
@@ -3624,21 +3726,22 @@ export function buildServer(opts: BuildServerOptions) {
           [k: string]: unknown;
         }> = [];
         try {
-          const it = streamIdeaConversation(project.path, {
-            title: idea.text,
-            description: idea.description,
-            planDraft: idea.planDraft,
-            history,
-            ...(userMessage ? { userMessage } : {}),
-            mode,
-            helper,
-          });
           while (true) {
             const next = await it.next();
             if (next.done) {
               const result = next.value;
-              if (!result.reply) {
-                controller.enqueue(
+              if (aborted.value) {
+                safeEnqueue(
+                  enc.encode(
+                    `\x1e${JSON.stringify({
+                      ok: false,
+                      source: "cancelled",
+                      error: "turn cancelled by operator",
+                    })}`,
+                  ),
+                );
+              } else if (!result.reply) {
+                safeEnqueue(
                   enc.encode(
                     `\x1e${JSON.stringify({
                       ok: false,
@@ -3739,7 +3842,7 @@ export function buildServer(opts: BuildServerOptions) {
                     });
                   }
                 }
-                controller.enqueue(
+                safeEnqueue(
                   enc.encode(
                     `\x1e${JSON.stringify({
                       ok: true,
@@ -3768,11 +3871,17 @@ export function buildServer(opts: BuildServerOptions) {
             const ev = next.value;
             if (ev.kind === "tool_use" || ev.kind === "tool_result") {
               accumulatedEvents.push(ev);
+              turnRec.events.push(ev as IdeaMessageEvent);
+            } else if (ev.kind === "text") {
+              turnRec.partialReply += ev.delta;
+            } else if (ev.kind === "plan_delta") {
+              turnRec.partialPlan += ev.delta;
             }
-            controller.enqueue(enc.encode(`\x1f${JSON.stringify(ev)}\n`));
+            maybeBroadcastTurn(turnRec);
+            safeEnqueue(enc.encode(`\x1f${JSON.stringify(ev)}\n`));
           }
         } catch (e) {
-          controller.enqueue(
+          safeEnqueue(
             enc.encode(
               `\x1e${JSON.stringify({
                 ok: false,
@@ -3782,7 +3891,18 @@ export function buildServer(opts: BuildServerOptions) {
             ),
           );
         } finally {
-          controller.close();
+          // Clear the active turn AFTER persistence so any subscriber
+          // that wakes up at this exact moment still sees the final
+          // snapshot — then explicitly broadcast `turn: null` so they
+          // know it ended and can fold the live deltas back into the
+          // persisted thread.
+          activeIdeaTurns.delete(id);
+          pubIdeaTurn(id, null);
+          try {
+            controller.close();
+          } catch {
+            // already closed (client disconnect path)
+          }
         }
       },
     });
@@ -3792,6 +3912,34 @@ export function buildServer(opts: BuildServerOptions) {
         "cache-control": "no-cache",
       },
     });
+  });
+
+  /**
+   * Snapshot of an idea's currently-running turn (if any). Lets surfaces
+   * that navigate into the workshop mid-stream pick up the partial
+   * reply / plan / tool activity without waiting for the next WS delta
+   * — i.e. plan drafting started on phone, operator opens it on laptop
+   * and immediately sees the agent's progress so far.
+   */
+  api.get("/saved-ideas/:id/active-turn", (c) => {
+    const id = c.req.param("id");
+    const idea = getSavedIdea(db, id);
+    if (!idea) return c.json({ error: "not found" }, 404);
+    const rec = activeIdeaTurns.get(id);
+    return c.json({ turn: rec ? snapshotTurn(rec) : null });
+  });
+
+  /**
+   * Cancel an in-flight turn. Aborts the helper iterator; the loop
+   * sees the abort flag and ends cleanly, persisting nothing for the
+   * cancelled turn. Returns 200 even when there's nothing to cancel
+   * so the operator's Stop button is idempotent.
+   */
+  api.post("/saved-ideas/:id/cancel-turn", (c) => {
+    const id = c.req.param("id");
+    const rec = activeIdeaTurns.get(id);
+    if (rec) rec.abort();
+    return c.json({ ok: true });
   });
 
   api.delete("/saved-ideas/:id", (c) => {
@@ -5136,6 +5284,13 @@ export function buildServer(opts: BuildServerOptions) {
               type: "saved_idea_removed",
               ideaId: env.event.ideaId,
               projectId: env.event.projectId,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "idea_turn") {
+            send({
+              type: "idea_turn",
+              ideaId: env.event.ideaId,
+              turn: env.event.turn,
               ts: env.ts,
             });
           } else if (env.event.kind === "provider_rate_limit_updated") {

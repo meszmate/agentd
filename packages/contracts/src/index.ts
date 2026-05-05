@@ -983,6 +983,31 @@ export const IdeaChatRequest = z.object({
 export type IdeaChatRequest = z.infer<typeof IdeaChatRequest>;
 
 /**
+ * In-flight conversation turn — populated while the agent is mid-stream
+ * for a given idea. Lives in daemon memory (cleared on completion or
+ * cancel) and is broadcast over WS so any surface that opens the idea
+ * mid-stream can pick up where the helper is, instead of the work
+ * appearing to "stop" because the operator navigated away.
+ */
+export const ActiveIdeaTurn = z.object({
+  ideaId: z.string(),
+  mode: z.enum(["chat", "challenge", "plan", "validate"]),
+  startedAt: z.number(),
+  /** Operator's text for chat / plan modes (empty for challenge). */
+  userMessage: z.string().nullable(),
+  /** Accumulated agent reply text deltas. */
+  partialReply: z.string(),
+  /** Accumulated `<plan-update>` body deltas (chat mode) — empty in plan mode. */
+  partialPlan: z.string(),
+  /** Tool-call activity captured so far. */
+  events: z.array(IdeaMessageEvent),
+  /** `agent:model` shape so the UI can show what's running. */
+  agent: AgentKind.optional(),
+  model: z.string().optional(),
+});
+export type ActiveIdeaTurn = z.infer<typeof ActiveIdeaTurn>;
+
+/**
  * One rater's second-opinion scoring of a Suggestion's options.
  * `scores[i]` is the 0-100 score this rater gave for `options[i]`.
  * Multiple validations can stack on the same suggestion so the
@@ -1859,6 +1884,17 @@ export const WsServerEvent = z.discriminatedUnion("type", [
     type: z.literal("saved_idea_removed"),
     ideaId: z.string(),
     projectId: z.string().nullable(),
+    ts: z.number(),
+  }),
+  // Pushed throughout an idea's chat / plan / challenge turn so any
+  // surface that has the idea open sees live deltas — text token, tool
+  // call, plan body — without holding open the original streaming
+  // request. `turn: null` means the turn ended (the persisted message
+  // is already in the idea's messages array via saved_idea_changed).
+  z.object({
+    type: z.literal("idea_turn"),
+    ideaId: z.string(),
+    turn: ActiveIdeaTurn.nullable(),
     ts: z.number(),
   }),
   // Fired when GitHub state for a project shifts in a way the issue / PR

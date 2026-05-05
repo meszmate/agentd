@@ -438,7 +438,19 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           void qc.invalidateQueries({ queryKey: qk.idea(msg.ideaId) });
           if (msg.type === "saved_idea_removed") {
             qc.removeQueries({ queryKey: qk.idea(msg.ideaId) });
+            qc.removeQueries({ queryKey: qk.ideaActiveTurn(msg.ideaId) });
           }
+          return;
+        }
+        if (msg.type === "idea_turn") {
+          // Patch the active-turn snapshot cache so any open workshop
+          // surface follows the helper's progress live without holding
+          // open the original streaming HTTP request. `turn: null` =
+          // the turn ended (the persisted message + plan land via
+          // `saved_idea_changed`).
+          qc.setQueryData(qk.ideaActiveTurn(msg.ideaId), {
+            turn: msg.turn,
+          });
           return;
         }
         if (msg.type === "models_changed") {

@@ -76,16 +76,65 @@ import {
 import { useApp, useClient } from "@/AppContext";
 import {
   qk,
+  useCancelIdeaTurn,
   useDeleteSavedIdea,
   useIdea,
+  useIdeaActiveTurn,
   useModels,
   useProject,
   useResolveSuggestion,
   useSpawnMultiFromSavedIdea,
   useUpdateIdea,
 } from "@/queries";
+import { ToolbarPick } from "@/components/toolbar-pick";
 import { useQueryClient } from "@tanstack/react-query";
 import { cn, formatTs } from "@/lib/utils";
+
+/**
+ * Picker payloads encode `<agent>:<model>` so a single flat menu can
+ * span both registries (claude opus/sonnet/haiku and codex models from
+ * `~/.codex/models_cache.json`). Empty = "use the daemon defaults",
+ * `claude:` / `codex:` = "that agent's default model".
+ */
+function decodeAgentModel(raw: string): {
+  agent?: AgentKind;
+  model?: string;
+  modelLabel?: string;
+} {
+  if (!raw) return {};
+  const idx = raw.indexOf(":");
+  if (idx < 0) return { agent: "claude", model: raw, modelLabel: raw };
+  const agent = raw.slice(0, idx) as AgentKind;
+  const model = raw.slice(idx + 1);
+  return {
+    agent,
+    ...(model ? { model, modelLabel: model } : {}),
+  };
+}
+
+function buildModelOptions(
+  claude: { id: string; label: string }[],
+  codex: { id: string; label: string }[],
+): { value: string; label: string }[] {
+  const opts: { value: string; label: string }[] = [
+    { value: "", label: "(default · claude)" },
+    { value: "claude:", label: "claude · default" },
+    ...claude.map((m) => ({
+      value: `claude:${m.id}`,
+      label: `claude · ${m.label || m.id}`,
+    })),
+  ];
+  if (codex.length > 0) {
+    opts.push({ value: "codex:", label: "codex · default" });
+    for (const m of codex) {
+      opts.push({
+        value: `codex:${m.id}`,
+        label: `codex · ${m.label || m.id}`,
+      });
+    }
+  }
+  return opts;
+}
 
 /**
  * `/projects/:slug/ideas/:id` — single-page workshop for one idea.
@@ -101,35 +150,43 @@ export function IdeaWorkshop() {
   const navigate = useNavigate();
   const projectQ = useProject(slug);
   const ideaQ = useIdea(id ?? null);
+  const activeTurnQ = useIdeaActiveTurn(id ?? null);
   const update = useUpdateIdea();
   const remove = useDeleteSavedIdea();
   const resolve = useResolveSuggestion();
   const spawnMulti = useSpawnMultiFromSavedIdea();
+  const cancelTurn = useCancelIdeaTurn();
+  const modelsQ = useModels();
   const client = useClient();
   const qc = useQueryClient();
   const { toast } = useApp();
 
   const [draft, setDraft] = useState("");
-  const [streaming, setStreaming] = useState(false);
-  const [streamingMode, setStreamingMode] = useState<
-    "chat" | "challenge" | "plan" | null
-  >(null);
-  const [streamingReply, setStreamingReply] = useState("");
-  const [streamingTools, setStreamingTools] = useState<IdeaChatEvent[]>([]);
-  /**
-   * The plan content the agent is writing right now — populated by
-   * `plan_delta` events. While non-empty (or while plan mode is
-   * running), this is what the right panel shows instead of the
-   * persisted `idea.planDraft`. Cleared when the turn ends + the
-   * idea query refetches with the new plan baked in.
-   */
-  const [streamingPlan, setStreamingPlan] = useState("");
-  /**
-   * Wall-clock the agent's turn began. Used to render an elapsed
-   * counter next to the shimmer label so the operator can tell at a
-   * glance how long the agent's been working.
-   */
-  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
+  // Active-turn snapshot drives the live streaming UI. Lives in the
+  // daemon (process-memory map) and arrives via WS deltas; survives
+  // navigation / reload because we re-fetch on mount and the helper
+  // keeps running independently of the original streaming HTTP request.
+  const turn = activeTurnQ.data?.turn ?? null;
+  const streaming = !!turn;
+  const streamingMode: "chat" | "challenge" | "plan" | null =
+    turn && (turn.mode === "chat" || turn.mode === "challenge" || turn.mode === "plan")
+      ? turn.mode
+      : null;
+  const streamingReply = turn?.partialReply ?? "";
+  const streamingPlan = turn?.partialPlan ?? "";
+  const streamingTools = (turn?.events ?? []) as IdeaChatEvent[];
+  const turnStartedAt = turn?.startedAt ?? null;
+  // Picker payloads encode `<agent>:<model>` — empty = daemon default.
+  // Same shape the brainstorm composer uses; lets the operator route a
+  // refinement turn through codex when claude's been long-thinking, or
+  // pin a specific model for cost / speed reasons.
+  const [pick, setPick] = useState<string>("");
+  const pickChoice = decodeAgentModel(pick);
+  const pickLabel = pick
+    ? `${pickChoice.agent} · ${pickChoice.modelLabel ?? "default"}`
+    : "default · claude";
+  const claudeModels = modelsQ.data?.models.claude ?? [];
+  const codexModels = modelsQ.data?.models.codex ?? [];
   /**
    * Tick the elapsed-time display once per second while a turn is in
    * flight — without this, the counter is stuck on whatever it was at
@@ -164,7 +221,6 @@ export function IdeaWorkshop() {
     mq.addEventListener("change", handler);
     return () => mq.removeEventListener("change", handler);
   }, []);
-  const abortRef = useRef<AbortController | null>(null);
   const threadRef = useRef<HTMLDivElement>(null);
   const planScrollRef = useRef<HTMLDivElement>(null);
 
@@ -250,6 +306,7 @@ export function IdeaWorkshop() {
   const send = async (mode: "chat" | "challenge" | "plan") => {
     if (!id) return;
     if (mode === "chat" && !draft.trim()) return;
+    if (streaming) return;
     const userText = draft.trim();
     if (mode === "chat") {
       setPendingUser(userText);
@@ -261,63 +318,71 @@ export function IdeaWorkshop() {
       // the plan: <text>") so the thread stays clean.
       setDraft("");
     }
-    setStreaming(true);
-    setStreamingMode(mode);
-    setStreamingReply("");
-    setStreamingTools([]);
-    setStreamingPlan("");
-    setTurnStartedAt(Date.now());
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-    try {
-      const r = await client.streamIdeaChat(
-        id,
-        {
-          mode,
-          ...(mode === "chat" || mode === "plan"
-            ? userText
-              ? { text: userText }
-              : {}
-            : {}),
-        },
-        (event) => {
-          if (event.kind === "text") {
-            setStreamingReply((p) => p + event.delta);
-          } else if (event.kind === "plan_delta") {
-            // Live plan content streaming into the right panel —
-            // either because the operator hit Plan, or because the
-            // agent decided to update the plan during chat.
-            setStreamingPlan((p) => p + event.delta);
-            setPlanPanelOpen(true);
-          } else {
-            setStreamingTools((prev) => [...prev, event]);
-          }
-        },
-        ctrl.signal,
-      );
-      if (r.ok === false) {
-        toast(r.error || "agent didn't respond", true);
-        if (userText) setDraft(userText);
-      } else if (mode === "plan") {
-        setPlanPanelOpen(true);
+    if (mode === "plan") setPlanPanelOpen(true);
+    // Optimistically seed the active-turn cache so the UI flips into
+    // streaming mode without waiting for the first WS broadcast. The
+    // daemon will overwrite this within ~250ms.
+    qc.setQueryData(qk.ideaActiveTurn(id), {
+      turn: {
+        ideaId: id,
+        mode,
+        startedAt: Date.now(),
+        userMessage: userText || null,
+        partialReply: "",
+        partialPlan: "",
+        events: [],
+        ...(pickChoice.agent ? { agent: pickChoice.agent } : {}),
+        ...(pickChoice.model ? { model: pickChoice.model } : {}),
+      },
+    });
+    // Fire-and-forget HTTP — the helper runs detached on the daemon and
+    // broadcasts deltas over WS, so navigating away no longer kills the
+    // turn. We still consume the response (it carries the final
+    // envelope) but don't depend on it for state.
+    void (async () => {
+      try {
+        const r = await client.streamIdeaChat(
+          id,
+          {
+            mode,
+            ...(mode === "chat" || mode === "plan"
+              ? userText
+                ? { text: userText }
+                : {}
+              : {}),
+            ...(pickChoice.agent ? { agent: pickChoice.agent } : {}),
+            ...(pickChoice.model ? { model: pickChoice.model } : {}),
+          },
+          () => {
+            // WS drives the live state — we ignore HTTP-stream events
+            // here so the two paths can't fight each other.
+          },
+        );
+        if (r.ok === false) {
+          toast(r.error || "agent didn't respond", true);
+          if (userText && mode === "chat") setDraft(userText);
+        }
+        void qc.invalidateQueries({ queryKey: qk.idea(id) });
+        void qc.invalidateQueries({ queryKey: ["saved-ideas"] });
+      } catch (e) {
+        // Connection dropped is fine — the daemon keeps running and
+        // the WS layer carries the result. Only show an error for
+        // genuine failures (e.g. 4xx returned synchronously).
+        const name = (e as { name?: string }).name;
+        const msg = (e as Error).message ?? "";
+        if (name !== "AbortError" && !msg.includes("network")) {
+          toast(msg || "request failed", true);
+          if (userText && mode === "chat") setDraft(userText);
+        }
+      } finally {
+        setPendingUser(null);
       }
-      void qc.invalidateQueries({ queryKey: qk.idea(id) });
-      void qc.invalidateQueries({ queryKey: ["saved-ideas"] });
-    } catch (e) {
-      if ((e as { name?: string }).name !== "AbortError") {
-        toast((e as Error).message, true);
-        if (userText) setDraft(userText);
-      }
-    } finally {
-      setStreaming(false);
-      setStreamingMode(null);
-      setStreamingReply("");
-      setStreamingTools([]);
-      setStreamingPlan("");
-      setTurnStartedAt(null);
-      setPendingUser(null);
-      abortRef.current = null;
-    }
+    })();
+  };
+
+  const stopTurn = () => {
+    if (!id) return;
+    cancelTurn.mutate(id);
   };
 
   const setStatus = async (status: IdeaStatus) => {
@@ -600,8 +665,11 @@ export function IdeaWorkshop() {
                 draft={draft}
                 setDraft={setDraft}
                 onSend={send}
-                onStop={() => abortRef.current?.abort()}
+                onStop={stopTurn}
                 hasPlan={!!idea.planDraft}
+                pickLabel={pickLabel}
+                pickOptions={buildModelOptions(claudeModels, codexModels)}
+                onPickChange={setPick}
               />
             </Panel>
             <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-ember-500/40 transition-colors dark:bg-ink-50/10" />
@@ -647,8 +715,11 @@ export function IdeaWorkshop() {
               draft={draft}
               setDraft={setDraft}
               onSend={send}
-              onStop={() => abortRef.current?.abort()}
+              onStop={stopTurn}
               hasPlan={!!idea.planDraft}
+              pickLabel={pickLabel}
+              pickOptions={buildModelOptions(claudeModels, codexModels)}
+              onPickChange={setPick}
               embedded
             />
             {!isWide && idea.planDraft && (
@@ -959,6 +1030,9 @@ function ChatColumn({
   onSend,
   onStop,
   hasPlan,
+  pickLabel,
+  pickOptions,
+  onPickChange,
   embedded = false,
 }: {
   threadRef: React.RefObject<HTMLDivElement>;
@@ -973,6 +1047,9 @@ function ChatColumn({
   onSend: (mode: "chat" | "challenge" | "plan") => Promise<void>;
   onStop: () => void;
   hasPlan: boolean;
+  pickLabel: string;
+  pickOptions: { value: string; label: string }[];
+  onPickChange: (v: string) => void;
   embedded?: boolean;
 }) {
   return (
@@ -1074,6 +1151,12 @@ function ChatColumn({
             ⌘↵ to send
           </span>
           <span className="ml-auto" />
+          <ToolbarPick
+            label={`with · ${pickLabel}`}
+            options={pickOptions}
+            onSelect={onPickChange}
+            align="end"
+          />
           {streaming ? (
             <Button
               size="sm"
