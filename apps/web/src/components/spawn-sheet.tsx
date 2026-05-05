@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { BookText, Loader2, Rocket, X } from "lucide-react";
 import type { PlanSlice } from "@agentd/contracts";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
@@ -14,11 +15,10 @@ import {
   useSkills,
   useSpawnTasksMulti,
 } from "@/queries";
-import { useApp } from "@/AppContext";
+import { useApp, useClient } from "@/AppContext";
 import { ProjectPicker } from "@/components/project-picker";
 import { PlanSlicesEditor } from "@/components/plan-slices-editor";
 import {
-  WorkspaceSetup,
   defaultWorkspaceSetup,
   type WorkspaceSetupValue,
 } from "@/components/workspace-setup";
@@ -505,22 +505,14 @@ export function SpawnSheet({
                   )}
                 </div>
 
-                <div className="space-y-2.5">
-                  <SectionHeading>workspace</SectionHeading>
-                  <WorkspaceSetup
-                    value={workspace}
-                    onChange={(next) => {
-                      setWorkspace(next);
-                      setBaseBranch(next.baseBranch);
-                    }}
-                    projectIdOrSlug={projectId || null}
-                    prompt={prompt}
-                    agent={agent}
-                    model={model}
-                    thinkingLevel={thinkingLevel}
-                    compact
-                  />
-                </div>
+                <WorkspaceRows
+                  value={workspace}
+                  onChange={(next) => {
+                    setWorkspace(next);
+                    setBaseBranch(next.baseBranch);
+                  }}
+                  projectIdOrSlug={projectId || null}
+                />
 
                 {availableSkills.length > 0 && (
                   <div className="space-y-2.5">
@@ -620,6 +612,128 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
   return (
     <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
       {children}
+    </div>
+  );
+}
+
+/**
+ * Compact workspace block for the spawn sheet's right pane. Branch
+ * names are auto-generated server-side from the prompt, so this UI
+ * exposes only the high-level shape: worktree vs in-place, base
+ * branch, optional pull-latest, and an "existing branch" override
+ * for re-runs. No manual branch-name input.
+ */
+function WorkspaceRows({
+  value,
+  onChange,
+  projectIdOrSlug,
+}: {
+  value: WorkspaceSetupValue;
+  onChange: (next: WorkspaceSetupValue) => void;
+  projectIdOrSlug: string | null;
+}) {
+  const client = useClient();
+  const branchesQ = useQuery({
+    queryKey: ["project", projectIdOrSlug ?? "_none", "branches"] as const,
+    queryFn: () => client.listProjectBranches(projectIdOrSlug!),
+    enabled: !!projectIdOrSlug && value.branchMode === "existing",
+    staleTime: 30_000,
+  });
+
+  const branchOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const out: { value: string; label: string }[] = [];
+    for (const b of branchesQ.data?.local ?? []) {
+      if (!seen.has(b)) {
+        seen.add(b);
+        out.push({ value: b, label: b });
+      }
+    }
+    for (const r of branchesQ.data?.remote ?? []) {
+      if (r.ref && !seen.has(r.ref)) {
+        seen.add(r.ref);
+        out.push({ value: r.ref, label: r.ref });
+      }
+    }
+    return out;
+  }, [branchesQ.data]);
+
+  const update = (patch: Partial<WorkspaceSetupValue>): void => {
+    onChange({ ...value, ...patch });
+  };
+
+  const branchLabel =
+    value.branchMode === "existing"
+      ? value.branchName || (branchesQ.isLoading ? "loading…" : "pick existing")
+      : "auto";
+
+  return (
+    <div className="space-y-3">
+      <SettingRow label="workspace">
+        <ToolbarPick
+          label={value.workspaceMode === "in_place" ? "in-place" : "worktree"}
+          options={[
+            { value: "worktree", label: "worktree · isolated copy" },
+            { value: "in_place", label: "in-place · your real branch" },
+          ]}
+          align="end"
+          onSelect={(v) =>
+            update({ workspaceMode: v as WorkspaceSetupValue["workspaceMode"] })
+          }
+        />
+      </SettingRow>
+      <SettingRow label="base">
+        <input
+          value={value.baseBranch}
+          onChange={(e) => update({ baseBranch: e.target.value })}
+          placeholder="main"
+          spellCheck={false}
+          className="font-mono text-[11px] bg-transparent border-0 outline-none focus:ring-0 text-ink-900 dark:text-ink-50 placeholder:text-ink-400 w-28 text-right"
+        />
+      </SettingRow>
+      <SettingRow label="branch">
+        <ToolbarPick
+          label={branchLabel}
+          options={[
+            { value: "__auto__", label: "auto · generated from prompt" },
+            ...(branchOptions.length > 0
+              ? branchOptions
+              : [{ value: "__none__", label: branchesQ.isLoading ? "loading branches…" : "no existing branches" }]),
+          ]}
+          align="end"
+          onSelect={(v) => {
+            if (v === "__auto__")
+              update({ branchMode: "new", branchName: "" });
+            else if (v !== "__none__")
+              update({ branchMode: "existing", branchName: v });
+          }}
+        />
+      </SettingRow>
+      <SettingRow label="pull latest">
+        <button
+          type="button"
+          onClick={() => update({ pullLatest: !value.pullLatest })}
+          className={cn(
+            "h-5 w-9 rounded-full transition-colors relative",
+            value.pullLatest
+              ? "bg-ember-500/40"
+              : "bg-ink-900/10 dark:bg-ink-50/10",
+          )}
+          aria-pressed={value.pullLatest}
+        >
+          <span
+            className={cn(
+              "absolute top-0.5 h-4 w-4 rounded-full bg-paper-50 dark:bg-ink-50 shadow transition-transform",
+              value.pullLatest ? "translate-x-4" : "translate-x-0.5",
+            )}
+          />
+        </button>
+      </SettingRow>
+      {value.workspaceMode === "in_place" && (
+        <p className="text-[10px] text-amber-700 dark:text-amber-300 font-mono leading-relaxed">
+          ⚠ in-place commits land on your real branch. Refused if the worktree has uncommitted changes.
+        </p>
+      )}
     </div>
   );
 }
