@@ -397,6 +397,12 @@ export const chatLinks = sqliteTable("chat_links", {
   createdAt: integer("created_at").notNull(),
 });
 
+export const providerRateLimits = sqliteTable("provider_rate_limits", {
+  provider: text("provider").primaryKey(),
+  windowsJson: text("windows_json").notNull().default("{}"),
+  updatedAt: integer("updated_at").notNull(),
+});
+
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
@@ -595,6 +601,12 @@ CREATE TABLE IF NOT EXISTS chat_links (
   session_id TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   UNIQUE(platform, external_user_id)
+);
+
+CREATE TABLE IF NOT EXISTS provider_rate_limits (
+  provider TEXT PRIMARY KEY,
+  windows_json TEXT NOT NULL DEFAULT '{}',
+  updated_at INTEGER NOT NULL
 );
 `;
 

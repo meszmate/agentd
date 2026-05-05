@@ -57,6 +57,8 @@ const KIND_LABEL: Record<Kind, string> = {
   ask: "❓ ask",
   answer: "↳ answer",
   todos_updated: "todos",
+  rate_limit: "rate limit",
+  auto_compacted: "✂ compacted",
 };
 
 const KIND_TONE: Record<Kind, string> = {
@@ -76,6 +78,8 @@ const KIND_TONE: Record<Kind, string> = {
   ask: "text-amber-700 dark:text-amber-300",
   answer: "text-amber-700 dark:text-amber-300",
   todos_updated: "text-violet-700 dark:text-violet-300",
+  rate_limit: "text-amber-700 dark:text-amber-300",
+  auto_compacted: "text-ink-500 dark:text-ink-400",
 };
 
 const ALL_KINDS: Kind[] = [
@@ -148,6 +152,18 @@ function renderEvent(ev: AgentEvent): { primary: string; secondary?: string } {
       return { primary: `${ev.queue.length} queued` };
     case "todos_updated":
       return { primary: "todos updated" };
+    case "rate_limit":
+      return {
+        primary: `${ev.rateLimitType} · ${ev.status}`,
+        secondary: `resets at ${new Date(ev.resetsAt * 1000).toLocaleString()}`,
+      };
+    case "auto_compacted":
+      return {
+        primary: `compacted (${ev.trigger ?? "auto"})`,
+        secondary: ev.preTokens
+          ? `${ev.preTokens.toLocaleString()} tokens summarized`
+          : undefined,
+      };
   }
 }
 
@@ -266,6 +282,8 @@ export function Activity() {
       ask: 0,
       answer: 0,
       todos_updated: 0,
+      rate_limit: 0,
+      auto_compacted: 0,
     };
     for (const e of events) c[e.kind] += 1;
     return c;

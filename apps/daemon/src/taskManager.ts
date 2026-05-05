@@ -16,6 +16,7 @@ import type {
 import {
   addTaskUsage,
   appendMessage,
+  appendMessageAt,
   autoCommit,
   checkoutPrInWorktree,
   createTask,
@@ -53,6 +54,7 @@ import {
   touchProject,
   pushBranch,
   removeWorktree,
+  setProviderRateLimitWindow,
   syncAgentPlan,
   setTaskCodexThreadId,
   setTaskPlanGroupId,
@@ -142,6 +144,16 @@ export class TaskManager {
    */
   private inputQueue = new Map<string, string[]>();
   private compacting = new Map<string, { startedAt: number }>();
+  /**
+   * Wall-clock when the current turn started — set on every `status:
+   * "running"` we see from a runner, and used as the prune cutoff when
+   * the CLI auto-compacts mid-turn. Pruning at "now" would drop the
+   * agent message of the in-flight turn (codex emits its agent_message
+   * BEFORE the compaction signal lands in `turn.completed`); pruning at
+   * the start of the turn keeps the post-compaction summary intact while
+   * still cutting away everything the CLI no longer remembers.
+   */
+  private turnStartedAt = new Map<string, number>();
   /**
    * Tasks whose agent signaled clean completion via `agentd-progress
    * --done`. The runner closes stdin in response, but claude's CLI may
@@ -943,6 +955,53 @@ export class TaskManager {
     return q.join("\n\n");
   }
 
+  /**
+   * The CLI just compacted its own context — bring our DB into the same
+   * state by:
+   *   1. Inserting a synthetic `system` boundary message at the start of
+   *      the current turn (or `now` if we somehow missed the start).
+   *      This is what the timeline renders as the "Conversation
+   *      compacted" divider.
+   *   2. Pruning every message strictly before that boundary. The
+   *      post-compaction summary message (which arrives in this same
+   *      turn for both runners) lands AFTER the boundary, so it stays.
+   *   3. Stamping `lastCompactedAt` on the task so future spawns inject
+   *      the summary as system context (`appendParts` in spawnRunner).
+   *   4. Publishing the boundary as a regular timeline event AND a
+   *      `task_changed` system event so every connected surface (web,
+   *      telegram, discord, CLI watchers) updates without polling.
+   *
+   * Importantly we do NOT clear `codexThreadId` here — that's a
+   * resume-control id, not a context-resync trigger. The next codex
+   * steer should resume the same thread; codex itself owns whether to
+   * inject its compacted summary or replay the full history.
+   */
+  private handleAutoCompacted(
+    taskId: string,
+    event: AgentEvent & { kind: "auto_compacted" },
+  ): void {
+    const cut = this.turnStartedAt.get(taskId) ?? Date.now();
+    const trigger = event.trigger ?? "auto";
+    const preTokens = event.preTokens;
+    // Tagged prefix so the web's parseSystemMessage can route this to a
+    // dedicated divider treatment instead of the plain monospace row.
+    const detail = preTokens
+      ? `[compacted ${trigger} ${preTokens}] Conversation compacted`
+      : `[compacted ${trigger}] Conversation compacted`;
+    // The boundary message itself sits at the cut timestamp; with
+    // `pruneTaskMessagesBefore`'s `<` predicate (not `<=`) it survives
+    // the prune that immediately follows.
+    appendMessageAt(this.db, taskId, "system", detail, cut);
+    pruneTaskMessagesBefore(this.db, taskId, cut);
+    markTaskCompacted(this.db, taskId);
+    // A manual /compact-in-progress is now redundant (the CLI did the
+    // work for us); clear it so finalizeCompaction doesn't double-prune
+    // on the next idle/done.
+    this.compacting.delete(taskId);
+    const fresh = getTask(this.db, taskId);
+    if (fresh) this.bus.publishSystem({ kind: "task_changed", task: fresh });
+  }
+
   private finalizeCompaction(taskId: string): void {
     const pending = this.compacting.get(taskId);
     if (!pending) return;
@@ -1159,6 +1218,18 @@ export class TaskManager {
         task.agent === "codex" && resume && task.codexThreadId
           ? task.codexThreadId
           : undefined;
+      // Codex-only baseline for the auto-compact heuristic — see
+      // CodexRunner's priorInputTokens / handleStdoutLine. Each `codex
+      // exec` is single-shot, so the runner can't track turn-over-turn
+      // drops itself; we hand it the previous turn's input_tokens (kept
+      // on the task in `latestTurnInputTokens`) and let it fire a
+      // synthetic `auto_compacted` event when this turn comes back with
+      // a sharply lower count. Claude ignores the field — it gets a
+      // clean `compact_boundary` system event in stream-json instead.
+      const priorInputTokens =
+        task.agent === "codex" && resume && task.latestTurnInputTokens
+          ? task.latestTurnInputTokens
+          : undefined;
       await runner.start({
         prompt,
         cwd: task.worktreePath,
@@ -1169,6 +1240,7 @@ export class TaskManager {
         thinkingLevel: task.thinkingLevel ?? "high",
         ...(model ? { model } : {}),
         ...(additionalReadDirs.length ? { additionalReadDirs } : {}),
+        ...(priorInputTokens ? { priorInputTokens } : {}),
         env: {
           AGENTD_TASK_ID: task.id,
           AGENTD_DAEMON_URL: this.daemonUrl,
@@ -1322,6 +1394,14 @@ export class TaskManager {
         status = "done";
         event = { kind: "status", status };
       }
+      // Stamp the turn start time on every `running` transition. The
+      // auto-compact handler uses this as the prune cutoff so the
+      // current turn's messages are preserved even when a CLI compaction
+      // signal lands late within the turn (true for codex's heuristic
+      // detection, harmless for claude's clean boundary).
+      if (status === "running") {
+        this.turnStartedAt.set(taskId, Date.now());
+      }
       updateTaskStatus(this.db, taskId, status);
       // Auto-fire any queued items at the turn boundary for
       // long-lived runners (claude). `idle` means the agent
@@ -1374,6 +1454,46 @@ export class TaskManager {
         cumulative: event.cumulative,
         costUsd: event.costUsd,
       });
+    } else if (event.kind === "auto_compacted") {
+      // Mirror the CLI's own prune. Claude fires this from a
+      // `compact_boundary` system event in stream-json; codex fires it
+      // from a sharp drop in `input_tokens` between turns. Either way
+      // the agent's working memory is now a short summary, so we cut
+      // pre-compaction messages out of our DB to match. Without this
+      // mirror, the web shows the full history while the agent only
+      // sees the summary, and the divergence accumulates with every
+      // subsequent steer.
+      this.handleAutoCompacted(taskId, event);
+    } else if (event.kind === "rate_limit") {
+      // Account-wide signal — mirror onto the singleton row keyed by
+      // provider and broadcast as a system event so the global header
+      // chip refreshes everywhere. Per-task fan-out is suppressed
+      // (return below) because operators don't want this row in every
+      // task's timeline.
+      const session = this.running.get(taskId);
+      const provider = session?.runner.kind ?? "claude";
+      const snapshot = setProviderRateLimitWindow(
+        this.db,
+        provider,
+        event.rateLimitType,
+        {
+          status: event.status,
+          resetsAt: event.resetsAt,
+          ...(event.overageStatus ? { overageStatus: event.overageStatus } : {}),
+          ...(event.overageDisabledReason
+            ? { overageReason: event.overageDisabledReason }
+            : {}),
+          ...(event.isUsingOverage != null
+            ? { usingOverage: event.isUsingOverage }
+            : {}),
+          updatedAt: Date.now(),
+        },
+      );
+      this.bus.publishSystem({
+        kind: "provider_rate_limit_updated",
+        rateLimit: snapshot,
+      });
+      return;
     } else if (event.kind === "exit") {
       const session = this.running.get(taskId);
       if (session) {
@@ -1385,6 +1505,10 @@ export class TaskManager {
       // Drop the codex per-file snapshots — a fresh run rebuilds them
       // from HEAD on first sighting.
       this.codexFileSnapshots.delete(taskId);
+      // The turn is over — drop the cached start time so it doesn't
+      // leak across spawns. The next runner will stamp a fresh value
+      // on its first `status:running`.
+      this.turnStartedAt.delete(taskId);
       // Fire-and-forget; commit + push + PR all run after the agent exits.
       void this.runCompletionHooks(taskId);
     } else if (event.kind === "raw" && event.stream === "stdout") {

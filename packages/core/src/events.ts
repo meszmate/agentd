@@ -1,6 +1,7 @@
 import type {
   AgentEvent,
   Project,
+  ProviderRateLimit,
   Suggestion,
   Task,
   TerminalSession,
@@ -113,7 +114,15 @@ export type SystemEvent =
    * invalidates issue/PR list queries on this so every connected
    * client picks up the new state without polling.
    */
-  | { kind: "github_refreshed"; projectId: string };
+  | { kind: "github_refreshed"; projectId: string }
+  /**
+   * Runner-reported rate-limit snapshot for a provider account.
+   * Today only claude emits these; the daemon mirrors the latest
+   * window into the singleton row keyed by provider and fans out
+   * the full snapshot so every connected surface sees the new
+   * state at once.
+   */
+  | { kind: "provider_rate_limit_updated"; rateLimit: ProviderRateLimit };
 
 export type SystemEventEnvelope = {
   event: SystemEvent;
