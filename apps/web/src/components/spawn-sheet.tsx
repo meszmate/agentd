@@ -427,10 +427,11 @@ export function SpawnSheet({
               </div>
             </section>
 
-            {/* Right pane — settings. Vertical list of label/control rows. */}
+            {/* Right pane — settings. Three sections (run / workspace / skills)
+              separated by hairline rules. */}
             <section className="flex flex-col min-h-0 bg-paper-100/40 dark:bg-ink-900/40">
-              <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-6">
-                <div className="space-y-3">
+              <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 divide-y divide-ink-900/[0.06] dark:divide-ink-50/[0.06]">
+                <SettingsGroup title="run">
                   <SettingRow label="mode">
                     <ToolbarPick
                       label={spawnMode}
@@ -503,22 +504,24 @@ export function SpawnSheet({
                       />
                     </SettingRow>
                   )}
-                </div>
+                </SettingsGroup>
 
-                <WorkspaceRows
-                  value={workspace}
-                  onChange={(next) => {
-                    setWorkspace(next);
-                    setBaseBranch(next.baseBranch);
-                  }}
-                  projectIdOrSlug={projectId || null}
-                />
+                <SettingsGroup title="workspace">
+                  <WorkspaceRows
+                    value={workspace}
+                    onChange={(next) => {
+                      setWorkspace(next);
+                      setBaseBranch(next.baseBranch);
+                    }}
+                    projectIdOrSlug={projectId || null}
+                  />
+                </SettingsGroup>
 
                 {availableSkills.length > 0 && (
-                  <div className="space-y-2.5">
-                    <SectionHeading>
-                      skills · {activeSkills.length} active
-                    </SectionHeading>
+                  <SettingsGroup
+                    title="skills"
+                    badge={`${activeSkills.length} active`}
+                  >
                     <div className="flex flex-wrap gap-1.5">
                       {availableSkills.map((s) => {
                         const id = `${s.scope}:${s.slug}`;
@@ -551,7 +554,7 @@ export function SpawnSheet({
                         );
                       })}
                     </div>
-                  </div>
+                  </SettingsGroup>
                 )}
               </div>
             </section>
@@ -591,6 +594,32 @@ export function SpawnSheet({
   );
 }
 
+function SettingsGroup({
+  title,
+  badge,
+  children,
+}: {
+  title: string;
+  badge?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="py-4 first:pt-0 last:pb-0 space-y-2.5">
+      <div className="flex items-baseline justify-between">
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-600 dark:text-ink-300">
+          {title}
+        </span>
+        {badge && (
+          <span className="font-mono text-[10px] tracking-[0.04em] text-ink-400 dark:text-ink-500">
+            {badge}
+          </span>
+        )}
+      </div>
+      <div className="space-y-2">{children}</div>
+    </div>
+  );
+}
+
 function SettingRow({
   label,
   children,
@@ -599,18 +628,10 @@ function SettingRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3">
+    <div className="flex items-center justify-between gap-3 min-h-[28px]">
       <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
         {label}
       </span>
-      {children}
-    </div>
-  );
-}
-
-function SectionHeading({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
       {children}
     </div>
   );
@@ -668,8 +689,8 @@ function WorkspaceRows({
       : "auto";
 
   return (
-    <div className="space-y-3">
-      <SettingRow label="workspace">
+    <>
+      <SettingRow label="mode">
         <ToolbarPick
           label={value.workspaceMode === "in_place" ? "in-place" : "worktree"}
           options={[
@@ -688,7 +709,7 @@ function WorkspaceRows({
           onChange={(e) => update({ baseBranch: e.target.value })}
           placeholder="main"
           spellCheck={false}
-          className="font-mono text-[11px] bg-transparent border-0 outline-none focus:ring-0 text-ink-900 dark:text-ink-50 placeholder:text-ink-400 w-28 text-right"
+          className="font-mono text-[11px] h-7 px-2 rounded border border-ink-900/10 bg-paper-50 text-ink-700 placeholder:text-ink-400 outline-none transition-colors hover:border-ink-900/25 focus:border-ember-500/40 focus:bg-paper-50 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-200 dark:placeholder:text-ink-500 dark:hover:border-ink-50/25 w-28 text-right"
         />
       </SettingRow>
       <SettingRow label="branch">
@@ -710,30 +731,52 @@ function WorkspaceRows({
         />
       </SettingRow>
       <SettingRow label="pull latest">
-        <button
-          type="button"
-          onClick={() => update({ pullLatest: !value.pullLatest })}
-          className={cn(
-            "h-5 w-9 rounded-full transition-colors relative",
-            value.pullLatest
-              ? "bg-ember-500/40"
-              : "bg-ink-900/10 dark:bg-ink-50/10",
-          )}
-          aria-pressed={value.pullLatest}
-        >
-          <span
-            className={cn(
-              "absolute top-0.5 h-4 w-4 rounded-full bg-paper-50 dark:bg-ink-50 shadow transition-transform",
-              value.pullLatest ? "translate-x-4" : "translate-x-0.5",
-            )}
-          />
-        </button>
+        <Switch
+          checked={value.pullLatest}
+          onChange={() => update({ pullLatest: !value.pullLatest })}
+        />
       </SettingRow>
       {value.workspaceMode === "in_place" && (
         <p className="text-[10px] text-amber-700 dark:text-amber-300 font-mono leading-relaxed">
           ⚠ in-place commits land on your real branch. Refused if the worktree has uncommitted changes.
         </p>
       )}
-    </div>
+    </>
+  );
+}
+
+/**
+ * Pill switch. Track w-9 (36px) with `p-0.5` (4px total inner padding)
+ * leaves 32px of inner room. Thumb w-4 (16px) so travel is exactly
+ * 16px = `translate-x-4`. The previous toggle used absolute positioning
+ * with mismatched offsets and the thumb sat asymmetrically in both states.
+ */
+function Switch({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onChange}
+      role="switch"
+      aria-checked={checked}
+      className={cn(
+        "inline-flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors",
+        checked
+          ? "bg-ember-500"
+          : "bg-ink-900/15 hover:bg-ink-900/25 dark:bg-ink-50/15 dark:hover:bg-ink-50/25",
+      )}
+    >
+      <span
+        className={cn(
+          "h-4 w-4 rounded-full bg-paper-50 shadow-sm transition-transform dark:bg-ink-50",
+          checked ? "translate-x-4" : "translate-x-0",
+        )}
+      />
+    </button>
   );
 }
