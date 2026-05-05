@@ -1,0 +1,15 @@
+{
+  "name": "@agentd/bot-core",
+  "version": "0.0.1",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentd/contracts": "workspace:*",
+    "@agentd/client": "workspace:*"
+  }
+}

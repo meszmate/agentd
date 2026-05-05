@@ -10,6 +10,7 @@
   "dependencies": {
     "@agentd/contracts": "workspace:*",
     "@agentd/client": "workspace:*",
+    "@agentd/bot-core": "workspace:*",
     "discord.js": "^14.16.3"
   }
 }
