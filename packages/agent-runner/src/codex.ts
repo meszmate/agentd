@@ -108,6 +108,133 @@ interface CodexStreamMessage {
   [key: string]: unknown;
 }
 
+/**
+ * Pull a human-readable one-liner out of one of codex's fatal stream
+ * messages (`turn.failed` / `error`). The runner stuffs upstream API
+ * errors into either `parsed.message` as a stringified JSON blob, or
+ * `parsed.error` as a structured object — both eventually look like
+ * the OpenAI shape `{type, error: {type, message, param}, status}`.
+ * We unwrap that one level so the timeline shows a real sentence
+ * instead of a multi-line JSON dump, and append a `Hint:` line for
+ * the handful of patterns operators can fix without reading docs.
+ *
+ * Returns the full `[codex] …` line (so the caller doesn't repeat the
+ * prefix and we can assert dedupe on the exact emitted text).
+ */
+function formatCodexError(
+  parsed: CodexStreamMessage,
+  fallback: string,
+): string {
+  const detail = extractCodexErrorDetail(parsed) ?? {
+    type: null,
+    message: null,
+  };
+  const message = detail.message?.trim() || fallback;
+  const head = detail.type ? `${detail.type}: ${message}` : message;
+  const hint = codexErrorHint(detail.type, message);
+  return hint ? `[codex] ${head}\nHint: ${hint}` : `[codex] ${head}`;
+}
+
+interface CodexErrorDetail {
+  type: string | null;
+  message: string | null;
+}
+
+function extractCodexErrorDetail(
+  parsed: CodexStreamMessage,
+): CodexErrorDetail | null {
+  // `parsed.error` is the structured form. Codex sometimes nests the
+  // upstream OpenAI error under it as `{error: {type, message, param}}`,
+  // and sometimes flattens it as `{type, message, param}`. Try both.
+  const err = parsed.error as
+    | { type?: unknown; message?: unknown; error?: unknown }
+    | undefined;
+  if (err && typeof err === "object") {
+    const inner = (err as { error?: unknown }).error;
+    if (inner && typeof inner === "object") {
+      const t = (inner as { type?: unknown }).type;
+      const m = (inner as { message?: unknown }).message;
+      if (typeof m === "string") {
+        return { type: typeof t === "string" ? t : null, message: m };
+      }
+    }
+    const t = err.type;
+    const m = err.message;
+    if (typeof m === "string") {
+      return { type: typeof t === "string" ? t : null, message: m };
+    }
+  }
+  // `parsed.message` is the stringified form. If it parses as JSON
+  // and looks like an upstream error, recurse into it. Otherwise treat
+  // it as plain text.
+  if (typeof parsed.message === "string") {
+    const trimmed = parsed.message.trim();
+    if (trimmed.startsWith("{")) {
+      try {
+        const obj = JSON.parse(trimmed) as CodexStreamMessage;
+        const nested = extractCodexErrorDetail(obj);
+        if (nested) return nested;
+      } catch {
+        // not JSON after all — fall through
+      }
+    }
+    return { type: null, message: trimmed };
+  }
+  return null;
+}
+
+function codexErrorHint(
+  type: string | null,
+  message: string,
+): string | null {
+  const m = message.toLowerCase();
+  // The exact 400 we keep hitting at minimal effort: gpt-5.x rejects
+  // `image_gen` / `web_search` registrations when reasoning effort is
+  // minimal. Tell the operator how to fix it without making them grep
+  // OpenAI's docs.
+  if (m.includes("reasoning.effort") && m.includes("minimal")) {
+    return "Codex's `minimal` thinking level can't run alongside web_search/image_gen. Bump the task's thinking level to `low` or higher.";
+  }
+  if (type === "rate_limit_error" || m.includes("rate limit")) {
+    return "Rate limited by the model provider. Wait a moment, then steer to retry.";
+  }
+  if (
+    type === "authentication_error" ||
+    m.includes("invalid api key") ||
+    m.includes("incorrect api key")
+  ) {
+    return "Auth failed. Check your `codex login` session or OPENAI_API_KEY.";
+  }
+  if (
+    type === "permission_error" ||
+    m.includes("does not have access") ||
+    m.includes("not allowed")
+  ) {
+    return "Your account/org lacks access to this model. Pick a different model in task settings.";
+  }
+  if (
+    type === "not_found_error" ||
+    (m.includes("model") && m.includes("not found"))
+  ) {
+    return "Model not found — check the codex models cache or switch model in task settings.";
+  }
+  if (m.includes("context") && m.includes("length")) {
+    return "Context window full. Run `/compact` (or steer with a fresh task) to reset.";
+  }
+  if (
+    type === "internal_error" ||
+    m.includes("server_error") ||
+    m.includes("503") ||
+    m.includes("502")
+  ) {
+    return "Upstream server flake. Steer to retry.";
+  }
+  if (m.includes("quota") || m.includes("billing")) {
+    return "Billing/quota issue. Check your provider dashboard.";
+  }
+  return null;
+}
+
 export interface CodexRunnerOptions {
   binary?: string;
   defaultPermissionMode?: PermissionMode;
@@ -173,6 +300,15 @@ export class CodexRunner implements AgentRunner {
   private exitTask: Promise<void> | null = null;
   private threadId: string | null = null;
   private suppressRouterErrorContinuation = false;
+  /**
+   * The last fatal-error text we emitted on this run. Codex frequently
+   * fires both `turn.failed` and a top-level `error` event for a single
+   * underlying failure (e.g. a 400 from the upstream API hits both
+   * pathways). We dedupe by remembering the last formatted message and
+   * dropping a second emission of the exact same text. Cleared on
+   * `proc.exited`, so the next spawn starts fresh.
+   */
+  private lastFatalErrorText: string | null = null;
 
   constructor(private readonly opts: CodexRunnerOptions = {}) {}
 
@@ -193,6 +329,26 @@ export class CodexRunner implements AgentRunner {
         // listener errors are swallowed
       }
     }
+  }
+
+  /**
+   * Format a fatal stream message into a single readable line and
+   * emit it as `[codex] …` stderr — deduped against the most recent
+   * fatal so codex's `turn.failed` + `error` double-fire doesn't show
+   * the same text twice. The default fallback (`stream error` / `turn
+   * failed`) is used when neither shape carries anything readable.
+   *
+   * Codex stuffs upstream-API error responses into either `parsed.message`
+   * (as a JSON string) or `parsed.error.message`. We unwrap one level
+   * of JSON when present so the operator reads "invalid_request_error:
+   * The following tools…" instead of a 400-line pretty-printed dump,
+   * and we tack on an actionable hint for the few patterns we recognise.
+   */
+  private emitFatalError(parsed: CodexStreamMessage, fallback: string): void {
+    const text = formatCodexError(parsed, fallback);
+    if (text === this.lastFatalErrorText) return;
+    this.lastFatalErrorText = text;
+    this.emit({ kind: "raw", stream: "stderr", text });
   }
 
   async start(opts: RunnerStartOptions): Promise<void> {
@@ -322,6 +478,7 @@ export class CodexRunner implements AgentRunner {
       });
       this.emit({ kind: "exit", code: code ?? null });
       if (this.proc === proc) this.proc = null;
+      this.lastFatalErrorText = null;
       void Promise.allSettled([this.streamTask, stderrTask]);
     })();
   }
@@ -427,19 +584,12 @@ export class CodexRunner implements AgentRunner {
       // The model errored out mid-turn (rate limit, network, etc.).
       // Surface as stderr so the task page shows a red banner; the
       // process will exit afterward and the runner emits status.
-      const msg =
-        parsed.error?.message ??
-        (typeof parsed.message === "string" ? parsed.message : "turn failed");
-      this.emit({ kind: "raw", stream: "stderr", text: `[codex] ${msg}` });
+      this.emitFatalError(parsed, "turn failed");
       return;
     }
     if (t === "error") {
       // Fatal stream error before/around the agent.
-      const msg =
-        (typeof parsed.message === "string" ? parsed.message : null) ??
-        parsed.error?.message ??
-        "stream error";
-      this.emit({ kind: "raw", stream: "stderr", text: `[codex] ${msg}` });
+      this.emitFatalError(parsed, "stream error");
       return;
     }
 

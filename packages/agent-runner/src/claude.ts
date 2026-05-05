@@ -54,6 +54,86 @@ interface ClaudeStreamMessage {
   [key: string]: unknown;
 }
 
+/**
+ * Recognise the handful of stderr patterns claude-code emits when it
+ * fails (auth, overload, rate limit, model permission). Returns a
+ * `[claude] …` line with an actionable hint where applicable, or
+ * `null` to pass the line through unchanged. The CLI doesn't ship a
+ * machine-readable error stream so we pattern-match on the human
+ * messages — keep this list short and ASCII-broad.
+ */
+function formatClaudeStderrLine(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  const lc = trimmed.toLowerCase();
+
+  // Anthropic API JSON error body: `{"type":"error","error":{"type":"...","message":"..."}}`.
+  // The CLI sometimes dumps this verbatim before exiting.
+  if (trimmed.startsWith("{") && lc.includes("\"type\":\"error\"")) {
+    try {
+      const obj = JSON.parse(trimmed) as {
+        error?: { type?: string; message?: string };
+      };
+      const type = obj.error?.type;
+      const message = obj.error?.message;
+      if (typeof message === "string") {
+        const head = type ? `${type}: ${message}` : message;
+        const hint = claudeErrorHint(type ?? null, message);
+        return hint ? `[claude] ${head}\nHint: ${hint}` : `[claude] ${head}`;
+      }
+    } catch {
+      // not parseable — fall through to plain-text matching
+    }
+  }
+
+  if (
+    lc.includes("invalid api key") ||
+    lc.includes("authentication_error") ||
+    lc.includes("anthropic_api_key")
+  ) {
+    return `[claude] ${trimmed}\nHint: Run \`claude /login\` or set ANTHROPIC_API_KEY.`;
+  }
+  if (lc.includes("overloaded") || lc.includes("overloaded_error")) {
+    return `[claude] ${trimmed}\nHint: Anthropic is overloaded. Wait a moment and steer to retry.`;
+  }
+  if (lc.includes("rate_limit") || lc.includes("rate limit")) {
+    return `[claude] ${trimmed}\nHint: Rate limited. Wait, then steer to retry.`;
+  }
+  if (lc.includes("permission_error") || lc.includes("not authorized")) {
+    return `[claude] ${trimmed}\nHint: Your account/org lacks access to this model. Pick a different model.`;
+  }
+  if (lc.includes("model") && lc.includes("not found")) {
+    return `[claude] ${trimmed}\nHint: Unknown model. Check the model field in task settings.`;
+  }
+  return null;
+}
+
+function claudeErrorHint(
+  type: string | null,
+  message: string,
+): string | null {
+  const m = message.toLowerCase();
+  if (type === "authentication_error" || m.includes("api key")) {
+    return "Run `claude /login` or set ANTHROPIC_API_KEY.";
+  }
+  if (type === "overloaded_error" || m.includes("overloaded")) {
+    return "Anthropic is overloaded. Wait a moment and steer to retry.";
+  }
+  if (type === "rate_limit_error" || m.includes("rate limit")) {
+    return "Rate limited. Wait, then steer to retry.";
+  }
+  if (type === "permission_error") {
+    return "Your account/org lacks access to this model. Pick a different model.";
+  }
+  if (type === "not_found_error") {
+    return "Model not found. Check the model field in task settings.";
+  }
+  if (m.includes("context") && m.includes("length")) {
+    return "Context window full. Run `/compact` or restart the task.";
+  }
+  return null;
+}
+
 export interface ClaudeRunnerOptions {
   binary?: string;
   defaultPermissionMode?: PermissionMode;
@@ -85,6 +165,12 @@ export class ClaudeRunner implements AgentRunner {
    * the chat as a system row.
    */
   private toolUseNames = new Map<string, string>();
+  /**
+   * Most recent friendly-formatted stderr error line. Used to dedupe
+   * repeated emissions when the claude CLI flushes the same error
+   * multiple times before exiting. Cleared on proc exit.
+   */
+  private lastFatalStderrLine: string | null = null;
 
   constructor(private readonly opts: ClaudeRunnerOptions = {}) {}
 
@@ -204,7 +290,18 @@ export class ClaudeRunner implements AgentRunner {
           // it's harmless (we always feed stdin within milliseconds via
           // sendInput) but pollutes the timeline. Real errors still flow.
           if (line.includes("no stdin data received")) continue;
-          this.emit({ kind: "raw", stream: "stderr", text: line });
+          // Tag known API-error patterns with `[claude] …` and an
+          // actionable hint where we recognise the shape. Everything
+          // else passes through unchanged so debug lines / unknown
+          // diagnostics aren't swallowed.
+          const friendly = formatClaudeStderrLine(line);
+          if (friendly && friendly === this.lastFatalStderrLine) continue;
+          if (friendly) this.lastFatalStderrLine = friendly;
+          this.emit({
+            kind: "raw",
+            stream: "stderr",
+            text: friendly ?? line,
+          });
         }
       } catch {
         // ignore
@@ -221,6 +318,7 @@ export class ClaudeRunner implements AgentRunner {
       this.emit({ kind: "exit", code: code ?? null });
       if (this.proc === proc) this.proc = null;
       this.inTurn = false;
+      this.lastFatalStderrLine = null;
       void Promise.allSettled([this.streamTask, stderrTask]);
     })();
 
