@@ -14,6 +14,13 @@ import { cn } from "@/lib/utils";
  * tone (amber-400 in light mode, amber-100 in dark) drifts across as
  * the alive cue. Slower than the global shimmer (3.2s) so it feels
  * like calm thinking instead of a frantic loading bar.
+ *
+ * In dark mode the base sits at reduced alpha (orange-300 @ 0.5) so
+ * the bright amber peak in the middle of the wave clearly stands
+ * out. The previous version put the base and peak at full opacity,
+ * which on near-black backgrounds left both stops in roughly the
+ * same luminance band — the shimmer animation was technically
+ * running but visually invisible.
  */
 export function ShimmerText({
   children,
@@ -27,7 +34,7 @@ export function ShimmerText({
       className={cn(
         "bg-clip-text text-transparent",
         "bg-[linear-gradient(90deg,rgba(194,65,12,1)_0%,rgba(194,65,12,1)_35%,rgba(252,191,36,1)_50%,rgba(194,65,12,1)_65%,rgba(194,65,12,1)_100%)]",
-        "dark:bg-[linear-gradient(90deg,rgba(252,165,107,1)_0%,rgba(252,165,107,1)_35%,rgba(254,243,199,1)_50%,rgba(252,165,107,1)_65%,rgba(252,165,107,1)_100%)]",
+        "dark:bg-[linear-gradient(90deg,rgba(252,165,107,0.5)_0%,rgba(252,165,107,0.5)_35%,rgba(254,243,199,1)_50%,rgba(252,165,107,0.5)_65%,rgba(252,165,107,0.5)_100%)]",
         "bg-[length:200%_100%] animate-shimmer [animation-duration:3.2s]",
         className,
       )}
