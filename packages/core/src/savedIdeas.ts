@@ -1,8 +1,27 @@
 import { eq, desc, and, sql } from "drizzle-orm";
-import type { Idea, IdeaStatus, PlanSlice } from "@agentd/contracts";
-import { PlanSlice as PlanSliceSchema, stripPlanSlicesBlock } from "@agentd/contracts";
+import type { Idea, IdeaQuestion, IdeaStatus, PlanSlice } from "@agentd/contracts";
+import {
+  IdeaQuestion as IdeaQuestionSchema,
+  PlanSlice as PlanSliceSchema,
+  stripPlanSlicesBlock,
+} from "@agentd/contracts";
 import { ideaMessages, savedIdeas, type Db } from "./db.ts";
 import { newId } from "./auth.ts";
+
+function parseQuestion(raw: string | null | undefined): IdeaQuestion | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    const safe = IdeaQuestionSchema.safeParse(parsed);
+    return safe.success ? safe.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function questionToJson(q: IdeaQuestion | null | undefined): string | null {
+  return q ? JSON.stringify(q) : null;
+}
 
 function parsePlanSlices(raw: string | null | undefined): PlanSlice[] | undefined {
   if (!raw) return undefined;
@@ -269,6 +288,12 @@ export interface IdeaMessageRow {
   role: "user" | "agent" | "system";
   content: string;
   events?: IdeaMessageEventRow[];
+  /**
+   * Pinned `<ask-user>` question for this turn — surfaces use it to
+   * render option buttons inline with the agent bubble after a
+   * reload, without re-parsing the body.
+   */
+  question?: IdeaQuestion | null;
   createdAt: number;
 }
 
@@ -290,14 +315,19 @@ export function listIdeaMessages(db: Db, ideaId: string): IdeaMessageRow[] {
     .where(eq(ideaMessages.ideaId, ideaId))
     .orderBy(ideaMessages.createdAt)
     .all();
-  return rows.map((r) => ({
-    id: r.id,
-    ideaId: r.ideaId,
-    role: r.role as "user" | "agent" | "system",
-    content: r.content,
-    createdAt: r.createdAt,
-    ...(parseEvents(r.eventsJson) ? { events: parseEvents(r.eventsJson) } : {}),
-  }));
+  return rows.map((r) => {
+    const events = parseEvents(r.eventsJson);
+    const question = parseQuestion(r.questionJson);
+    return {
+      id: r.id,
+      ideaId: r.ideaId,
+      role: r.role as "user" | "agent" | "system",
+      content: r.content,
+      createdAt: r.createdAt,
+      ...(events ? { events } : {}),
+      ...(question ? { question } : {}),
+    };
+  });
 }
 
 export function appendIdeaMessage(
@@ -307,6 +337,7 @@ export function appendIdeaMessage(
     role: "user" | "agent" | "system";
     content: string;
     events?: IdeaMessageEventRow[];
+    question?: IdeaQuestion | null;
   },
 ): IdeaMessageRow {
   const id = newId("imsg");
@@ -324,6 +355,7 @@ export function appendIdeaMessage(
       role: input.role,
       content: input.content,
       eventsJson: persistable.length > 0 ? JSON.stringify(persistable) : null,
+      questionJson: questionToJson(input.question ?? null),
       createdAt: now,
     })
     .run();
@@ -339,5 +371,6 @@ export function appendIdeaMessage(
     content: input.content,
     createdAt: now,
     ...(persistable.length > 0 ? { events: persistable } : {}),
+    ...(input.question ? { question: input.question } : {}),
   };
 }

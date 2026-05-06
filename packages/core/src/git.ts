@@ -1,4 +1,9 @@
-import { stripPlanSlicesBlock } from "@agentd/contracts";
+import {
+  IdeaQuestion as IdeaQuestionSchema,
+  stripAskUserBlocks,
+  stripPlanSlicesBlock,
+  type IdeaQuestion,
+} from "@agentd/contracts";
 
 async function run(
   cmd: string[],
@@ -86,6 +91,13 @@ export type HelperStreamEvent =
    * right-side preview in the project-instructions workshop modal.
    */
   | { kind: "instructions_delta"; delta: string }
+  /**
+   * Structured clarifying question the agent emitted via an
+   * `<ask-user>` block. Surfaces (web, telegram, discord) render the
+   * options as buttons; tapping one (or typing free-form) feeds back
+   * as the operator's next turn. Stripped from the persisted reply.
+   */
+  | { kind: "question"; question: IdeaQuestion }
   /**
    * Cumulative token + cost usage emitted as the helper progresses
    * (and once more on the final `result` envelope). The UI reads
@@ -1242,6 +1254,14 @@ export interface IdeationResult {
   options: string[];
   source: "claude" | "fallback-empty" | "fallback-error";
   error?: string;
+  /**
+   * Clarifying question the brainstorm helper raised instead of (or
+   * before) generating options — the new structured replacement for
+   * the legacy "?? " prefix mechanism. Surfaces render this as a
+   * question card with option buttons; the operator's pick fires a
+   * fresh brainstorm with the disambiguated brief.
+   */
+  question?: IdeaQuestion | null;
 }
 
 /**
@@ -1329,11 +1349,9 @@ function buildIdeationPrompt(
     `Return up to ${max} options.`,
     "",
     `Clarify-first rule (IMPORTANT):`,
-    `If the operator's brief is too vague to commit to a coherent direction — single words like "ads", "ideas", "make it better", "improvements", or anything you can't ground in what the project actually is — DO NOT generate options. Generating speculative ideas wastes the operator's time. Instead, output ONE clarifying question.`,
-    `Output the question as a single line starting with the literal prefix "?? " (two question marks + space). Examples:`,
-    `?? "ads" is ambiguous — do you mean billing/conversion features, marketing pages, in-app announcements, or something else?`,
-    `?? "make it better" is too broad — which area (workshop, brainstorm, task page) and what dimension (perf, UX, code quality)?`,
-    `Stop after the question. No options, no preamble, no second line.`,
+    `If the operator's brief is too vague to commit to a coherent direction — single words like "ads", "ideas", "make it better", "improvements", or anything you can't ground in what the project actually is — DO NOT generate options. Generating speculative ideas wastes the operator's time. Instead, ASK using the \`<ask-user>\` protocol below: one block, 2-5 distinct directional buckets the operator can tap. After the block, stop. Don't also list options — the operator's reply re-fires brainstorm with the disambiguated brief.`,
+    "",
+    ASK_USER_INSTRUCTION,
     "",
     `Output format when the brief is concrete enough — strictly one option per line:`,
     `  [score: NN] <directional pitch> — <1-line critique>`,
@@ -1399,7 +1417,15 @@ export type IdeationStreamEvent =
       cacheReadTokens?: number;
       cacheWriteTokens?: number;
       costUsd?: number;
-    };
+    }
+  /**
+   * Structured clarifying question the brainstorm helper emitted via
+   * an `<ask-user>` block — fired when the brief is too vague to
+   * commit to a direction. The UI renders the options as buttons;
+   * the operator's pick re-fires brainstorm with the disambiguated
+   * brief. Replaces the older "?? " text-prefix mechanism.
+   */
+  | { kind: "question"; question: IdeaQuestion };
 
 export async function* streamIdeation(
   cwd: string,
@@ -1443,6 +1469,13 @@ export async function* streamIdeation(
 
   const it = runHelperWithEvents(cwd, ask, opts.helper ?? {});
   let final: { text: string; source: string; error?: string } | null = null;
+  // ask-user splitter: when the brief is too vague, the agent emits a
+  // structured question instead of a list of options. The splitter
+  // suppresses the JSON body from the line-extraction buffer (otherwise
+  // partial JSON would parse into garbage option lines) and emits a
+  // `question` event the moment a complete block parses.
+  const askSplitter = makeAskUserSplitter();
+  let lastQuestion: IdeaQuestion | null = null;
   try {
     while (true) {
       const next = await it.next();
@@ -1452,8 +1485,15 @@ export async function* streamIdeation(
       }
       const ev = next.value;
       if (ev.kind === "text") {
-        buffer += ev.delta;
-        for (const line of drainLines()) yield line;
+        for (const askEv of askSplitter.feed(ev.delta)) {
+          if (askEv.kind === "text") {
+            buffer += askEv.delta;
+            for (const line of drainLines()) yield line;
+          } else if (askEv.kind === "question") {
+            lastQuestion = askEv.question;
+            yield { kind: "question", question: askEv.question };
+          }
+        }
       } else if (ev.kind === "tool_use") {
         yield { kind: "tool_use", name: ev.name, input: ev.input };
       } else if (ev.kind === "tool_result") {
@@ -1478,6 +1518,16 @@ export async function* streamIdeation(
       }
       if (collected.length >= max) break;
     }
+    // Drain any text the splitter held back at boundaries.
+    for (const askEv of askSplitter.flush()) {
+      if (askEv.kind === "text") {
+        buffer += askEv.delta;
+        for (const line of drainLines()) yield line;
+      } else if (askEv.kind === "question") {
+        lastQuestion = askEv.question;
+        yield { kind: "question", question: askEv.question };
+      }
+    }
     // Flush any trailing line that didn't end with a newline.
     if (buffer.trim()) {
       const emitted = tryEmit(buffer);
@@ -1492,9 +1542,14 @@ export async function* streamIdeation(
       options: [],
       source: (final?.source as IdeationResult["source"]) ?? "fallback-empty",
       ...(final?.error ? { error: final.error } : {}),
+      ...(lastQuestion ? { question: lastQuestion } : {}),
     };
   }
-  return { options: collected, source: "claude" };
+  return {
+    options: collected,
+    source: "claude",
+    ...(lastQuestion ? { question: lastQuestion } : {}),
+  };
 }
 
 /**
@@ -1729,6 +1784,40 @@ const SLICE_BLOCK_RE = /```json-slices\s*\n([\s\S]*?)\n```/i;
  * conversation plan mode) must stay in sync — otherwise one path emits
  * slices and the other doesn't, and the spawn sheet UX silently splits.
  */
+/**
+ * Shared instruction that teaches the agent to ask clarifying
+ * questions via a structured `<ask-user>` block instead of guessing.
+ * Mirrors the AskUserQuestion / request_user_input tools in
+ * Claude Code and Codex — short header chip, full question, 2-5
+ * options each with a tradeoff line. Operators can always type a
+ * free-form answer instead of picking. Surfaces (web, telegram,
+ * discord) all render this block as button rows.
+ *
+ * Kept in one place so brainstorm + idea-conversation + plan + idea
+ * validate stay in sync — drift between them lands the agent
+ * emitting questions in one mode and pure prose in another, and the
+ * UX flips silently between flows.
+ */
+const ASK_USER_INSTRUCTION = [
+  `Ask-the-user protocol (USE THIS instead of guessing when something material is unclear):`,
+  `When the operator's request leaves a real fork in the road — different scopes, different files, different acceptance criteria — STOP and ask. Don't make a 50/50 guess and barrel ahead; that wastes the operator's turn and hides the choice from them.`,
+  ``,
+  `Format: emit ONE \`<ask-user>\` block somewhere in your reply, with a strict JSON body. The UI parses this and renders the options as tappable buttons; the operator can always type their own answer instead of picking. Keep the surrounding prose minimal — one short sentence of context above the block is enough.`,
+  ``,
+  `<ask-user>`,
+  `{"id":"<stable-snake-case-id>","header":"<<=12 char chip>","question":"<single sentence ending with '?'>","options":[{"label":"<1-5 words>","description":"<one-line tradeoff>"},{"label":"<…>","description":"<…>"}]}`,
+  `</ask-user>`,
+  ``,
+  `Rules:`,
+  `- 2-5 options. Fewer than 2 isn't a question; more than 5 is a menu.`,
+  `- Each label is 1-5 words. The description is the WHY/tradeoff in one line — what changes if they pick this.`,
+  `- The options must be MEANINGFULLY different. Don't list "yes" / "yeah, sure" / "go for it".`,
+  `- "Other" is implicit — the UI always offers a free-form text box, so don't add an "Other..." option yourself.`,
+  `- Use \`<ask-user>\` ONLY when you genuinely can't proceed without the answer. If you can pick a reasonable default and call it out, do that instead — the operator can redirect.`,
+  `- After the block, keep prose to a minimum and STOP. Don't pre-answer your own question; wait for the operator's reply.`,
+  `- Never quote the raw \`<ask-user>\` markup in any other context — the parser strips it on display, and quoting it confuses future replies.`,
+].join("\n");
+
 const SLICE_BLOCK_INSTRUCTION = [
   `After the plan prose, append a fenced \`\`\`json-slices\`\`\` block whose body is a JSON array of {title, prompt} objects (with optional agent / model / thinkingLevel / permissionMode hints). Each entry becomes one task in a sibling chain that shares a single git branch and runs sequentially, so slices represent independent commits stacked on the same branch.`,
   ``,
@@ -1780,6 +1869,12 @@ export interface PlanResult {
   error?: string;
   /** Parsed slices from the trailing json-slices block, when present. */
   slices?: ParsedPlan["slices"];
+  /**
+   * Latest `<ask-user>` question the planner attached to this turn —
+   * if it asked anything before drafting, the spawn sheet renders
+   * the options as buttons instead of a plan body.
+   */
+  question?: IdeaQuestion | null;
 }
 
 export async function* streamSuggestionPlan(
@@ -1808,6 +1903,9 @@ export async function* streamSuggestionPlan(
     `- 250–500 words total. No preamble.`,
     `- No code blocks unless quoting an exact API shape — the executor model will write the code.`,
     opts.extraInstructions ? `\nExtra guidance from the operator:\n${opts.extraInstructions}` : "",
+    "",
+    ASK_USER_INSTRUCTION,
+    `When the idea has a real fork (e.g. two reasonable architectures, two scopes, two file layouts), STOP before drafting the plan and emit one \`<ask-user>\` block. Wait for the operator's pick and write the plan against that direction next turn. A wrong-direction 500-word plan is worse than a 5-second question.`,
     "",
     SLICE_BLOCK_INSTRUCTION,
     "",
@@ -1838,28 +1936,54 @@ export async function* streamSuggestionPlan(
   const reader = proc.stdout.getReader();
   const decoder = new TextDecoder();
   let raw = "";
+  // Streaming ask-user filter: agent emits `<ask-user>{json}</ask-user>`
+  // somewhere in its reply when it needs the operator to pick a fork
+  // before drafting. The splitter buffers tag boundaries so the JSON
+  // never lands in the live text we yield to the operator's screen.
+  // Parsed questions ride on the final PlanResult.
+  const askSplitter = makeAskUserSplitter();
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       const chunk = decoder.decode(value, { stream: true });
       raw += chunk;
-      yield chunk;
+      for (const ev of askSplitter.feed(chunk)) {
+        if (ev.kind === "text") yield ev.delta;
+      }
+    }
+    for (const ev of askSplitter.flush()) {
+      if (ev.kind === "text") yield ev.delta;
     }
   } catch {
     // stream cancelled
   }
   await proc.exited;
-  const cleaned = raw
+  // Strip ask-user blocks from the captured body so the persisted
+  // plan never carries raw markup; surface the LAST question on the
+  // result so the UI can render option buttons.
+  const askStrip = stripAskUserBlocks(raw);
+  const cleaned = askStrip.text
     .trim()
     .replace(/^```[a-z]*\n?|```$/g, "")
     .trim();
-  if (!cleaned) return { plan: "", source: "fallback-empty" };
+  const question: IdeaQuestion | null =
+    askStrip.questions.length > 0
+      ? askStrip.questions[askStrip.questions.length - 1]!
+      : null;
+  if (!cleaned) {
+    return {
+      plan: "",
+      source: "fallback-empty",
+      ...(question ? { question } : {}),
+    };
+  }
   const parsed = parseSlicesFromPlan(cleaned);
   return {
     plan: parsed.plan,
     source: "claude",
     ...(parsed.slices.length > 0 ? { slices: parsed.slices } : {}),
+    ...(question ? { question } : {}),
   };
 }
 
@@ -1901,6 +2025,15 @@ export interface IdeaChatResult {
    * `parseSlicesFromPlan` so slices found there flow through too.
    */
   planSlices?: ParsedPlan["slices"];
+  /**
+   * Latest structured `<ask-user>` question the agent attached to
+   * this turn — if it asked anything, the surfaces render the
+   * options as buttons inline with the agent message. When the
+   * agent emitted multiple blocks (rare) we keep the LAST one,
+   * since later questions usually supersede earlier ones in the
+   * same reply.
+   */
+  question?: IdeaQuestion | null;
 }
 
 export async function* streamIdeaConversation(
@@ -1998,6 +2131,8 @@ export async function* streamIdeaConversation(
     `Format: Reply directly. NEVER prefix with "Agent:", "Assistant:", "[agent]", or any role label — the UI handles attribution.`,
     `Use markdown for structure when it helps (bold, lists, inline code for file paths and symbols).`,
     "",
+    ASK_USER_INSTRUCTION,
+    "",
     planProtocol,
     "",
     `The idea:`,
@@ -2014,11 +2149,21 @@ export async function* streamIdeaConversation(
   const it = runHelperWithEvents(cwd, ask, args.helper ?? {});
   let final: { text: string; source: string; error?: string } | null = null;
 
-  // Streaming filter for the plan-update protocol — splits text deltas
-  // into chat tokens and plan tokens so the workshop can update the
-  // right panel live as the agent writes the plan, while the chat
-  // thread keeps showing only the conversational reply.
-  const splitter = makePlanSplitter();
+  // Streaming filters — chained. ask-user runs FIRST so question JSON
+  // never leaks into either the plan-update stream or the chat stream
+  // regardless of where the agent placed the block. plan-update runs
+  // after, splitting cleaned text into chat tokens vs plan tokens.
+  const askSplitter = makeAskUserSplitter();
+  const planSplitter = makePlanSplitter();
+  const isPlanMode = mode === "plan";
+
+  function* routeAskEvent(ev: HelperStreamEvent): Generator<HelperStreamEvent> {
+    if (ev.kind === "text" && !isPlanMode) {
+      yield* planSplitter.feed(ev.delta);
+    } else {
+      yield ev;
+    }
+  }
 
   try {
     while (true) {
@@ -2028,13 +2173,20 @@ export async function* streamIdeaConversation(
         break;
       }
       const ev = next.value;
-      if (ev.kind === "text" && mode !== "plan") {
-        for (const out of splitter.feed(ev.delta)) yield out;
+      if (ev.kind === "text") {
+        for (const askEv of askSplitter.feed(ev.delta)) {
+          yield* routeAskEvent(askEv);
+        }
       } else {
         yield ev;
       }
     }
-    for (const out of splitter.flush()) yield out;
+    for (const askEv of askSplitter.flush()) {
+      yield* routeAskEvent(askEv);
+    }
+    if (!isPlanMode) {
+      for (const out of planSplitter.flush()) yield out;
+    }
   } catch {
     // stream cancelled
   }
@@ -2057,6 +2209,21 @@ export async function* streamIdeaConversation(
       body = body.replace(/<plan-update>[\s\S]*?<\/plan-update>/g, "").trim();
     }
   }
+  // Pull any `<ask-user>` block out of the message body too — the
+  // splitter already suppressed it from the live stream; this is the
+  // belt-and-braces strip on persistence so the saved reply never
+  // carries raw markup. We surface the LAST question on the result
+  // so the UI pins the operative one when an agent (rarely) asks
+  // multiple in the same turn.
+  const askStripBody = stripAskUserBlocks(body);
+  body = askStripBody.text;
+  const askStripPlan = planContent
+    ? stripAskUserBlocks(planContent)
+    : { text: "", questions: [] };
+  if (planContent) planContent = askStripPlan.text || null;
+  const allQuestions = [...askStripBody.questions, ...askStripPlan.questions];
+  const question: IdeaQuestion | null =
+    allQuestions.length > 0 ? allQuestions[allQuestions.length - 1]! : null;
   const cleaned = cleanAssistantText(body);
   // Validate mode appends `TITLE: <suggested>` on the agent's trailing
   // line. Surface it on the result for the brainstorm UI's save
@@ -2100,6 +2267,7 @@ export async function* streamIdeaConversation(
     ...(planContent ? { planContent } : {}),
     ...(suggestedTitle ? { suggestedTitle } : {}),
     ...(planSlices ? { planSlices } : {}),
+    ...(question ? { question } : {}),
   };
 }
 
@@ -2119,6 +2287,12 @@ export interface ValidateIdeaResult {
   suggestedTitle: string;
   source: "claude" | "codex" | "fallback-empty" | "fallback-error";
   error?: string;
+  /**
+   * Latest `<ask-user>` question the agent attached to the validate
+   * turn — if it asked anything, surfaces render the options as
+   * buttons inline with the agent reply.
+   */
+  question?: IdeaQuestion | null;
 }
 
 export interface ValidateIdeaTurn {
@@ -2162,6 +2336,8 @@ export async function* streamValidateIdea(
   const ask = [
     directive,
     ``,
+    ASK_USER_INSTRUCTION,
+    ``,
     `End your reply with this line, exactly:`,
     `TITLE: <3-6 word title for this idea>`,
     ``,
@@ -2176,6 +2352,11 @@ export async function* streamValidateIdea(
 
   const it = runHelperWithEvents(cwd, ask, args.helper ?? {});
   let final: { text: string; source: string; error?: string } | null = null;
+  // Filter ask-user blocks out of the live text stream so the
+  // brainstorm "I have an idea" surface never shows raw markup —
+  // the parsed question rides on the result envelope and the UI
+  // pins it as buttons under the agent reply.
+  const askSplitter = makeAskUserSplitter();
   try {
     while (true) {
       const next = await it.next();
@@ -2183,8 +2364,14 @@ export async function* streamValidateIdea(
         final = next.value;
         break;
       }
-      yield next.value;
+      const ev = next.value;
+      if (ev.kind === "text") {
+        for (const askEv of askSplitter.feed(ev.delta)) yield askEv;
+      } else {
+        yield ev;
+      }
     }
+    for (const askEv of askSplitter.flush()) yield askEv;
   } catch {
     // stream cancelled
   }
@@ -2199,9 +2386,18 @@ export async function* streamValidateIdea(
     };
   }
 
+  // Strip any `<ask-user>` blocks from the persisted body too — the
+  // splitter already suppressed the live deltas; this is the safety
+  // net so the saved reply never carries raw markup.
+  const askStrip = stripAskUserBlocks(final.text);
+  const stripped = askStrip.text;
+  const question: IdeaQuestion | null =
+    askStrip.questions.length > 0
+      ? askStrip.questions[askStrip.questions.length - 1]!
+      : null;
   // Pull the trailing TITLE: line out of the body so the UI can
   // suggest a save title without surfacing the marker in the prose.
-  const body = cleanAssistantText(final.text);
+  const body = cleanAssistantText(stripped);
   const m = body.match(/(^|\n)\s*TITLE:\s*([^\n]+?)\s*$/i);
   const suggestedTitle = (m?.[2] ?? "").trim();
   const critique = m
@@ -2219,6 +2415,7 @@ export async function* streamValidateIdea(
         .slice(0, 6)
         .join(" "),
     source: "claude",
+    ...(question ? { question } : {}),
   };
 }
 
@@ -2417,6 +2614,119 @@ function makeTagSplitter(
 
 function makePlanSplitter() {
   return makeTagSplitter("<plan-update>", "</plan-update>", "plan_delta");
+}
+
+/**
+ * Streaming-safe extractor for `<ask-user>{json}</ask-user>` blocks.
+ * Suppresses the JSON body from the live text deltas (so the chat
+ * thread never shows raw markup) and emits a `question` event the
+ * moment a complete block parses. Mirrors the boundary-tolerant
+ * buffering of `makeTagSplitter` — tags can land mid-chunk.
+ */
+const ASK_USER_OPEN = "<ask-user>";
+const ASK_USER_CLOSE = "</ask-user>";
+
+function deriveQuestionId(question: string): string {
+  let h = 0;
+  for (let i = 0; i < question.length; i++) {
+    h = (h * 31 + question.charCodeAt(i)) >>> 0;
+  }
+  return `q_${h.toString(36)}`;
+}
+
+function parseAskUserBody(body: string): IdeaQuestion | null {
+  const trimmed = body
+    .trim()
+    .replace(/^```(?:json)?\s*\n?|\n?```\s*$/g, "")
+    .trim();
+  if (!trimmed) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    !(parsed as { id?: unknown }).id &&
+    typeof (parsed as { question?: unknown }).question === "string"
+  ) {
+    (parsed as { id: string }).id = deriveQuestionId(
+      (parsed as { question: string }).question,
+    );
+  }
+  const safe = IdeaQuestionSchema.safeParse(parsed);
+  return safe.success ? safe.data : null;
+}
+
+function makeAskUserSplitter() {
+  const KEEP = Math.max(ASK_USER_OPEN.length, ASK_USER_CLOSE.length) - 1;
+  let buf = "";
+  let inside = false;
+  let inner = "";
+
+  function* drain(): Generator<HelperStreamEvent> {
+    while (true) {
+      if (!inside) {
+        const i = buf.indexOf(ASK_USER_OPEN);
+        if (i >= 0) {
+          if (i > 0) yield { kind: "text", delta: buf.slice(0, i) };
+          buf = buf.slice(i + ASK_USER_OPEN.length);
+          inside = true;
+          inner = "";
+          continue;
+        }
+        const safe = Math.max(0, buf.length - KEEP);
+        if (safe > 0) {
+          yield { kind: "text", delta: buf.slice(0, safe) };
+          buf = buf.slice(safe);
+        }
+        return;
+      }
+      const j = buf.indexOf(ASK_USER_CLOSE);
+      if (j >= 0) {
+        inner += buf.slice(0, j);
+        buf = buf.slice(j + ASK_USER_CLOSE.length);
+        const q = parseAskUserBody(inner);
+        inner = "";
+        inside = false;
+        if (q) yield { kind: "question", question: q };
+        // Malformed blocks are silently swallowed — the operator never
+        // sees raw markup and the agent will recover on the next turn.
+        continue;
+      }
+      // Stash all but the last KEEP chars into `inner` so we can match
+      // a close tag that lands across deltas. Don't flush as text —
+      // we never want JSON leaking into the chat.
+      const safe = Math.max(0, buf.length - KEEP);
+      if (safe > 0) {
+        inner += buf.slice(0, safe);
+        buf = buf.slice(safe);
+      }
+      return;
+    }
+  }
+
+  return {
+    *feed(delta: string): Generator<HelperStreamEvent> {
+      buf += delta;
+      yield* drain();
+    },
+    *flush(): Generator<HelperStreamEvent> {
+      // Flush any text outside a tag. If we ended mid-tag, drop the
+      // partial body silently — better to lose a malformed question
+      // than to leak raw markup into the persisted reply.
+      if (!inside && buf.length > 0) {
+        yield { kind: "text", delta: buf };
+        buf = "";
+      } else if (inside) {
+        inner = "";
+        inside = false;
+        buf = "";
+      }
+    },
+  };
 }
 
 function makeInstructionsSplitter() {
