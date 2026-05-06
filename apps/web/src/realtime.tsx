@@ -11,6 +11,7 @@ import type { ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type {
   AgentEvent,
+  Message,
   ProviderRateLimit,
   Task,
   TaskStatus,
@@ -21,6 +22,7 @@ import type {
 import { useApp } from "@/AppContext";
 import { qk } from "@/queries";
 import { useStore } from "@/store";
+import { parsePlanFromTool, shapeMessageFromEvent } from "@/lib/agent-event";
 import type { Project } from "@agentd/contracts";
 
 /**
@@ -103,6 +105,35 @@ const READONLY_TOOLS = new Set([
   "ExitPlanMode",
   "ToolSearch",
 ]);
+
+/**
+ * Idempotently append a live-shaped Message into the qk.task(id).messages
+ * cache. Same-shape rows that landed within a 2s window are treated as
+ * duplicates so a refetch (which returns the proper `msg_…` ids) doesn't
+ * leave the live `live_…` row beside its persisted twin. Cache is left
+ * untouched if the task detail hasn't been opened yet — the next mount
+ * will fetch the persisted history fresh.
+ */
+function appendMessageToCache(
+  qc: ReturnType<typeof useQueryClient>,
+  taskId: string,
+  shaped: Message,
+): void {
+  qc.setQueryData(qk.task(taskId), (cur: unknown) => {
+    const prev = cur as
+      | { task: Task; messages: Message[] }
+      | undefined;
+    if (!prev || !prev.task) return cur;
+    const dup = prev.messages.some(
+      (m) =>
+        m.role === shaped.role &&
+        m.content === shaped.content &&
+        Math.abs(m.ts - shaped.ts) < 2_000,
+    );
+    if (dup) return prev;
+    return { ...prev, messages: [...prev.messages, shaped] };
+  });
+}
 
 function describe(ev: AgentEvent): string | null {
   switch (ev.kind) {
@@ -213,6 +244,13 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
             void qc.invalidateQueries({ queryKey: qk.projects() });
             void qc.invalidateQueries({ queryKey: ["saved-ideas"] });
             void qc.invalidateQueries({ queryKey: qk.bridgeSummary() });
+            // Any task page that was already open during the disconnect
+            // is missing the messages the daemon emitted while we were
+            // gone. We've been patching qk.task(*).messages on every
+            // live event below, but events between WS close and reopen
+            // never arrived. Refetch every cached task detail so the
+            // chat history catches up before the operator notices.
+            void qc.invalidateQueries({ queryKey: ["task"] });
           }
           return;
         }
@@ -528,6 +566,68 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           return;
         }
         if (msg.type !== "event") return;
+        // Patch the per-task message cache the moment a message-shaped
+        // event lands. The daemon already wrote the row to SQLite (see
+        // taskManager.ts handleEvent), so the cache stays in lockstep
+        // with the server. Without this, the cache only refreshed on
+        // terminal events (idle/done/exit), which meant tab-switching
+        // away mid-turn and back showed an empty chat for a refetch
+        // round-trip — the bug operators called "loads from nothing".
+        const shaped = shapeMessageFromEvent(msg.event, msg.ts, msg.taskId);
+        if (shaped) appendMessageToCache(qc, msg.taskId, shaped);
+
+        // Per-task derived realtime state lives in zustand so it survives
+        // the TaskDetail unmount/remount that happens on any route change.
+        const store = useStore.getState();
+        if (msg.event.kind === "message_delta") {
+          store.appendStreamDelta(msg.taskId, msg.event.streamId, msg.event.delta);
+        } else if (msg.event.kind === "message_end") {
+          store.endStream(msg.taskId, msg.event.streamId);
+        } else if (msg.event.kind === "tool_call") {
+          const planItems = parsePlanFromTool(msg.event.tool, msg.event.args);
+          if (planItems) {
+            store.setTaskPlan(msg.taskId, planItems);
+            store.setTaskHint(
+              msg.taskId,
+              `✓ plan · ${planItems.length} item${planItems.length === 1 ? "" : "s"}`,
+            );
+          } else {
+            store.setTaskHint(msg.taskId, `→ ${msg.event.tool}`);
+          }
+        } else if (msg.event.kind === "tool_result") {
+          // Result lands; let the next tool_call (or status flip) overwrite
+          // the hint. Don't proactively clear here — claude often emits a
+          // back-to-back call+result within ~10ms which would flicker.
+        } else if (msg.event.kind === "status") {
+          if (msg.event.status === "running") {
+            store.beginTaskTurn(msg.taskId);
+          } else {
+            store.endTaskTurn(msg.taskId);
+          }
+        } else if (msg.event.kind === "exit") {
+          store.endTaskTurn(msg.taskId);
+        } else if (msg.event.kind === "usage") {
+          const delta =
+            (msg.event.inputTokens ?? 0) +
+            (msg.event.outputTokens ?? 0) +
+            (msg.event.cacheReadTokens ?? 0) +
+            (msg.event.cacheWriteTokens ?? 0);
+          if (delta > 0) store.addTaskUsage(msg.taskId, delta);
+        } else if (msg.event.kind === "message") {
+          // Final committed text lands — drop any matching streaming
+          // bubble (same task) so the timeline doesn't double-render the
+          // text. Streams are keyed by streamId which we don't see here,
+          // so flush all open streams; another delta will rebuild one if
+          // the agent starts a new content block.
+          const cur = useStore.getState().taskRt[msg.taskId];
+          if (cur && Object.keys(cur.streams).length > 0) {
+            for (const sid of Object.keys(cur.streams)) {
+              store.endStream(msg.taskId, sid);
+            }
+          }
+          store.setTaskHint(msg.taskId, null);
+        }
+
         const summary = describe(msg.event);
         if (summary == null) {
           // Streaming partials still bump the pulse so the row glows, but
