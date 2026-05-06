@@ -315,6 +315,7 @@ export function buildServer(opts: BuildServerOptions) {
       events: rec.events,
       ...(rec.agent ? { agent: rec.agent } : {}),
       ...(rec.model ? { model: rec.model } : {}),
+      ...(rec.question ? { question: rec.question } : {}),
     };
   }
 
@@ -2104,6 +2105,7 @@ export function buildServer(opts: BuildServerOptions) {
             source: string;
             error?: string;
             slices?: import("@agentd/contracts").PlanSlice[];
+            question?: import("@agentd/contracts").IdeaQuestion | null;
           };
           let result: Final | null = null;
           while (true) {
@@ -2123,6 +2125,7 @@ export function buildServer(opts: BuildServerOptions) {
                 ...(result?.slices && result.slices.length > 0
                   ? { slices: result.slices }
                   : {}),
+                ...(result?.question ? { question: result.question } : {}),
               }),
             ),
           );
@@ -3227,6 +3230,9 @@ export function buildServer(opts: BuildServerOptions) {
           kind: "tool_use" | "tool_result";
           [k: string]: unknown;
         }> = [];
+        let lastQuestion:
+          | import("@agentd/contracts").IdeaQuestion
+          | null = null;
         try {
           const it = streamIdeation(project.path, parsed.data.prompt, {
             helper,
@@ -3237,7 +3243,12 @@ export function buildServer(opts: BuildServerOptions) {
             const next = await it.next();
             if (next.done) {
               const result = next.value;
-              if (collected.length === 0 && result.options.length === 0) {
+              const finalQuestion = result.question ?? lastQuestion;
+              if (
+                collected.length === 0 &&
+                result.options.length === 0 &&
+                !finalQuestion
+              ) {
                 controller.enqueue(
                   enc.encode(
                     `\x1e${JSON.stringify({
@@ -3274,6 +3285,7 @@ export function buildServer(opts: BuildServerOptions) {
                         >,
                       }
                     : {}),
+                  ...(finalQuestion ? { question: finalQuestion } : {}),
                 });
                 bus.publishSystem({
                   kind: "suggestion_created",
@@ -3298,6 +3310,8 @@ export function buildServer(opts: BuildServerOptions) {
               accumulatedEvents.push(
                 ev as { kind: "tool_use" | "tool_result"; [k: string]: unknown },
               );
+            } else if (ev.kind === "question") {
+              lastQuestion = ev.question;
             } else if (ev.kind === "usage") {
               lastUsage = {
                 inputTokens: ev.inputTokens,
@@ -3441,6 +3455,7 @@ export function buildServer(opts: BuildServerOptions) {
             suggestedTitle: string;
             source: string;
             error?: string;
+            question?: import("@agentd/contracts").IdeaQuestion | null;
           } | null = null;
           while (true) {
             const next = await it.next();
@@ -3458,6 +3473,7 @@ export function buildServer(opts: BuildServerOptions) {
                 suggestedTitle: result?.suggestedTitle ?? "",
                 source: result?.source ?? "fallback-empty",
                 ...(result?.error ? { error: result.error } : {}),
+                ...(result?.question ? { question: result.question } : {}),
               })}`,
             ),
           );
@@ -3812,6 +3828,7 @@ export function buildServer(opts: BuildServerOptions) {
                           }>,
                         }
                       : {}),
+                    ...(result.question ? { question: result.question } : {}),
                   });
                   // Chat / challenge mode: if the agent decided to
                   // update the plan in this turn (via a <plan-update>
@@ -3855,6 +3872,9 @@ export function buildServer(opts: BuildServerOptions) {
                       ...(result.suggestedTitle
                         ? { suggestedTitle: result.suggestedTitle }
                         : {}),
+                      ...(result.question
+                        ? { question: result.question }
+                        : {}),
                     })}`,
                   ),
                 );
@@ -3866,8 +3886,9 @@ export function buildServer(opts: BuildServerOptions) {
             }
             // streamIdeaConversation now yields HelperStreamEvent —
             // we forward each as `\x1f<json>\n` so the web can render
-            // tool_use / tool_result rows live + persist them on the
-            // agent message at the end so history survives reload.
+            // tool_use / tool_result / question rows live + persist
+            // them on the agent message at the end so history survives
+            // reload.
             const ev = next.value;
             if (ev.kind === "tool_use" || ev.kind === "tool_result") {
               accumulatedEvents.push(ev);
@@ -3876,6 +3897,10 @@ export function buildServer(opts: BuildServerOptions) {
               turnRec.partialReply += ev.delta;
             } else if (ev.kind === "plan_delta") {
               turnRec.partialPlan += ev.delta;
+            } else if (ev.kind === "question") {
+              turnRec.question = ev.question;
+              turnRec.events.push(ev as IdeaMessageEvent);
+              maybeBroadcastTurn(turnRec, true);
             }
             maybeBroadcastTurn(turnRec);
             safeEnqueue(enc.encode(`\x1f${JSON.stringify(ev)}\n`));

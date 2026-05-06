@@ -184,6 +184,14 @@ export const ideaMessages = sqliteTable("idea_messages", {
    * matching how task timelines show their history.
    */
   eventsJson: text("events_json"),
+  /**
+   * Pinned `<ask-user>` question the agent asked on this turn (the
+   * latest one when multiple). JSON-encoded `IdeaQuestion`. NULL
+   * when the message wasn't a question turn — the common case.
+   * Surfaces use this to render option buttons inline with the
+   * agent bubble after a reload, without re-parsing the body.
+   */
+  questionJson: text("question_json"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -232,6 +240,15 @@ export const suggestions = sqliteTable("suggestions", {
   /** Tokens the helper consumed across the whole turn (claude only). */
   inputTokens: integer("input_tokens"),
   outputTokens: integer("output_tokens"),
+  /**
+   * Clarifying `<ask-user>` question the brainstorm helper raised
+   * instead of (or before) emitting options. JSON-encoded
+   * `IdeaQuestion`. NULL when the brainstorm produced ordinary
+   * options. Surfaces render this card with option buttons; the
+   * operator's pick fires a fresh brainstorm using the answer as
+   * the disambiguated brief.
+   */
+  questionJson: text("question_json"),
 });
 
 export const councils = sqliteTable("councils", {
@@ -679,6 +696,8 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE tasks ADD COLUMN github_pr_state TEXT",
   "ALTER TABLE tasks ADD COLUMN github_pr_is_draft INTEGER",
   "ALTER TABLE tasks ADD COLUMN github_issue_state TEXT",
+  "ALTER TABLE idea_messages ADD COLUMN question_json TEXT",
+  "ALTER TABLE suggestions ADD COLUMN question_json TEXT",
 ];
 
 function migrate(sqlite: Database): void {

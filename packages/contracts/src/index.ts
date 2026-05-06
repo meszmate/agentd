@@ -804,6 +804,62 @@ export function stripPlanSlicesBlock(text: string | null | undefined): {
 }
 
 /**
+ * Strip `<ask-user>{json}</ask-user>` blocks from a streamed reply
+ * and return both the cleaned text + the parsed questions. The agent
+ * emits one or more such blocks when it needs the operator to pick a
+ * direction during brainstorm / idea-workshop chat / plan drafting.
+ *
+ * Forgiving: malformed JSON inside a tag still strips the block (so
+ * raw markup never leaks into the chat thread) and yields no
+ * question for that block. A missing `id` is auto-derived from the
+ * question text so the UI can still key the rendered card.
+ */
+const ASK_USER_BLOCK_RE = /<ask-user>([\s\S]*?)<\/ask-user>/g;
+
+function deriveQuestionId(question: string): string {
+  let h = 0;
+  for (let i = 0; i < question.length; i++) {
+    h = (h * 31 + question.charCodeAt(i)) >>> 0;
+  }
+  return `q_${h.toString(36)}`;
+}
+
+export function stripAskUserBlocks(text: string | null | undefined): {
+  text: string;
+  questions: IdeaQuestion[];
+} {
+  if (!text) return { text: "", questions: [] };
+  const questions: IdeaQuestion[] = [];
+  const re = new RegExp(ASK_USER_BLOCK_RE.source, ASK_USER_BLOCK_RE.flags);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const raw = (m[1] ?? "").trim();
+    if (!raw) continue;
+    const stripped = raw.replace(/^```(?:json)?\s*\n?|\n?```\s*$/g, "").trim();
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(stripped);
+    } catch {
+      continue;
+    }
+    if (
+      parsedJson &&
+      typeof parsedJson === "object" &&
+      !(parsedJson as { id?: unknown }).id &&
+      typeof (parsedJson as { question?: unknown }).question === "string"
+    ) {
+      (parsedJson as { id: string }).id = deriveQuestionId(
+        (parsedJson as { question: string }).question,
+      );
+    }
+    const safe = IdeaQuestion.safeParse(parsedJson);
+    if (safe.success) questions.push(safe.data);
+  }
+  const cleaned = text.replace(re, "").replace(/\n{3,}/g, "\n\n").trim();
+  return { text: cleaned, questions };
+}
+
+/**
  * First-class project-scoped idea. Has a workflow status, optional
  * extended description, tags, optional plan draft, and an attached
  * conversation thread (`IdeaMessage[]`) where the operator and the
@@ -929,6 +985,57 @@ export const SpawnSiblingRequest = z.object({
 export type SpawnSiblingRequest = z.infer<typeof SpawnSiblingRequest>;
 
 /**
+ * One option in a structured AskUser question. Matches the shape
+ * Claude Code's AskUserQuestion + Codex's request_user_input use:
+ * a short label and a one-line description of the tradeoff. Pickers
+ * render the label as a button; the description shows as a tooltip
+ * or subtitle. Operators can always type their own answer instead
+ * of picking one of the listed options (see `IdeaQuestion.allowOther`).
+ */
+export const IdeaQuestionOption = z.object({
+  /** 1-5 word label shown as a button. */
+  label: z.string().min(1),
+  /** One-line tradeoff explanation. Optional but strongly encouraged. */
+  description: z.string().optional(),
+});
+export type IdeaQuestionOption = z.infer<typeof IdeaQuestionOption>;
+
+/**
+ * Structured clarifying question the agent emits during brainstorm /
+ * idea workshop conversation / plan drafting. Mirrors Claude Code's
+ * AskUserQuestion + Codex's request_user_input: stable id, short
+ * header chip, full question text, 2-5 option chips, and an "other"
+ * escape hatch that always lets the operator type a free-form answer.
+ *
+ * The agent emits this as an `<ask-user>{json}</ask-user>` block in
+ * its streaming reply; the daemon parses it out, strips it from the
+ * displayed text, and persists it on the message. Surfaces (web,
+ * telegram, discord) render the options as buttons and feed the
+ * chosen label (or free-form text) back as the operator's next turn.
+ */
+export const IdeaQuestion = z.object({
+  /**
+   * Stable snake_case identifier for this question — survives stream
+   * reconnects and lets the UI key on it. Defaults to a hash of the
+   * question text when the agent forgets to provide one.
+   */
+  id: z.string().min(1),
+  /** Up to 12-char chip label shown above the question. */
+  header: z.string().min(1).max(40),
+  /** Full question text — single sentence, ends with "?". */
+  question: z.string().min(1),
+  /** 2-5 picker options. Each is one tap for the operator. */
+  options: z.array(IdeaQuestionOption).min(2).max(5),
+  /**
+   * When true (default), the UI also offers an "Other…" button that
+   * opens a free-form input. Set false only when free-form answers
+   * genuinely don't make sense (rare).
+   */
+  allowOther: z.boolean().default(true),
+});
+export type IdeaQuestion = z.infer<typeof IdeaQuestion>;
+
+/**
  * Tool-call activity captured during the agent's turn — persisted
  * with the agent message so the workshop can replay the exploration
  * timeline after reload, matching how task pages show their history.
@@ -946,6 +1053,11 @@ export const IdeaMessageEvent = z.discriminatedUnion("kind", [
   }),
   z.object({ kind: z.literal("text"), delta: z.string() }),
   z.object({ kind: z.literal("raw"), text: z.string() }),
+  /**
+   * Structured clarifying question the agent emitted via an
+   * `<ask-user>` block. Surfaces render the options as buttons.
+   */
+  z.object({ kind: z.literal("question"), question: IdeaQuestion }),
 ]);
 export type IdeaMessageEvent = z.infer<typeof IdeaMessageEvent>;
 
@@ -964,6 +1076,14 @@ export const IdeaMessage = z.object({
   content: z.string(),
   createdAt: z.number(),
   events: z.array(IdeaMessageEvent).optional(),
+  /**
+   * Pinned clarifying question the agent attached to this turn — the
+   * latest `<ask-user>` block from the message body. Surfaces use this
+   * to render option buttons inline with the bubble; tapping a button
+   * (or typing a free-form answer) sends the next operator turn.
+   * `null` when the agent answered without asking anything.
+   */
+  question: IdeaQuestion.nullable().optional(),
 });
 export type IdeaMessage = z.infer<typeof IdeaMessage>;
 
@@ -1004,6 +1124,12 @@ export const ActiveIdeaTurn = z.object({
   /** `agent:model` shape so the UI can show what's running. */
   agent: AgentKind.optional(),
   model: z.string().optional(),
+  /**
+   * Latest `<ask-user>` question the agent has emitted in this turn —
+   * snapshotted so a client that opens the workshop mid-stream sees
+   * the buttons immediately, instead of waiting for the next event.
+   */
+  question: IdeaQuestion.nullable().optional(),
 });
 export type ActiveIdeaTurn = z.infer<typeof ActiveIdeaTurn>;
 
@@ -1059,6 +1185,14 @@ export const Suggestion = z.object({
   /** Tokens the helper consumed (claude only — codex doesn't expose). */
   inputTokens: z.number().int().nullable().optional(),
   outputTokens: z.number().int().nullable().optional(),
+  /**
+   * Clarifying question the brainstorm helper asked instead of (or
+   * before) generating options — when the brief was too vague to
+   * commit to a direction. Surfaces render this as a question card
+   * with option buttons; the operator's pick re-fires brainstorm
+   * with the disambiguated brief. `null` for ordinary brainstorms.
+   */
+  question: IdeaQuestion.nullable().optional(),
 });
 export type Suggestion = z.infer<typeof Suggestion>;
 

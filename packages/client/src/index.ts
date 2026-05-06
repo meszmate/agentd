@@ -5,6 +5,7 @@ import type {
   CreateTodoRequest,
   Idea,
   IdeaMessage,
+  IdeaQuestion,
   IdeaStatus,
   PlanSlice,
   SavedIdea,
@@ -126,6 +127,13 @@ export type IdeaChatEvent =
    * `idea.planDraft` once the turn completes.
    */
   | { kind: "plan_delta"; delta: string }
+  /**
+   * Structured `<ask-user>` question the agent emitted in the live
+   * stream. Surfaces render this as buttons (web), inline keyboards
+   * (telegram), or message components (discord). Tapping an option
+   * (or typing a free-form reply) sends the next operator turn.
+   */
+  | { kind: "question"; question: IdeaQuestion }
   | { kind: "raw"; text: string };
 
 /**
@@ -166,7 +174,14 @@ export type IdeationEvent =
       cacheReadTokens?: number;
       cacheWriteTokens?: number;
       costUsd?: number;
-    };
+    }
+  /**
+   * Structured `<ask-user>` question the brainstorm helper raised
+   * instead of (or before) generating options. Surfaces render the
+   * card with option buttons; the operator's pick re-fires
+   * brainstorm with the disambiguated brief.
+   */
+  | { kind: "question"; question: IdeaQuestion };
 
 export type PluginName = "telegram" | "discord";
 
@@ -574,6 +589,7 @@ export class AgentdClient {
         planDraft?: string | null;
         planSlices?: PlanSlice[];
         suggestedTitle?: string;
+        question?: IdeaQuestion | null;
       }
     | { ok: false; source: string; error: string }
   > {

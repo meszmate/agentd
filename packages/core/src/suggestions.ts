@@ -1,10 +1,12 @@
 import { and, eq, desc, type SQL } from "drizzle-orm";
 import type {
   IdeaMessageEvent,
+  IdeaQuestion,
   Suggestion,
   SuggestionStatus,
   SuggestionValidation,
 } from "@agentd/contracts";
+import { IdeaQuestion as IdeaQuestionSchema } from "@agentd/contracts";
 import { suggestions, type Db } from "./db.ts";
 import { newId } from "./auth.ts";
 
@@ -26,6 +28,13 @@ export interface CreateSuggestionInput {
   /** Token totals reported by the helper (claude). */
   inputTokens?: number;
   outputTokens?: number;
+  /**
+   * Clarifying question the brainstorm helper raised instead of (or
+   * before) generating options. Surfaces render this card with
+   * option buttons; the operator's pick fires a fresh brainstorm
+   * with the disambiguated brief.
+   */
+  question?: IdeaQuestion | null;
 }
 
 function parseEvents(
@@ -54,6 +63,18 @@ function parseValidations(
   }
 }
 
+function parseQuestion(
+  raw: string | null | undefined,
+): IdeaQuestion | null {
+  if (!raw) return null;
+  try {
+    const safe = IdeaQuestionSchema.safeParse(JSON.parse(raw));
+    return safe.success ? safe.data : null;
+  } catch {
+    return null;
+  }
+}
+
 function rowToSuggestion(
   row: typeof suggestions.$inferSelect,
 ): Suggestion {
@@ -68,6 +89,7 @@ function rowToSuggestion(
   }
   const events = parseEvents(row.eventsJson);
   const validations = parseValidations(row.validationsJson);
+  const question = parseQuestion(row.questionJson);
   return {
     id: row.id,
     templateId: row.templateId ?? null,
@@ -86,6 +108,7 @@ function rowToSuggestion(
     ...(row.durationMs != null ? { durationMs: row.durationMs } : {}),
     ...(row.inputTokens != null ? { inputTokens: row.inputTokens } : {}),
     ...(row.outputTokens != null ? { outputTokens: row.outputTokens } : {}),
+    ...(question ? { question } : {}),
   };
 }
 
@@ -144,6 +167,7 @@ export function createSuggestion(
       durationMs: input.durationMs ?? null,
       inputTokens: input.inputTokens ?? null,
       outputTokens: input.outputTokens ?? null,
+      questionJson: input.question ? JSON.stringify(input.question) : null,
     })
     .run();
   return getSuggestion(db, id)!;
