@@ -20,6 +20,7 @@ import {
   type SendResult,
   createState,
   formatTaskEvent,
+  handleIdeaQuestionPick,
   handleProjectPick,
   replyKey,
   routePlainText,
@@ -388,10 +389,6 @@ async function main() {
   bot.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isButton()) return;
     const btn = interaction as ButtonInteraction;
-    const m = /^pp:([^:]+):(.+)$/.exec(btn.customId);
-    if (!m) return;
-    const pendId = m[1] ?? "";
-    const projectId = m[2] ?? "";
     if (!isAllowed(btn.channelId ?? "", btn.user.id)) {
       await btn.reply({ content: "not allowed", ephemeral: true }).catch(() => {});
       return;
@@ -424,7 +421,29 @@ async function main() {
           .catch(() => {});
       }
     };
-    await handleProjectPick(ctx, pendId, projectId, postBack);
+    const projectMatch = /^pp:([^:]+):(.+)$/.exec(btn.customId);
+    if (projectMatch) {
+      const pendId = projectMatch[1] ?? "";
+      const projectId = projectMatch[2] ?? "";
+      await handleProjectPick(ctx, pendId, projectId, postBack);
+      return;
+    }
+    // Idea-question button. Encodes `iq:<suggestionId>:<optionIdx>`;
+    // re-fires brainstorm with the operator's clarification answer
+    // mirroring the project picker's hand-off pattern.
+    const questionMatch = /^iq:([^:]+):(\d+)$/.exec(btn.customId);
+    if (questionMatch) {
+      const suggestionId = questionMatch[1] ?? "";
+      const optionIdx = Number(questionMatch[2] ?? "");
+      await handleIdeaQuestionPick(
+        ctx,
+        btn.channelId ?? "",
+        suggestionId,
+        optionIdx,
+        postBack,
+      );
+      return;
+    }
   });
 
   /**

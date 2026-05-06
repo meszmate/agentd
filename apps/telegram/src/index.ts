@@ -10,6 +10,7 @@ import {
   type SendResult,
   createState,
   formatTaskEvent,
+  handleIdeaQuestionPick,
   handleProjectPick,
   replyKey,
   routePlainText,
@@ -351,6 +352,50 @@ async function main() {
       }
     };
     await handleProjectPick(ctx, pendId, projectId, postBack);
+  });
+
+  // Idea-question callback router. Same shape as the project picker:
+  // adapter decodes `iq:<suggestionId>:<optionIdx>` and hands chatId
+  // off so the shared handler can re-fire brainstorm with the picked
+  // clarification answer in the originating chat.
+  bot.callbackQuery(/^iq:([^:]+):(\d+)$/, async (g) => {
+    const m = g.match;
+    const suggestionId = m[1] ?? "";
+    const optionIdx = Number(m[2] ?? "");
+    const chatId = String(g.chat?.id ?? "");
+    let acked = false;
+    const postBack = async (text: string): Promise<void> => {
+      if (!acked) {
+        try {
+          await g.answerCallbackQuery({ text: text.slice(0, 200) });
+        } catch {
+          // expired callback — keep going so the edit still lands
+        }
+        acked = true;
+        try {
+          await g.editMessageText(text);
+        } catch {
+          try {
+            await bot.api.sendMessage(Number(chatId || 0), text);
+          } catch {
+            // give up
+          }
+        }
+        return;
+      }
+      try {
+        await bot.api.sendMessage(Number(chatId || 0), text);
+      } catch {
+        // ignore
+      }
+    };
+    await handleIdeaQuestionPick(
+      ctx,
+      chatId,
+      suggestionId,
+      optionIdx,
+      postBack,
+    );
   });
 
   // Plain-text routing: suggestions → steer → input.

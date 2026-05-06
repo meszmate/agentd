@@ -15,6 +15,7 @@
 
 import type { BotContext, IncomingMessage } from "./types.ts";
 import { replyKey } from "./types.ts";
+import { runProjectAction } from "./commands.ts";
 
 const ACK_RE = /^(y|yes|ok|okay|👍|cool|nice|done|good|sgtm)\b/i;
 
@@ -39,6 +40,33 @@ export async function routePlainText(
   }
   if (suggestionId) {
     try {
+      // If the suggestion came back with a structured `<ask-user>`
+      // question (no concrete options yet), the operator's free-form
+      // reply is the answer to the clarification — re-fire brainstorm
+      // with the disambiguated brief instead of running the legacy
+      // pick-an-option router. Mirrors the web "Other…" + button
+      // flows, so the same agent prompt produces grounded options
+      // next turn whether the operator typed a custom answer or
+      // tapped a button.
+      const peek = await ctx.client
+        .getSuggestion(suggestionId)
+        .catch(() => null);
+      const peekProjectId = peek?.suggestion?.projectId ?? null;
+      if (peek?.suggestion?.question && peekProjectId) {
+        const sug = peek.suggestion;
+        const combined = `${sug.prompt}\n\nClarification (${sug.question!.header}): ${text}`;
+        if (ctx.state.lastSuggestionByChat.get(chatId) === suggestionId) {
+          ctx.state.lastSuggestionByChat.delete(chatId);
+        }
+        await runProjectAction(
+          ctx,
+          chatId,
+          "brainstorm",
+          combined,
+          peekProjectId,
+        );
+        return;
+      }
       const r = await ctx.client.replyToSuggestion(suggestionId, text);
       if (r.kind === "spawned") {
         await msg.reply(

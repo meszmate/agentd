@@ -653,7 +653,7 @@ export async function cmdMirror(
  * project shortcut). All output goes via `adapter.sendMessage` to
  * `chatId` so a tap-style flow can ack out-of-band.
  */
-async function runProjectAction(
+export async function runProjectAction(
   ctx: BotContext,
   chatId: string,
   kind: PendingKind,
@@ -706,6 +706,63 @@ async function runProjectAction(
           chatId,
           `brainstorm failed (${r.source}): ${r.error}`,
         );
+        return;
+      }
+      // Structured `<ask-user>` clarifying question — agent decided
+      // the brief was too vague to commit to options yet. Render the
+      // question + options as inline buttons so the operator can pick
+      // a direction in one tap; tapping re-fires brainstorm with the
+      // disambiguated brief, mirroring the web flow. Free-form replies
+      // still work — textRouter detects question-bearing suggestions
+      // and re-fires brainstorm with the typed answer instead of
+      // running the legacy reply-to-suggestion path.
+      if (r.suggestion.question) {
+        const q = r.suggestion.question;
+        const lines: string[] = [
+          `❓ ${fmt.bold(q.header)} · ${project.name}`,
+          "",
+          fmt.italic(q.question),
+          "",
+        ];
+        for (let i = 0; i < q.options.length; i++) {
+          const opt = q.options[i]!;
+          if (opt.description) {
+            lines.push(
+              `${fmt.bold(`${i + 1}.`)} ${opt.label} — ${fmt.italic(opt.description)}`,
+            );
+          } else {
+            lines.push(`${fmt.bold(`${i + 1}.`)} ${opt.label}`);
+          }
+        }
+        lines.push("");
+        lines.push(
+          fmt.italic("Tap an option or reply with your own answer."),
+        );
+        // Two buttons per row keeps short labels readable on phones
+        // (Telegram inline keyboards default to wide buttons; Discord
+        // action rows hold up to 5 buttons but two-per-row reads
+        // cleaner alongside the description list).
+        const rows: BotButton[][] = [];
+        for (let i = 0; i < q.options.length; i += 2) {
+          const row: BotButton[] = q.options
+            .slice(i, i + 2)
+            .map((opt, j) => ({
+              id: `iq:${r.suggestion.id}:${i + j}`,
+              label: opt.label,
+              style: "primary" as const,
+            }));
+          rows.push(row);
+        }
+        const sent = await ctx.adapter.sendWithButtons(
+          chatId,
+          lines.join("\n"),
+          rows,
+        );
+        ctx.state.suggestionReplyMap.set(
+          replyKey(chatId, sent.messageId),
+          r.suggestion.id,
+        );
+        ctx.state.lastSuggestionByChat.set(chatId, r.suggestion.id);
         return;
       }
       const opts = r.suggestion.options
@@ -765,6 +822,64 @@ async function runProjectAction(
     }
     return;
   }
+}
+
+/**
+ * Idea-question button-pick handler. Fired when the operator taps an
+ * option button on a brainstorm suggestion that came back with a
+ * structured `<ask-user>` clarification. We fetch the suggestion to
+ * get the original brief + question, combine them with the picked
+ * label, and re-fire `runProjectAction` with `kind="brainstorm"` so
+ * the disambiguated brief produces grounded options in the next turn.
+ *
+ * Mirrors `handleProjectPick`'s shape: adapters decode the callback
+ * id (`iq:<suggestionId>:<optionIdx>`), pass chatId from the surrounding
+ * message context, and let `postBack` emit a transient ack on the
+ * platform's widget.
+ */
+export async function handleIdeaQuestionPick(
+  ctx: BotContext,
+  chatId: string,
+  suggestionId: string,
+  optionIdx: number,
+  postBack: (text: string) => Promise<void>,
+): Promise<void> {
+  let suggestion;
+  try {
+    const r = await ctx.client.getSuggestion(suggestionId);
+    suggestion = r.suggestion;
+  } catch (e) {
+    await postBack(`(suggestion gone: ${(e as Error).message})`);
+    return;
+  }
+  if (!suggestion.question) {
+    await postBack("(no question on this suggestion)");
+    return;
+  }
+  if (
+    !Number.isInteger(optionIdx) ||
+    optionIdx < 0 ||
+    optionIdx >= suggestion.question.options.length
+  ) {
+    await postBack("(invalid option)");
+    return;
+  }
+  const opt = suggestion.question.options[optionIdx]!;
+  const projectId = suggestion.projectId;
+  if (!projectId) {
+    await postBack("(suggestion has no project)");
+    return;
+  }
+  // Original brief + clarification, same shape as the web's answer
+  // path. Keeps the agent grounded in the operator's intent across
+  // both turns rather than just brainstorming on the answer alone.
+  const combined = `${suggestion.prompt}\n\nClarification (${suggestion.question.header}): ${opt.label}`;
+  await postBack(`→ ${opt.label}`);
+  // Drop the question's reply pointer so a stray free-form reply to
+  // the old bubble doesn't double-fire. lastSuggestionByChat will be
+  // refreshed when the new brainstorm posts its result.
+  ctx.state.lastSuggestionByChat.delete(chatId);
+  await runProjectAction(ctx, chatId, "brainstorm", combined, projectId);
 }
 
 /**
