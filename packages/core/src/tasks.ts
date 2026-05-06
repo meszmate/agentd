@@ -272,12 +272,16 @@ export function setTaskGithubMeta(
   db: Db,
   id: string,
   patch: {
+    githubPr?: number | null;
+    githubIssue?: number | null;
     githubPrState?: string | null;
     githubPrIsDraft?: boolean | null;
     githubIssueState?: string | null;
   },
 ): Task | null {
   const next: Record<string, unknown> = {};
+  if (patch.githubPr !== undefined) next.githubPr = patch.githubPr;
+  if (patch.githubIssue !== undefined) next.githubIssue = patch.githubIssue;
   if (patch.githubPrState !== undefined)
     next.githubPrState = patch.githubPrState;
   if (patch.githubPrIsDraft !== undefined)

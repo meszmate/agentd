@@ -1341,6 +1341,30 @@ export function buildServer(opts: BuildServerOptions) {
       });
       if (r.url) {
         setTaskPrUrl(db, task.id, r.url);
+        // The github lifecycle icon (TaskGithubBadge) reads from
+        // task.githubPr / githubPrState / githubPrIsDraft, NOT prUrl.
+        // Without this block, opening a PR via Ship menu sets prUrl
+        // but leaves githubPr null, so the icon never appears on
+        // the task row even though we have a live PR. Parse the
+        // PR number out of gh's stdout URL and ask gh for the live
+        // state so every connected surface (web, sidebar, telegram,
+        // discord) lights up the icon within a frame.
+        const numMatch = r.url.match(/\/pull\/(\d+)/);
+        const prNumber = numMatch ? Number(numMatch[1]) : null;
+        if (prNumber && Number.isFinite(prNumber)) {
+          const state = await ghViewPr(task.worktreePath, prNumber).catch(
+            () => ({ ok: false as const, error: "gh failed" }),
+          );
+          setTaskGithubMeta(db, task.id, {
+            githubPr: prNumber,
+            githubPrState:
+              state.ok && state.data?.state ? state.data.state : "OPEN",
+            githubPrIsDraft:
+              state.ok && state.data
+                ? state.data.isDraft === true
+                : !!body.draft,
+          });
+        }
         pubTaskChanged(task.id);
       }
       return c.json(r);

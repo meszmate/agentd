@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRealtime } from "@/realtime";
+import { useStore, useTaskRt } from "@/store";
 import {
   Check,
   CheckSquare,
@@ -27,7 +29,6 @@ import {
 } from "react-resizable-panels";
 import {
   agentContextWindow,
-  type AgentEvent,
   type Message,
   type Task,
 } from "@agentd/contracts";
@@ -66,7 +67,6 @@ import {
   useSpawnSiblingTask,
   useStopTask,
   useTask,
-  useTaskStream,
   useTasks,
 } from "@/queries";
 import { useApp, useClient } from "@/AppContext";
@@ -94,7 +94,6 @@ import type {
   AgentKind,
   ThinkingLevel,
 } from "@agentd/contracts";
-import type { TaskPlanItem } from "@/views/TaskPlan";
 
 export function TaskDetail({ task }: { task: Task }) {
   const navigate = useNavigate();
@@ -109,9 +108,18 @@ export function TaskDetail({ task }: { task: Task }) {
   const qc = useQueryClient();
   const [siblingOpen, setSiblingOpen] = useState(false);
 
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [loadedFor, setLoadedFor] = useState<string | null>(null);
-  const [lastToolHint, setLastToolHint] = useState<string | null>(null);
+  // Server-truth chat history. Lives in the qk.task(id) cache and is
+  // patched in real time by the global WS bus (see realtime.tsx) so
+  // tab-switching never wipes the chat. Streaming partials, plan
+  // snapshot, per-turn meter and tool hint live in zustand for the
+  // same reason — surviving route mounts is a hard requirement.
+  const messages: Message[] = taskQ.data?.messages ?? [];
+  const rt = useTaskRt(task.id);
+  const { streams, plan, planUpdatedAt, lastToolHint } = rt;
+  const turn = useMemo(
+    () => ({ startedAt: rt.turnStartedAt, tokens: rt.turnTokens }),
+    [rt.turnStartedAt, rt.turnTokens],
+  );
   // Viewport-width gate for the two-column body. Mobile (<1024px)
   // collapses the workspace panel since both fitting side-by-side
   // produces unreadable column widths.
@@ -126,30 +134,6 @@ export function TaskDetail({ task }: { task: Task }) {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
-  /**
-   * In-flight streaming bubbles — one per content-block. Accumulates
-   * `message_delta` events into the bubble's text; `message_end` removes
-   * the bubble (the final committed text arrives via the regular
-   * `message` event right after).
-   */
-  const [streams, setStreams] = useState<Record<string, string>>({});
-  /**
-   * Latest TodoWrite / update_plan snapshot from the agent. Replaced
-   * wholesale on each tool call (those tools always send the full plan,
-   * not deltas).
-   */
-  const [plan, setPlan] = useState<TaskPlanItem[]>([]);
-  const [planUpdatedAt, setPlanUpdatedAt] = useState<number | null>(null);
-  /**
-   * Per-turn meter — accumulates tokens reported via `usage` events and
-   * tracks when the turn started so the timeline can render an
-   * elapsed-thinking display next to the pulse. `startedAt = null` means
-   * the turn has settled; `tokens` stays put so the operator sees the
-   * final cost of the last turn until the next one begins.
-   */
-  const [turn, setTurn] = useState<{ startedAt: number | null; tokens: number }>(
-    { startedAt: null, tokens: 0 },
-  );
   const prefsQ = usePrefs();
   const patchPrefs = usePatchPrefs();
   const [workspaceOpen, setWorkspaceOpenState] = useState<boolean>(true);
@@ -166,210 +150,58 @@ export function TaskDetail({ task }: { task: Task }) {
     void patchPrefs.mutateAsync({ taskWorkspaceOpen: v });
   };
 
-  useEffect(() => {
-    if (!taskQ.data) return;
-    // Always re-sync from the server when the cache updates. The
-    // previous `loadedFor` guard meant only the FIRST snapshot ever
-    // landed — so if the operator tab-switched away mid-chat and
-    // back, the cached pre-chat messages would lock in and the new
-    // ones (now persisted server-side) wouldn't appear.
-    //
-    // Dedupe by id so optimistic tmp_ messages survive briefly
-    // until the server-side version arrives. Server-persisted
-    // messages always replace tmp_ duplicates with the same ts/role.
-    setMessages((prev) => {
-      const serverMsgs = taskQ.data.messages ?? [];
-      const tmpPending = prev.filter(
-        (m) =>
-          m.id.startsWith("tmp_") &&
-          !serverMsgs.some(
-            (s) =>
-              s.role === m.role &&
-              s.content === m.content &&
-              Math.abs(s.ts - m.ts) < 10_000,
-          ),
-      );
-      const merged = [...serverMsgs, ...tmpPending];
-      merged.sort((a, b) => a.ts - b.ts);
-      return merged;
-    });
-    if (loadedFor !== task.id) setLoadedFor(task.id);
-  }, [task.id, taskQ.data, loadedFor]);
-
+  // Optimistic user message append for the composer. Writes directly to
+  // the qk.task cache so the message shows the moment Send is hit; the
+  // realtime bus then dedupes the persisted server-shape row that lands
+  // a few hundred ms later. Same dedup window as appendMessageToCache.
   const appendLocal = useCallback(
     (role: Message["role"], content: string) => {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: "tmp_" + Math.random().toString(36).slice(2),
-          taskId: task.id,
-          role,
-          content,
-          ts: Date.now(),
-        },
-      ]);
-    },
-    [task.id],
-  );
-
-  const handleEvent = useCallback(
-    ({
-      event,
-      taskId: evTaskId,
-    }: {
-      taskId: string;
-      event: AgentEvent;
-      ts: number;
-    }) => {
-      if (evTaskId !== task.id) return;
-      if (event.kind === "message") {
-        appendLocal(event.role, event.text);
-        setLastToolHint(null);
-      } else if (event.kind === "message_delta") {
-        setStreams((prev) => ({
+      const ts = Date.now();
+      qc.setQueryData(qk.task(task.id), (cur: unknown) => {
+        const prev = cur as
+          | { task: Task; messages: Message[] }
+          | undefined;
+        if (!prev || !prev.task) return cur;
+        return {
           ...prev,
-          [event.streamId]: (prev[event.streamId] ?? "") + event.delta,
-        }));
-      } else if (event.kind === "message_end") {
-        setStreams((prev) => {
-          if (!(event.streamId in prev)) return prev;
-          const next = { ...prev };
-          delete next[event.streamId];
-          return next;
-        });
-      } else if (event.kind === "tool_call") {
-        // Intercept the agent's plan tools — render them as a structured
-        // checklist instead of a wall of JSON. Both Claude (TodoWrite)
-        // and Codex (update_plan) send the full snapshot per call.
-        const planItems = parsePlan(event.tool, event.args);
-        if (planItems) {
-          setPlan(planItems);
-          setPlanUpdatedAt(Date.now());
-          setLastToolHint(
-            `✓ plan · ${planItems.length} item${planItems.length === 1 ? "" : "s"}`,
-          );
-          // Don't litter the timeline with the raw JSON for plan tools.
-          return;
-        }
-        setLastToolHint(`→ ${event.tool}`);
-        // Persist in the EXACT shape the daemon writes server-side so
-        // the dedup against re-fetched messages (line ~167's
-        // `s.content === m.content` check) actually matches. The
-        // daemon injects `_agentdParent` / `_agentdToolId` into args
-        // for swarm nesting; replicating that here keeps the local
-        // tmp_ row from doubling with its persisted twin once the
-        // server message lands.
-        const liveArgs =
-          (event.parentToolUseId || event.toolUseId) &&
-          event.args &&
-          typeof event.args === "object" &&
-          !Array.isArray(event.args)
-            ? {
-                ...(event.args as Record<string, unknown>),
-                ...(event.parentToolUseId
-                  ? { _agentdParent: event.parentToolUseId }
-                  : {}),
-                ...(event.toolUseId
-                  ? { _agentdToolId: event.toolUseId }
-                  : {}),
-              }
-            : event.args;
-        appendLocal(
-          "tool",
-          `[call ${event.tool}] ${JSON.stringify(liveArgs ?? {}).slice(0, 32_000)}`,
-        );
-      } else if (event.kind === "tool_result") {
-        // Append the result in the same `[result <tool> ok|err <meta>]
-        // <output>` shape the daemon persists. Without this, the Live
-        // tab's call-to-result pairing has nothing to match against
-        // until the task exits and the messages query refetches —
-        // which is the bug operators saw as "tool calls stay loading
-        // until the task finishes". TaskTimeline already groups these
-        // rows under their tool card, so the chat side stays clean.
-        const okFlag = event.ok ? "ok" : "err";
-        const meta = [
-          event.parentToolUseId ? `p:${event.parentToolUseId}` : null,
-          event.toolUseId ? `u:${event.toolUseId}` : null,
-        ]
-          .filter(Boolean)
-          .join(" ");
-        const header = meta
-          ? `[result ${event.tool} ${okFlag} ${meta}]`
-          : `[result ${event.tool} ${okFlag}]`;
-        const PERSIST_LIMIT = 1500;
-        const raw = event.output;
-        const trimmed =
-          raw.length > PERSIST_LIMIT
-            ? `${raw.slice(0, PERSIST_LIMIT)}\n… (${raw.length - PERSIST_LIMIT} more chars truncated)`
-            : raw;
-        appendLocal("tool", `${header} ${trimmed}`);
-      } else if (event.kind === "raw") {
-        appendLocal("system", event.text);
-      } else if (event.kind === "ask") {
-        // Mirror the daemon's persisted format so the AskCard renders
-        // live (interactive picker) without waiting for a status/exit
-        // refetch. Same shape that `appendMessage(... "system", ...)`
-        // wrote on the server.
-        const optionsBlock = event.options.length
-          ? `\n${event.options.map((o, i) => `${i + 1}. ${o}`).join("\n")}`
-          : "";
-        appendLocal(
-          "system",
-          `[ask · ${event.askId}] ${event.prompt}${optionsBlock}`,
-        );
-      } else if (event.kind === "answer") {
-        appendLocal("system", `[answer · ${event.askId}] ${event.answer}`);
-      } else if (event.kind === "status") {
-        if (event.status === "running") {
-          setTurn({ startedAt: Date.now(), tokens: 0 });
-        } else {
-          // Freeze the meter on the final value when the turn settles.
-          setTurn((cur) => ({ startedAt: null, tokens: cur.tokens }));
-          setLastToolHint(null);
-        }
-        void qc.invalidateQueries({ queryKey: qk.tasks() });
-        void qc.invalidateQueries({ queryKey: qk.task(task.id) });
-      } else if (event.kind === "exit") {
-        setTurn((cur) => ({ startedAt: null, tokens: cur.tokens }));
-        setLastToolHint(null);
-        void qc.invalidateQueries({ queryKey: qk.tasks() });
-        void qc.invalidateQueries({ queryKey: qk.task(task.id) });
-      } else if (event.kind === "usage") {
-        // Accumulate per-turn tokens. Cleared by the next "running" status.
-        const delta =
-          (event.inputTokens ?? 0) +
-          (event.outputTokens ?? 0) +
-          (event.cacheReadTokens ?? 0) +
-          (event.cacheWriteTokens ?? 0);
-        setTurn((cur) => ({ ...cur, tokens: cur.tokens + delta }));
-        void qc.invalidateQueries({ queryKey: qk.tasks() });
-        void qc.invalidateQueries({ queryKey: qk.task(task.id) });
-      }
+          messages: [
+            ...prev.messages,
+            {
+              id: "tmp_" + Math.random().toString(36).slice(2),
+              taskId: task.id,
+              role,
+              content,
+              ts,
+            },
+          ],
+        };
+      });
     },
-    [task.id, qc, appendLocal],
+    [task.id, qc],
   );
 
-  const { live } = useTaskStream(task.id, handleEvent);
+  // Realtime liveness comes from the global WS now — there's no per-task
+  // WS subscription anymore (it was duplicating the global one). The
+  // global bus drives qk.task(id).messages and the zustand task slice,
+  // so chats stay current across route mounts and the chat doesn't
+  // reload from blank when the operator returns from another tab.
+  const { live } = useRealtime();
 
-  // Server status is the source of truth. The per-task WS events above
-  // settle local "in-flight" state (streams, lastToolHint, turn.startedAt)
-  // on the happy path, but a dropped/buffered status or message_end event
-  // would leave the "agent is thinking" pulse and any orphaned streaming
-  // bubble visible until a tab switch forces a refetch. Once the realtime
-  // bus pushes task_updated and task.status leaves the running set, force
-  // the local in-flight state to settle in lockstep.
+  // Server status is the source of truth. realtime.tsx flips zustand's
+  // turn/hint/streams off on every non-running status event, but a
+  // status flip that arrives via task_updated only (no event — happens
+  // when the daemon mutates the row directly, e.g. close/reopen) needs
+  // a belt-and-suspenders reset here so the persistent zustand slice
+  // doesn't keep showing a "thinking" pulse for an idle task.
+  const endTaskTurnAction = useStore((s) => s.endTaskTurn);
   useEffect(() => {
     const stillRunning =
       task.status === "running" ||
       task.status === "waiting_input" ||
       task.status === "waiting_perm";
     if (stillRunning) return;
-    setStreams((cur) => (Object.keys(cur).length === 0 ? cur : {}));
-    setLastToolHint((cur) => (cur === null ? cur : null));
-    setTurn((cur) =>
-      cur.startedAt === null ? cur : { startedAt: null, tokens: cur.tokens },
-    );
-  }, [task.status]);
+    endTaskTurnAction(task.id);
+  }, [task.status, task.id, endTaskTurnAction]);
 
   // Cumulative billing-style total (never decreases) — shown in the
   // task header chip + cost summaries.
@@ -422,26 +254,6 @@ export function TaskDetail({ task }: { task: Task }) {
     task.status === "running" ||
     task.status === "waiting_input" ||
     task.status === "waiting_perm";
-
-  // Defensive cleanup: when the task moves out of a running state (idle
-  // between turns, done, failed, stopped), clear any leftover streaming
-  // UI driven by per-event state. The runner may not always emit a
-  // `message_end` for every open `message_delta` stream — if claude's
-  // proc gets SIGTERMed mid-stream by `agentd-progress --done`, the WS
-  // reconnects between block_delta and block_stop, or codex exits while
-  // a delta is in flight, the UI's `streams` map keeps rendering the
-  // blinking λ + "streaming" forever (until a tab-switch unmounts the
-  // component and resets local state). Same goes for `turn.startedAt`
-  // and `lastToolHint` — the realtime push of `task.status` is the
-  // authoritative signal that the turn is over, so trust it and reset
-  // the per-turn UI from there instead of relying on every event
-  // landing in order.
-  useEffect(() => {
-    if (isRunning) return;
-    setStreams((prev) => (Object.keys(prev).length ? {} : prev));
-    setTurn((cur) => (cur.startedAt == null ? cur : { startedAt: null, tokens: cur.tokens }));
-    setLastToolHint((cur) => (cur == null ? cur : null));
-  }, [isRunning]);
 
   const onStop = async () => {
     try {
@@ -1554,58 +1366,6 @@ function ContextUsage({
       </Tooltip>
     </TooltipProvider>
   );
-}
-
-/**
- * Normalize a plan-tool call's args into a TaskPlanItem[]. Returns null
- * for tools that aren't plan tools, so the caller can fall through to
- * the generic tool_call rendering. Lenient about shape so Codex's
- * update_plan and other agent dialects don't all need bespoke parsers.
- */
-function parsePlan(tool: string, args: unknown): TaskPlanItem[] | null {
-  if (
-    tool !== "TodoWrite" &&
-    tool !== "todo_write" &&
-    tool !== "update_plan" &&
-    tool !== "UpdatePlan" &&
-    tool !== "Plan"
-  ) {
-    return null;
-  }
-  if (!args || typeof args !== "object") return null;
-  const a = args as Record<string, unknown>;
-  // Try common keys for the array of items.
-  const list =
-    (Array.isArray(a.todos) && (a.todos as unknown[])) ||
-    (Array.isArray(a.plan) && (a.plan as unknown[])) ||
-    (Array.isArray(a.items) && (a.items as unknown[])) ||
-    null;
-  if (!list) return null;
-  const out: TaskPlanItem[] = [];
-  for (const raw of list) {
-    if (!raw || typeof raw !== "object") continue;
-    const r = raw as Record<string, unknown>;
-    const content = String(r.content ?? r.step ?? r.task ?? r.title ?? "").trim();
-    if (!content) continue;
-    const rawStatus = String(r.status ?? r.state ?? "pending").toLowerCase();
-    const status: TaskPlanItem["status"] =
-      rawStatus === "completed" ||
-      rawStatus === "done" ||
-      rawStatus === "complete"
-        ? "completed"
-        : rawStatus === "in_progress" ||
-            rawStatus === "in-progress" ||
-            rawStatus === "active" ||
-            rawStatus === "running"
-          ? "in_progress"
-          : "pending";
-    const item: TaskPlanItem = { content, status };
-    if (typeof r.activeForm === "string" && r.activeForm) {
-      item.activeForm = r.activeForm;
-    }
-    out.push(item);
-  }
-  return out;
 }
 
 /**
