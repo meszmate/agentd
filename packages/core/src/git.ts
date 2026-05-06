@@ -497,6 +497,137 @@ async function* runHelperWithEvents(
 }
 
 /**
+ * Stream just the text deltas from the AI helper. Claude runs in
+ * `stream-json` + `--include-partial-messages` mode so token-level
+ * deltas reach the caller as they arrive (plain `-p` text mode buffers
+ * the whole reply, which kills "live typing" UIs). Codex doesn't
+ * support stream-json, so we fall back to plain stdout chunks — those
+ * already arrive in flushes from `codex exec`, which is good enough.
+ *
+ * Yields each text fragment, returns the full accumulated string at
+ * the end.
+ */
+async function* streamHelperText(
+  cwd: string,
+  prompt: string,
+  opts: AiHelperOptions = {},
+): AsyncGenerator<
+  string,
+  {
+    text: string;
+    source: "claude" | "codex" | "fallback-empty" | "fallback-error";
+    error?: string;
+  },
+  void
+> {
+  const useJson = (opts.agent ?? "claude") === "claude";
+  const argv = buildAiHelperArgv(
+    opts,
+    prompt,
+    cwd,
+    useJson ? "stream-json" : "text",
+  );
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn({
+      cmd: argv,
+      cwd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+  } catch (e) {
+    return {
+      text: "",
+      source: "fallback-error",
+      error: (e as Error).message,
+    };
+  }
+
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let acc = "";
+  let finalResult: string | null = null;
+
+  const handleClaudeLine = (line: string): string | null => {
+    if (!line.trim()) return null;
+    let parsed: ClaudeJsonLine;
+    try {
+      parsed = JSON.parse(line) as ClaudeJsonLine;
+    } catch {
+      return null;
+    }
+    if (
+      parsed.type === "stream_event" &&
+      parsed.event?.type === "content_block_delta" &&
+      parsed.event.delta?.type === "text_delta" &&
+      typeof parsed.event.delta.text === "string"
+    ) {
+      return parsed.event.delta.text || null;
+    }
+    if (parsed.type === "result" && typeof parsed.result === "string") {
+      finalResult = parsed.result;
+    }
+    return null;
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      if (useJson) {
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 1);
+          const delta = handleClaudeLine(line);
+          if (delta) {
+            acc += delta;
+            yield delta;
+          }
+        }
+      } else {
+        const chunk = buffer;
+        buffer = "";
+        if (chunk) {
+          acc += chunk;
+          yield chunk;
+        }
+      }
+    }
+    if (useJson && buffer.trim()) {
+      const delta = handleClaudeLine(buffer);
+      if (delta) {
+        acc += delta;
+        yield delta;
+      }
+    } else if (!useJson && buffer) {
+      acc += buffer;
+      yield buffer;
+    }
+  } catch {
+    // stream cancelled
+  }
+  await proc.exited;
+  // If claude's final `result` envelope disagrees with what we
+  // streamed (rare — usually the stream-text equals the result), trust
+  // the result for the *returned* string but keep the streamed deltas
+  // visible. The caller can decide whether to overwrite the UI from
+  // the final result.
+  const text = finalResult != null ? finalResult : acc;
+  if (!text.trim()) {
+    return { text: "", source: "fallback-empty" };
+  }
+  return {
+    text,
+    source: opts.agent === "codex" ? "codex" : "claude",
+  };
+}
+
+/**
  * Tidy a final assistant reply: strip any "Agent:" / "[agent]" /
  * "**Agent:**" prefix the model leaks despite instructions, drop
  * code-fence wrappers around the whole reply.
@@ -1062,43 +1193,17 @@ export async function* streamCommitMessage(
     return { message: fallback, source: "fallback-no-changes" };
   }
   const prompt = buildCommitPrompt(diff, opts, opts.extraInstructions);
-  const argv = buildAiHelperArgv(opts.helper ?? {}, prompt);
-  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
-  try {
-    proc = Bun.spawn({
-      cmd: argv,
-      cwd,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      env: process.env as Record<string, string>,
-    });
-  } catch (e) {
+  const result = yield* streamHelperText(cwd, prompt, opts.helper ?? {});
+  if (result.source === "fallback-error") {
     const fallback = COMMIT_FALLBACK(opts.fallbackHint ?? "");
     yield fallback;
     return {
       message: fallback,
       source: "fallback-claude-error",
-      error: (e as Error).message,
+      error: result.error,
     };
   }
-
-  const reader = proc.stdout.getReader();
-  const decoder = new TextDecoder();
-  let raw = "";
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      raw += chunk;
-      yield chunk;
-    }
-  } catch {
-    // stream cancelled
-  }
-  await proc.exited;
-  const cleaned = cleanCommitOutput(raw);
+  const cleaned = cleanCommitOutput(result.text);
   if (!cleaned) {
     const fallback = COMMIT_FALLBACK(opts.fallbackHint ?? "");
     return {
@@ -1195,39 +1300,14 @@ export async function* streamPrMessage(
     return { ...split, source: "fallback-no-changes" };
   }
   const prompt = buildPrPrompt(diff, opts, opts.extraInstructions);
-  const argv = buildAiHelperArgv(opts.helper ?? {}, prompt);
-  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
-  try {
-    proc = Bun.spawn({
-      cmd: argv,
-      cwd,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      env: process.env as Record<string, string>,
-    });
-  } catch (e) {
+  const result = yield* streamHelperText(cwd, prompt, opts.helper ?? {});
+  if (result.source === "fallback-error") {
     const fallback = `${opts.taskTitle ? `feat: ${slugifyTitle(opts.taskTitle)}` : "chore: update"}\n\n${PR_FALLBACK_BODY(opts.taskPrompt)}`;
     yield fallback;
     const split = splitPrOutput(fallback);
-    return { ...split, source: "fallback-claude-error", error: (e as Error).message };
+    return { ...split, source: "fallback-claude-error", error: result.error };
   }
-  const reader = proc.stdout.getReader();
-  const decoder = new TextDecoder();
-  let raw = "";
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      raw += chunk;
-      yield chunk;
-    }
-  } catch {
-    // stream cancelled
-  }
-  await proc.exited;
-  const split = splitPrOutput(raw);
+  const split = splitPrOutput(result.text);
   if (!split.title) {
     return {
       title: opts.taskTitle ? `feat: ${slugifyTitle(opts.taskTitle)}` : "chore: update",
