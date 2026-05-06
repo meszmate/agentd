@@ -143,9 +143,15 @@ On launch the desktop app:
 2. spawns `bun apps/daemon/src/index.ts` if none is reachable,
 3. tears that spawned daemon down on quit.
 
+If Bun isn't installed and no local daemon is running, the app opens a
+small connect window where you can paste in a remote daemon URL (e.g.
+the daemon on another tailnet machine). The URL is saved and reused on
+the next launch.
+
 Set `AGENTD_DESKTOP_NO_SPAWN=1` if you'd rather start the daemon
 yourself, or `AGENTD_DESKTOP_URL=http://...` to point at a different
-host (e.g. the daemon on another tailnet machine).
+host without going through the connect page (the env var trumps any
+saved URL).
 
 Packaged installers (DMG / NSIS / AppImage / deb) are built by the
 `desktop` GitHub Actions workflow on `v*` tags. To build locally:
