@@ -16,8 +16,8 @@
 
 "use strict";
 
-const { app, BrowserWindow, shell, Menu } = require("electron");
-const { spawn } = require("node:child_process");
+const { app, BrowserWindow, shell, Menu, dialog } = require("electron");
+const { spawn, spawnSync } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -60,6 +60,32 @@ async function waitForHealth(maxMs = 30_000) {
     await new Promise((r) => setTimeout(r, 250));
   }
   return false;
+}
+
+function isBunAvailable() {
+  try {
+    const result = spawnSync("bun", ["--version"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function showBunMissingDialog() {
+  return dialog.showMessageBoxSync({
+    type: "warning",
+    title: "Bun not installed",
+    message: "agentd needs Bun to run the local daemon.",
+    detail:
+      "agentd starts a daemon process (bun apps/daemon/src/index.ts) that the UI talks to over HTTP. Install Bun from https://bun.sh and relaunch.\n\n" +
+      "The daemon doesn't have to run on this machine. To point this app at a daemon on another host, launch with AGENTD_DESKTOP_URL=http://other-host:3773 (and AGENTD_DESKTOP_NO_SPAWN=1 to skip the local check).",
+    buttons: ["Install Bun", "Quit"],
+    defaultId: 0,
+    cancelId: 1,
+  });
 }
 
 function spawnDaemon() {
@@ -132,29 +158,47 @@ function createWindow(url) {
 }
 
 async function bootstrap() {
-  // If the user pointed us at a custom URL (e.g. Vite dev server), don't
-  // spawn or health-check anything — just load it.
+  // If the user pointed us at a custom URL (e.g. Vite dev server or a
+  // remote daemon on another host), don't spawn or health-check anything,
+  // just load it.
   if (process.env.AGENTD_DESKTOP_URL) {
     mainWindow = createWindow(TARGET_URL);
     return;
   }
 
   const alive = await pingHealth();
-  if (!alive) {
-    daemonProc = spawnDaemon();
-    if (daemonProc) {
-      const ok = await waitForHealth();
-      if (!ok) {
-        console.error(
-          "[desktop] daemon did not respond on /health within 30s; " +
-            "loading the URL anyway",
-        );
-      }
-    }
-  } else {
+  if (alive) {
     console.log(`[desktop] attaching to existing daemon at ${DAEMON_BASE}`);
+    mainWindow = createWindow(TARGET_URL);
+    return;
   }
 
+  if (NO_SPAWN) {
+    console.warn(
+      `[desktop] no daemon at ${DAEMON_BASE} and AGENTD_DESKTOP_NO_SPAWN=1; loading anyway`,
+    );
+    mainWindow = createWindow(TARGET_URL);
+    return;
+  }
+
+  if (!isBunAvailable()) {
+    const choice = showBunMissingDialog();
+    if (choice === 0) {
+      shell.openExternal("https://bun.sh").catch(() => {});
+    }
+    app.quit();
+    return;
+  }
+
+  daemonProc = spawnDaemon();
+  if (daemonProc) {
+    const ok = await waitForHealth();
+    if (!ok) {
+      console.error(
+        "[desktop] daemon did not respond on /health within 30s; loading the URL anyway",
+      );
+    }
+  }
   mainWindow = createWindow(TARGET_URL);
 }
 

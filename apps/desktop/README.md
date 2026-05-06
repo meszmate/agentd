@@ -12,6 +12,12 @@ on macOS / Windows / Linux instead of a browser tab.
    waits up to 30s for `/health` to come up before loading the window.
 4. On quit, any daemon the desktop app spawned is torn down.
 
+If no local daemon is reachable and Bun isn't installed, the app shows a
+warning dialog with two paths: install Bun, or relaunch with
+`AGENTD_DESKTOP_URL=http://other-host:3773` to point at a daemon running on
+another machine. The daemon doesn't have to run on the same host as the
+desktop app.
+
 The renderer always loads the daemon's HTTP UI; nothing in the React app
 needs to know it's running inside Electron.
 
@@ -49,7 +55,7 @@ bun --filter @agentd/desktop dev    # AGENTD_DESKTOP_URL=http://127.0.0.1:5173
 
 ```bash
 bun --filter @agentd/desktop build:linux   # AppImage + deb
-bun --filter @agentd/desktop build:mac     # dmg + zip
+bun --filter @agentd/desktop build:mac     # dmg + zip, x64 and arm64
 bun --filter @agentd/desktop build:win     # nsis + zip
 ```
 
