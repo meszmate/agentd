@@ -1,0 +1,52 @@
+appId: dev.meszmate.agentd
+productName: agentd
+copyright: Copyright (c) Matthew Meszaros
+asar: true
+
+# Pull files from the package itself plus the built web bundle and the
+# daemon source from the monorepo. electron-builder runs from this
+# package's cwd; "../../.." is the repo root.
+files:
+  - "src/**/*"
+  - "package.json"
+
+extraResources:
+  - from: "../web/dist"
+    to: "web-dist"
+  - from: "../daemon"
+    to: "daemon"
+    filter:
+      - "**/*"
+      - "!node_modules/**"
+  - from: "../../packages"
+    to: "packages"
+    filter:
+      - "**/*"
+      - "!**/node_modules/**"
+      - "!**/dist/**"
+
+directories:
+  buildResources: build
+  output: dist
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
+  artifactName: "agentd-${version}-${arch}.${ext}"
+
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.developer-tools
+  artifactName: "agentd-${version}-${arch}.${ext}"
+
+win:
+  target:
+    - nsis
+    - zip
+  artifactName: "agentd-${version}-${arch}.${ext}"
+
+publish: null

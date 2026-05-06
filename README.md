@@ -45,6 +45,8 @@ Designed for one operator with many devices. Reachable from anywhere over Tailsc
   once per minute).
 - **Web UI**: Vite + React, served by the daemon, with chat, file tree, syntax-coloured
   diff, commit log + one-click revert, and an embedded terminal in the worktree.
+- **Desktop app**: optional Electron wrapper (`apps/desktop`) around the same web UI,
+  packaged for macOS / Windows / Linux. Auto-spawns the daemon if none is running.
 - **Telegram & Discord bridges** as managed plugins, with two-axis user-ID + chat/channel-ID
   allowlists. The daemon spawns and supervises them; restart-with-backoff on crash.
 - **Cost tracking**: token usage and USD cost captured per task from the agent's stream.
@@ -124,6 +126,39 @@ above.
 You can switch between modes any time: `docker compose down` and then
 `bun apps/daemon/src/index.ts`. The two have separate state directories
 (`/data` volume vs `~/.agentd/`) so they don't collide.
+
+### Desktop app (optional)
+
+Same UI, native window. Useful if you'd rather click an app icon than
+keep a browser tab pinned.
+
+```bash
+bun --filter @agentd/web build           # one-time, builds the web bundle
+bun --filter @agentd/desktop start       # opens an Electron window
+```
+
+On launch the desktop app:
+
+1. tries to attach to a daemon on `127.0.0.1:3773`,
+2. spawns `bun apps/daemon/src/index.ts` if none is reachable,
+3. tears that spawned daemon down on quit.
+
+Set `AGENTD_DESKTOP_NO_SPAWN=1` if you'd rather start the daemon
+yourself, or `AGENTD_DESKTOP_URL=http://...` to point at a different
+host (e.g. the daemon on another tailnet machine).
+
+Packaged installers (DMG / NSIS / AppImage / deb) are built by the
+`desktop` GitHub Actions workflow on `v*` tags. To build locally:
+
+```bash
+bun --filter @agentd/desktop build:linux
+bun --filter @agentd/desktop build:mac
+bun --filter @agentd/desktop build:win
+```
+
+Output lands in `apps/desktop/dist/`. Packaged builds still rely on
+[Bun](https://bun.sh) being installed on the user's machine to run the
+spawned daemon.
 
 ### Pairing
 
@@ -222,6 +257,8 @@ apps/cli          The `agentd` command. pair / ls / new / show / input / attach 
                   stop / rm / template / schedule / plugin / settings.
 apps/web          Vite + React UI served by the daemon at /. Tasks, templates,
                   schedules, plugins, settings; embedded terminal via WS PTY.
+apps/desktop      Electron wrapper around apps/web (loads the daemon URL).
+                  Optional; auto-spawns the daemon if none is running.
 apps/telegram     grammY bridge (managed by the daemon).
 apps/discord      discord.js bridge (managed by the daemon).
 packages/contracts  zod schemas — Task, Template, Schedule, AgentEvent, requests.

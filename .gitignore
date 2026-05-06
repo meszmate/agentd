@@ -17,3 +17,6 @@ worktrees/
 *.db-journal
 *.db-wal
 *.db-shm
+
+# electron-builder output
+apps/desktop/dist/

@@ -27,6 +27,16 @@ bun apps/cli/src/index.ts pair --server http://127.0.0.1:3773 --token <token-fro
 bun apps/cli/src/index.ts ls
 ```
 
+To work on the desktop app, run the daemon and Vite as above, then in a
+fourth terminal:
+
+```bash
+bun --filter @agentd/desktop dev
+```
+
+The `dev` script sets `AGENTD_DESKTOP_URL=http://127.0.0.1:5173` so the
+window points at Vite (HMR works) instead of the daemon's served bundle.
+
 ## Project layout
 
 A full tour lives in [README.md](./README.md). The guiding principles:

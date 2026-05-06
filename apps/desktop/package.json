@@ -1,0 +1,23 @@
+{
+  "name": "@agentd/desktop",
+  "version": "0.0.1",
+  "description": "Electron wrapper around the agentd web UI.",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "AGENTD_DESKTOP_URL=http://127.0.0.1:5173 electron .",
+    "pack": "electron-builder --dir",
+    "build": "electron-builder",
+    "build:linux": "electron-builder --linux",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "electron": "^33.0.2",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.6.3"
+  }
+}
