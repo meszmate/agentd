@@ -1186,6 +1186,22 @@ export class AgentdClient {
     });
   }
 
+  /**
+   * Resolve the oldest pending `agentd-ask` for this task. The agent's
+   * blocked HTTP call unblocks and gets the answer on stdout. `matched`
+   * is false when no ask was pending — caller can then fall back to
+   * a regular `sendInput`.
+   */
+  async answerTask(
+    id: string,
+    answer: string,
+  ): Promise<{ ok: true; matched: boolean }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/answer`, {
+      method: "POST",
+      body: JSON.stringify({ answer }),
+    });
+  }
+
   async stopTask(id: string): Promise<void> {
     await this.req(`/api/tasks/${id}/stop`, { method: "POST" });
   }

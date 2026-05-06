@@ -368,11 +368,18 @@ export class TaskManager {
     options: string[],
     timeoutMs = 60 * 60 * 1000,
   ): Promise<string> {
+    // Persist the askId in the breadcrumb so a refreshed/reconnecting
+    // web client can pair this `[ask · ...]` row with its later
+    // `[answer · ...]` row and render the interactive card with the
+    // chosen answer pre-filled.
+    const optionsBlock = options.length
+      ? `\n${options.map((o, i) => `${i + 1}. ${o}`).join("\n")}`
+      : "";
     appendMessage(
       this.db,
       taskId,
       "system",
-      `[ask] ${prompt}\n${options.map((o, i) => `${i + 1}. ${o}`).join("\n")}`,
+      `[ask · ${askId}] ${prompt}${optionsBlock}`,
     );
     this.bus.publish({
       taskId,
@@ -407,7 +414,13 @@ export class TaskManager {
     if (!oldestAskId) return false;
     const entry = this.pendingAsks.get(oldestAskId)!;
     this.pendingAsks.delete(oldestAskId);
-    appendMessage(this.db, taskId, "user", `[answer · ${oldestAskId}] ${answer}`);
+    // Persist as a system breadcrumb (not a user turn). The agent
+    // already received the answer over its blocked HTTP call; this
+    // row is purely the operator-facing record. Writing it as
+    // role=system also avoids colliding with the optimistic
+    // appendLocal("user", ...) the web composer fires, which used to
+    // produce two rows for the same answer.
+    appendMessage(this.db, taskId, "system", `[answer · ${oldestAskId}] ${answer}`);
     this.bus.publish({
       taskId,
       event: { kind: "answer", askId: oldestAskId, answer },

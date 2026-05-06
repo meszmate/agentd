@@ -305,6 +305,20 @@ export function TaskDetail({ task }: { task: Task }) {
         appendLocal("tool", `${header} ${trimmed}`);
       } else if (event.kind === "raw") {
         appendLocal("system", event.text);
+      } else if (event.kind === "ask") {
+        // Mirror the daemon's persisted format so the AskCard renders
+        // live (interactive picker) without waiting for a status/exit
+        // refetch. Same shape that `appendMessage(... "system", ...)`
+        // wrote on the server.
+        const optionsBlock = event.options.length
+          ? `\n${event.options.map((o, i) => `${i + 1}. ${o}`).join("\n")}`
+          : "";
+        appendLocal(
+          "system",
+          `[ask · ${event.askId}] ${event.prompt}${optionsBlock}`,
+        );
+      } else if (event.kind === "answer") {
+        appendLocal("system", `[answer · ${event.askId}] ${event.answer}`);
       } else if (event.kind === "status") {
         if (event.status === "running") {
           setTurn({ startedAt: Date.now(), tokens: 0 });

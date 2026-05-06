@@ -321,6 +321,24 @@ export function useSendInput(taskId: string) {
   });
 }
 
+/**
+ * Resolve a pending `agentd-ask` for this task. The interactive ask
+ * card in the timeline calls this on each option button click and on
+ * free-form submit. The bottom composer also routes here when it
+ * detects an open ask, so the operator's answer doesn't double-up
+ * (optimistic user row + server-side `[answer · …]` row).
+ */
+export function useAnswerTask(taskId: string) {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (answer: string) => client.answerTask(taskId, answer),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.task(taskId) });
+    },
+  });
+}
+
 /** Live snapshot of a task's running state + steer queue. */
 export function useTaskSteer(taskId: string) {
   const client = useClient();
