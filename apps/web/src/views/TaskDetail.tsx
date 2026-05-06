@@ -1067,36 +1067,33 @@ function ModelChip({ task }: { task: Task }) {
 }
 
 /**
- * Toggle whether this task mirrors its curated events (progress notes,
- * permission asks, terminal status changes) into a chat. Today the only
- * supported targets come from enabled plugins (Telegram + Discord).
- *
- * The chatId itself comes from the plugin: in Telegram, every operator
- * runs `/whoami` once to discover their id, then drops it here. We
- * keep the input lightweight — the real flow is "open chat, /mirror
- * <task-id>" which is already handled by the bot side.
+ * Show whether this task is mirroring its curated events (progress
+ * notes, permission asks, terminal status changes) to a chat, and let
+ * the operator turn it off. Turning it ON happens inside the chat
+ * itself: `/use <task>` then `/mirror`. That path is the only one
+ * that scales, since the bot already knows the chat id at that point —
+ * no copy-pasting numeric IDs into the web UI.
  */
 function MirrorChip({ task }: { task: Task }) {
   const client = useClient();
   const qc = useQueryClient();
   const { toast } = useApp();
   const cur = task.mirrorTo;
+  const platformLabel = cur
+    ? cur.platform === "telegram"
+      ? "telegram"
+      : "discord"
+    : null;
   const label = cur
-    ? `mirror:${cur.platform === "telegram" ? "tg" : "ds"} ${cur.chatId.slice(-6)}`
+    ? `mirror:${cur.platform === "telegram" ? "tg" : "ds"}`
     : "mirror:off";
-  const [draftId, setDraftId] = useState("");
+  const shortTask = task.id.slice(-8);
 
-  const apply = async (
-    next: { platform: "telegram" | "discord"; chatId: string } | null,
-  ) => {
+  const stop = async () => {
     try {
-      const res = await client.setTaskMirror(task.id, next);
+      const res = await client.setTaskMirror(task.id, null);
       if (res.task) qc.setQueryData(qk.task(task.id), { task: res.task });
-      toast(
-        next
-          ? `mirroring → ${next.platform}:${next.chatId.slice(-6)}`
-          : "mirror off",
-      );
+      toast("mirror off");
     } catch (e) {
       toast((e as Error).message, true);
     }
@@ -1118,55 +1115,71 @@ function MirrorChip({ task }: { task: Task }) {
           <span className="truncate">{label}</span>
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-72">
+      <DropdownMenuContent align="start" className="w-80">
         <DropdownMenuLabel className="text-[10px] uppercase tracking-[0.12em]">
           Mirror to chat
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {cur && (
-          <DropdownMenuItem
-            onClick={() => void apply(null)}
-            className="text-red-700 dark:text-red-300"
-          >
-            Stop mirroring
-          </DropdownMenuItem>
-        )}
         <div className="px-2 py-1.5">
-          <p className="font-mono text-[10px] text-ink-500 dark:text-ink-400">
-            Set the chat id directly. Easier path: in your bot chat run{" "}
-            <code className="font-mono">/use {task.id.slice(-8)}</code> then{" "}
-            <code className="font-mono">/mirror</code> — it self-registers.
-          </p>
+          {cur ? (
+            <div className="flex items-start gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-2">
+              <span className="mt-0.5 h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <div className="text-[12px] font-medium text-ink-900 dark:text-ink-50">
+                  Mirroring to {platformLabel}
+                </div>
+                <div className="font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate">
+                  …{cur.chatId.slice(-10)}
+                </div>
+                <div className="mt-1 text-[11px] text-ink-600 dark:text-ink-300 leading-relaxed">
+                  Replies in that chat steer the agent.
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-start gap-2 rounded-md border border-ink-900/10 bg-ink-900/[0.03] px-2.5 py-2 dark:border-ink-50/10 dark:bg-ink-50/[0.03]">
+              <span className="mt-0.5 h-1.5 w-1.5 rounded-full bg-ink-300 dark:bg-ink-600 shrink-0" />
+              <div className="text-[11px] text-ink-600 dark:text-ink-300 leading-relaxed">
+                Not mirrored. This task's progress notes and permission
+                asks stay in the web UI.
+              </div>
+            </div>
+          )}
         </div>
-        {(["telegram", "discord"] as const).map((platform) => (
-          <form
-            key={platform}
-            className="flex items-center gap-1 px-1 py-1"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const v = draftId.trim();
-              if (!v) return;
-              void apply({ platform, chatId: v });
-              setDraftId("");
-            }}
-          >
-            <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 dark:text-ink-400 w-16 shrink-0">
-              {platform}
-            </span>
-            <input
-              value={draftId}
-              onChange={(e) => setDraftId(e.target.value)}
-              placeholder="chat / channel id"
-              className="flex-1 h-7 px-2 rounded border border-ink-900/15 bg-paper-50 font-mono text-[11px] outline-none focus:border-ember-500/40 dark:border-ink-50/15 dark:bg-ink-800"
-            />
-            <button
-              type="submit"
-              className="h-7 px-2 rounded font-mono text-[10px] uppercase tracking-[0.08em] border border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+        <div className="px-2 pb-2">
+          <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-ink-500 dark:text-ink-400 mb-1.5">
+            {cur ? "Move to a different chat" : "How to mirror"}
+          </div>
+          <ol className="space-y-1 text-[11px] text-ink-700 dark:text-ink-200 leading-relaxed">
+            <li className="flex gap-2">
+              <span className="font-mono text-ink-400 dark:text-ink-500 shrink-0">1.</span>
+              <span>Open your Telegram or Discord chat with the bot.</span>
+            </li>
+            <li className="flex gap-2">
+              <span className="font-mono text-ink-400 dark:text-ink-500 shrink-0">2.</span>
+              <span>
+                Send <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-ink-900/[0.06] dark:bg-ink-50/[0.08]">/use {shortTask}</code>
+              </span>
+            </li>
+            <li className="flex gap-2">
+              <span className="font-mono text-ink-400 dark:text-ink-500 shrink-0">3.</span>
+              <span>
+                Send <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-ink-900/[0.06] dark:bg-ink-50/[0.08]">/mirror</code> — toggles on for that chat.
+              </span>
+            </li>
+          </ol>
+        </div>
+        {cur && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={() => void stop()}
+              className="text-red-700 dark:text-red-300"
             >
-              set
-            </button>
-          </form>
-        ))}
+              Stop mirroring
+            </DropdownMenuItem>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
