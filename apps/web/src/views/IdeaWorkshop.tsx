@@ -65,6 +65,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Markdown } from "@/components/markdown";
+import { IdeaQuestionCard } from "@/components/idea-question-card";
 import { WorkCard, pairToolEvents } from "@/components/tool-line";
 import {
   ShimmerText,
@@ -385,6 +386,61 @@ export function IdeaWorkshop() {
     cancelTurn.mutate(id);
   };
 
+  /**
+   * Submit a chat-mode turn with an explicit text — the entry point
+   * the operator hits when they tap an option button on an agent
+   * `<ask-user>` question (or send a free-form "Other…" answer). The
+   * draft state is bypassed so picking doesn't fight whatever the
+   * operator was typing in the composer.
+   */
+  const sendAnswer = (text: string) => {
+    if (!id) return;
+    if (streaming) return;
+    const userText = text.trim();
+    if (!userText) return;
+    setPendingUser(userText);
+    qc.setQueryData(qk.ideaActiveTurn(id), {
+      turn: {
+        ideaId: id,
+        mode: "chat" as const,
+        startedAt: Date.now(),
+        userMessage: userText,
+        partialReply: "",
+        partialPlan: "",
+        events: [],
+        ...(pickChoice.agent ? { agent: pickChoice.agent } : {}),
+        ...(pickChoice.model ? { model: pickChoice.model } : {}),
+      },
+    });
+    void (async () => {
+      try {
+        const r = await client.streamIdeaChat(
+          id,
+          {
+            mode: "chat",
+            text: userText,
+            ...(pickChoice.agent ? { agent: pickChoice.agent } : {}),
+            ...(pickChoice.model ? { model: pickChoice.model } : {}),
+          },
+          () => {
+            // WS drives the live state — same handshake as send().
+          },
+        );
+        if (r.ok === false) toast(r.error || "agent didn't respond", true);
+        void qc.invalidateQueries({ queryKey: qk.idea(id) });
+        void qc.invalidateQueries({ queryKey: ["saved-ideas"] });
+      } catch (e) {
+        const name = (e as { name?: string }).name;
+        const msg = (e as Error).message ?? "";
+        if (name !== "AbortError" && !msg.includes("network")) {
+          toast(msg || "request failed", true);
+        }
+      } finally {
+        setPendingUser(null);
+      }
+    })();
+  };
+
   const setStatus = async (status: IdeaStatus) => {
     if (!id) return;
     try {
@@ -492,6 +548,7 @@ export function IdeaWorkshop() {
             createdAt: Date.now(),
             live: true,
             events: streamingTools as unknown as IdeaMessage["events"],
+            ...(turn?.question ? { question: turn.question } : {}),
           },
         ]
       : []),
@@ -665,6 +722,7 @@ export function IdeaWorkshop() {
                 draft={draft}
                 setDraft={setDraft}
                 onSend={send}
+                onAnswerQuestion={sendAnswer}
                 onStop={stopTurn}
                 hasPlan={!!idea.planDraft}
                 pickLabel={pickLabel}
@@ -715,6 +773,7 @@ export function IdeaWorkshop() {
               draft={draft}
               setDraft={setDraft}
               onSend={send}
+              onAnswerQuestion={sendAnswer}
               onStop={stopTurn}
               hasPlan={!!idea.planDraft}
               pickLabel={pickLabel}
@@ -837,8 +896,14 @@ function StatusPill({ status }: { status: IdeaStatus }) {
  */
 function TimelineItem({
   message,
+  onAnswerQuestion,
+  questionDisabled,
+  questionAnswered,
 }: {
   message: IdeaMessage & { live?: boolean };
+  onAnswerQuestion?: (text: string) => void;
+  questionDisabled?: boolean;
+  questionAnswered?: string | null;
 }) {
   if (message.role === "system") {
     // System rows carry plan-mode tool activity — render those rows
@@ -923,6 +988,14 @@ function TimelineItem({
             </div>
           ) : (
             <Markdown text={body} />
+          )}
+          {!isUser && message.question && onAnswerQuestion && (
+            <IdeaQuestionCard
+              question={message.question}
+              onAnswer={onAnswerQuestion}
+              disabled={questionDisabled}
+              answered={questionAnswered}
+            />
           )}
         </div>
       </div>
@@ -1028,6 +1101,7 @@ function ChatColumn({
   draft,
   setDraft,
   onSend,
+  onAnswerQuestion,
   onStop,
   hasPlan,
   pickLabel,
@@ -1045,6 +1119,9 @@ function ChatColumn({
   draft: string;
   setDraft: (v: string) => void;
   onSend: (mode: "chat" | "challenge" | "plan") => Promise<void>;
+  /** Submit the operator's answer to a structured `<ask-user>` question
+   *  the agent attached to a previous turn — fired by IdeaQuestionCard. */
+  onAnswerQuestion: (text: string) => void;
   onStop: () => void;
   hasPlan: boolean;
   pickLabel: string;
@@ -1074,9 +1151,37 @@ function ChatColumn({
           )}
           {(allMessages.length > 0 || streaming) && (
             <ol className="space-y-6">
-              {allMessages.map((m) => (
-                <TimelineItem key={m.id} message={m} />
-              ))}
+              {allMessages.map((m, i) => {
+                // An agent question is "answered" once the operator's
+                // next message in the thread (any user role after this
+                // index) lands — surface that pinned answer instead of
+                // the live buttons. Hides the picker on reload after
+                // the operator already replied.
+                let answered: string | null = null;
+                if (m.role === "agent" && m.question) {
+                  for (let j = i + 1; j < allMessages.length; j++) {
+                    const next = allMessages[j]!;
+                    if (next.role === "user") {
+                      answered = next.content;
+                      break;
+                    }
+                    if (next.role === "agent") break;
+                  }
+                }
+                return (
+                  <TimelineItem
+                    key={m.id}
+                    message={m}
+                    onAnswerQuestion={
+                      m.role === "agent" && m.question
+                        ? onAnswerQuestion
+                        : undefined
+                    }
+                    questionDisabled={streaming}
+                    questionAnswered={answered}
+                  />
+                );
+              })}
               {streaming && (
                 <ThinkingItem
                   events={streamingTools}

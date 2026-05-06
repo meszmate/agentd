@@ -33,6 +33,7 @@ import {
 import type { IdeaChatEvent, IdeationEvent } from "@agentd/client";
 import type { Idea, IdeaStatus, Suggestion } from "@agentd/contracts";
 import { Markdown } from "@/components/markdown";
+import { IdeaQuestionCard } from "@/components/idea-question-card";
 import { ToolLine, WorkCard, pairToolEvents } from "@/components/tool-line";
 import {
   Count,
@@ -625,6 +626,15 @@ export function ProjectBrainstorm() {
                     onMore={(nudge) =>
                       void runBrainstorm(s.prompt, { nudge })
                     }
+                    onAnswerQuestion={(sug, answer) => {
+                      // Re-fire brainstorm with the original brief
+                      // PLUS the operator's clarification — gives the
+                      // agent the original intent + the picked
+                      // direction so it can produce grounded options
+                      // in the next turn.
+                      const combined = `${sug.prompt}\n\nClarification (${sug.question?.header ?? "answer"}): ${answer}`;
+                      void runBrainstorm(combined);
+                    }}
                     validating={validatingId}
                     validateLabel={validateLabel}
                     validateTools={validateTools}
@@ -880,6 +890,7 @@ function ChatTurn({
   onOpenIdea,
   onValidate,
   onMore,
+  onAnswerQuestion,
   validating,
   validateLabel,
   validateTools,
@@ -892,6 +903,7 @@ function ChatTurn({
   onOpenIdea: (id: string) => void;
   onValidate: (sid: string, agent: "claude" | "codex", model: string) => void;
   onMore: (nudge: string) => void;
+  onAnswerQuestion?: (suggestion: Suggestion, answer: string) => void;
   validating: string | null;
   validateLabel: string;
   validateTools: IdeationEvent[];
@@ -917,6 +929,7 @@ function ChatTurn({
         onOpenIdea={onOpenIdea}
         onValidate={onValidate}
         onMore={onMore}
+        {...(onAnswerQuestion ? { onAnswerQuestion } : {})}
         streaming={streaming}
         validating={isValidating}
         validateLabel={isValidating ? validateLabel : ""}
@@ -1230,6 +1243,7 @@ function AgentCluster({
   onOpenIdea,
   onValidate,
   onMore,
+  onAnswerQuestion,
   streaming,
   validating,
   validateLabel,
@@ -1241,14 +1255,30 @@ function AgentCluster({
   onOpenIdea: (id: string) => void;
   onValidate: (sid: string, agent: "claude" | "codex", model: string) => void;
   onMore: (nudge: string) => void;
+  /** Re-fire brainstorm with the operator's answer to the agent's
+   *  `<ask-user>` clarifying question. */
+  onAnswerQuestion?: (suggestion: Suggestion, answer: string) => void;
   streaming: boolean;
   validating: boolean;
   validateLabel: string;
   validateTools: IdeationEvent[];
 }) {
-  // Clarifying-question turn — agent decided the brief was too vague
-  // and asked back instead of generating speculative options. Render
-  // as a quiet question card; the operator answers in the composer.
+  // Structured `<ask-user>` clarifying question — preferred over the
+  // legacy "?? " text fallback. Renders option buttons + free-form
+  // input; the operator's pick re-fires brainstorm with the
+  // disambiguated brief.
+  if (suggestion.question && onAnswerQuestion) {
+    return (
+      <StructuredQuestionTurn
+        suggestion={suggestion}
+        onAnswer={(text) => onAnswerQuestion(suggestion, text)}
+        disabled={streaming}
+      />
+    );
+  }
+  // Legacy clarifying-question turn — older brainstorms used a "?? "
+  // line prefix before the structured protocol existed. Kept as a
+  // fallback so old suggestions stay readable.
   const question = clarifyingQuestion(suggestion.options);
   if (question) return <QuestionTurn question={question} />;
   // Decorate options with parsed score + each rater's score so we
@@ -1433,6 +1463,41 @@ function AgentCluster({
  * needs more from me", not "agent gave me bad ideas". A small hint
  * underneath nudges them back to the composer to refine the brief.
  */
+/**
+ * Structured `<ask-user>` question card for brainstorm. Used when
+ * `suggestion.question` is set — preferred over the legacy "?? "
+ * text-line fallback since it gives the operator tap-to-pick options
+ * + a free-form input, mirroring Claude Code's AskUserQuestion and
+ * Codex's request_user_input. Picking re-fires brainstorm with the
+ * disambiguated brief.
+ */
+function StructuredQuestionTurn({
+  suggestion,
+  onAnswer,
+  disabled,
+}: {
+  suggestion: Suggestion;
+  onAnswer: (text: string) => void;
+  disabled?: boolean;
+}) {
+  if (!suggestion.question) return null;
+  return (
+    <section>
+      <div className="flex items-baseline gap-2 mb-2">
+        <HelpCircle className="h-3 w-3 text-amber-600 dark:text-amber-300" />
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-amber-700 dark:text-amber-300">
+          agent needs more
+        </span>
+      </div>
+      <IdeaQuestionCard
+        question={suggestion.question}
+        onAnswer={onAnswer}
+        disabled={disabled}
+      />
+    </section>
+  );
+}
+
 function QuestionTurn({ question }: { question: string }) {
   return (
     <section>
