@@ -8,10 +8,13 @@ import {
   Rocket,
   Sparkles,
 } from "lucide-react";
-import type {
-  PermissionMode,
-  Project,
-  Task,
+import {
+  THINKING_LEVELS_BY_AGENT,
+  clampThinkingLevel,
+  type PermissionMode,
+  type Project,
+  type Task,
+  type ThinkingLevel,
 } from "@agentd/contracts";
 import {
   Kicker,
@@ -20,22 +23,23 @@ import {
   VRule,
 } from "@/components/ui/page-topbar";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { ProjectPicker } from "@/components/project-picker";
 import {
   WorkspaceSetup,
   defaultWorkspaceSetup,
   type WorkspaceSetupValue,
 } from "@/components/workspace-setup";
+import {
+  ToolbarPick,
+  commitModeLabel,
+  parseCommitMode,
+} from "@/components/toolbar-pick";
 import { useApp } from "@/AppContext";
 import {
   useCreateTask,
+  useModels,
   usePatchPrefs,
   usePrefs,
   useProjects,
@@ -272,6 +276,7 @@ function Composer({ firstRun }: { firstRun: boolean }) {
   const { toast } = useApp();
   const projectsQ = useProjects();
   const projects = projectsQ.data?.projects ?? [];
+  const modelsQ = useModels();
 
   const prefsQ = usePrefs();
   const patchPrefs = usePatchPrefs();
@@ -283,6 +288,11 @@ function Composer({ firstRun }: { firstRun: boolean }) {
   const [agent, setAgent] = useState<"claude" | "codex">("claude");
   const [permissionMode, setPermissionMode] =
     useState<PermissionMode>("bypassPermissions");
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("high");
+  const [model, setModel] = useState<string>("");
+  const [autoCommit, setAutoCommit] = useState(true);
+  const [autoPush, setAutoPush] = useState(true);
+  const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [hydrated, setHydrated] = useState(false);
@@ -295,6 +305,12 @@ function Composer({ firstRun }: { firstRun: boolean }) {
     setProjectId(p.lastProjectId);
     setAgent(p.lastAgent);
     setPermissionMode(p.lastPermissionMode);
+    setThinkingLevel(clampThinkingLevel(p.lastAgent, p.lastThinkingLevel));
+    setModel(
+      p.lastAgent === "claude" ? p.lastModelClaude : p.lastModelCodex,
+    );
+    setAutoCommit(p.lastAutoCommit);
+    setAutoPush(p.lastAutoPush);
     setWorkspace({
       workspaceMode: p.workspaceMode,
       branchMode: p.branchMode,
@@ -304,6 +320,22 @@ function Composer({ firstRun }: { firstRun: boolean }) {
     });
     setHydrated(true);
   }, [prefsQ.data, hydrated]);
+
+  // Swap model whenever the agent changes after hydration.
+  useEffect(() => {
+    if (!hydrated || !prefsQ.data) return;
+    setModel(
+      agent === "claude"
+        ? prefsQ.data.prefs.lastModelClaude
+        : prefsQ.data.prefs.lastModelCodex,
+    );
+  }, [agent, hydrated, prefsQ.data]);
+
+  // Clamp the thinking level whenever the agent changes so the runner
+  // never receives a value the chosen CLI rejects.
+  useEffect(() => {
+    setThinkingLevel((cur) => clampThinkingLevel(agent, cur));
+  }, [agent]);
 
   // Sync the path label whenever the project list updates and our id matches.
   useEffect(() => {
@@ -331,6 +363,11 @@ function Composer({ firstRun }: { firstRun: boolean }) {
         baseBranch: finalBase,
         prompt: p,
         permissionMode,
+        thinkingLevel,
+        autoCommit,
+        autoPush,
+        ...(title.trim() ? { title: title.trim() } : {}),
+        ...(model.trim() ? { model: model.trim() } : {}),
         workspaceMode: workspace.workspaceMode,
         branchMode: workspace.branchMode,
         ...(workspace.branchName.trim()
@@ -343,11 +380,18 @@ function Composer({ firstRun }: { firstRun: boolean }) {
         lastBase: finalBase,
         lastAgent: agent,
         lastPermissionMode: permissionMode,
+        lastThinkingLevel: thinkingLevel,
+        lastAutoCommit: autoCommit,
+        lastAutoPush: autoPush,
+        ...(agent === "claude"
+          ? { lastModelClaude: model.trim() }
+          : { lastModelCodex: model.trim() }),
         workspaceMode: workspace.workspaceMode,
         branchMode: workspace.branchMode,
         pullLatest: workspace.pullLatest,
       });
       setPrompt("");
+      setTitle("");
       navigate(`/tasks/${res.task.id}`);
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err), true);
@@ -401,6 +445,15 @@ function Composer({ firstRun }: { firstRun: boolean }) {
         className="border-0 rounded-none focus-visible:ring-0 resize-none bg-transparent text-[14px] leading-relaxed px-4 py-3 shadow-none"
       />
 
+      <div className="border-t border-ink-900/[0.06] bg-paper-100/40 px-3 py-2 dark:border-ink-50/[0.06] dark:bg-ink-900/30">
+        <Input
+          placeholder="Title (optional, auto-derived from prompt)"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          className="h-8 text-[12px]"
+        />
+      </div>
+
       {/* Bottom toolbar */}
       <div className="flex flex-wrap items-center gap-2 border-t border-ink-900/[0.06] bg-paper-100/40 px-3 py-2 dark:border-ink-50/[0.06] dark:bg-ink-900/30">
         <div className="min-w-0 flex-1 sm:flex-initial sm:w-72">
@@ -414,7 +467,7 @@ function Composer({ firstRun }: { firstRun: boolean }) {
           />
         </div>
 
-        <ToolbarSelect
+        <ToolbarPick
           label={agent}
           options={[
             { value: "claude", label: "claude" },
@@ -423,7 +476,7 @@ function Composer({ firstRun }: { firstRun: boolean }) {
           onSelect={(v) => setAgent(v as "claude" | "codex")}
         />
 
-        <ToolbarSelect
+        <ToolbarPick
           label={
             permissionMode === "bypassPermissions"
               ? "bypass"
@@ -439,7 +492,42 @@ function Composer({ firstRun }: { firstRun: boolean }) {
           onSelect={(v) => setPermissionMode(v as PermissionMode)}
         />
 
-        <ToolbarSelect
+        <ToolbarPick
+          label={`think:${thinkingLevel}`}
+          options={THINKING_LEVELS_BY_AGENT[agent].map((v) => ({
+            value: v,
+            label: v,
+          }))}
+          onSelect={(v) => setThinkingLevel(v as ThinkingLevel)}
+        />
+
+        <ToolbarPick
+          label={`model:${model || "default"}`}
+          options={[
+            { value: "", label: "(default)" },
+            ...((modelsQ.data?.models[agent] ?? []).map((m) => ({
+              value: m.id,
+              label: m.label || m.id,
+            }))),
+          ]}
+          onSelect={setModel}
+        />
+
+        <ToolbarPick
+          label={`commit:${commitModeLabel(autoCommit, autoPush)}`}
+          options={[
+            { value: "none", label: "no commit" },
+            { value: "commit", label: "commit only" },
+            { value: "commit+push", label: "commit + push (default)" },
+          ]}
+          onSelect={(v) => {
+            const next = parseCommitMode(v);
+            setAutoCommit(next.autoCommit);
+            setAutoPush(next.autoPush);
+          }}
+        />
+
+        <ToolbarPick
           label={workspace.workspaceMode === "in_place" ? "in-place" : "worktree"}
           options={[
             { value: "worktree", label: "worktree · isolated copy" },
@@ -458,7 +546,7 @@ function Composer({ firstRun }: { firstRun: boolean }) {
           onClick={() => setShowAdvanced((v) => !v)}
           className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 hover:text-ink-700 dark:text-ink-500 dark:hover:text-ink-200 inline-flex items-center gap-1 px-1"
         >
-          {showAdvanced ? "less" : "setup"}
+          {showAdvanced ? "less" : "branch"}
           <ChevronDown
             className={cn(
               "h-3 w-3 transition-transform",
@@ -491,42 +579,13 @@ function Composer({ firstRun }: { firstRun: boolean }) {
             projectIdOrSlug={projectId || null}
             prompt={prompt}
             agent={agent}
+            model={model}
+            thinkingLevel={thinkingLevel}
           />
         </div>
       )}
 
     </section>
-  );
-}
-
-function ToolbarSelect({
-  label,
-  options,
-  onSelect,
-}: {
-  label: string;
-  options: { value: string; label: string }[];
-  onSelect: (v: string) => void;
-}) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="inline-flex items-center gap-1 h-7 px-2 rounded border border-ink-900/10 bg-paper-50 font-mono text-[11px] text-ink-700 hover:border-ink-900/25 hover:bg-paper-100 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-200 dark:hover:bg-ink-700 transition-colors"
-        >
-          {label}
-          <ChevronDown className="h-3 w-3 opacity-60" />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-[200px]">
-        {options.map((o) => (
-          <DropdownMenuItem key={o.value} onClick={() => onSelect(o.value)}>
-            <span className="font-mono text-[12px]">{o.label}</span>
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }
 
