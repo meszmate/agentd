@@ -188,10 +188,11 @@ export function TaskDetail({ task }: { task: Task }) {
   const { live } = useRealtime();
 
   // Server status is the source of truth. realtime.tsx flips zustand's
-  // turn/hint/streams off on every non-running status event, but if the
-  // status flip arrives via task_updated only (no event), make sure the
-  // local view settles too. Cheap idempotent reset.
-  const resetTaskRtAction = useStore((s) => s.resetTaskRt);
+  // turn/hint/streams off on every non-running status event, but a
+  // status flip that arrives via task_updated only (no event — happens
+  // when the daemon mutates the row directly, e.g. close/reopen) needs
+  // a belt-and-suspenders reset here so the persistent zustand slice
+  // doesn't keep showing a "thinking" pulse for an idle task.
   const endTaskTurnAction = useStore((s) => s.endTaskTurn);
   useEffect(() => {
     const stillRunning =
@@ -200,8 +201,7 @@ export function TaskDetail({ task }: { task: Task }) {
       task.status === "waiting_perm";
     if (stillRunning) return;
     endTaskTurnAction(task.id);
-    void resetTaskRtAction;
-  }, [task.status, task.id, endTaskTurnAction, resetTaskRtAction]);
+  }, [task.status, task.id, endTaskTurnAction]);
 
   // Cumulative billing-style total (never decreases) — shown in the
   // task header chip + cost summaries.
