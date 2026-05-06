@@ -20,6 +20,7 @@ packages/    pure libraries (no app imports)
 apps/        deployables (depend on packages, not on each other)
   daemon/    Hono HTTP+WS server. Owns the event bus + state.
   web/       Vite + React frontend served by the daemon.
+  desktop/   Electron wrapper around the web UI (loads the daemon URL).
   cli/       agentd CLI (pair, ls, run, settings, plugin enable, …).
   telegram/  Telegram bot plugin (subprocess of daemon).
   discord/   Discord bot plugin (subprocess of daemon).
@@ -90,13 +91,19 @@ The daemon spawns plugin apps as subprocesses, never imports them.
 ```bash
 bun install
 bun --filter @agentd/web build         # produces apps/web/dist
-bun --filter '*' typecheck              # all 9 packages must pass
+bun --filter '*' typecheck              # all 11 packages must pass
 bun apps/daemon/src/index.ts            # listens on 127.0.0.1:3773
 ```
 
 Web dev with HMR (proxies to daemon):
 ```bash
 bun --filter @agentd/web dev
+```
+
+Desktop app (Electron, loads the daemon URL — same UI, native window):
+```bash
+bun --filter @agentd/desktop start      # auto-spawns daemon if none running
+bun --filter @agentd/desktop dev        # points at Vite on :5173 for HMR
 ```
 
 There are no automated tests yet. Verify behavior end-to-end against
@@ -159,6 +166,42 @@ curl -s http://127.0.0.1:3773/health
 - **PTY work runs in a Node subprocess** (`apps/daemon/src/pty-worker.cjs`)
   because `node-pty` misbehaves under Bun. Don't attempt to use
   `node-pty` from the daemon process directly.
+
+## Desktop app conventions
+
+- **Thin wrapper, no UI of its own — except the bootstrap connect page.**
+  `apps/desktop` is a single `BrowserWindow` pointed at the daemon's HTTP
+  UI. Every product UI change belongs in `apps/web`. The one allowed
+  exception is `apps/desktop/src/connect.html` — a small static page
+  shown only when no daemon is reachable, so the operator can type in a
+  remote daemon URL without learning env vars. Don't grow it into a
+  general settings panel; if a setting can be edited once a daemon is
+  reachable, it belongs in the React app's Settings, not here.
+- **`main.cjs` is plain CommonJS.** Electron's main runs in Node, not Bun.
+  Match the existing `pty-worker.cjs` pattern. No new TypeScript build
+  step. The connect page is plain HTML + a small inline script — no
+  framework, no bundler.
+- **Daemon spawn is opt-out, not opt-in.** Open the app and it tries to
+  attach to a running daemon, then spawns `bun apps/daemon/src/index.ts`
+  if none is reachable on `127.0.0.1:3773`. Respect
+  `AGENTD_DESKTOP_NO_SPAWN=1` and `AGENTD_DESKTOP_URL` overrides.
+- **Bootstrap URL is the one local-only setting.** The URL the operator
+  picks in the connect page is persisted to
+  `app.getPath('userData')/connection.json`. This is the single
+  exception to the "cross-device state goes on the server" rule,
+  because the URL *is* which server to talk to — chicken-and-egg. Don't
+  add other settings to this file. `AGENTD_DESKTOP_URL` (env) trumps
+  the saved URL; "Retry local" in the connect page clears it.
+- **Don't bypass the HTTP boundary.** The renderer talks to the daemon
+  the same way a browser does (HTTP+WS over 127.0.0.1). Don't expose
+  Node APIs through the main-window preload to "make it faster" —
+  `contextIsolation` stays on, `nodeIntegration` stays off. The
+  connect window has its own `connect-preload.cjs` exposing only the
+  bootstrap IPC channels (`agentd-connect:*`); never reuse it for the
+  main window.
+- **Packaging via electron-builder.** Config lives in
+  `apps/desktop/electron-builder.yml`. `.github/workflows/desktop.yml`
+  builds the macOS / Windows / Linux artifacts on `v*` tags.
 
 ## When in doubt
 

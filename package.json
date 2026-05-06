@@ -12,6 +12,9 @@
     "cli": "bun --filter @agentd/cli start",
     "dev": "bun --filter @agentd/web dev",
     "web:build": "bun --filter @agentd/web build",
+    "desktop": "bun --filter @agentd/desktop start",
+    "desktop:dev": "bun --filter @agentd/desktop dev",
+    "desktop:build": "bun --filter @agentd/desktop build",
     "typecheck": "bun --filter '*' typecheck"
   },
   "devDependencies": {

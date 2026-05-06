@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agentd · connect</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0b0b;
+        --panel: #141414;
+        --border: #262626;
+        --text: #e5e5e5;
+        --muted: #8a8a8a;
+        --accent: #f97316;
+        --accent-hover: #fb923c;
+        --danger: #f87171;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Oxygen, Ubuntu, sans-serif;
+      }
+      .wrap {
+        min-height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 32px;
+      }
+      .card {
+        width: 100%;
+        max-width: 520px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 28px;
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 18px;
+        font-weight: 600;
+      }
+      p.lede {
+        margin: 0 0 20px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .reason {
+        margin: 0 0 18px;
+        padding: 10px 12px;
+        background: rgba(248, 113, 113, 0.08);
+        border: 1px solid rgba(248, 113, 113, 0.25);
+        border-radius: 8px;
+        color: var(--danger);
+        font-size: 12.5px;
+      }
+      label {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin: 0 0 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      input[type="text"] {
+        width: 100%;
+        background: #0b0b0b;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--text);
+        padding: 10px 12px;
+        font: inherit;
+        outline: none;
+      }
+      input[type="text"]:focus {
+        border-color: var(--accent);
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        margin-top: 16px;
+      }
+      button {
+        font: inherit;
+        border-radius: 8px;
+        padding: 9px 14px;
+        cursor: pointer;
+        border: 1px solid var(--border);
+        background: #1c1c1c;
+        color: var(--text);
+      }
+      button:hover { background: #232323; }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #1a0a00;
+        font-weight: 600;
+      }
+      button.primary:hover { background: var(--accent-hover); }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .spacer { flex: 1; }
+      .hint {
+        margin-top: 18px;
+        padding-top: 16px;
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+      .hint a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      .hint a:hover { text-decoration: underline; }
+      .status {
+        margin-top: 12px;
+        font-size: 12.5px;
+        color: var(--muted);
+        min-height: 18px;
+      }
+      .status.error { color: var(--danger); }
+      .status.ok { color: #4ade80; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>Connect to a daemon</h1>
+        <p class="lede">
+          The desktop app needs a running agentd daemon to talk to.
+        </p>
+
+        <div id="reason" class="reason" hidden></div>
+
+        <label for="url">Daemon URL</label>
+        <input
+          id="url"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="http://127.0.0.1:3773"
+        />
+
+        <div class="row">
+          <button id="connect" class="primary">Connect</button>
+          <button id="retry-local">Retry local</button>
+          <div class="spacer"></div>
+          <button id="quit">Quit</button>
+        </div>
+
+        <div id="status" class="status"></div>
+
+        <div class="hint">
+          No Bun installed?
+          <a href="#" id="install-bun">Get it from bun.sh</a>, then click
+          Retry local. The daemon doesn't have to run on this machine — point
+          this at any tailnet host running agentd.
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const api = window.agentdConnect;
+      const urlInput = document.getElementById("url");
+      const connectBtn = document.getElementById("connect");
+      const retryBtn = document.getElementById("retry-local");
+      const quitBtn = document.getElementById("quit");
+      const installBunLink = document.getElementById("install-bun");
+      const reasonBox = document.getElementById("reason");
+      const statusEl = document.getElementById("status");
+
+      function setStatus(text, kind) {
+        statusEl.textContent = text || "";
+        statusEl.className = "status" + (kind ? " " + kind : "");
+      }
+
+      function setBusy(busy) {
+        connectBtn.disabled = busy;
+        retryBtn.disabled = busy;
+      }
+
+      async function init() {
+        const ctx = await api.getContext();
+        if (ctx.reason) {
+          reasonBox.textContent = ctx.reason;
+          reasonBox.hidden = false;
+        }
+        urlInput.value = ctx.savedUrl || "";
+        urlInput.focus();
+        urlInput.select();
+      }
+
+      function normalizeUrl(raw) {
+        let u = (raw || "").trim();
+        if (!u) return "";
+        if (!/^https?:\/\//i.test(u)) u = "http://" + u;
+        return u.replace(/\/+$/, "");
+      }
+
+      async function doConnect() {
+        const url = normalizeUrl(urlInput.value);
+        if (!url) {
+          setStatus("Enter a daemon URL.", "error");
+          return;
+        }
+        setBusy(true);
+        setStatus("Checking " + url + " ...");
+        const result = await api.connect(url);
+        if (result.ok) {
+          setStatus("Connected. Loading...", "ok");
+          // Main process will swap the window contents.
+        } else {
+          setBusy(false);
+          setStatus(result.error || "Could not reach that daemon.", "error");
+        }
+      }
+
+      async function doRetryLocal() {
+        setBusy(true);
+        setStatus("Retrying local daemon...");
+        const result = await api.retryLocal();
+        if (result.ok) {
+          setStatus("Connected. Loading...", "ok");
+        } else {
+          setBusy(false);
+          setStatus(result.error || "Local daemon still unreachable.", "error");
+        }
+      }
+
+      connectBtn.addEventListener("click", doConnect);
+      retryBtn.addEventListener("click", doRetryLocal);
+      quitBtn.addEventListener("click", () => api.quit());
+      installBunLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        api.openBun();
+      });
+      urlInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") doConnect();
+      });
+
+      init();
+    </script>
+  </body>
+</html>
