@@ -1280,7 +1280,7 @@ const PR_FALLBACK_BODY = (taskPrompt?: string): string => {
   if (taskPrompt?.trim()) {
     return `## What changed\n\n${taskPrompt.trim()}\n`;
   }
-  return "## What changed\n\n- (auto-fallback — could not reach the AI helper)\n";
+  return "## What changed\n\n- AI helper unavailable, please edit this body before opening the PR\n";
 };
 
 /** Stream a PR subject + body. Yields chunks for the wire, returns the parsed result. */

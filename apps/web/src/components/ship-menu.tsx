@@ -260,10 +260,25 @@ function CommitDialog({
                       claude is writing
                     </span>
                   </>
-                ) : source === "claude" ? (
-                  "claude generated · edit freely"
+                ) : source === "claude" || source === "codex" ? (
+                  `${source} generated · edit freely`
+                ) : source === "fallback-no-changes" ? (
+                  <span className="text-amber-700 dark:text-amber-400">
+                    nothing staged · placeholder shown
+                  </span>
+                ) : source === "fallback-empty-output" ? (
+                  <span className="text-amber-700 dark:text-amber-400">
+                    AI returned no message · edit before committing
+                  </span>
+                ) : source === "fallback-claude-error" ||
+                  source === "fallback-error" ? (
+                  <span className="text-rose-700 dark:text-rose-400">
+                    AI helper unavailable · edit before committing
+                  </span>
                 ) : source ? (
-                  `fallback (${source.replace("fallback-", "")})`
+                  <span className="text-amber-700 dark:text-amber-400">
+                    placeholder · edit before committing
+                  </span>
                 ) : (
                   ""
                 )}
