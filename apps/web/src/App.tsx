@@ -43,9 +43,6 @@ const Devices = lazy(() =>
 const Activity = lazy(() =>
   import("@/views/Activity").then((m) => ({ default: m.Activity })),
 );
-const Skills = lazy(() =>
-  import("@/views/Skills").then((m) => ({ default: m.Skills })),
-);
 const Projects = lazy(() =>
   import("@/views/Projects").then((m) => ({ default: m.Projects })),
 );
@@ -124,14 +121,7 @@ const router = createBrowserRouter([
           </ViewSuspense>
         ),
       },
-      {
-        path: "skills",
-        element: (
-          <ViewSuspense>
-            <Skills />
-          </ViewSuspense>
-        ),
-      },
+      { path: "skills", element: <Navigate to="/settings/skills" replace /> },
       {
         path: "projects",
         element: (
@@ -212,6 +202,7 @@ const router = createBrowserRouter([
             <Settings />
           </ViewSuspense>
         ),
+        children: [{ path: "skills" }],
       },
       { path: "*", element: <Navigate to="/home" replace /> },
     ],

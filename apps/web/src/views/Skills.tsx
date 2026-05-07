@@ -95,7 +95,7 @@ interface FileNode {
   mtime: number;
 }
 
-export function Skills() {
+export function Skills({ embedded = false }: { embedded?: boolean } = {}) {
   const projectsQ = useProjects();
   const projects = projectsQ.data?.projects ?? [];
 
@@ -176,37 +176,71 @@ export function Skills() {
     return xs;
   }, [skills, filter, search]);
 
+  const header = embedded ? (
+    <div className="flex h-9 items-center gap-2 px-4 border-b border-ink-900/10 dark:border-ink-50/10 shrink-0 bg-paper-100 dark:bg-ink-800">
+      <Kicker>library</Kicker>
+      <VRule />
+      <span className="text-[13px] text-ink-900 dark:text-ink-50 font-medium">
+        Skills
+      </span>
+      <span className="text-ink-300 dark:text-ink-600">·</span>
+      <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 tabular-nums">
+        {skills.length} total
+      </span>
+      <Spacer />
+      <div className="hidden md:flex items-center gap-2">
+        <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+          project
+        </span>
+        <div className="w-56">
+          <ProjectPicker
+            value={projectId}
+            onChange={(p) => {
+              setProjectId(p.id);
+              setProjectPath(p.path);
+            }}
+          />
+        </div>
+      </div>
+      <Button size="xs" onClick={() => setCreateOpen(true)}>
+        <Plus className="h-3 w-3" /> New skill
+      </Button>
+    </div>
+  ) : (
+    <PageTopbar>
+      <Kicker>library</Kicker>
+      <VRule />
+      <span className="text-[13px] text-ink-900 dark:text-ink-50 font-medium">
+        Skills
+      </span>
+      <span className="text-ink-300 dark:text-ink-600">·</span>
+      <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 tabular-nums">
+        {skills.length} total
+      </span>
+      <Spacer />
+      <div className="hidden md:flex items-center gap-2">
+        <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+          project
+        </span>
+        <div className="w-56">
+          <ProjectPicker
+            value={projectId}
+            onChange={(p) => {
+              setProjectId(p.id);
+              setProjectPath(p.path);
+            }}
+          />
+        </div>
+      </div>
+      <Button size="xs" onClick={() => setCreateOpen(true)}>
+        <Plus className="h-3 w-3" /> New skill
+      </Button>
+    </PageTopbar>
+  );
+
   return (
     <div className="flex h-full flex-col">
-      <PageTopbar>
-        <Kicker>library</Kicker>
-        <VRule />
-        <span className="text-[13px] text-ink-900 dark:text-ink-50 font-medium">
-          Skills
-        </span>
-        <span className="text-ink-300 dark:text-ink-600">·</span>
-        <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500 tabular-nums">
-          {skills.length} total
-        </span>
-        <Spacer />
-        <div className="hidden md:flex items-center gap-2">
-          <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
-            project
-          </span>
-          <div className="w-56">
-            <ProjectPicker
-              value={projectId}
-              onChange={(p) => {
-                setProjectId(p.id);
-                setProjectPath(p.path);
-              }}
-            />
-          </div>
-        </div>
-        <Button size="xs" onClick={() => setCreateOpen(true)}>
-          <Plus className="h-3 w-3" /> New skill
-        </Button>
-      </PageTopbar>
+      {header}
 
       {/* Master-detail body */}
       <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[300px_1fr]">

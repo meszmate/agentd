@@ -1,6 +1,11 @@
-import { useEffect, useId, useRef, useState } from "react";
-import { Bell, BellOff, Loader2, Save } from "lucide-react";
+import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
+import { Bell, BellOff, BookText, Loader2, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
+
+const SkillsView = lazy(() =>
+  import("@/views/Skills").then((m) => ({ default: m.Skills })),
+);
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -71,6 +76,8 @@ export function Settings() {
   const settingsQ = useSettings();
   const patch = usePatchSettings();
   const modelsQ = useModels();
+  const location = useLocation();
+  const onSkillsTab = location.pathname.startsWith("/settings/skills");
 
   const [agentInstructions, setAgentInstructions] = useState("");
   const [commitInstructions, setCommitInstructions] = useState("");
@@ -252,11 +259,32 @@ export function Settings() {
             </span>
           </div>
           <nav className="flex-1 py-1.5">
+            <Link
+              to="/settings/skills"
+              className={cn(
+                "h-8 pl-[14px] pr-4 flex items-center gap-2.5 text-[12px] transition-colors border-l-2",
+                onSkillsTab
+                  ? "bg-paper-50 text-ink-900 border-ember-500 font-medium dark:bg-ink-50/[0.05] dark:text-ink-50"
+                  : "text-ink-500 hover:bg-paper-50 hover:text-ink-900 border-transparent dark:text-ink-400 dark:hover:bg-ink-700 dark:hover:text-ink-50",
+              )}
+            >
+              <BookText
+                className={cn(
+                  "h-3 w-3 shrink-0",
+                  onSkillsTab
+                    ? "text-ember-500"
+                    : "text-ink-400 dark:text-ink-500",
+                )}
+              />
+              <span>Skills</span>
+            </Link>
+            <div className="mx-3 my-1.5 h-px bg-ink-900/[0.06] dark:bg-ink-50/[0.06]" />
             {SECTIONS.map((s) => (
-              <a
+              <Link
                 key={s.id}
-                href={`#section-${s.id}`}
+                to={`/settings#section-${s.id}`}
                 onClick={(e) => {
+                  if (onSkillsTab) return;
                   e.preventDefault();
                   setActive(s.id);
                   document
@@ -265,7 +293,7 @@ export function Settings() {
                 }}
                 className={cn(
                   "h-8 pl-[14px] pr-4 flex items-center gap-2.5 text-[12px] transition-colors border-l-2",
-                  active === s.id
+                  !onSkillsTab && active === s.id
                     ? "bg-paper-50 text-ink-900 border-ember-500 font-medium dark:bg-ink-50/[0.05] dark:text-ink-50"
                     : "text-ink-500 hover:bg-paper-50 hover:text-ink-900 border-transparent dark:text-ink-400 dark:hover:bg-ink-700 dark:hover:text-ink-50",
                 )}
@@ -273,7 +301,7 @@ export function Settings() {
                 <span
                   className={cn(
                     "font-mono text-[11px] w-3 shrink-0",
-                    active === s.id
+                    !onSkillsTab && active === s.id
                       ? "text-ember-500"
                       : "text-ink-400 dark:text-ink-500",
                   )}
@@ -281,11 +309,24 @@ export function Settings() {
                   {s.glyph}
                 </span>
                 <span>{s.label}</span>
-              </a>
+              </Link>
             ))}
           </nav>
         </aside>
 
+        {onSkillsTab ? (
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center text-sm text-ink-500 dark:text-ink-400">
+                  Loading…
+                </div>
+              }
+            >
+              <SkillsView embedded />
+            </Suspense>
+          </div>
+        ) : (
         <div
           id="settings-scroll"
           className="flex-1 min-h-0 overflow-y-auto"
@@ -569,9 +610,12 @@ export function Settings() {
           {/* Spacer to allow last section to scroll into view */}
           <div className="h-24" />
         </div>
+        )}
       </div>
 
-      {/* Sticky save bar */}
+      {/* Sticky save bar — hidden on the Skills tab (Skills has its own
+          per-file save model). */}
+      {!onSkillsTab && (
       <div className="flex h-9 items-center gap-3 px-5 border-t border-ink-900/10 bg-paper-100 dark:border-ink-50/10 dark:bg-ink-800 shrink-0">
         <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
           config.json
@@ -597,6 +641,7 @@ export function Settings() {
           Save
         </Button>
       </div>
+      )}
     </div>
   );
 }
