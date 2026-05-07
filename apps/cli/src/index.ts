@@ -433,9 +433,19 @@ async function cmdTemplate(argv: string[]) {
       }
     }
     const args = parseArgPairs(argFlags);
-    const { task } = await c.runTemplate(name, { args });
-    console.log(`fired template '${name}' → task ${task.id}`);
-    console.log(`attach: agentd attach ${task.id}`);
+    const result = await c.runTemplate(name, { args });
+    if ("task" in result) {
+      console.log(`fired template '${name}' → task ${result.task.id}`);
+      console.log(`attach: agentd attach ${result.task.id}`);
+    } else {
+      // Ideation template — no task spawned. Just print the brainstorm
+      // brief and tell the operator where the options landed.
+      const sug = result.suggestion;
+      console.log(
+        `brainstormed '${name}' → ${sug.options.length} option${sug.options.length === 1 ? "" : "s"} (suggestion ${sug.id})`,
+      );
+      console.log(`pick: open the web ui's brainstorm window for this project`);
+    }
     return;
   }
   console.error(`unknown template subcommand: ${sub}`);

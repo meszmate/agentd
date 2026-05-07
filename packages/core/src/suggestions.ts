@@ -1,4 +1,4 @@
-import { and, eq, desc, type SQL } from "drizzle-orm";
+import { and, eq, desc, lt, or, sql, type SQL } from "drizzle-orm";
 import type {
   IdeaMessageEvent,
   IdeaQuestion,
@@ -238,6 +238,76 @@ export function deleteProjectSuggestions(db: Db, projectId: string): number {
     .where(eq(suggestions.projectId, projectId))
     .run() as { changes?: number } | undefined;
   return Number(r?.changes ?? 0);
+}
+
+/**
+ * Auto-dismiss pending suggestions older than `maxAgeMs`. Used by the
+ * daemon TTL sweep so a brainstorm window the operator never engaged
+ * with stops cluttering the project's pending list. Returns the rows
+ * that flipped so the caller can broadcast `suggestion_updated` events.
+ *
+ * `maxAgeMs <= 0` is a no-op (operator opted out of auto-dismiss).
+ */
+export function autoDismissStalePending(
+  db: Db,
+  maxAgeMs: number,
+): Suggestion[] {
+  if (maxAgeMs <= 0) return [];
+  const cutoff = Date.now() - maxAgeMs;
+  const stale = db
+    .select()
+    .from(suggestions)
+    .where(
+      and(
+        eq(suggestions.status, "pending"),
+        lt(suggestions.createdAt, cutoff),
+      )!,
+    )
+    .all();
+  if (stale.length === 0) return [];
+  const now = Date.now();
+  for (const row of stale) {
+    db.update(suggestions)
+      .set({ status: "dismissed", resolvedAt: now })
+      .where(eq(suggestions.id, row.id))
+      .run();
+  }
+  return stale.map((row) =>
+    rowToSuggestion({ ...row, status: "dismissed", resolvedAt: now }),
+  );
+}
+
+/**
+ * Hard-delete `dismissed` / `resolved` suggestions older than `maxAgeMs`.
+ * Returns `{id, projectId}` pairs so the daemon can publish
+ * `suggestion_removed` events. `maxAgeMs <= 0` keeps history forever.
+ */
+export function purgeOldArchived(
+  db: Db,
+  maxAgeMs: number,
+): Array<{ id: string; projectId: string | null }> {
+  if (maxAgeMs <= 0) return [];
+  const cutoff = Date.now() - maxAgeMs;
+  // Compare on resolvedAt when present, fall back to createdAt for any
+  // legacy row that somehow has status != pending without a resolvedAt.
+  const candidates = db
+    .select()
+    .from(suggestions)
+    .where(
+      and(
+        or(
+          eq(suggestions.status, "dismissed"),
+          eq(suggestions.status, "resolved"),
+        )!,
+        lt(sql`coalesce(${suggestions.resolvedAt}, ${suggestions.createdAt})`, cutoff),
+      )!,
+    )
+    .all();
+  if (candidates.length === 0) return [];
+  for (const row of candidates) {
+    db.delete(suggestions).where(eq(suggestions.id, row.id)).run();
+  }
+  return candidates.map((r) => ({ id: r.id, projectId: r.projectId ?? null }));
 }
 
 export function dismissSuggestion(db: Db, id: string): Suggestion | null {

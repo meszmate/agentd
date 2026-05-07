@@ -819,7 +819,7 @@ interface PlanSheetProps {
   onClose: () => void;
 }
 
-function PlanAndSpawnSheet({
+export function PlanAndSpawnSheet({
   seed,
   suggestion,
   savedIdea,

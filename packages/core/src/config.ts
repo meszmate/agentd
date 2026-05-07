@@ -409,6 +409,29 @@ export const UserPrefs = z.object({
 export type UserPrefs = z.infer<typeof UserPrefs>;
 export const DEFAULT_USER_PREFS: UserPrefs = UserPrefs.parse({});
 
+/**
+ * Lifecycle for ephemeral brainstorm suggestions. The web "brainstorm
+ * windows" surface streams options into a transient panel; if the
+ * operator never picks one, the row should not stick around forever.
+ *
+ *   pendingTtlHours    — pending suggestions older than this get auto-
+ *                        marked `dismissed`. Default 24h.
+ *   archiveTtlDays     — `dismissed` / `resolved` rows older than this
+ *                        get hard-deleted. Default 7d. Set to 0 to keep
+ *                        history forever.
+ *   sweepIntervalMinutes — how often the daemon runs the sweep. Default
+ *                        30 minutes. The sweep is cheap (two indexed
+ *                        SQL statements) so dropping this lower is
+ *                        fine.
+ */
+export const BrainstormConfig = z.object({
+  pendingTtlHours: z.number().nonnegative().default(24),
+  archiveTtlDays: z.number().nonnegative().default(7),
+  sweepIntervalMinutes: z.number().positive().default(30),
+});
+export type BrainstormConfig = z.infer<typeof BrainstormConfig>;
+export const DEFAULT_BRAINSTORM_CONFIG: BrainstormConfig = BrainstormConfig.parse({});
+
 export const AgentdConfig = z.object({
   pluginSessionToken: z.string().nullable().default(null),
   /** Appended to the agent's system prompt for every task. */
@@ -489,6 +512,11 @@ export const AgentdConfig = z.object({
       github: GithubPresets.default(DEFAULT_GITHUB_PRESETS),
     })
     .default({ github: DEFAULT_GITHUB_PRESETS }),
+  /**
+   * TTL + sweep cadence for ephemeral brainstorm suggestions. See
+   * {@link BrainstormConfig}.
+   */
+  brainstorm: BrainstormConfig.default(DEFAULT_BRAINSTORM_CONFIG),
   plugins: z
     .object({
       telegram: TelegramPluginConfig.default({

@@ -19,6 +19,7 @@ import { buildServer } from "./server.ts";
 import { TaskManager } from "./taskManager.ts";
 import { PluginManager } from "./pluginManager.ts";
 import { Scheduler } from "./scheduler.ts";
+import { BrainstormSweep } from "./brainstormSweep.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WEB_DIST = resolve(HERE, "..", "..", "web", "dist");
@@ -162,6 +163,9 @@ async function main() {
   scheduler.start();
   console.log("scheduler: ticking once per minute");
 
+  const brainstormSweep = new BrainstormSweep(db, bus, paths);
+  brainstormSweep.start();
+
   plugins.startAll();
   const pluginStatuses = plugins.status();
   for (const p of pluginStatuses) {
@@ -176,6 +180,7 @@ async function main() {
   const shutdown = async (sig: string) => {
     console.log(`\nreceived ${sig}, shutting down...`);
     scheduler.stop();
+    brainstormSweep.stop();
     await plugins.stopAll();
     server.stop();
     process.exit(0);

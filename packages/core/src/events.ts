@@ -46,6 +46,16 @@ export type SystemEvent =
       kind: "suggestion_updated";
       suggestion: Suggestion;
     }
+  | {
+      /**
+       * A suggestion was hard-deleted (TTL sweep or explicit purge). UIs
+       * drop it from any list and close any open brainstorm window pinned
+       * to this id.
+       */
+      kind: "suggestion_removed";
+      suggestionId: string;
+      projectId: string | null;
+    }
   /**
    * Task / project mutations. Realtime principle: every state
    * change visible across surfaces (web, telegram, discord, CLI)

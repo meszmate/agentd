@@ -94,6 +94,8 @@ import {
   getSavedIdea,
   getSuggestion,
   addSuggestionValidation,
+  autoDismissStalePending,
+  purgeOldArchived,
   listCouncils,
   listIdeaMessages,
   listProviderRateLimits,
@@ -2261,6 +2263,24 @@ export function buildServer(opts: BuildServerOptions) {
       const project = getProjectById(db, tpl.projectId);
       if (project) repoPath = project.path;
     }
+    // Ideation templates do NOT spawn a task — they brainstorm and
+    // create a Suggestion the operator picks from. Web clients prefer
+    // the streaming endpoint below for live options; this blocking
+    // path exists for plugins / curl / scheduled "run now" calls.
+    if (tpl.kind === "ideation") {
+      try {
+        const sug = await tasks.fireIdeation(tpl, prompt, null);
+        if (!sug) {
+          return c.json(
+            { error: "the helper returned no options — try a sharper brief" },
+            502,
+          );
+        }
+        return c.json({ suggestion: sug });
+      } catch (e) {
+        return c.json({ error: (e as Error).message }, 400);
+      }
+    }
     try {
       const task = await tasks.create({
         agent: tpl.agent,
@@ -2285,6 +2305,191 @@ export function buildServer(opts: BuildServerOptions) {
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
+  });
+
+  /**
+   * Streaming counterpart to `/templates/:id/run` for ideation
+   * templates — same wire shape as `/projects/:idOrSlug/ideate/stream`
+   * so the brainstorm window can render options as they arrive instead
+   * of waiting for the helper to finish.
+   *
+   * Body: `{ args?: Record<string,string>, max?, agent?, model?, effort? }`.
+   */
+  api.post("/templates/:id/ideate/stream", async (c) => {
+    const tpl =
+      getTemplate(db, c.req.param("id")) ??
+      getTemplateByName(db, c.req.param("id"));
+    if (!tpl) return c.json({ error: "not found" }, 404);
+    if (tpl.kind !== "ideation") {
+      return c.json(
+        { error: `template ${tpl.name} is kind=${tpl.kind}, not ideation` },
+        400,
+      );
+    }
+    const body = (await c.req.json().catch(() => ({}))) as {
+      args?: Record<string, string>;
+      max?: number;
+      agent?: "claude" | "codex";
+      model?: string;
+      effort?: ThinkingLevel;
+      title?: string;
+    };
+    const prompt = renderTemplate(tpl.promptTemplate, body.args ?? {});
+    const project = tpl.projectId ? getProjectById(db, tpl.projectId) : null;
+    const repoPath = project?.path ?? tpl.repoPath;
+    const cfg = loadConfig(paths.root);
+    const helper = {
+      ...cfg.aiHelpers,
+      ...(body.agent ? { agent: body.agent } : {}),
+      ...(body.model ? { model: body.model } : {}),
+      ...(body.effort ? { effort: body.effort } : {}),
+    };
+    const ctx = project
+      ? {
+          savedIdeas: listSavedIdeas(db, {
+            projectId: project.id,
+            includeSpawned: false,
+          }).map((i) => i.text),
+          pastOptions: listSuggestions(db, {
+            projectId: project.id,
+            limit: 8,
+          }).flatMap((s) => s.options),
+          recentTasks: tasks
+            .list()
+            .filter((t) => t.projectId === project.id)
+            .sort((a, b) => b.createdAt - a.createdAt)
+            .slice(0, 30)
+            .map((t) => t.title),
+          instructions:
+            project.instructionsEnabled !== false
+              ? project.instructions ?? null
+              : null,
+        }
+      : { savedIdeas: [], pastOptions: [], recentTasks: [], instructions: null };
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const enc = new TextEncoder();
+        const collected: string[] = [];
+        const startedAt = Date.now();
+        let lastUsage: {
+          inputTokens?: number;
+          outputTokens?: number;
+        } | null = null;
+        const accumulatedEvents: Array<{
+          kind: "tool_use" | "tool_result";
+          [k: string]: unknown;
+        }> = [];
+        let lastQuestion:
+          | import("@agentd/contracts").IdeaQuestion
+          | null = null;
+        try {
+          const it = streamIdeation(repoPath, prompt, {
+            helper,
+            context: ctx,
+            ...(body.max != null ? { max: body.max } : {}),
+          });
+          while (true) {
+            const next = await it.next();
+            if (next.done) {
+              const result = next.value;
+              const finalQuestion = result.question ?? lastQuestion;
+              if (
+                collected.length === 0 &&
+                result.options.length === 0 &&
+                !finalQuestion
+              ) {
+                controller.enqueue(
+                  enc.encode(
+                    `\x1e${JSON.stringify({
+                      ok: false,
+                      source: result.source,
+                      error:
+                        result.error ??
+                        "the helper returned no options — try a sharper brief",
+                    })}`,
+                  ),
+                );
+              } else {
+                const title =
+                  body.title?.trim() ||
+                  tpl.name ||
+                  prompt.replace(/\s+/g, " ").trim().slice(0, 60);
+                const sug = createSuggestion(db, {
+                  templateId: tpl.id,
+                  projectId: project?.id ?? null,
+                  title,
+                  prompt,
+                  options: collected,
+                  durationMs: Date.now() - startedAt,
+                  ...(lastUsage?.inputTokens != null
+                    ? { inputTokens: lastUsage.inputTokens }
+                    : {}),
+                  ...(lastUsage?.outputTokens != null
+                    ? { outputTokens: lastUsage.outputTokens }
+                    : {}),
+                  ...(accumulatedEvents.length > 0
+                    ? {
+                        events: accumulatedEvents as Array<
+                          import("@agentd/contracts").IdeaMessageEvent
+                        >,
+                      }
+                    : {}),
+                  ...(finalQuestion ? { question: finalQuestion } : {}),
+                });
+                bus.publishSystem({
+                  kind: "suggestion_created",
+                  suggestion: sug,
+                });
+                controller.enqueue(
+                  enc.encode(
+                    `\x1e${JSON.stringify({
+                      ok: true,
+                      suggestion: sug,
+                      source: result.source,
+                    })}`,
+                  ),
+                );
+              }
+              break;
+            }
+            const ev = next.value;
+            if (ev.kind === "option") {
+              collected.push(ev.text);
+            } else if (ev.kind === "tool_use" || ev.kind === "tool_result") {
+              accumulatedEvents.push(
+                ev as { kind: "tool_use" | "tool_result"; [k: string]: unknown },
+              );
+            } else if (ev.kind === "question") {
+              lastQuestion = ev.question;
+            } else if (ev.kind === "usage") {
+              lastUsage = {
+                ...(ev.inputTokens != null ? { inputTokens: ev.inputTokens } : {}),
+                ...(ev.outputTokens != null ? { outputTokens: ev.outputTokens } : {}),
+              };
+            }
+            controller.enqueue(enc.encode(`\x1f${JSON.stringify(ev)}\n`));
+          }
+        } catch (e) {
+          controller.enqueue(
+            enc.encode(
+              `\x1e${JSON.stringify({
+                ok: false,
+                source: "exception",
+                error: (e as Error).message,
+              })}`,
+            ),
+          );
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "application/octet-stream",
+        "cache-control": "no-cache",
+      },
+    });
   });
 
   // ──────────────────────── schedules ────────────────────────
@@ -5253,6 +5458,13 @@ export function buildServer(opts: BuildServerOptions) {
             send({
               type: "suggestion_updated",
               suggestion: env.event.suggestion,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "suggestion_removed") {
+            send({
+              type: "suggestion_removed",
+              suggestionId: env.event.suggestionId,
+              projectId: env.event.projectId,
               ts: env.ts,
             });
           } else if (env.event.kind === "task_changed") {

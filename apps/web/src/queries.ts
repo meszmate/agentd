@@ -487,7 +487,13 @@ export function useRunTemplate() {
   return useMutation({
     mutationFn: ({ name, args }: { name: string; args: Record<string, string> }) =>
       client.runTemplate(name, { args }),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.tasks() }),
+    onSuccess: (data) => {
+      if ("task" in data) {
+        void qc.invalidateQueries({ queryKey: qk.tasks() });
+      } else {
+        void qc.invalidateQueries({ queryKey: ["project-suggestions"] });
+      }
+    },
   });
 }
 

@@ -508,6 +508,84 @@ export class AgentdClient {
       };
     }
   }
+  /**
+   * Streaming counterpart to `runTemplate` for ideation-kind templates.
+   * Same wire shape as {@link streamIdeateForProject} but bound to a
+   * template instead of an ad-hoc project brief — args fill the
+   * template placeholders before the brainstorm helper runs.
+   */
+  async streamIdeateForTemplate(
+    templateId: string,
+    body: {
+      args?: Record<string, string>;
+      max?: number;
+      title?: string;
+      agent?: "claude" | "codex";
+      model?: string;
+      effort?: ThinkingLevel;
+    },
+    onEvent: (event: IdeationEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<
+    | { ok: true; suggestion: Suggestion; source: string }
+    | { ok: false; source: string; error: string }
+  > {
+    const r = await fetch(
+      `${this.server}/api/templates/${encodeURIComponent(templateId)}/ideate/stream`,
+      {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(body),
+        signal,
+      },
+    );
+    if (!r.ok || !r.body) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`ideate stream failed: ${r.status} ${text}`);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let envelope = "";
+    let sawSentinel = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      buffer += chunk;
+      while (!sawSentinel) {
+        const sIdx = buffer.indexOf("\x1e");
+        const oIdx = buffer.indexOf("\x1f");
+        if (sIdx >= 0 && (oIdx < 0 || sIdx < oIdx)) {
+          envelope += buffer.slice(sIdx + 1);
+          buffer = "";
+          sawSentinel = true;
+          break;
+        }
+        if (oIdx < 0) break;
+        const eol = buffer.indexOf("\n", oIdx + 1);
+        if (eol < 0) break;
+        const json = buffer.slice(oIdx + 1, eol);
+        buffer = buffer.slice(eol + 1);
+        try {
+          onEvent(JSON.parse(json));
+        } catch {
+          // bad event — skip
+        }
+      }
+      if (sawSentinel) envelope += buffer.length ? buffer : "";
+      if (sawSentinel) buffer = "";
+    }
+    try {
+      return JSON.parse(envelope || "{}");
+    } catch {
+      return {
+        ok: false,
+        source: "fallback-error",
+        error: envelope || "empty stream",
+      };
+    }
+  }
   // ── ideas (per-project library) ──
   async listSavedIdeas(
     idOrSlug: string,
@@ -1538,10 +1616,18 @@ export class AgentdClient {
   async deleteTemplate(idOrName: string): Promise<void> {
     await this.req(`/api/templates/${encodeURIComponent(idOrName)}`, { method: "DELETE" });
   }
+  /**
+   * Run a template. `kind: "task"` templates return `{ task }`;
+   * `kind: "ideation"` templates run the brainstorm helper synchronously
+   * and return `{ suggestion }`. Web prefers
+   * {@link streamIdeateForTemplate} for ideation so the operator sees
+   * options stream in live, but this blocking path stays available for
+   * plugins / curl / scheduled "run now" use.
+   */
   async runTemplate(
     idOrName: string,
     req: RunTemplateRequest = { args: {} },
-  ): Promise<{ task: Task }> {
+  ): Promise<{ task: Task } | { suggestion: Suggestion }> {
     return this.req(`/api/templates/${encodeURIComponent(idOrName)}/run`, {
       method: "POST",
       body: JSON.stringify(req),
