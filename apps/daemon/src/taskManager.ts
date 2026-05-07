@@ -22,6 +22,7 @@ import {
   createTask,
   deleteTask,
   detectDefaultBranch,
+  isGitRepo,
   EventBus,
   getTask,
   getTasksDependingOn,
@@ -439,15 +440,34 @@ export class TaskManager {
   }
 
   async create(params: CreateTaskParams): Promise<Task> {
-    const baseBranch =
-      params.baseBranch ?? (await detectDefaultBranch(params.repoPath));
+    // When the project folder isn't a git repo, fall back to running
+    // directly inside it: no worktree, no branch, no auto-commit/push.
+    // git operations would just fail, and the operator clearly didn't
+    // intend version control here (otherwise they'd have run `git init`).
+    const isGit = await isGitRepo(params.repoPath);
+    const baseBranch = isGit
+      ? (params.baseBranch ?? (await detectDefaultBranch(params.repoPath)))
+      : "";
     const title = params.title ?? params.prompt.split("\n")[0]!.slice(0, 80);
     const taskId = newId("task");
-    const workspaceMode = params.workspaceMode ?? "worktree";
+    const workspaceMode = isGit ? (params.workspaceMode ?? "worktree") : "in_place";
     const branchMode = params.branchMode ?? "new";
     let branch: string;
     let worktreePath: string;
-    if (params.sharedWorktreePath && params.sharedBranch) {
+    if (!isGit) {
+      if (params.githubPr) {
+        throw new Error(
+          `cannot run a GitHub PR task in ${params.repoPath}: not a git repository`,
+        );
+      }
+      if (params.sharedWorktreePath || params.sharedBranch) {
+        throw new Error(
+          `shared worktree spawn requires a git repository at ${params.repoPath}`,
+        );
+      }
+      worktreePath = params.repoPath;
+      branch = "";
+    } else if (params.sharedWorktreePath && params.sharedBranch) {
       // Plan-slice sibling: the batch already created the shared
       // worktree + branch; just reuse them so every slice lands on
       // the same checkout.
@@ -532,9 +552,10 @@ export class TaskManager {
       projectId: project.id,
       // Default ON for commit + push (the agent commits + pushes when
       // done; the post-hook is a safety net). Pull requests stay manual
-      // from the Ship menu.
-      autoCommit: params.autoCommit ?? true,
-      autoPush: params.autoPush ?? true,
+      // from the Ship menu. Non-git folders force both off — there's
+      // nothing to commit to.
+      autoCommit: isGit ? (params.autoCommit ?? true) : false,
+      autoPush: isGit ? (params.autoPush ?? true) : false,
       skills: params.skills ?? [],
       permissionMode: params.permissionMode ?? "bypassPermissions",
       workspaceMode,
