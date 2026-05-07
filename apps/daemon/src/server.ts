@@ -1012,15 +1012,24 @@ export function buildServer(opts: BuildServerOptions) {
       // and we treat the whole branch as ahead.
       const m = out.match(/^(\d+)\s+(\d+)/);
       if (proc.exitCode !== 0 || !m) {
-        const headOnly = Bun.spawn({
-          cmd: ["git", "rev-list", "--count", "HEAD"],
+        // No upstream yet — count commits unique to this branch vs. the
+        // base branch, not the entire HEAD history (which would include
+        // every commit on main and report a wildly inflated count).
+        const vsBase = Bun.spawn({
+          cmd: [
+            "git",
+            "rev-list",
+            "--count",
+            `${task.baseBranch}..HEAD`,
+          ],
           cwd: task.worktreePath,
           stdout: "pipe",
+          stderr: "pipe",
         });
-        const headCount = (await new Response(headOnly.stdout).text()).trim();
-        await headOnly.exited;
+        const baseCount = (await new Response(vsBase.stdout).text()).trim();
+        await vsBase.exited;
         return c.json({
-          ahead: parseInt(headCount, 10) || 0,
+          ahead: vsBase.exitCode === 0 ? parseInt(baseCount, 10) || 0 : 0,
           behind: 0,
           hasUpstream: false,
         });
