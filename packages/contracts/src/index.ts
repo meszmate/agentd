@@ -1930,6 +1930,14 @@ export const WsServerEvent = z.discriminatedUnion("type", [
     suggestion: Suggestion,
     ts: z.number(),
   }),
+  // Hard-deleted by the TTL sweep (or any future explicit delete path).
+  // Surfaces drop the row from caches + close any window pinned to it.
+  z.object({
+    type: z.literal("suggestion_removed"),
+    suggestionId: z.string(),
+    projectId: z.string().nullable(),
+    ts: z.number(),
+  }),
   // Pushed when a task is removed (operator deleted, cleanup, etc).
   // Lets every connected surface drop the row from its cache without
   // a full /api/tasks round-trip.

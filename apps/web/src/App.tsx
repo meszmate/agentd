@@ -17,6 +17,7 @@ import { AppShell } from "@/components/app-shell";
 import { Login } from "@/views/Login";
 import { useTaskCompletionNotifications } from "@/useNotifications";
 import { RealtimeProvider } from "@/realtime";
+import { BrainstormWindows } from "@/components/brainstorm-windows";
 import { qk } from "@/queries";
 
 const Home = lazy(() =>
@@ -264,6 +265,7 @@ function Root() {
     <ErrorBoundary>
       <RealtimeProvider>
         <RouterProvider router={router} />
+        <BrainstormWindows />
         <BackgroundEffects />
       </RealtimeProvider>
     </ErrorBoundary>

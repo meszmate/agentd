@@ -23,6 +23,10 @@ import { useApp } from "@/AppContext";
 import { qk } from "@/queries";
 import { useStore } from "@/store";
 import { parsePlanFromTool, shapeMessageFromEvent } from "@/lib/agent-event";
+import {
+  applySuggestionEvent,
+  dropWindowForSuggestionId,
+} from "@/components/brainstorm-windows";
 import type { Project } from "@agentd/contracts";
 
 /**
@@ -404,6 +408,18 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           });
           return;
         }
+        if (msg.type === "suggestion_removed") {
+          // TTL sweep (or manual purge) hard-deleted a row. Drop it
+          // from any cached project-suggestions list and close any
+          // open brainstorm window pinned to it.
+          if (msg.projectId) {
+            void qc.invalidateQueries({ queryKey: ["project-suggestions"] });
+          } else {
+            void qc.invalidateQueries({ queryKey: ["project-suggestions"] });
+          }
+          dropWindowForSuggestionId(msg.suggestionId);
+          return;
+        }
         if (
           msg.type === "suggestion_created" ||
           msg.type === "suggestion_updated"
@@ -413,6 +429,12 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           // might be open while a different surface (chat) is
           // resolving an older suggestion at the same time.
           void qc.invalidateQueries({ queryKey: ["project-suggestions"] });
+          // Patch any open brainstorm window pinned to this suggestion
+          // so the picker reflects the latest state, and auto-close
+          // when the row reaches a terminal status from elsewhere.
+          if (msg.type === "suggestion_updated") {
+            applySuggestionEvent(msg.suggestion);
+          }
           // Surface brainstorm activity in the same channels that
           // task events use — recent ticker at the bottom of the
           // sidebar AND the per-project pulse + unread counter.

@@ -583,9 +583,19 @@ export async function cmdRun(
     if (eq > 0) args[p.slice(0, eq)] = p.slice(eq + 1);
   }
   try {
-    const { task } = await ctx.client.runTemplate(name, { args });
-    ctx.state.focus.set(msg.chatId, task.id);
-    await msg.reply(`fired '${name}' → ${task.id.slice(-8)} (focused)`);
+    const result = await ctx.client.runTemplate(name, { args });
+    if ("task" in result) {
+      ctx.state.focus.set(msg.chatId, result.task.id);
+      await msg.reply(`fired '${name}' → ${result.task.id.slice(-8)} (focused)`);
+    } else {
+      // Ideation template — server returned a brainstorm Suggestion
+      // instead of a Task. Surface the option count so the operator
+      // knows where to look (web brainstorm window or /ideas listing).
+      const sug = result.suggestion;
+      await msg.reply(
+        `brainstormed '${name}' → ${sug.options.length} option${sug.options.length === 1 ? "" : "s"}; pick one in the web ui or via /ideas`,
+      );
+    }
   } catch (e) {
     await msg.reply((e as Error).message);
   }

@@ -42,6 +42,7 @@ import {
 import { useApp } from "@/AppContext";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ProjectPicker } from "@/components/project-picker";
+import { useOpenBrainstormWindow } from "@/components/brainstorm-windows";
 import {
   cn,
   formatCost,
@@ -666,6 +667,7 @@ function RunTemplateSheet({
   onClose: () => void;
 }) {
   const run = useRunTemplate();
+  const openBrainstorm = useOpenBrainstormWindow();
   const { toast } = useApp();
   const navigate = useNavigate();
   const [argInput, setArgInput] = useState("");
@@ -675,11 +677,35 @@ function RunTemplateSheet({
     if (!template) return;
     try {
       const args = parseArgs(argInput);
-      const { task } = await run.mutateAsync({ name: template.name, args });
-      toast(`Ran ${template.name} → ${shortId(task.id)}`);
-      setArgInput("");
-      onClose();
-      navigate(`/tasks/${task.id}`);
+      // Ideation templates don't spawn a task — they pop a streaming
+      // brainstorm window so the operator can pick from options as they
+      // land. The window auto-cleans on TTL or close, so dropping the
+      // sheet doesn't leave a row behind.
+      if (template.kind === "ideation") {
+        openBrainstorm({
+          templateId: template.id,
+          templateName: template.name,
+          args,
+        });
+        toast(`Brainstorming ${template.name}…`);
+        setArgInput("");
+        onClose();
+        return;
+      }
+      const result = await run.mutateAsync({ name: template.name, args });
+      if ("task" in result) {
+        toast(`Ran ${template.name} → ${shortId(result.task.id)}`);
+        setArgInput("");
+        onClose();
+        navigate(`/tasks/${result.task.id}`);
+      } else {
+        // Server returned a suggestion (e.g. an ideation template the
+        // client didn't recognize as such). Treat it like the
+        // brainstorm flow and let the window handle picking.
+        toast(`${template.name} → ${result.suggestion.options.length} options`);
+        setArgInput("");
+        onClose();
+      }
     } catch (e) {
       toast((e as Error).message, true);
     }
