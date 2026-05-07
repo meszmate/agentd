@@ -460,7 +460,15 @@ export class TaskManager {
           `cannot run a GitHub PR task in ${params.repoPath}: not a git repository`,
         );
       }
-      if (params.sharedWorktreePath || params.sharedBranch) {
+      // A sibling spawned off a non-git parent will pass the parent's
+      // worktreePath (= repoPath) as `sharedWorktreePath` and an empty
+      // `sharedBranch`. That's fine — every slice runs in_place against
+      // the project folder, so we just reuse the path. Reject only the
+      // truly-shared case where someone passed a *different* path.
+      if (
+        params.sharedWorktreePath &&
+        params.sharedWorktreePath !== params.repoPath
+      ) {
         throw new Error(
           `shared worktree spawn requires a git repository at ${params.repoPath}`,
         );
@@ -615,11 +623,18 @@ export class TaskManager {
     if (params.slices.length === 0) {
       throw new Error("createBatch needs at least one slice");
     }
-    const baseBranch =
-      params.baseBranch ?? (await detectDefaultBranch(params.repoPath));
+    // Non-git folders can't host worktrees or branches. Run each slice
+    // in_place against the project path; tasks.create() already handles
+    // the per-slice fallback (no auto-commit/push, empty branch).
+    const isGit = await isGitRepo(params.repoPath);
+    const baseBranch = isGit
+      ? (params.baseBranch ?? (await detectDefaultBranch(params.repoPath)))
+      : "";
     const project = ensureProjectForPath(this.db, params.repoPath);
     const planGroupId = newId("grp");
-    const shareWorktree = params.shareWorktree ?? params.slices.length > 1;
+    const shareWorktree = isGit
+      ? (params.shareWorktree ?? params.slices.length > 1)
+      : false;
 
     let sharedWorktreePath: string | undefined;
     let sharedBranch: string | undefined;
@@ -1957,6 +1972,14 @@ export class TaskManager {
   }): Promise<Council> {
     if (params.members.length < 2 || params.members.length > 5) {
       throw new Error("council needs 2-5 members");
+    }
+    // Council fans out to N worktrees on N branches; that simply
+    // doesn't work without a git repo. Surface a clear reason instead
+    // of bouncing the operator into the cryptic createWorktree error.
+    if (!(await isGitRepo(params.repoPath))) {
+      throw new Error(
+        `council needs a git repository at ${params.repoPath} (each member runs on its own branch)`,
+      );
     }
     const baseBranch =
       params.baseBranch ?? (await detectDefaultBranch(params.repoPath));
