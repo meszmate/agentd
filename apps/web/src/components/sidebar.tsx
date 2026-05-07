@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
 import {
   Activity,
-  BookText,
   CalendarClock,
   ChevronRight,
   CircleDot,
@@ -70,7 +69,6 @@ const SECTIONS: {
       { to: "/tasks", label: "Tasks", icon: Inbox, kbd: "g t" },
       { to: "/templates", label: "Templates", icon: FileTerminal, kbd: "g e" },
       { to: "/schedules", label: "Schedules", icon: CalendarClock, kbd: "g s" },
-      { to: "/skills", label: "Skills", icon: BookText, kbd: "g k" },
       { to: "/terminal", label: "Terminal", icon: TerminalSquare, kbd: "g r" },
     ],
   },

@@ -38,7 +38,7 @@ export function KeyboardShortcuts({
       gt: () => onNavigate("/tasks"),
       ge: () => onNavigate("/templates"),
       gs: () => onNavigate("/schedules"),
-      gk: () => onNavigate("/skills"),
+      gk: () => onNavigate("/settings/skills"),
       gr: () => onNavigate("/terminal"),
       ga: () => onNavigate("/activity"),
       gp: () => onNavigate("/plugins"),
