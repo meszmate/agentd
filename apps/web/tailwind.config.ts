@@ -117,17 +117,19 @@ const config: Config = {
           "0%": { backgroundPosition: "-200% 0" },
           "100%": { backgroundPosition: "200% 0" },
         },
-        // Whole-label crossfade for `<TransitioningText>`. The old
-        // line fades + drifts up, the new line fades in from slightly
-        // below, as a single beat. Per-letter wave + blur looked
-        // janky on the 11-12.5px thinking labels.
-        "label-in": {
-          "0%": { opacity: "0", transform: "translateY(0.25em)" },
+        // Crossfade for `<TransitioningText>`. The exiting line uses
+        // `label-out` as a single whole-block fade so the two phrases
+        // never overlap visually. The incoming line uses `letter-in`
+        // per character with an index-based delay, opacity + a small
+        // upward drift, no blur — blur was the part that read janky
+        // at 11-12.5px, the stagger itself is fine.
+        "letter-in": {
+          "0%": { opacity: "0", transform: "translateY(0.3em)" },
           "100%": { opacity: "1", transform: "translateY(0)" },
         },
         "label-out": {
           "0%": { opacity: "1", transform: "translateY(0)" },
-          "100%": { opacity: "0", transform: "translateY(-0.25em)" },
+          "100%": { opacity: "0", transform: "translateY(-0.2em)" },
         },
         "fade-in": {
           "0%": { opacity: "0", transform: "translateY(4px)" },
@@ -236,8 +238,8 @@ const config: Config = {
         shimmer: "shimmer 2s linear infinite",
         "thinking-pulse": "thinking-pulse 2.4s ease-in-out infinite",
         "fade-in": "fade-in 0.25s ease-out both",
-        "label-in": "label-in 0.34s cubic-bezier(0.22, 1, 0.36, 1) both",
-        "label-out": "label-out 0.18s cubic-bezier(0.4, 0, 0.7, 0) both",
+        "letter-in": "letter-in 0.42s cubic-bezier(0.22, 1, 0.36, 1) both",
+        "label-out": "label-out 0.22s cubic-bezier(0.4, 0, 0.7, 0) both",
         rise: "rise 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both",
         blink: "blink 1.6s ease-in-out infinite",
         "pulse-ring": "pulse_ring 1.6s cubic-bezier(0.2, 0.7, 0.2, 1) infinite",

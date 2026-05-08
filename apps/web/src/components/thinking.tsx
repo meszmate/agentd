@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -38,13 +38,15 @@ export function ShimmerText({
 }
 
 /**
- * Whole-label crossfade. When the rotating phrase changes, the old
- * line fades + drifts up as a single beat, then the new line fades
- * in from slightly below. The previous per-letter wave (each char
- * blurring + sliding independently) looked janky at 11-12.5px and
- * the two phrases overlapping in the same grid cell read as messy
- * rather than alive. A calm crossfade pairs cleanly with the parent
- * <ShimmerText>'s slow opacity pulse.
+ * Per-letter staggered crossfade. The exiting line fades out as a
+ * single beat (whole-label, no per-letter motion) so the two phrases
+ * never collide visually. The incoming line reveals letter-by-letter
+ * with an index-based delay, opacity + a small upward drift, no blur.
+ * The blur on the previous version is what read as janky at 11-12.5px,
+ * not the stagger itself, so the wave is back without it.
+ *
+ * Both copies share a grid cell so the parent only sizes for the
+ * longer of the two and there's no layout shift mid-transition.
  */
 export function TransitioningText({
   children,
@@ -54,33 +56,53 @@ export function TransitioningText({
   className?: string;
 }) {
   const text = children;
-  const [displayed, setDisplayed] = useState(text);
-  const [phase, setPhase] = useState<"idle" | "out" | "in">("idle");
+  const [exiting, setExiting] = useState<string | null>(null);
+  const prev = useRef(text);
   useEffect(() => {
-    if (text === displayed) return;
-    setPhase("out");
-    const swap = setTimeout(() => {
-      setDisplayed(text);
-      setPhase("in");
-    }, 180);
-    const settle = setTimeout(() => setPhase("idle"), 520);
-    return () => {
-      clearTimeout(swap);
-      clearTimeout(settle);
-    };
-  }, [text, displayed]);
+    if (prev.current === text) return;
+    setExiting(prev.current);
+    prev.current = text;
+    const t = setTimeout(() => setExiting(null), 600);
+    return () => clearTimeout(t);
+  }, [text]);
   return (
-    <span className={cn("inline-block align-baseline", className)}>
-      <span
-        key={`${phase}-${displayed}`}
-        className={cn(
-          "inline-block will-change-[opacity,transform]",
-          phase === "out" && "animate-label-out",
-          phase === "in" && "animate-label-in",
-        )}
-      >
-        {displayed}
-      </span>
+    <span
+      className={cn(
+        "relative inline-grid align-baseline [&>*]:[grid-area:1/1]",
+        className,
+      )}
+    >
+      {exiting !== null && (
+        <span
+          key={`out-${exiting}`}
+          className="inline-block whitespace-pre animate-label-out will-change-[opacity,transform]"
+          aria-hidden
+        >
+          {exiting}
+        </span>
+      )}
+      <StaggeredIn key={`in-${text}`} text={text} />
+    </span>
+  );
+}
+
+function StaggeredIn({ text }: { text: string }) {
+  const safe = text ?? "";
+  // Per-letter stagger capped so the whole reveal stays under ~half
+  // a second on long phrases. Short phrases get a slightly slower
+  // stagger so the wave is still legible.
+  const stagger = Math.min(28, Math.max(12, 240 / Math.max(safe.length, 1)));
+  return (
+    <span className="inline-flex whitespace-pre">
+      {[...safe].map((c, i) => (
+        <span
+          key={i}
+          className="inline-block animate-letter-in will-change-[opacity,transform]"
+          style={{ animationDelay: `${i * stagger}ms` }}
+        >
+          {c === " " ? " " : c}
+        </span>
+      ))}
     </span>
   );
 }
