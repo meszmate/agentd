@@ -573,10 +573,8 @@ function ShimmerText({
   return (
     <span
       className={cn(
-        "bg-clip-text text-transparent",
-        "bg-[linear-gradient(90deg,rgba(194,65,12,1)_0%,rgba(194,65,12,1)_35%,rgba(252,191,36,1)_50%,rgba(194,65,12,1)_65%,rgba(194,65,12,1)_100%)]",
-        "dark:bg-[linear-gradient(90deg,rgba(251,146,60,1)_0%,rgba(251,146,60,1)_35%,rgba(253,224,71,1)_50%,rgba(251,146,60,1)_65%,rgba(251,146,60,1)_100%)]",
-        "bg-[length:200%_100%] animate-shimmer [animation-duration:3.2s]",
+        "text-orange-700 dark:text-orange-300",
+        "animate-thinking-pulse",
         className,
       )}
     >

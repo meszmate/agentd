@@ -243,9 +243,17 @@ const config: Config = {
             backgroundColor: "rgba(247, 127, 0, 0)",
           },
         },
+        // Slow opacity wave for the "agent is thinking" label. Drops
+        // to 60% mid-cycle so the line clearly reads as alive without
+        // ever fading enough to feel like it's loading.
+        "thinking-pulse": {
+          "0%, 100%": { opacity: "1" },
+          "50%": { opacity: "0.6" },
+        },
       },
       animation: {
         shimmer: "shimmer 2s linear infinite",
+        "thinking-pulse": "thinking-pulse 2.4s ease-in-out infinite",
         "fade-in": "fade-in 0.25s ease-out both",
         "letter-in": "letter-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) both",
         "letter-out": "letter-out 0.4s cubic-bezier(0.32, 0, 0.67, 0) both",
