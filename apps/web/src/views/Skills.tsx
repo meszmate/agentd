@@ -176,6 +176,40 @@ export function Skills({ embedded = false }: { embedded?: boolean } = {}) {
     return xs;
   }, [skills, filter, search]);
 
+  const clearProject = () => {
+    setProjectIdState("");
+    setProjectPath("");
+    void patchPrefs.mutateAsync({ lastProjectId: "" });
+    if (filter === "local") setFilter("all");
+  };
+
+  const projectControls = (
+    <div className="hidden md:flex items-center gap-2">
+      <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+        project
+      </span>
+      <div className="w-56">
+        <ProjectPicker
+          value={projectId}
+          onChange={(p) => {
+            setProjectId(p.id);
+            setProjectPath(p.path);
+          }}
+        />
+      </div>
+      {projectId && (
+        <button
+          type="button"
+          onClick={clearProject}
+          title="clear project — show global skills only"
+          className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-ink-900/15 text-ink-500 hover:bg-paper-100 hover:text-ink-900 dark:border-ink-50/15 dark:text-ink-400 dark:hover:bg-ink-700 dark:hover:text-ink-50"
+        >
+          <X className="h-3 w-3" />
+        </button>
+      )}
+    </div>
+  );
+
   const header = embedded ? (
     <div className="flex h-9 items-center gap-2 px-4 border-b border-ink-900/10 dark:border-ink-50/10 shrink-0 bg-paper-100 dark:bg-ink-800">
       <Kicker>library</Kicker>
@@ -188,20 +222,7 @@ export function Skills({ embedded = false }: { embedded?: boolean } = {}) {
         {skills.length} total
       </span>
       <Spacer />
-      <div className="hidden md:flex items-center gap-2">
-        <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
-          project
-        </span>
-        <div className="w-56">
-          <ProjectPicker
-            value={projectId}
-            onChange={(p) => {
-              setProjectId(p.id);
-              setProjectPath(p.path);
-            }}
-          />
-        </div>
-      </div>
+      {projectControls}
       <Button size="xs" onClick={() => setCreateOpen(true)}>
         <Plus className="h-3 w-3" /> New skill
       </Button>
@@ -218,20 +239,7 @@ export function Skills({ embedded = false }: { embedded?: boolean } = {}) {
         {skills.length} total
       </span>
       <Spacer />
-      <div className="hidden md:flex items-center gap-2">
-        <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
-          project
-        </span>
-        <div className="w-56">
-          <ProjectPicker
-            value={projectId}
-            onChange={(p) => {
-              setProjectId(p.id);
-              setProjectPath(p.path);
-            }}
-          />
-        </div>
-      </div>
+      {projectControls}
       <Button size="xs" onClick={() => setCreateOpen(true)}>
         <Plus className="h-3 w-3" /> New skill
       </Button>
