@@ -774,7 +774,7 @@ export function ProjectBrainstorm() {
                 "inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.08em] border transition-colors disabled:opacity-40",
                 composerMode === "idea"
                   ? "border-amber-500/50 bg-amber-500/15 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20"
-                  : "border-ink-900/10 dark:border-ink-50/10 text-ink-500 hover:text-amber-700 dark:hover:text-amber-300 hover:border-amber-500/40",
+                  : "border-ink-900/10 dark:border-ink-50/10 text-ink-500 dark:text-ink-400 hover:text-amber-700 dark:hover:text-amber-300 hover:border-amber-500/40",
               )}
             >
               <Lightbulb className="h-2.5 w-2.5" />
