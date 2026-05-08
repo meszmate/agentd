@@ -228,9 +228,9 @@ function buildAiHelperArgv(
         if (caps.supportsSandboxFlag) {
           argv.push("--sandbox", "danger-full-access");
         } else {
-          argv.push("--config", 'sandbox_mode="danger-full-access"');
+          argv.push("-c", 'sandbox_mode="danger-full-access"');
         }
-        argv.push("--config", 'approval_policy="never"');
+        argv.push("-c", 'approval_policy="never"');
       }
     }
     if (opts.model && opts.model.trim()) {
@@ -238,7 +238,12 @@ function buildAiHelperArgv(
     }
     const effort = opts.effort ?? "medium";
     const codexEffort = effort === "max" ? "xhigh" : effort;
-    argv.push("--config", `model_reasoning_effort="${codexEffort}"`);
+    // Use the short `-c` form: older codex builds only ship the short
+    // flag and reject `--config` outright, which surfaces in the
+    // brainstorm rater as "unparseable rater response: error: unknown
+    // option '--config'". Modern codex still accepts `-c` as the
+    // canonical short form.
+    argv.push("-c", `model_reasoning_effort="${codexEffort}"`);
     if (cwd) argv.push("--cd", cwd);
     argv.push(prompt);
     return argv;
