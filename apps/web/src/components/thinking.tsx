@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -14,8 +14,8 @@ import { cn } from "@/lib/utils";
  * opacity pulse so the line reads as "alive thinking" without
  * relying on `background-clip: text`. The previous gradient-clip
  * approach didn't paint reliably through the nested
- * `<TransitioningText>` letter grid, the label rendered as
- * transparent text and was invisible on both backgrounds.
+ * `<TransitioningText>` spans, the label rendered as transparent
+ * text and was invisible on both backgrounds.
  */
 export function ShimmerText({
   children,
@@ -38,14 +38,20 @@ export function ShimmerText({
 }
 
 /**
- * Horizontal swipe transition. The exiting line slides off to the
- * left as a single block (no per-letter motion, so the two phrases
- * never collide). The incoming line swipes in from the right
- * letter-by-letter with an index-based delay, opacity + translateX,
- * no blur. Reads as a quick rightward wipe.
+ * Horizontal swipe transition. Old line slides off to the left and
+ * fades; new line slides in from the right and fades in. Both move
+ * as whole blocks, the per-letter version was invisibly subtle at
+ * 12.5px because letters with `backwards` fill sat at opacity 0
+ * during their stagger delay, so the user only ever saw a fade.
+ * Block-level translateX of ~1.4em is the shortest distance that
+ * actually reads as a swipe at this size.
  *
  * Both copies share a grid cell so the parent only sizes for the
  * longer of the two and there's no layout shift mid-transition.
+ * `useLayoutEffect` so the exiting copy is in the DOM before paint,
+ * avoids a one-frame flash where the new text appears alone.
+ * `overflow-hidden` clips off-screen halves so the swipe reads as
+ * text moving in/out of a window rather than letters floating past.
  */
 export function TransitioningText({
   children,
@@ -57,17 +63,20 @@ export function TransitioningText({
   const text = children;
   const [exiting, setExiting] = useState<string | null>(null);
   const prev = useRef(text);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (prev.current === text) return;
     setExiting(prev.current);
     prev.current = text;
-    const t = setTimeout(() => setExiting(null), 600);
-    return () => clearTimeout(t);
   }, [text]);
+  useEffect(() => {
+    if (exiting === null) return;
+    const t = setTimeout(() => setExiting(null), 500);
+    return () => clearTimeout(t);
+  }, [exiting]);
   return (
     <span
       className={cn(
-        "relative inline-grid align-baseline [&>*]:[grid-area:1/1]",
+        "relative inline-grid overflow-hidden align-baseline [&>*]:[grid-area:1/1]",
         className,
       )}
     >
@@ -80,31 +89,16 @@ export function TransitioningText({
           {exiting}
         </span>
       )}
-      <StaggeredIn key={`in-${text}`} text={text} />
+      <span
+        key={`in-${text}`}
+        className="inline-block whitespace-pre animate-label-in will-change-[opacity,transform]"
+      >
+        {text}
+      </span>
     </span>
   );
 }
 
-function StaggeredIn({ text }: { text: string }) {
-  const safe = text ?? "";
-  // Per-letter stagger capped so the whole reveal stays under ~half
-  // a second on long phrases. Short phrases get a slightly slower
-  // stagger so the wave is still legible.
-  const stagger = Math.min(28, Math.max(12, 240 / Math.max(safe.length, 1)));
-  return (
-    <span className="inline-flex whitespace-pre">
-      {[...safe].map((c, i) => (
-        <span
-          key={i}
-          className="inline-block animate-letter-in will-change-[opacity,transform]"
-          style={{ animationDelay: `${i * stagger}ms` }}
-        >
-          {c === " " ? " " : c}
-        </span>
-      ))}
-    </span>
-  );
-}
 
 /**
  * What flavor of work the agent is doing right now. Drives both the
@@ -204,7 +198,7 @@ export function useRotatingLabel(
   // Defensive modulo: when `phase` changes to a pool with fewer
   // entries than the current `idx`, the setIdx in the effect above
   // hasn't fired yet for this render, so a raw pool[idx] would
-  // return undefined and crash <TransitioningText>'s letter loop.
+  // return undefined.
   return pool[idx % pool.length] ?? pool[0]!;
 }
 

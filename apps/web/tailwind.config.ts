@@ -117,17 +117,19 @@ const config: Config = {
           "0%": { backgroundPosition: "-200% 0" },
           "100%": { backgroundPosition: "200% 0" },
         },
-        // Horizontal swipe for `<TransitioningText>`. The exiting
-        // line slides off to the left as a single block; the incoming
-        // line swipes in letter-by-letter from the right with an
-        // index-based delay. No blur — kept clean at 11-12.5px.
-        "letter-in": {
-          "0%": { opacity: "0", transform: "translateX(0.5em)" },
+        // Horizontal swipe for `<TransitioningText>`. Both lines
+        // move as whole blocks: the old one slides off left and
+        // fades, the new one slides in from the right and fades in.
+        // Distance is ~1.4em - per-letter at 0.5em was invisibly
+        // subtle at 12.5px. Parent has `overflow-hidden` so the
+        // off-screen halves are clipped instead of poking past.
+        "label-in": {
+          "0%": { opacity: "0", transform: "translateX(1.4em)" },
           "100%": { opacity: "1", transform: "translateX(0)" },
         },
         "label-out": {
           "0%": { opacity: "1", transform: "translateX(0)" },
-          "100%": { opacity: "0", transform: "translateX(-0.5em)" },
+          "100%": { opacity: "0", transform: "translateX(-1.4em)" },
         },
         "fade-in": {
           "0%": { opacity: "0", transform: "translateY(4px)" },
@@ -236,8 +238,8 @@ const config: Config = {
         shimmer: "shimmer 2s linear infinite",
         "thinking-pulse": "thinking-pulse 2.4s ease-in-out infinite",
         "fade-in": "fade-in 0.25s ease-out both",
-        "letter-in": "letter-in 0.42s cubic-bezier(0.22, 1, 0.36, 1) both",
-        "label-out": "label-out 0.22s cubic-bezier(0.4, 0, 0.7, 0) both",
+        "label-in": "label-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both",
+        "label-out": "label-out 0.35s cubic-bezier(0.55, 0.06, 0.68, 0.19) both",
         rise: "rise 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both",
         blink: "blink 1.6s ease-in-out infinite",
         "pulse-ring": "pulse_ring 1.6s cubic-bezier(0.2, 0.7, 0.2, 1) infinite",
