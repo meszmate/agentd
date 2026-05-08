@@ -175,6 +175,31 @@ export class TaskManager {
    * right baseline. Cleared on task `exit`.
    */
   private codexFileSnapshots = new Map<string, Map<string, string>>();
+  /**
+   * Wall-clock of the most recent event we received from each running
+   * runner. Stamped on every `handleEvent` and on `spawnRunner`. Drives
+   * the stall watchdog: a `running` task whose lastActivityAt has gone
+   * stale beyond `STALL_THRESHOLD_MS` is treated as wedged (network
+   * drop mid-API-call, Mac woke from sleep with a dead HTTP socket,
+   * agent CLI hung on stdin) — we kill the runner, mark stopped, and
+   * drop a breadcrumb so the operator's UI clears its "thinking" pulse
+   * instead of hanging forever.
+   */
+  private lastActivityAt = new Map<string, number>();
+  /**
+   * setInterval handle for the stall watchdog. Started by the daemon
+   * after `recoverOrphans()`; stopped on shutdown.
+   */
+  private stallWatchdog: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Last time the watchdog tick fired. A larger-than-expected gap
+   * (process suspended by the OS, e.g. macOS sleep) signals we just
+   * woke up — dead sockets are likely, so we sweep more aggressively.
+   */
+  private lastWatchdogTickAt = 0;
+  private static readonly WATCHDOG_INTERVAL_MS = 30_000;
+  private static readonly STALL_THRESHOLD_MS = 5 * 60_000;
+  private static readonly SLEEP_GAP_MS = 60_000;
 
   constructor(
     private readonly db: Db,
@@ -227,6 +252,150 @@ export class TaskManager {
       }
       this.bus.publish({
         taskId: t.id,
+        event: { kind: "status", status: "stopped" },
+        ts: Date.now(),
+      });
+    }
+  }
+
+  /**
+   * Start the stall watchdog. Detects three failure modes the
+   * daemon-restart-only `recoverOrphans` sweep can't catch on its own:
+   *
+   *   1. The runner subprocess died but its `exit` event got lost
+   *      (Bun.spawn edge case, listener removed mid-iteration, etc) —
+   *      `running` map still holds a session whose `runner.running`
+   *      is false. Clean it up and mark stopped.
+   *
+   *   2. The runner subprocess is alive but no events have arrived
+   *      for STALL_THRESHOLD_MS while the task is `running`. That's
+   *      the classic "internet ran out / wifi dropped / VPN died /
+   *      API request wedged" path — the agent CLI is blocked on a
+   *      dead HTTP socket. Kill it and mark stopped so the operator
+   *      can resume; a hung CLI will never recover on its own.
+   *
+   *   3. The OS suspended us (macOS lid close, container freeze).
+   *      `setInterval` doesn't fire while suspended; on wake the next
+   *      tick comes in much later than expected. Treat any tick gap
+   *      >= SLEEP_GAP_MS as a likely sleep wake and run the sweep —
+   *      sockets the agent had open before sleep are usually dead on
+   *      the other side, even when our process kept its file
+   *      descriptors.
+   */
+  startStallWatchdog(): void {
+    if (this.stallWatchdog) return;
+    this.lastWatchdogTickAt = Date.now();
+    this.stallWatchdog = setInterval(() => {
+      const now = Date.now();
+      const gap = now - this.lastWatchdogTickAt;
+      this.lastWatchdogTickAt = now;
+      const wokeFromSleep =
+        gap >= TaskManager.WATCHDOG_INTERVAL_MS + TaskManager.SLEEP_GAP_MS;
+      if (wokeFromSleep) {
+        console.log(
+          `[watchdog] tick gap ${Math.round(gap / 1000)}s — likely woke from sleep, sweeping running tasks`,
+        );
+      }
+      void this.sweepStalledRuns(wokeFromSleep);
+    }, TaskManager.WATCHDOG_INTERVAL_MS);
+    if (typeof this.stallWatchdog.unref === "function") {
+      this.stallWatchdog.unref();
+    }
+  }
+
+  stopStallWatchdog(): void {
+    if (this.stallWatchdog) {
+      clearInterval(this.stallWatchdog);
+      this.stallWatchdog = null;
+    }
+  }
+
+  /**
+   * One pass of the stall watchdog. Walks every entry in `this.running`
+   * and recovers wedged sessions. `force` (true after a sleep-wake
+   * detection) lowers the threshold to "any active running session" so
+   * tasks whose API sockets died during suspension get cleaned up
+   * immediately instead of waiting another STALL_THRESHOLD_MS.
+   */
+  private async sweepStalledRuns(force: boolean): Promise<void> {
+    const now = Date.now();
+    for (const [taskId, session] of [...this.running.entries()]) {
+      if (!session.runner.running) {
+        await this.recoverWedgedRun(
+          taskId,
+          session,
+          force
+            ? "[woke from sleep — agent runner died while suspended; turn interrupted, send a new message to resume]"
+            : "[agent runner died unexpectedly — turn interrupted, send a new message to resume]",
+          { kill: false },
+        );
+        continue;
+      }
+      const cur = getTask(this.db, taskId);
+      if (!cur) continue;
+      if (cur.status !== "running") continue;
+      const lastAt = this.lastActivityAt.get(taskId) ?? now;
+      const idleFor = now - lastAt;
+      if (!force && idleFor < TaskManager.STALL_THRESHOLD_MS) continue;
+      if (force && idleFor < TaskManager.SLEEP_GAP_MS) continue;
+      console.log(
+        `[watchdog] task ${taskId} stalled ${Math.round(idleFor / 1000)}s — killing runner`,
+      );
+      await this.recoverWedgedRun(
+        taskId,
+        session,
+        force
+          ? `[woke from sleep — no agent activity for ${Math.round(idleFor / 60_000)}m, the connection likely died while suspended; turn interrupted, send a new message to resume]`
+          : `[stalled — no agent activity for ${Math.round(idleFor / 60_000)}m (likely a network drop or wedged API call); turn interrupted, send a new message to resume]`,
+        { kill: true },
+      );
+    }
+  }
+
+  /**
+   * Tear down a wedged runner session and mark its task `stopped` with
+   * an explanatory breadcrumb. Shared between the dead-process and
+   * stall-timeout branches of the watchdog.
+   */
+  private async recoverWedgedRun(
+    taskId: string,
+    session: RunningSession,
+    breadcrumb: string,
+    opts: { kill: boolean },
+  ): Promise<void> {
+    if (opts.kill) {
+      try {
+        await session.runner.stop("SIGKILL");
+      } catch {
+        // best-effort — proc may already be gone
+      }
+    }
+    try {
+      session.unsubscribe();
+    } catch {
+      // listener may already be detached
+    }
+    this.running.delete(taskId);
+    this.completedSignaled.delete(taskId);
+    this.codexFileSnapshots.delete(taskId);
+    this.turnStartedAt.delete(taskId);
+    this.lastActivityAt.delete(taskId);
+    const cur = getTask(this.db, taskId);
+    if (
+      cur &&
+      (cur.status === "running" ||
+        cur.status === "waiting_input" ||
+        cur.status === "waiting_perm" ||
+        cur.status === "idle")
+    ) {
+      updateTaskStatus(this.db, taskId, "stopped");
+      try {
+        appendMessage(this.db, taskId, "system", breadcrumb);
+      } catch {
+        // never let a logging hiccup block recovery
+      }
+      this.bus.publish({
+        taskId,
         event: { kind: "status", status: "stopped" },
         ts: Date.now(),
       });
@@ -1132,6 +1301,10 @@ export class TaskManager {
     // A new run starts fresh — drop any stale done-signal from a prior
     // spawn so this run's exit is classified on its own merits.
     this.completedSignaled.delete(task.id);
+    // Seed the watchdog's activity clock so the stall sweep doesn't
+    // immediately fire on a fresh spawn that hasn't emitted its first
+    // event yet (claude's first stream-json line can take a few seconds).
+    this.lastActivityAt.set(task.id, Date.now());
     updateTaskStatus(this.db, task.id, "running");
     this.bus.publish({
       taskId: task.id,
@@ -1321,6 +1494,11 @@ export class TaskManager {
   }
 
   private handleEvent(taskId: string, event: AgentEvent): void {
+    // Refresh the stall watchdog's activity clock for every event from
+    // the runner. Any sign of life — a token, a tool call, a status
+    // flip, even a stderr line — proves the CLI is still talking, so
+    // the watchdog should not treat this run as wedged.
+    this.lastActivityAt.set(taskId, Date.now());
     // Codex enrichment runs first so every consumer below — DB
     // append, plan sync, bus publish — sees the args with
     // `codex_diff` already attached. The web's `parseToolCall`
@@ -1558,6 +1736,8 @@ export class TaskManager {
       // leak across spawns. The next runner will stamp a fresh value
       // on its first `status:running`.
       this.turnStartedAt.delete(taskId);
+      // Drop the watchdog activity clock — the next spawn re-seeds it.
+      this.lastActivityAt.delete(taskId);
       // Fire-and-forget; commit + push + PR all run after the agent exits.
       void this.runCompletionHooks(taskId);
     } else if (event.kind === "raw" && event.stream === "stdout") {

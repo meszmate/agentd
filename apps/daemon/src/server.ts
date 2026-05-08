@@ -299,9 +299,54 @@ export function buildServer(opts: BuildServerOptions) {
   type ActiveIdeaTurnRecord = ActiveIdeaTurn & {
     abort: () => void;
     lastBroadcast: number;
+    /**
+     * Wall-clock of the most recent helper event seen for this turn.
+     * Drives the idea-turn stall watchdog: a turn whose iterator hasn't
+     * yielded anything for `IDEA_STALL_THRESHOLD_MS` is treated as
+     * wedged (network died mid-API-call, mac slept) and aborted so the
+     * workshop's "agent is thinking…" placeholder clears.
+     */
+    lastActivityAt: number;
   };
   const activeIdeaTurns = new Map<string, ActiveIdeaTurnRecord>();
   const IDEA_TURN_BROADCAST_MS = 250;
+  const IDEA_STALL_THRESHOLD_MS = 5 * 60_000;
+  const IDEA_WATCHDOG_INTERVAL_MS = 30_000;
+  const IDEA_SLEEP_GAP_MS = 60_000;
+  let lastIdeaWatchdogTickAt = Date.now();
+  const ideaStallWatchdog = setInterval(() => {
+    const now = Date.now();
+    const gap = now - lastIdeaWatchdogTickAt;
+    lastIdeaWatchdogTickAt = now;
+    const wokeFromSleep =
+      gap >= IDEA_WATCHDOG_INTERVAL_MS + IDEA_SLEEP_GAP_MS;
+    for (const [ideaId, rec] of [...activeIdeaTurns.entries()]) {
+      const idleFor = now - rec.lastActivityAt;
+      const stale = wokeFromSleep
+        ? idleFor >= IDEA_SLEEP_GAP_MS
+        : idleFor >= IDEA_STALL_THRESHOLD_MS;
+      if (!stale) continue;
+      console.log(
+        `[idea-watchdog] turn ${ideaId} stalled ${Math.round(idleFor / 1000)}s — aborting${wokeFromSleep ? " (woke from sleep)" : ""}`,
+      );
+      try {
+        rec.abort();
+      } catch {
+        // best-effort; the iterator's `finally` clears the turn record
+      }
+      // Belt-and-suspenders: if abort() couldn't propagate (helper
+      // didn't implement `return`), force the record out so the WS
+      // bus broadcasts `turn: null` and the workshop UI clears its
+      // "agent is thinking…" placeholder regardless.
+      if (activeIdeaTurns.has(ideaId)) {
+        activeIdeaTurns.delete(ideaId);
+        pubIdeaTurn(ideaId, null);
+      }
+    }
+  }, IDEA_WATCHDOG_INTERVAL_MS);
+  if (typeof ideaStallWatchdog.unref === "function") {
+    ideaStallWatchdog.unref();
+  }
 
   function pubIdeaTurn(ideaId: string, turn: ActiveIdeaTurn | null): void {
     bus.publishSystem({ kind: "idea_turn", ideaId, turn });
@@ -3979,6 +4024,7 @@ export function buildServer(opts: BuildServerOptions) {
       ...(parsed.data.agent ? { agent: parsed.data.agent } : {}),
       ...(parsed.data.model ? { model: parsed.data.model } : {}),
       lastBroadcast: 0,
+      lastActivityAt: Date.now(),
       abort: () => {
         aborted.value = true;
         try {
@@ -4191,6 +4237,9 @@ export function buildServer(opts: BuildServerOptions) {
             // them on the agent message at the end so history survives
             // reload.
             const ev = next.value;
+            // Stamp activity for the stall watchdog — any yield is
+            // proof the helper iterator is still talking.
+            turnRec.lastActivityAt = Date.now();
             if (ev.kind === "tool_use" || ev.kind === "tool_result") {
               accumulatedEvents.push(ev);
               turnRec.events.push(ev as IdeaMessageEvent);
