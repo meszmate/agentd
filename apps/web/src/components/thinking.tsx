@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 
 /**
- * Shared "agent is alive" primitives — the ShimmerText label, a
+ * Shared "agent is alive" primitives, the ShimmerText label, a
  * pool-rotating thinking message, an elapsed-ms ticker, and a small
  * formatter. Both the brainstorm thread and the idea workshop pull
  * from here so the in-flight feel is consistent.
@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
  * opacity pulse so the line reads as "alive thinking" without
  * relying on `background-clip: text`. The previous gradient-clip
  * approach didn't paint reliably through the nested
- * `<TransitioningText>` letter grid — the label rendered as
+ * `<TransitioningText>` letter grid, the label rendered as
  * transparent text and was invisible on both backgrounds.
  */
 export function ShimmerText({
@@ -38,16 +38,13 @@ export function ShimmerText({
 }
 
 /**
- * Crossfades string content with a per-letter wave. When the text
- * changes, the old characters drift up and blur out while the new
- * characters rise from below and sharpen in — each letter staggered
- * by ~18ms so the wave reads as a quick ripple, not a single beat.
- *
- * Both copies render in the same grid cell so the container only
- * sizes for the longer of the two and the gradient on a parent
- * `<ShimmerText>` clips through both copies cleanly. Stagger caps
- * around 250ms so the whole transition stays under ~half a second
- * even on long labels.
+ * Whole-label crossfade. When the rotating phrase changes, the old
+ * line fades + drifts up as a single beat, then the new line fades
+ * in from slightly below. The previous per-letter wave (each char
+ * blurring + sliding independently) looked janky at 11-12.5px and
+ * the two phrases overlapping in the same grid cell read as messy
+ * rather than alive. A calm crossfade pairs cleanly with the parent
+ * <ShimmerText>'s slow opacity pulse.
  */
 export function TransitioningText({
   children,
@@ -57,53 +54,33 @@ export function TransitioningText({
   className?: string;
 }) {
   const text = children;
-  const [exiting, setExiting] = useState<string | null>(null);
-  const prev = useRef(text);
+  const [displayed, setDisplayed] = useState(text);
+  const [phase, setPhase] = useState<"idle" | "out" | "in">("idle");
   useEffect(() => {
-    if (prev.current === text) return;
-    setExiting(prev.current);
-    prev.current = text;
-    const t = setTimeout(() => setExiting(null), 520);
-    return () => clearTimeout(t);
-  }, [text]);
+    if (text === displayed) return;
+    setPhase("out");
+    const swap = setTimeout(() => {
+      setDisplayed(text);
+      setPhase("in");
+    }, 180);
+    const settle = setTimeout(() => setPhase("idle"), 520);
+    return () => {
+      clearTimeout(swap);
+      clearTimeout(settle);
+    };
+  }, [text, displayed]);
   return (
-    <span
-      className={cn(
-        "relative inline-grid align-baseline [&>*]:[grid-area:1/1]",
-        className,
-      )}
-    >
-      {exiting !== null && (
-        <Letters key={`out-${exiting}`} text={exiting} kind="out" />
-      )}
-      <Letters key={`in-${text}`} text={text} kind="in" />
-    </span>
-  );
-}
-
-function Letters({ text, kind }: { text: string; kind: "in" | "out" }) {
-  const safe = text ?? "";
-  // Tighter stagger so the letters move as a soft wave instead of
-  // a rolling banner. Capped to keep total animation under ~half a
-  // second on long phrases.
-  const stagger = Math.min(16, Math.max(6, 180 / Math.max(safe.length, 1)));
-  return (
-    <span className="inline-flex whitespace-pre" aria-hidden={kind === "out"}>
-      {[...safe].map((c, i) => (
-        <span
-          key={i}
-          className={cn(
-            "inline-block will-change-transform",
-            kind === "in" ? "animate-letter-in" : "animate-letter-out",
-          )}
-          style={{
-            animationDelay: `${i * stagger}ms`,
-            animationFillMode: kind === "in" ? "backwards" : "forwards",
-          }}
-        >
-          {c === " " ? " " : c}
-        </span>
-      ))}
+    <span className={cn("inline-block align-baseline", className)}>
+      <span
+        key={`${phase}-${displayed}`}
+        className={cn(
+          "inline-block will-change-[opacity,transform]",
+          phase === "out" && "animate-label-out",
+          phase === "in" && "animate-label-in",
+        )}
+      >
+        {displayed}
+      </span>
     </span>
   );
 }
@@ -183,7 +160,7 @@ const THINKING_LABELS: Record<ThinkingPhase, string[]> = {
 /**
  * Cycles through a phase's label pool every `intervalMs`. Phase
  * change resets to a fresh random label so the transition is visible
- * (e.g. "scouting" → "shaping the plan" the moment the first
+ * (e.g. "scouting" -> "shaping the plan" the moment the first
  * tool result lands and we know we're past reconnaissance).
  */
 export function useRotatingLabel(
@@ -205,7 +182,7 @@ export function useRotatingLabel(
   }, [phase, intervalMs, pool.length]);
   // Defensive modulo: when `phase` changes to a pool with fewer
   // entries than the current `idx`, the setIdx in the effect above
-  // hasn't fired yet for this render — so a raw pool[idx] would
+  // hasn't fired yet for this render, so a raw pool[idx] would
   // return undefined and crash <TransitioningText>'s letter loop.
   return pool[idx % pool.length] ?? pool[0]!;
 }
@@ -239,7 +216,7 @@ export function formatElapsed(ms: number): string {
   if (ms < 1000) return `${(ms / 1000).toFixed(1)}s`;
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
+  const m = Math.floor(ms / 1000 / 60);
   const rem = s % 60;
   return `${m}m ${rem.toString().padStart(2, "0")}s`;
 }
