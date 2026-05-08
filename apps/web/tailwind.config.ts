@@ -117,19 +117,17 @@ const config: Config = {
           "0%": { backgroundPosition: "-200% 0" },
           "100%": { backgroundPosition: "200% 0" },
         },
-        // Crossfade for `<TransitioningText>`. The exiting line uses
-        // `label-out` as a single whole-block fade so the two phrases
-        // never overlap visually. The incoming line uses `letter-in`
-        // per character with an index-based delay, opacity + a small
-        // upward drift, no blur — blur was the part that read janky
-        // at 11-12.5px, the stagger itself is fine.
+        // Horizontal swipe for `<TransitioningText>`. The exiting
+        // line slides off to the left as a single block; the incoming
+        // line swipes in letter-by-letter from the right with an
+        // index-based delay. No blur — kept clean at 11-12.5px.
         "letter-in": {
-          "0%": { opacity: "0", transform: "translateY(0.3em)" },
-          "100%": { opacity: "1", transform: "translateY(0)" },
+          "0%": { opacity: "0", transform: "translateX(0.5em)" },
+          "100%": { opacity: "1", transform: "translateX(0)" },
         },
         "label-out": {
-          "0%": { opacity: "1", transform: "translateY(0)" },
-          "100%": { opacity: "0", transform: "translateY(-0.2em)" },
+          "0%": { opacity: "1", transform: "translateX(0)" },
+          "100%": { opacity: "0", transform: "translateX(-0.5em)" },
         },
         "fade-in": {
           "0%": { opacity: "0", transform: "translateY(4px)" },

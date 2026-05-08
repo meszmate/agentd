@@ -38,12 +38,11 @@ export function ShimmerText({
 }
 
 /**
- * Per-letter staggered crossfade. The exiting line fades out as a
- * single beat (whole-label, no per-letter motion) so the two phrases
- * never collide visually. The incoming line reveals letter-by-letter
- * with an index-based delay, opacity + a small upward drift, no blur.
- * The blur on the previous version is what read as janky at 11-12.5px,
- * not the stagger itself, so the wave is back without it.
+ * Horizontal swipe transition. The exiting line slides off to the
+ * left as a single block (no per-letter motion, so the two phrases
+ * never collide). The incoming line swipes in from the right
+ * letter-by-letter with an index-based delay, opacity + translateX,
+ * no blur. Reads as a quick rightward wipe.
  *
  * Both copies share a grid cell so the parent only sizes for the
  * longer of the two and there's no layout shift mid-transition.
