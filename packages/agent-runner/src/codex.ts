@@ -473,9 +473,9 @@ export class CodexRunner implements AgentRunner {
           if (caps.supportsSandboxFlag) {
             args.push("--sandbox", "danger-full-access");
           } else {
-            args.push("--config", 'sandbox_mode="danger-full-access"');
+            args.push("-c", 'sandbox_mode="danger-full-access"');
           }
-          args.push("--config", 'approval_policy="never"');
+          args.push("-c", 'approval_policy="never"');
         }
       }
     } else if (caps.supportsFullAuto && !resumeId) {
@@ -490,7 +490,9 @@ export class CodexRunner implements AgentRunner {
     // top tier, which corresponds to `xhigh` on Codex.
     const effort = opts.thinkingLevel ?? "high";
     const codexEffort = effort === "max" ? "xhigh" : effort;
-    args.push("--config", `model_reasoning_effort="${codexEffort}"`);
+    // Short `-c` form, not `--config` — older codex builds only ship
+    // the short flag and reject `--config`. Modern codex accepts both.
+    args.push("-c", `model_reasoning_effort="${codexEffort}"`);
     if (opts.appendSystemPrompt && opts.appendSystemPrompt.trim().length > 0) {
       // codex doesn't have a dedicated --append-system-prompt flag; the next
       // best thing is prepending the instructions to the user prompt with a
