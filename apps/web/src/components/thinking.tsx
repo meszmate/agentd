@@ -9,16 +9,13 @@ import { cn } from "@/lib/utils";
  */
 
 /**
- * Living text label. Base color stays at full opacity so the label
- * reads cleanly even when the highlight isn't passing over; a lighter
- * tone (amber-400 in light mode, yellow-300 in dark) drifts across
- * as the alive cue. Slower than the global shimmer (3.2s) so it
- * feels like calm thinking instead of a frantic loading bar.
- *
- * Both modes keep base + peak at full opacity but pick different
- * hues per mode: orange-700 base on the cream paper, orange-400 base
- * on the near-black ink so the same warm orange identity reads
- * clearly on either background.
+ * Living text label. Renders a readable solid orange (orange-700 on
+ * the cream paper, orange-300 on the near-black ink) with a slow
+ * opacity pulse so the line reads as "alive thinking" without
+ * relying on `background-clip: text`. The previous gradient-clip
+ * approach didn't paint reliably through the nested
+ * `<TransitioningText>` letter grid — the label rendered as
+ * transparent text and was invisible on both backgrounds.
  */
 export function ShimmerText({
   children,
@@ -30,10 +27,8 @@ export function ShimmerText({
   return (
     <span
       className={cn(
-        "bg-clip-text text-transparent",
-        "bg-[linear-gradient(90deg,rgba(194,65,12,1)_0%,rgba(194,65,12,1)_35%,rgba(252,191,36,1)_50%,rgba(194,65,12,1)_65%,rgba(194,65,12,1)_100%)]",
-        "dark:bg-[linear-gradient(90deg,rgba(251,146,60,1)_0%,rgba(251,146,60,1)_35%,rgba(253,224,71,1)_50%,rgba(251,146,60,1)_65%,rgba(251,146,60,1)_100%)]",
-        "bg-[length:200%_100%] animate-shimmer [animation-duration:3.2s]",
+        "text-orange-700 dark:text-orange-300",
+        "animate-thinking-pulse",
         className,
       )}
     >
