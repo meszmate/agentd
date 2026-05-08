@@ -16,6 +16,7 @@ import {
   Settings as SettingsIcon,
   Smartphone,
   TerminalSquare,
+  Zap,
 } from "lucide-react";
 import type { Project, Task } from "@agentd/contracts";
 import { cn, formatTs } from "@/lib/utils";
@@ -69,6 +70,7 @@ const SECTIONS: {
       { to: "/tasks", label: "Tasks", icon: Inbox, kbd: "g t" },
       { to: "/templates", label: "Templates", icon: FileTerminal, kbd: "g e" },
       { to: "/schedules", label: "Schedules", icon: CalendarClock, kbd: "g s" },
+      { to: "/triggers", label: "Triggers", icon: Zap, kbd: "g w" },
       { to: "/terminal", label: "Terminal", icon: TerminalSquare, kbd: "g r" },
     ],
   },

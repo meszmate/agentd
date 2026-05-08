@@ -159,7 +159,7 @@ async function main() {
   console.log(`config:    ${paths.root}/config.json`);
   console.log("");
 
-  const scheduler = new Scheduler(db, tasks);
+  const scheduler = new Scheduler(db, tasks, bus);
   scheduler.start();
   console.log("scheduler: ticking once per minute");
 

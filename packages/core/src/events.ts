@@ -7,6 +7,7 @@ import type {
   Task,
   TerminalSession,
   TerminalWindow,
+  Trigger,
 } from "@agentd/contracts";
 
 export type TaskEventEnvelope = {
@@ -141,7 +142,16 @@ export type SystemEvent =
    * the full snapshot so every connected surface sees the new
    * state at once.
    */
-  | { kind: "provider_rate_limit_updated"; rateLimit: ProviderRateLimit };
+  | { kind: "provider_rate_limit_updated"; rateLimit: ProviderRateLimit }
+  /**
+   * Conditional task trigger lifecycle. Fired on create/update/delete
+   * (so all surfaces refresh their list) and again on `trigger_fired`
+   * with the spawned task id so UIs can render a deep-link toast.
+   */
+  | { kind: "trigger_created"; trigger: Trigger }
+  | { kind: "trigger_updated"; trigger: Trigger }
+  | { kind: "trigger_deleted"; triggerId: string }
+  | { kind: "trigger_fired"; trigger: Trigger; taskId: string | null };
 
 export type SystemEventEnvelope = {
   event: SystemEvent;

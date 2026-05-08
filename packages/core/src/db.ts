@@ -372,6 +372,29 @@ export const schedules = sqliteTable("schedules", {
   createdAt: integer("created_at").notNull(),
 });
 
+/**
+ * Conditional task triggers — sibling to `schedules`. Where a schedule
+ * fires on a cron, a trigger fires when an external predicate flips
+ * true (PR merged, issue closed, datetime reached, signed webhook
+ * arrived). Predicate config lives in `predicate_config_json` as a
+ * tagged union keyed by `predicate_kind`.
+ */
+export const triggers = sqliteTable("triggers", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull().unique(),
+  predicateKind: text("predicate_kind").notNull(),
+  predicateConfigJson: text("predicate_config_json").notNull().default("{}"),
+  templateId: text("template_id").notNull(),
+  templateArgsJson: text("template_args_json").notNull().default("{}"),
+  enabled: integer("enabled").notNull().default(1),
+  repeat: integer("repeat").notNull().default(0),
+  lastFiredAt: integer("last_fired_at"),
+  lastFiredTaskId: text("last_fired_task_id"),
+  lastError: text("last_error"),
+  errorCount: integer("error_count").notNull().default(0),
+  createdAt: integer("created_at").notNull(),
+});
+
 export const messages = sqliteTable("messages", {
   id: text("id").primaryKey(),
   taskId: text("task_id").notNull(),
@@ -573,6 +596,22 @@ CREATE TABLE IF NOT EXISTS schedules (
   last_run_at INTEGER,
   last_task_id TEXT,
   next_run_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS triggers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  predicate_kind TEXT NOT NULL,
+  predicate_config_json TEXT NOT NULL DEFAULT '{}',
+  template_id TEXT NOT NULL,
+  template_args_json TEXT NOT NULL DEFAULT '{}',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  repeat INTEGER NOT NULL DEFAULT 0,
+  last_fired_at INTEGER,
+  last_fired_task_id TEXT,
+  last_error TEXT,
+  error_count INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
 

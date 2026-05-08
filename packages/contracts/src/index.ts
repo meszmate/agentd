@@ -393,6 +393,106 @@ export const Schedule = z.object({
 });
 export type Schedule = z.infer<typeof Schedule>;
 
+/**
+ * Conditional task trigger — sibling to Schedule. Where a Schedule
+ * fires on a cron (recurring, time-based), a Trigger fires when an
+ * external predicate flips true (one-shot, event-based). v1 ships:
+ *
+ *   github_pr_merged   — gh pr view <n> reports state="MERGED"
+ *   github_issue_closed — gh issue view <n> reports state="CLOSED"
+ *   datetime           — wall-clock now() >= fireAt
+ *   webhook            — a signed POST /api/webhooks/<id> arrived
+ *
+ * Predicates are checked once per `Scheduler.tick()` (minute-level
+ * resolution). Webhook triggers bypass polling — POST flips
+ * `webhookReadyAt` and the next tick fires.
+ *
+ * One-shot by default: after firing, `enabled` flips to false. Set
+ * `repeat: true` to keep firing on every match (every webhook hit,
+ * every PR merge if multiple PRs share a config — though that's an
+ * unusual shape).
+ */
+export const TriggerPredicateKind = z.enum([
+  "github_pr_merged",
+  "github_issue_closed",
+  "datetime",
+  "webhook",
+]);
+export type TriggerPredicateKind = z.infer<typeof TriggerPredicateKind>;
+
+export const TriggerPredicateConfig = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("github_pr_merged"),
+    owner: z.string().min(1),
+    repo: z.string().min(1),
+    number: z.number().int().positive(),
+  }),
+  z.object({
+    kind: z.literal("github_issue_closed"),
+    owner: z.string().min(1),
+    repo: z.string().min(1),
+    number: z.number().int().positive(),
+  }),
+  z.object({
+    kind: z.literal("datetime"),
+    /** Epoch ms — fire when now >= fireAt. */
+    fireAt: z.number().int(),
+  }),
+  z.object({
+    kind: z.literal("webhook"),
+    /** HMAC-SHA256 secret used to verify inbound POSTs. */
+    secret: z.string().min(8),
+    /**
+     * Filled by the daemon when a valid signed POST arrives. The next
+     * Scheduler.tick() reads this, fires the trigger, and clears the
+     * field (or, if `repeat: true`, leaves it cleared so a future POST
+     * can mark ready again).
+     */
+    readyAt: z.number().nullable().optional(),
+  }),
+]);
+export type TriggerPredicateConfig = z.infer<typeof TriggerPredicateConfig>;
+
+export const Trigger = z.object({
+  id: z.string(),
+  name: z.string(),
+  predicateKind: TriggerPredicateKind,
+  predicateConfig: TriggerPredicateConfig,
+  templateId: z.string(),
+  templateArgs: z.record(z.string(), z.string()).default({}),
+  enabled: z.boolean(),
+  /** When false (the default) the trigger auto-disables after one fire. */
+  repeat: z.boolean(),
+  lastFiredAt: z.number().nullable(),
+  lastFiredTaskId: z.string().nullable(),
+  /** Last error from the evaluator — surfaced in the UI for debugging. */
+  lastError: z.string().nullable(),
+  /** Cumulative count of failed evaluations; auto-disables at threshold. */
+  errorCount: z.number(),
+  createdAt: z.number(),
+});
+export type Trigger = z.infer<typeof Trigger>;
+
+export const CreateTriggerRequest = z.object({
+  name: z.string().min(1),
+  predicateKind: TriggerPredicateKind,
+  predicateConfig: TriggerPredicateConfig,
+  templateId: z.string().min(1),
+  templateArgs: z.record(z.string(), z.string()).default({}),
+  enabled: z.boolean().default(true),
+  repeat: z.boolean().default(false),
+});
+export type CreateTriggerRequest = z.infer<typeof CreateTriggerRequest>;
+
+export const UpdateTriggerRequest = z.object({
+  name: z.string().min(1).optional(),
+  predicateConfig: TriggerPredicateConfig.optional(),
+  templateArgs: z.record(z.string(), z.string()).optional(),
+  enabled: z.boolean().optional(),
+  repeat: z.boolean().optional(),
+});
+export type UpdateTriggerRequest = z.infer<typeof UpdateTriggerRequest>;
+
 export const Message = z.object({
   id: z.string(),
   taskId: z.string(),
@@ -2065,6 +2165,29 @@ export const WsServerEvent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("provider_rate_limit_updated"),
     rateLimit: ProviderRateLimit,
+    ts: z.number(),
+  }),
+  // Conditional-trigger lifecycle events. `trigger_fired` carries the
+  // spawned task id so surfaces can render a deep-link toast.
+  z.object({
+    type: z.literal("trigger_created"),
+    trigger: Trigger,
+    ts: z.number(),
+  }),
+  z.object({
+    type: z.literal("trigger_updated"),
+    trigger: Trigger,
+    ts: z.number(),
+  }),
+  z.object({
+    type: z.literal("trigger_deleted"),
+    triggerId: z.string(),
+    ts: z.number(),
+  }),
+  z.object({
+    type: z.literal("trigger_fired"),
+    trigger: Trigger,
+    taskId: z.string().nullable(),
     ts: z.number(),
   }),
 ]);

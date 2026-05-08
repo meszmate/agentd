@@ -18,6 +18,9 @@ import type {
   CreateSkillRequest,
   CreateTaskRequest,
   CreateTemplateRequest,
+  CreateTriggerRequest,
+  Trigger,
+  UpdateTriggerRequest,
   CreateTerminalSessionRequest,
   CreateTerminalWindowRequest,
   DeviceSession,
@@ -1649,6 +1652,48 @@ export class AgentdClient {
   }
   async deleteSchedule(id: string): Promise<void> {
     await this.req(`/api/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  // ── triggers ──
+  async listTriggers(): Promise<{ triggers: Trigger[] }> {
+    return this.req("/api/triggers");
+  }
+  async createTrigger(req: CreateTriggerRequest): Promise<{ trigger: Trigger }> {
+    return this.req("/api/triggers", { method: "POST", body: JSON.stringify(req) });
+  }
+  async getTrigger(id: string): Promise<{ trigger: Trigger }> {
+    return this.req(`/api/triggers/${encodeURIComponent(id)}`);
+  }
+  async updateTrigger(
+    id: string,
+    patch: UpdateTriggerRequest,
+  ): Promise<{ trigger: Trigger }> {
+    return this.req(`/api/triggers/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  }
+  async enableTrigger(id: string): Promise<{ trigger: Trigger }> {
+    return this.req(`/api/triggers/${encodeURIComponent(id)}/enable`, {
+      method: "POST",
+    });
+  }
+  async disableTrigger(id: string): Promise<{ trigger: Trigger }> {
+    return this.req(`/api/triggers/${encodeURIComponent(id)}/disable`, {
+      method: "POST",
+    });
+  }
+  async deleteTrigger(id: string): Promise<void> {
+    await this.req(`/api/triggers/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  }
+  async testTrigger(
+    id: string,
+  ): Promise<{ trigger: Trigger; taskId: string }> {
+    return this.req(`/api/triggers/${encodeURIComponent(id)}/test`, {
+      method: "POST",
+    });
   }
 
   // ── settings ──

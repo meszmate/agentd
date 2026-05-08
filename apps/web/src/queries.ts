@@ -23,6 +23,7 @@ export const qk = {
   log: (id: string, limit?: number) => ["log", id, limit ?? 50] as const,
   templates: () => ["templates"] as const,
   schedules: () => ["schedules"] as const,
+  triggers: () => ["triggers"] as const,
   plugins: () => ["plugins"] as const,
   settings: () => ["settings"] as const,
   skills: (repoPath?: string) => ["skills", repoPath ?? null] as const,
@@ -202,6 +203,15 @@ export function useSchedules() {
   return useQuery({
     queryKey: qk.schedules(),
     queryFn: () => client.listSchedules(),
+    refetchInterval: 6000,
+  });
+}
+
+export function useTriggers() {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.triggers(),
+    queryFn: () => client.listTriggers(),
     refetchInterval: 6000,
   });
 }
@@ -520,6 +530,58 @@ export function useDeleteSchedule() {
   return useMutation({
     mutationFn: (id: string) => client.deleteSchedule(id),
     onSuccess: () => void qc.invalidateQueries({ queryKey: qk.schedules() }),
+  });
+}
+
+export function useCreateTrigger() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: Parameters<AgentdClient["createTrigger"]>[0]) =>
+      client.createTrigger(req),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.triggers() }),
+  });
+}
+export function useUpdateTrigger() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      patch,
+    }: {
+      id: string;
+      patch: Parameters<AgentdClient["updateTrigger"]>[1];
+    }) => client.updateTrigger(id, patch),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.triggers() }),
+  });
+}
+export function useToggleTrigger() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      enabled ? client.enableTrigger(id) : client.disableTrigger(id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.triggers() }),
+  });
+}
+export function useDeleteTrigger() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => client.deleteTrigger(id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.triggers() }),
+  });
+}
+export function useTestTrigger() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => client.testTrigger(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.triggers() });
+      void qc.invalidateQueries({ queryKey: qk.tasks() });
+    },
   });
 }
 

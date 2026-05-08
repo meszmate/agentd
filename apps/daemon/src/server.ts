@@ -7,6 +7,9 @@ import {
   CreateSkillRequest,
   CreateTaskRequest,
   CreateTemplateRequest,
+  CreateTriggerRequest,
+  type Trigger,
+  UpdateTriggerRequest,
   type DeviceSession,
   PairExchangeRequest,
   RunTemplateRequest,
@@ -41,6 +44,7 @@ import {
   type WsServerEvent,
 } from "@agentd/contracts";
 import { isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   existsSync,
   statSync,
@@ -139,6 +143,14 @@ import {
   getSchedule,
   listSchedules,
   setScheduleEnabled,
+  createTrigger,
+  deleteTrigger,
+  getTrigger,
+  listTriggers,
+  markTriggerFired,
+  setTriggerEnabled,
+  setWebhookReady,
+  updateTrigger,
   type AiHelperOptions,
   type AgentdPaths,
   type Db,
@@ -339,6 +351,22 @@ export function buildServer(opts: BuildServerOptions) {
    */
   function pubGithubRefreshed(projectId: string): void {
     bus.publishSystem({ kind: "github_refreshed", projectId });
+  }
+
+  /**
+   * Conditional-trigger lifecycle fan-out. Every mutation (create /
+   * update / delete / fire) flows through these so every connected
+   * surface (web, CLI, plugins) reflects the change without a
+   * polling round-trip.
+   */
+  function pubTriggerCreated(trigger: Trigger): void {
+    bus.publishSystem({ kind: "trigger_created", trigger });
+  }
+  function pubTriggerUpdated(trigger: Trigger): void {
+    bus.publishSystem({ kind: "trigger_updated", trigger });
+  }
+  function pubTriggerDeleted(triggerId: string): void {
+    bus.publishSystem({ kind: "trigger_deleted", triggerId });
   }
 
   /**
@@ -2547,6 +2575,119 @@ export function buildServer(opts: BuildServerOptions) {
     if (!sch) return c.json({ error: "not found" }, 404);
     deleteSchedule(db, sch.id);
     return c.json({ ok: true });
+  });
+
+  // ──────────────────────── triggers ────────────────────────
+  // Conditional task triggers. Where a schedule fires on a cron, a
+  // trigger fires when an external predicate flips true (PR merged,
+  // issue closed, datetime reached, signed webhook arrived). The
+  // webhook receiver itself is NOT here — it's mounted outside the
+  // auth gate further down (HMAC, not bearer token).
+
+  api.get("/triggers", (c) => c.json({ triggers: listTriggers(db) }));
+
+  api.post("/triggers", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = CreateTriggerRequest.safeParse(body);
+    if (!parsed.success)
+      return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
+    const tpl =
+      getTemplate(db, parsed.data.templateId) ??
+      getTemplateByName(db, parsed.data.templateId);
+    if (!tpl) return c.json({ error: `unknown template: ${parsed.data.templateId}` }, 400);
+    try {
+      const trg = createTrigger(db, {
+        ...parsed.data,
+        templateId: tpl.id,
+      });
+      pubTriggerCreated(trg);
+      return c.json({ trigger: trg });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  api.get("/triggers/:id", (c) => {
+    const trg = getTrigger(db, c.req.param("id"));
+    if (!trg) return c.json({ error: "not found" }, 404);
+    return c.json({ trigger: trg });
+  });
+
+  api.patch("/triggers/:id", async (c) => {
+    const id = c.req.param("id");
+    const existing = getTrigger(db, id);
+    if (!existing) return c.json({ error: "not found" }, 404);
+    const body = await c.req.json().catch(() => null);
+    const parsed = UpdateTriggerRequest.safeParse(body);
+    if (!parsed.success)
+      return c.json({ error: "invalid request", issues: parsed.error.issues }, 400);
+    try {
+      const trg = updateTrigger(db, id, parsed.data);
+      if (!trg) return c.json({ error: "not found" }, 404);
+      pubTriggerUpdated(trg);
+      return c.json({ trigger: trg });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  api.post("/triggers/:id/enable", (c) => {
+    const trg = setTriggerEnabled(db, c.req.param("id"), true);
+    if (!trg) return c.json({ error: "not found" }, 404);
+    pubTriggerUpdated(trg);
+    return c.json({ trigger: trg });
+  });
+
+  api.post("/triggers/:id/disable", (c) => {
+    const trg = setTriggerEnabled(db, c.req.param("id"), false);
+    if (!trg) return c.json({ error: "not found" }, 404);
+    pubTriggerUpdated(trg);
+    return c.json({ trigger: trg });
+  });
+
+  api.delete("/triggers/:id", (c) => {
+    const trg = getTrigger(db, c.req.param("id"));
+    if (!trg) return c.json({ error: "not found" }, 404);
+    deleteTrigger(db, trg.id);
+    pubTriggerDeleted(trg.id);
+    return c.json({ ok: true });
+  });
+
+  /**
+   * Force-fire a trigger now. Useful for development + post-creation
+   * smoke tests — the webhook variant is marked ready, the rest fire
+   * inline. Honors `repeat`: a one-shot trigger still auto-disables.
+   */
+  api.post("/triggers/:id/test", async (c) => {
+    const id = c.req.param("id");
+    const trg = getTrigger(db, id);
+    if (!trg) return c.json({ error: "not found" }, 404);
+    const tpl = getTemplate(db, trg.templateId);
+    if (!tpl) return c.json({ error: "template missing" }, 400);
+    try {
+      const prompt = renderTemplate(tpl.promptTemplate, trg.templateArgs);
+      const task = await tasks.create({
+        agent: tpl.agent,
+        repoPath: tpl.repoPath,
+        baseBranch: tpl.baseBranch,
+        prompt,
+        title: `${trg.name}: ${tpl.name}`,
+        autoPush: tpl.autoPush,
+        templateId: tpl.id,
+      });
+      const updated = markTriggerFired(db, trg.id, task.id);
+      if (updated) {
+        bus.publishSystem({
+          kind: "trigger_fired",
+          trigger: updated,
+          taskId: task.id,
+        });
+        pubTriggerUpdated(updated);
+      }
+      return c.json({ trigger: updated, taskId: task.id });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 500);
+    }
   });
 
   api.post("/admin/pair", (c) => {
@@ -5454,6 +5595,62 @@ export function buildServer(opts: BuildServerOptions) {
     return c.json({ ok: true });
   });
 
+  /**
+   * Conditional-trigger webhook receiver. Mounted on `app` directly
+   * (NOT on `api`) so it bypasses the `requireSession` bearer-token
+   * middleware — webhooks authenticate via per-trigger HMAC instead.
+   * The path lives under `/api/` so reverse proxies routing on that
+   * prefix continue to forward it.
+   *
+   * Verification: HMAC-SHA256(secret, raw-body) matches header
+   * `X-Agentd-Signature: sha256=<hex>`, plus `X-Agentd-Timestamp`
+   * within ±300s of now to prevent replay. On success, the trigger's
+   * `webhookReadyAt` flips and the next `Scheduler.tick()` fires it.
+   */
+  app.post("/api/webhooks/:id", async (c) => {
+    const id = c.req.param("id");
+    const trg = getTrigger(db, id);
+    if (!trg) return c.json({ error: "not found" }, 404);
+    if (trg.predicateConfig.kind !== "webhook") {
+      return c.json({ error: "trigger is not a webhook predicate" }, 400);
+    }
+    if (!trg.enabled) {
+      return c.json({ error: "trigger disabled" }, 409);
+    }
+    const sigHeader = c.req.header("x-agentd-signature") ?? "";
+    const tsHeader = c.req.header("x-agentd-timestamp") ?? "";
+    if (!sigHeader || !tsHeader) {
+      return c.json({ error: "missing signature headers" }, 401);
+    }
+    const ts = Number(tsHeader);
+    if (!Number.isFinite(ts)) {
+      return c.json({ error: "bad timestamp" }, 401);
+    }
+    const skew = Math.abs(Date.now() - ts);
+    if (skew > 300_000) {
+      return c.json({ error: "timestamp out of window" }, 401);
+    }
+    const raw = await c.req.arrayBuffer();
+    const bodyBuf = Buffer.from(raw);
+    const expectedHex = createHmac("sha256", trg.predicateConfig.secret)
+      .update(bodyBuf)
+      .digest("hex");
+    const expected = `sha256=${expectedHex}`;
+    const provided = sigHeader.trim();
+    let ok = false;
+    try {
+      const a = Buffer.from(expected, "utf8");
+      const b = Buffer.from(provided, "utf8");
+      ok = a.length === b.length && timingSafeEqual(a, b);
+    } catch {
+      ok = false;
+    }
+    if (!ok) return c.json({ error: "bad signature" }, 401);
+    const updated = setWebhookReady(db, id, Date.now());
+    if (updated) pubTriggerUpdated(updated);
+    return c.body(null, 204);
+  });
+
   app.route("/api", api);
 
   const wsHandler = {
@@ -5630,6 +5827,31 @@ export function buildServer(opts: BuildServerOptions) {
             send({
               type: "provider_rate_limit_updated",
               rateLimit: env.event.rateLimit,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "trigger_created") {
+            send({
+              type: "trigger_created",
+              trigger: env.event.trigger,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "trigger_updated") {
+            send({
+              type: "trigger_updated",
+              trigger: env.event.trigger,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "trigger_deleted") {
+            send({
+              type: "trigger_deleted",
+              triggerId: env.event.triggerId,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "trigger_fired") {
+            send({
+              type: "trigger_fired",
+              trigger: env.event.trigger,
+              taskId: env.event.taskId,
               ts: env.ts,
             });
           }
