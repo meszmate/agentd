@@ -387,22 +387,28 @@ export function IdeaWorkshop() {
   };
 
   /**
-   * Submit a chat-mode turn with an explicit text — the entry point
-   * the operator hits when they tap an option button on an agent
-   * `<ask-user>` question (or send a free-form "Other…" answer). The
-   * draft state is bypassed so picking doesn't fight whatever the
-   * operator was typing in the composer.
+   * Submit a turn with an explicit text — the entry point the operator
+   * hits when they tap an option button on an agent `<ask-user>`
+   * question (or send a free-form "Other…" answer). The draft state
+   * is bypassed so picking doesn't fight whatever the operator was
+   * typing in the composer. `answerMode` resumes the same flow the
+   * question was asked in (chat → chat, plan → plan), so a plan-mode
+   * clarifying question doesn't drift into a 250-word chat reply.
    */
-  const sendAnswer = (text: string) => {
+  const sendAnswer = (
+    text: string,
+    answerMode: "chat" | "challenge" | "plan" = "chat",
+  ) => {
     if (!id) return;
     if (streaming) return;
     const userText = text.trim();
     if (!userText) return;
     setPendingUser(userText);
+    if (answerMode === "plan") setPlanPanelOpen(true);
     qc.setQueryData(qk.ideaActiveTurn(id), {
       turn: {
         ideaId: id,
-        mode: "chat" as const,
+        mode: answerMode,
         startedAt: Date.now(),
         userMessage: userText,
         partialReply: "",
@@ -417,7 +423,7 @@ export function IdeaWorkshop() {
         const r = await client.streamIdeaChat(
           id,
           {
-            mode: "chat",
+            mode: answerMode,
             text: userText,
             ...(pickChoice.agent ? { agent: pickChoice.agent } : {}),
             ...(pickChoice.model ? { model: pickChoice.model } : {}),
@@ -538,12 +544,19 @@ export function IdeaWorkshop() {
           },
         ]
       : []),
-    ...(streaming && streamingReply && streamingMode !== "plan"
+    ...(streaming &&
+    streamingReply &&
+    (streamingMode !== "plan" || !!turn?.question)
       ? [
           {
             id: "live",
             ideaId: id ?? "",
             role: "agent" as const,
+            // In plan mode, the agent's text is normally piped to the
+            // right plan panel. But once it emits a clarifying
+            // question, the reply is a preamble that won't become a
+            // plan — surface it in the chat with the question card so
+            // the operator can see what was asked and answer.
             content: streamingReply,
             createdAt: Date.now(),
             live: true,
@@ -739,6 +752,7 @@ export function IdeaWorkshop() {
                 streamingReply={streamingReply}
                 streamingPlan={streamingPlan}
                 streamingTools={streamingTools}
+                streamingHasQuestion={!!turn?.question}
                 elapsedMs={elapsedMs}
                 editingPlan={editingPlan}
                 planDraftEditor={planDraftEditor}
@@ -901,7 +915,10 @@ function TimelineItem({
   questionAnswered,
 }: {
   message: IdeaMessage & { live?: boolean };
-  onAnswerQuestion?: (text: string) => void;
+  onAnswerQuestion?: (
+    text: string,
+    answerMode: "chat" | "challenge" | "plan",
+  ) => void;
   questionDisabled?: boolean;
   questionAnswered?: string | null;
 }) {
@@ -992,7 +1009,18 @@ function TimelineItem({
           {!isUser && message.question && onAnswerQuestion && (
             <IdeaQuestionCard
               question={message.question}
-              onAnswer={onAnswerQuestion}
+              onAnswer={(text) => {
+                // The agent stamps the originating mode onto the
+                // question so a plan-mode "binary or source?" resumes
+                // in plan mode (full spec) instead of chat mode (a
+                // 250-word reply). Older messages won't carry it —
+                // default to chat for those.
+                const m = message.question?.mode;
+                onAnswerQuestion(
+                  text,
+                  m === "plan" || m === "challenge" ? m : "chat",
+                );
+              }}
               disabled={questionDisabled}
               answered={questionAnswered}
             />
@@ -1120,8 +1148,13 @@ function ChatColumn({
   setDraft: (v: string) => void;
   onSend: (mode: "chat" | "challenge" | "plan") => Promise<void>;
   /** Submit the operator's answer to a structured `<ask-user>` question
-   *  the agent attached to a previous turn — fired by IdeaQuestionCard. */
-  onAnswerQuestion: (text: string) => void;
+   *  the agent attached to a previous turn — fired by IdeaQuestionCard.
+   *  `answerMode` is the originating mode from `question.mode`, so a
+   *  plan-mode question resumes plan drafting instead of chat drift. */
+  onAnswerQuestion: (
+    text: string,
+    answerMode: "chat" | "challenge" | "plan",
+  ) => void;
   onStop: () => void;
   hasPlan: boolean;
   pickLabel: string;
@@ -1305,6 +1338,7 @@ function PlanColumn({
   streamingReply,
   streamingPlan,
   streamingTools,
+  streamingHasQuestion,
   elapsedMs,
   editingPlan,
   planDraftEditor,
@@ -1324,6 +1358,7 @@ function PlanColumn({
   streamingReply: string;
   streamingPlan: string;
   streamingTools: IdeaChatEvent[];
+  streamingHasQuestion: boolean;
   elapsedMs: number;
   editingPlan: boolean;
   planDraftEditor: string;
@@ -1341,12 +1376,15 @@ function PlanColumn({
   //   1. The agent is mid-stream and has emitted plan content → show
   //      that live, with a typing caret. Plan mode uses streamingReply
   //      (whole body is the plan); chat mode uses streamingPlan (only
-  //      the <plan-update> block content).
-  //   2. The persisted plan draft if one exists.
-  //   3. Empty-state CTA.
+  //      the <plan-update> block content). Once the agent emits a
+  //      clarifying `<ask-user>` question in plan mode the reply is a
+  //      preamble that won't become a plan, so suppress the live body
+  //      here and let the question render in the chat column instead.
   const liveBody =
     streamingMode === "plan"
-      ? streamingReply
+      ? streamingHasQuestion
+        ? ""
+        : streamingReply
       : streamingPlan;
   const isLive = streaming && liveBody.length > 0;
   const isPlanning = streaming && streamingMode === "plan" && !isLive;
