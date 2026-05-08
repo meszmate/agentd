@@ -574,9 +574,9 @@ function ShimmerText({
     <span
       className={cn(
         "bg-clip-text text-transparent",
-        "bg-[linear-gradient(90deg,rgba(194,65,12,0.45),rgba(194,65,12,1),rgba(99,102,241,1),rgba(34,211,238,1),rgba(194,65,12,0.45))]",
-        "dark:bg-[linear-gradient(90deg,rgba(252,165,107,0.4),rgba(252,165,107,1),rgba(165,180,252,1),rgba(103,232,249,1),rgba(252,165,107,0.4))]",
-        "bg-[length:300%_100%] animate-shimmer",
+        "bg-[linear-gradient(90deg,rgba(194,65,12,1)_0%,rgba(194,65,12,1)_35%,rgba(252,191,36,1)_50%,rgba(194,65,12,1)_65%,rgba(194,65,12,1)_100%)]",
+        "dark:bg-[linear-gradient(90deg,rgba(251,146,60,1)_0%,rgba(251,146,60,1)_35%,rgba(253,224,71,1)_50%,rgba(251,146,60,1)_65%,rgba(251,146,60,1)_100%)]",
+        "bg-[length:200%_100%] animate-shimmer [animation-duration:3.2s]",
         className,
       )}
     >
