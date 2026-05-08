@@ -142,6 +142,7 @@ import {
   type AiHelperOptions,
   type AgentdPaths,
   type Db,
+  type IdeaChatResult,
   type PluginName,
   listAllSkills,
   findSkill,
@@ -3780,17 +3781,49 @@ export function buildServer(opts: BuildServerOptions) {
         mode: "plan",
         helper: cfg.aiHelpers,
       });
-      let plan = "";
+      let result: IdeaChatResult | null = null;
       while (true) {
         const next = await it.next();
         if (next.done) {
-          plan = (next.value.reply || "").trim();
+          result = next.value;
           break;
         }
         // Drop streaming events here — this endpoint is synchronous;
         // the web's streaming variant handles live UI separately.
       }
-      if (!plan) {
+      const reply = (result?.reply || "").trim();
+      // Agent decided to ask a clarifying question before drafting the
+      // spec — its reply is a preamble + an `<ask-user>` block, NOT a
+      // plan. Persist the preamble as a normal agent message on the
+      // idea (so opening the workshop shows the question card with
+      // the option buttons) and DO NOT write planDraft. Callers
+      // (telegram /plan, discord /plan, project page entry) get a
+      // pointer to the workshop where the operator can answer.
+      if (reply && result?.question) {
+        appendIdeaMessage(db, {
+          ideaId: idea.id,
+          role: "user",
+          content: text,
+        });
+        appendIdeaMessage(db, {
+          ideaId: idea.id,
+          role: "agent",
+          content: reply,
+          question: result.question,
+        });
+        pubSavedIdeaChanged(idea.id);
+        return c.json(
+          {
+            ok: false,
+            idea,
+            question: result.question,
+            error:
+              "the agent has a clarifying question — open the workshop to answer and resume planning",
+          },
+          200,
+        );
+      }
+      if (!reply) {
         return c.json(
           {
             ok: false,
@@ -3801,8 +3834,8 @@ export function buildServer(opts: BuildServerOptions) {
           200,
         );
       }
-      const updated = updateSavedIdeaPlan(db, idea.id, plan) ?? idea;
-      return c.json({ ok: true, idea: updated, plan });
+      const updated = updateSavedIdeaPlan(db, idea.id, reply) ?? idea;
+      return c.json({ ok: true, idea: updated, plan: reply });
     } catch (e) {
       return c.json(
         { ok: false, idea, error: (e as Error).message },
@@ -4022,37 +4055,67 @@ export function buildServer(opts: BuildServerOptions) {
                 let nextPlanDraft = idea.planDraft;
                 let nextPlanSlices = idea.planSlices ?? null;
                 if (mode === "plan") {
-                  // Plan mode: the agent's reply IS the new plan. Stash
-                  // it on the idea (the right-side plan panel shows
-                  // this) and write a short system marker in the
-                  // thread instead of bloating the chat with the full
-                  // plan body. Tool-call events go on the marker so
-                  // the activity history still survives reload.
-                  const planned = updateSavedIdeaPlan(db, id, result.reply);
-                  if (planned) nextPlanDraft = planned.planDraft;
-                  if (result.planSlices && result.planSlices.length > 0) {
-                    const sliced = updateSavedIdeaSlices(
-                      db,
-                      id,
-                      result.planSlices,
-                    );
-                    if (sliced) nextPlanSlices = sliced.planSlices ?? null;
+                  if (result.question) {
+                    // Plan mode but the agent decided it needs more
+                    // info before committing to a spec — its reply is
+                    // a preamble plus an `<ask-user>` block, not a
+                    // plan. Persist the preamble as a normal agent
+                    // message with the question attached so the
+                    // workshop renders the option buttons exactly
+                    // like a chat-mode question. Do NOT write
+                    // `result.reply` to `planDraft` — that preamble
+                    // isn't an executable spec, and saving it would
+                    // replace the right panel with a single "before
+                    // I write the plan…" sentence (the bug this
+                    // branch fixes).
+                    persisted = appendIdeaMessage(db, {
+                      ideaId: id,
+                      role: "agent",
+                      content: result.reply,
+                      ...(accumulatedEvents.length > 0
+                        ? {
+                            events: accumulatedEvents as Array<{
+                              kind: "tool_use" | "tool_result" | "text" | "raw";
+                              [k: string]: unknown;
+                            }>,
+                          }
+                        : {}),
+                      question: result.question,
+                    });
+                  } else {
+                    // Plan mode: the agent's reply IS the new plan.
+                    // Stash it on the idea (the right-side plan panel
+                    // shows this) and write a short system marker in
+                    // the thread instead of bloating the chat with
+                    // the full plan body. Tool-call events go on the
+                    // marker so the activity history still survives
+                    // reload.
+                    const planned = updateSavedIdeaPlan(db, id, result.reply);
+                    if (planned) nextPlanDraft = planned.planDraft;
+                    if (result.planSlices && result.planSlices.length > 0) {
+                      const sliced = updateSavedIdeaSlices(
+                        db,
+                        id,
+                        result.planSlices,
+                      );
+                      if (sliced) nextPlanSlices = sliced.planSlices ?? null;
+                    }
+                    persisted = appendIdeaMessage(db, {
+                      ideaId: id,
+                      role: "system",
+                      content: idea.planDraft
+                        ? "Plan refined — see the right panel."
+                        : "Plan drafted — see the right panel.",
+                      ...(accumulatedEvents.length > 0
+                        ? {
+                            events: accumulatedEvents as Array<{
+                              kind: "tool_use" | "tool_result" | "text" | "raw";
+                              [k: string]: unknown;
+                            }>,
+                          }
+                        : {}),
+                    });
                   }
-                  persisted = appendIdeaMessage(db, {
-                    ideaId: id,
-                    role: "system",
-                    content: idea.planDraft
-                      ? "Plan refined — see the right panel."
-                      : "Plan drafted — see the right panel.",
-                    ...(accumulatedEvents.length > 0
-                      ? {
-                          events: accumulatedEvents as Array<{
-                            kind: "tool_use" | "tool_result" | "text" | "raw";
-                            [k: string]: unknown;
-                          }>,
-                        }
-                      : {}),
-                  });
                 } else {
                   persisted = appendIdeaMessage(db, {
                     ideaId: id,

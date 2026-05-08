@@ -2240,6 +2240,11 @@ export async function* streamIdeaConversation(
   function* routeAskEvent(ev: HelperStreamEvent): Generator<HelperStreamEvent> {
     if (ev.kind === "text" && !isPlanMode) {
       yield* planSplitter.feed(ev.delta);
+    } else if (ev.kind === "question") {
+      // Stamp the conversation mode onto the live question event too,
+      // so the WS-fed `turn.question` carries it before the final
+      // result envelope ever reaches the UI.
+      yield { kind: "question", question: { ...ev.question, mode } };
     } else {
       yield ev;
     }
@@ -2304,6 +2309,12 @@ export async function* streamIdeaConversation(
   const allQuestions = [...askStripBody.questions, ...askStripPlan.questions];
   const question: IdeaQuestion | null =
     allQuestions.length > 0 ? allQuestions[allQuestions.length - 1]! : null;
+  // Stamp the conversation mode onto the question so the operator's
+  // answer resumes the same flow — a plan-mode question ("binary or
+  // source?") needs the next turn to be plan mode (full spec), not
+  // chat mode (a 250-word reply). Surfaces read `question.mode` in
+  // their answer handler.
+  if (question) question.mode = mode;
   const cleaned = cleanAssistantText(body);
   // Validate mode appends `TITLE: <suggested>` on the agent's trailing
   // line. Surface it on the result for the brainstorm UI's save

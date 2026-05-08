@@ -1032,6 +1032,16 @@ export const IdeaQuestion = z.object({
    * genuinely don't make sense (rare).
    */
   allowOther: z.boolean().default(true),
+  /**
+   * Mode the operator's answer should be sent back in. Stamped by
+   * the daemon when the question was emitted, so a plan-mode question
+   * resumes plan drafting (and not chat drift) once the operator
+   * answers. The agent doesn't set this — it's added server-side
+   * from the current conversation mode. Optional for back-compat
+   * with older messages that don't carry it; surfaces default to
+   * `"chat"` when absent.
+   */
+  mode: z.enum(["chat", "challenge", "plan", "validate"]).optional(),
 });
 export type IdeaQuestion = z.infer<typeof IdeaQuestion>;
 
