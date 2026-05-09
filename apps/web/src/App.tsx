@@ -32,6 +32,9 @@ const Templates = lazy(() =>
 const Schedules = lazy(() =>
   import("@/views/Schedules").then((m) => ({ default: m.Schedules })),
 );
+const Triggers = lazy(() =>
+  import("@/views/Triggers").then((m) => ({ default: m.Triggers })),
+);
 const Plugins = lazy(() =>
   import("@/views/Plugins").then((m) => ({ default: m.Plugins })),
 );
@@ -119,6 +122,14 @@ const router = createBrowserRouter([
         element: (
           <ViewSuspense>
             <Schedules />
+          </ViewSuspense>
+        ),
+      },
+      {
+        path: "triggers",
+        element: (
+          <ViewSuspense>
+            <Triggers />
           </ViewSuspense>
         ),
       },

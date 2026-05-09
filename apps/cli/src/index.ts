@@ -32,6 +32,16 @@ Schedules (cron-driven template runs):
   agentd schedule disable <name|id>
   agentd schedule rm <name|id>
 
+Triggers (condition-driven template runs — fire when an external predicate flips true):
+  agentd triggers ls
+  agentd triggers add <name> --kind datetime --fire-at "<iso-or-+Nm>" --template <name> [--repeat] [--arg k=v]
+  agentd triggers add <name> --kind webhook --template <name> [--secret <hex>] [--repeat]
+  agentd triggers add <name> --kind github_pr_merged --owner <o> --repo <r> --number <n> --template <name>
+  agentd triggers add <name> --kind github_issue_closed --owner <o> --repo <r> --number <n> --template <name>
+  agentd triggers enable <id|name>
+  agentd triggers disable <id|name>
+  agentd triggers rm <id|name>
+
 Settings (daemon-side, edit the system prompt + AI helper guidance):
   agentd settings show
   agentd settings set <agentInstructions|commitInstructions|prInstructions> <value>
@@ -528,6 +538,153 @@ async function cmdSchedule(argv: string[]) {
   process.exit(2);
 }
 
+// ───────────── triggers ─────────────
+
+async function cmdTriggers(argv: string[]) {
+  const sub = argv[0];
+  const c = client();
+  if (!sub || sub === "ls" || sub === "list") {
+    const { triggers } = await c.listTriggers();
+    if (triggers.length === 0) return console.log("(no triggers)");
+    for (const t of triggers) {
+      const last = t.lastFiredAt ? new Date(t.lastFiredAt).toLocaleString() : "—";
+      const state = t.enabled ? "enabled" : "disabled";
+      const cfg = JSON.stringify(t.predicateConfig);
+      console.log(`${t.name.padEnd(20)} ${state.padEnd(9)} ${t.predicateKind.padEnd(20)} ${cfg}`);
+      console.log(`                     last=${last}  template=${t.templateId}${t.lastError ? "  err=" + t.lastError : ""}`);
+    }
+    return;
+  }
+  if (sub === "add" || sub === "create") {
+    const name = argv[1];
+    if (!name) { console.error("usage: agentd triggers add <name> --kind <k> --template <name> [...]"); process.exit(2); }
+    const argFlags: string[] = [];
+    const passed = argv.slice(2);
+    const filtered: string[] = [];
+    for (let i = 0; i < passed.length; i++) {
+      if (passed[i] === "--arg" && passed[i + 1]) {
+        argFlags.push(passed[i + 1]!);
+        i++;
+      } else {
+        filtered.push(passed[i]!);
+      }
+    }
+    const { values } = parseArgs({
+      args: filtered,
+      options: {
+        kind: { type: "string" },
+        template: { type: "string" },
+        owner: { type: "string" },
+        repo: { type: "string" },
+        number: { type: "string" },
+        "fire-at": { type: "string" },
+        secret: { type: "string" },
+        repeat: { type: "boolean" },
+      },
+      allowPositionals: false,
+    });
+    if (!values.kind || !values.template) {
+      console.error("--kind and --template are required");
+      process.exit(2);
+    }
+    const kind = String(values.kind);
+    let predicateConfig: Record<string, unknown>;
+    if (kind === "github_pr_merged" || kind === "github_issue_closed") {
+      if (!values.owner || !values.repo || !values.number) {
+        console.error(`--owner, --repo, --number are required for ${kind}`);
+        process.exit(2);
+      }
+      predicateConfig = {
+        kind,
+        owner: String(values.owner),
+        repo: String(values.repo),
+        number: Number(values.number),
+      };
+    } else if (kind === "datetime") {
+      if (!values["fire-at"]) {
+        console.error("--fire-at is required for datetime (ISO timestamp or +Nm/+Ns)");
+        process.exit(2);
+      }
+      const fireAt = parseFireAt(String(values["fire-at"]));
+      predicateConfig = { kind, fireAt };
+    } else if (kind === "webhook") {
+      const secret = values.secret ? String(values.secret) : randomHex(24);
+      predicateConfig = { kind, secret };
+    } else {
+      console.error(`unknown kind: ${kind}`);
+      process.exit(2);
+    }
+    const args = parseArgPairs(argFlags);
+    const { trigger } = await c.createTrigger({
+      name,
+      predicateKind: kind as "datetime" | "webhook" | "github_pr_merged" | "github_issue_closed",
+      predicateConfig: predicateConfig as never,
+      templateId: String(values.template),
+      templateArgs: args,
+      enabled: true,
+      repeat: !!values.repeat,
+    });
+    console.log(`created trigger '${trigger.name}' (${trigger.id})`);
+    if (trigger.predicateConfig.kind === "webhook") {
+      const cfg = loadCliConfig();
+      console.log(`  webhook URL: ${cfg.server.replace(/\/$/, "")}/api/webhooks/${trigger.id}`);
+      console.log(`  secret:      ${trigger.predicateConfig.secret}`);
+    }
+    return;
+  }
+  if (sub === "enable") {
+    const id = argv[1];
+    if (!id) { console.error("usage: agentd triggers enable <id>"); process.exit(2); }
+    const { trigger } = await c.enableTrigger(id);
+    console.log(`enabled ${trigger.name}`);
+    return;
+  }
+  if (sub === "disable") {
+    const id = argv[1];
+    if (!id) { console.error("usage: agentd triggers disable <id>"); process.exit(2); }
+    const { trigger } = await c.disableTrigger(id);
+    console.log(`disabled ${trigger.name}`);
+    return;
+  }
+  if (sub === "rm" || sub === "delete") {
+    const id = argv[1];
+    if (!id) { console.error("usage: agentd triggers rm <id>"); process.exit(2); }
+    await c.deleteTrigger(id);
+    console.log(`removed ${id}`);
+    return;
+  }
+  console.error(`unknown triggers subcommand: ${sub}`);
+  process.exit(2);
+}
+
+/** Accept ISO timestamps, epoch ms, or relative offsets like "+90s" / "+5m" / "+2h". */
+function parseFireAt(input: string): number {
+  const trimmed = input.trim();
+  const rel = trimmed.match(/^\+(\d+)\s*([smhd])?$/);
+  if (rel) {
+    const n = Number(rel[1]);
+    const unit = (rel[2] ?? "s") as "s" | "m" | "h" | "d";
+    const mult: Record<typeof unit, number> = {
+      s: 1000,
+      m: 60_000,
+      h: 3_600_000,
+      d: 86_400_000,
+    };
+    return Date.now() + n * mult[unit];
+  }
+  const asNum = Number(trimmed);
+  if (Number.isFinite(asNum) && asNum > 1_000_000_000) return asNum;
+  const parsed = Date.parse(trimmed);
+  if (Number.isFinite(parsed)) return parsed;
+  throw new Error(`could not parse --fire-at: ${input}`);
+}
+
+function randomHex(bytes: number): string {
+  const buf = new Uint8Array(bytes);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 // ───────────── settings ─────────────
 
 const SETTINGS_KEYS = ["agentInstructions", "commitInstructions", "prInstructions"] as const;
@@ -786,6 +943,9 @@ async function main() {
     case "schedules":
     case "cron":
       return cmdSchedule(rest);
+    case "trigger":
+    case "triggers":
+      return cmdTriggers(rest);
     case "settings":
       return cmdSettings(rest);
     case "skills":

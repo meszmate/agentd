@@ -8,6 +8,7 @@ export * from "./git.ts";
 export * from "./config.ts";
 export * from "./templates.ts";
 export * from "./schedules.ts";
+export * from "./triggers.ts";
 export * from "./cron.ts";
 export * from "./skills.ts";
 export * from "./projects.ts";

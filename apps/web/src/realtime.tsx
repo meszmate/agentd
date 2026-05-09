@@ -17,6 +17,7 @@ import type {
   TaskStatus,
   TerminalSession,
   TerminalWindow,
+  Trigger,
   WsServerEvent,
 } from "@agentd/contracts";
 import { useApp } from "@/AppContext";
@@ -571,6 +572,55 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
               return { rateLimits: next };
             },
           );
+          return;
+        }
+        if (
+          msg.type === "trigger_created" ||
+          msg.type === "trigger_updated"
+        ) {
+          // Patch the cached triggers list so every device sees the
+          // new state without a refetch — works whether the change
+          // came from /api/triggers or from the scheduler firing.
+          qc.setQueryData<{ triggers: Trigger[] }>(qk.triggers(), (prev) => {
+            const cur = prev?.triggers ?? [];
+            const i = cur.findIndex((t) => t.id === msg.trigger.id);
+            if (i >= 0) {
+              const next = cur.slice();
+              next[i] = msg.trigger;
+              return { triggers: next };
+            }
+            return { triggers: [msg.trigger, ...cur] };
+          });
+          return;
+        }
+        if (msg.type === "trigger_deleted") {
+          qc.setQueryData<{ triggers: Trigger[] }>(qk.triggers(), (prev) => {
+            const cur = prev?.triggers ?? [];
+            return { triggers: cur.filter((t) => t.id !== msg.triggerId) };
+          });
+          return;
+        }
+        if (msg.type === "trigger_fired") {
+          qc.setQueryData<{ triggers: Trigger[] }>(qk.triggers(), (prev) => {
+            const cur = prev?.triggers ?? [];
+            const i = cur.findIndex((t) => t.id === msg.trigger.id);
+            if (i >= 0) {
+              const next = cur.slice();
+              next[i] = msg.trigger;
+              return { triggers: next };
+            }
+            return { triggers: [msg.trigger, ...cur] };
+          });
+          // Surface a toast with a deep-link to the spawned task so the
+          // operator can jump straight to the new run.
+          if (msg.taskId) {
+            toast(
+              `Trigger '${msg.trigger.name}' fired → /tasks/${msg.taskId}`,
+            );
+          } else {
+            toast(`Trigger '${msg.trigger.name}' fired`);
+          }
+          void qc.invalidateQueries({ queryKey: qk.tasks() });
           return;
         }
         if (msg.type === "terminal_sessions") {
