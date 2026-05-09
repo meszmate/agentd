@@ -38,20 +38,21 @@ export function ShimmerText({
 }
 
 /**
- * Vertical drop transition. New line falls in from above and lands
- * in place; old line continues falling out the bottom. Reads as a
- * top→bottom roll, like a slot machine row landing into the slot.
- * translateY uses 100% (one own-line-height) so both lines clear
- * the row exactly. IN uses an `easeOutExpo`-ish curve so it
- * decelerates into rest; OUT uses ease-in so it accelerates out
- * (gravity-like).
+ * Vertical drop with per-letter stagger. Each new letter falls in
+ * from one line-height above the slot on its own delay; each old
+ * letter continues falling out the bottom on the same staggered
+ * cadence. Reads as a left→right wave landing into the row, like
+ * GSAP SplitText / Anime.js letter stagger demos. Distinct from the
+ * older horizontal version because each letter starts at a position
+ * that's actually off-screen (above the row), not at opacity 0, so
+ * the wave is visible mid-flight rather than just a fade.
  *
  * Both copies share a grid cell so the parent only sizes for the
  * longer of the two and there's no layout shift mid-transition.
  * `useLayoutEffect` so the exiting copy is in the DOM before paint,
  * avoids a one-frame flash where the new text appears alone.
- * `overflow-hidden` clips off-row halves so the drop reads as text
- * moving through a window rather than ghosting above/below.
+ * `overflow-hidden` clips off-row halves so letters disappear cleanly
+ * above/below the line instead of ghosting past.
  */
 export function TransitioningText({
   children,
@@ -70,7 +71,9 @@ export function TransitioningText({
   }, [text]);
   useEffect(() => {
     if (exiting === null) return;
-    const t = setTimeout(() => setExiting(null), 500);
+    // Generous - the longest pool label is ~31 chars, with 25ms
+    // stagger that's 775ms + 300ms anim = ~1075ms; round up.
+    const t = setTimeout(() => setExiting(null), 1200);
     return () => clearTimeout(t);
   }, [exiting]);
   return (
@@ -81,20 +84,46 @@ export function TransitioningText({
       )}
     >
       {exiting !== null && (
-        <span
+        <StaggeredLetters
           key={`out-${exiting}`}
-          className="inline-block whitespace-pre animate-label-out will-change-[opacity,transform]"
-          aria-hidden
-        >
-          {exiting}
-        </span>
+          text={exiting}
+          kind="out"
+        />
       )}
-      <span
-        key={`in-${text}`}
-        className="inline-block whitespace-pre animate-label-in will-change-[opacity,transform]"
-      >
-        {text}
-      </span>
+      <StaggeredLetters key={`in-${text}`} text={text} kind="in" />
+    </span>
+  );
+}
+
+function StaggeredLetters({
+  text,
+  kind,
+}: {
+  text: string;
+  kind: "in" | "out";
+}) {
+  const safe = text ?? "";
+  // Capped stagger so long phrases stay under ~1s total. Short
+  // phrases get a slightly longer per-letter delay so the wave is
+  // still legible instead of arriving as one beat.
+  const stagger = Math.min(35, Math.max(18, 320 / Math.max(safe.length, 1)));
+  return (
+    <span
+      className="inline-flex whitespace-pre"
+      aria-hidden={kind === "out"}
+    >
+      {[...safe].map((c, i) => (
+        <span
+          key={i}
+          className={cn(
+            "inline-block will-change-[opacity,transform]",
+            kind === "in" ? "animate-letter-in" : "animate-letter-out",
+          )}
+          style={{ animationDelay: `${i * stagger}ms` }}
+        >
+          {c === " " ? " " : c}
+        </span>
+      ))}
     </span>
   );
 }
