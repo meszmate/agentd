@@ -38,20 +38,20 @@ export function ShimmerText({
 }
 
 /**
- * Horizontal swipe transition. Old line slides off to the left and
- * fades; new line slides in from the right and fades in. Both move
- * as whole blocks, the per-letter version was invisibly subtle at
- * 12.5px because letters with `backwards` fill sat at opacity 0
- * during their stagger delay, so the user only ever saw a fade.
- * Block-level translateX of ~1.4em is the shortest distance that
- * actually reads as a swipe at this size.
+ * Vertical drop transition. New line falls in from above and lands
+ * in place; old line continues falling out the bottom. Reads as a
+ * top→bottom roll, like a slot machine row landing into the slot.
+ * translateY uses 100% (one own-line-height) so both lines clear
+ * the row exactly. IN uses an `easeOutExpo`-ish curve so it
+ * decelerates into rest; OUT uses ease-in so it accelerates out
+ * (gravity-like).
  *
  * Both copies share a grid cell so the parent only sizes for the
  * longer of the two and there's no layout shift mid-transition.
  * `useLayoutEffect` so the exiting copy is in the DOM before paint,
  * avoids a one-frame flash where the new text appears alone.
- * `overflow-hidden` clips off-screen halves so the swipe reads as
- * text moving in/out of a window rather than letters floating past.
+ * `overflow-hidden` clips off-row halves so the drop reads as text
+ * moving through a window rather than ghosting above/below.
  */
 export function TransitioningText({
   children,
