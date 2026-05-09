@@ -57,6 +57,12 @@ async function main() {
   // at `running`/`waiting_*`/`idle` and the UI would draw "agent is
   // thinking…" forever otherwise.
   tasks.recoverOrphans();
+  // Tick a stall watchdog while we're up, too — a live daemon can
+  // still get its agent CLI wedged by a network drop, a Mac sleeping
+  // mid-API-call, or a hung HTTP socket. The watchdog kills runners
+  // whose connections went dead and unsticks the UI without waiting
+  // for a daemon restart.
+  tasks.startStallWatchdog();
 
   const plugins = new PluginManager(paths.root, baseUrl, db);
 
@@ -179,6 +185,7 @@ async function main() {
 
   const shutdown = async (sig: string) => {
     console.log(`\nreceived ${sig}, shutting down...`);
+    tasks.stopStallWatchdog();
     scheduler.stop();
     brainstormSweep.stop();
     await plugins.stopAll();
