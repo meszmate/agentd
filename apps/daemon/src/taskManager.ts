@@ -1371,6 +1371,20 @@ export class TaskManager {
     }
     if (catalog.text) appendParts.push(catalog.text);
     if (repoCtx.text) appendParts.push(repoCtx.text);
+    // PR-spawned tasks: the daemon already ran `gh pr checkout <n>` in
+    // this worktree, so HEAD is the PR's head branch. Tell the agent
+    // explicitly so it doesn't try to spin up a new branch / new PR for
+    // its commits. Auto-push (when on) lands them right back on the PR.
+    if (task.githubPr) {
+      const lines = [
+        `# GitHub PR context`,
+        ``,
+        `This worktree is already checked out on the branch for PR #${task.githubPr} (equivalent to running \`gh pr checkout ${task.githubPr}\`). HEAD is \`${task.branch}\`, tracking the PR's head ref.`,
+        ``,
+        `Any commits you make land directly on this PR. Do NOT create a new branch, do NOT open a new PR, and do NOT run \`gh pr create\` — pushing this branch updates the existing PR.`,
+      ];
+      appendParts.push(lines.join("\n"));
+    }
     // Tell the agent to land its own work. We always ask it to commit
     // because the agent has full context of what it changed and writes
     // a much more accurate message than a separate Claude pass over the

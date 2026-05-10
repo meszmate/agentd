@@ -4924,7 +4924,14 @@ export function buildServer(opts: BuildServerOptions) {
         githubPrState: r.data.state || null,
         githubPrIsDraft: r.data.isDraft === true,
       });
-      if (next) pubTaskChanged(taskId);
+      // Backfill prUrl for PR-spawned tasks created before we started
+      // persisting it. Idempotent: only writes when the column is empty.
+      let urlChanged = false;
+      if (!task.prUrl && r.data.url) {
+        setTaskPrUrl(db, taskId, r.data.url);
+        urlChanged = true;
+      }
+      if (next || urlChanged) pubTaskChanged(taskId);
     } else if (task.githubIssue) {
       const r = await ghViewIssue(cwd, task.githubIssue);
       if (!r.ok || !r.data) return;
@@ -5154,6 +5161,7 @@ export function buildServer(opts: BuildServerOptions) {
     let prompt = parsed.data.prompt?.trim() ?? "";
     let title = parsed.data.title?.trim() ?? "";
     let conversation = "";
+    let prUrl: string | undefined;
     const spawnMeta: {
       githubPrState?: string | null;
       githubPrIsDraft?: boolean | null;
@@ -5198,6 +5206,7 @@ export function buildServer(opts: BuildServerOptions) {
       conversation = formatPrConversation(pr);
       spawnMeta.githubPrState = pr.state || "OPEN";
       spawnMeta.githubPrIsDraft = pr.isDraft === true;
+      if (pr.url) prUrl = pr.url;
       if (!title) title = `PR #${pr.number} ${pr.title}`.slice(0, 100);
       if (parsed.data.preset === "review-pr" || (!prompt && parsed.data.preset !== "freeform")) {
         prompt = renderConfigTemplate(presets.reviewPr, {
@@ -5241,6 +5250,10 @@ export function buildServer(opts: BuildServerOptions) {
       // performed above so the lifecycle icon shows up immediately,
       // without a second `gh` round-trip.
       setTaskGithubMeta(db, task.id, spawnMeta);
+      // PR-spawned tasks: also persist the PR url so the task topbar's
+      // "Open PR" button works the same as for tasks that opened the PR
+      // themselves (the column is shared).
+      if (prUrl) setTaskPrUrl(db, task.id, prUrl);
       pubTaskChanged(task.id);
       void refreshGithubCounts(project).catch(() => {});
       pubGithubRefreshed(project.id);
