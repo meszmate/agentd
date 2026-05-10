@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { File, FolderClosed, FolderOpen, Search } from "lucide-react";
+import { Highlight, themes } from "prism-react-renderer";
 import {
   Panel,
   PanelGroup,
   PanelResizeHandle,
 } from "react-resizable-panels";
+import { langFromPath } from "@/components/code-block";
+import { useTheme } from "@/components/theme-provider";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useFile, useFiles, useGitStatus } from "@/queries";
@@ -294,13 +297,13 @@ export function TaskFiles({
                 )}
               </div>
               <ScrollArea className="flex-1 min-h-0">
-                <pre className="p-3 text-xs font-mono leading-relaxed">
-                  {fileQ.isLoading ? (
-                    <span className="text-ink-400 dark:text-ink-500">Loading…</span>
-                  ) : (
-                    fileQ.data?.content ?? ""
-                  )}
-                </pre>
+                {fileQ.isLoading ? (
+                  <pre className="p-3 text-xs font-mono leading-relaxed text-ink-400 dark:text-ink-500">
+                    Loading…
+                  </pre>
+                ) : (
+                  <FileContent path={path} content={fileQ.data?.content ?? ""} />
+                )}
               </ScrollArea>
             </>
           ) : (
@@ -423,5 +426,75 @@ function TreeRow({
         )}
       </span>
     </button>
+  );
+}
+
+/**
+ * Renders the file body. When the path resolves to a known prism
+ * grammar we tokenize and color it; otherwise we fall through to a
+ * plain `<pre>` so unknown / binary-ish text stays untouched. Line
+ * numbers always show — same gutter as the chat's `<CodeBlock>` so the
+ * two surfaces feel consistent.
+ */
+function FileContent({ path, content }: { path: string; content: string }) {
+  const { resolved } = useTheme();
+  const isDark = resolved === "dark";
+  const lang = langFromPath(path);
+  const lineNumberTone = isDark ? "text-ink-50/25" : "text-ink-400/70";
+
+  if (!lang) {
+    return (
+      <pre className="p-3 text-xs font-mono leading-relaxed whitespace-pre">
+        {content}
+      </pre>
+    );
+  }
+
+  return (
+    <Highlight
+      code={content.replace(/\n+$/, "")}
+      language={lang}
+      theme={isDark ? themes.oneDark : themes.oneLight}
+    >
+      {({ className, style, tokens, getLineProps, getTokenProps }) => (
+        <pre
+          className={cn(
+            className,
+            "m-0 py-2 font-mono text-xs leading-relaxed",
+          )}
+          style={{
+            ...style,
+            // Win against the prism theme's inline backgroundColor so
+            // the file viewer keeps the surrounding panel surface.
+            backgroundColor: "transparent",
+          }}
+        >
+          {tokens.map((line, i) => {
+            const lineProps = getLineProps({ line, key: i });
+            return (
+              <div
+                key={i}
+                {...lineProps}
+                className={cn(lineProps.className, "flex items-start min-w-fit")}
+              >
+                <span
+                  className={cn(
+                    "shrink-0 pl-2 pr-2 text-right select-none text-[10px] tabular-nums w-10",
+                    lineNumberTone,
+                  )}
+                >
+                  {i + 1}
+                </span>
+                <span className="whitespace-pre flex-1 pr-3">
+                  {line.map((token, j) => (
+                    <span key={j} {...getTokenProps({ token, key: j })} />
+                  ))}
+                </span>
+              </div>
+            );
+          })}
+        </pre>
+      )}
+    </Highlight>
   );
 }

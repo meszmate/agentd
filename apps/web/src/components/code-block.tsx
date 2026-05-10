@@ -260,3 +260,100 @@ export function normalizeLanguage(raw: string): Language {
       return (raw as Language) || "tsx";
   }
 }
+
+/**
+ * Map a file path to a prism language by extension. Returns `undefined`
+ * for plain-text or unknown files so callers can skip the highlighter
+ * entirely and render the body as raw text. Languages not bundled with
+ * prism-react-renderer (bash, java, kotlin, etc.) still pass through —
+ * the highlighter falls back to plain tokens but the label is still
+ * useful context for the operator.
+ */
+export function langFromPath(path: string): Language | undefined {
+  const base = path.split("/").pop() ?? path;
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0) return undefined;
+  const ext = base.slice(dot + 1).toLowerCase();
+  switch (ext) {
+    case "ts":
+    case "tsx":
+    case "mts":
+    case "cts":
+      return "tsx";
+    case "js":
+    case "jsx":
+    case "mjs":
+    case "cjs":
+      return "jsx";
+    case "py":
+    case "pyi":
+      return "python";
+    case "rs":
+      return "rust";
+    case "go":
+      return "go";
+    case "rb":
+      return "ruby";
+    case "java":
+      return "java";
+    case "kt":
+    case "kts":
+      return "kotlin";
+    case "swift":
+      return "swift";
+    case "c":
+    case "h":
+      return "c";
+    case "cc":
+    case "cpp":
+    case "cxx":
+    case "hpp":
+    case "hh":
+      return "cpp";
+    case "cs":
+      return "csharp";
+    case "php":
+      return "php";
+    case "sh":
+    case "bash":
+    case "zsh":
+    case "fish":
+      return "bash";
+    case "yml":
+    case "yaml":
+      return "yaml";
+    case "toml":
+      return "toml";
+    case "json":
+    case "jsonc":
+    case "json5":
+      return "json";
+    case "md":
+    case "markdown":
+    case "mdx":
+      return "markdown";
+    case "html":
+    case "htm":
+    case "vue":
+    case "svelte":
+      return "markup";
+    case "xml":
+    case "svg":
+      return "markup";
+    case "css":
+    case "scss":
+    case "sass":
+    case "less":
+      return "css";
+    case "sql":
+      return "sql";
+    case "graphql":
+    case "gql":
+      return "graphql";
+    case "diff":
+    case "patch":
+      return "diff";
+    default:
+      return undefined;
+  }
+}
