@@ -165,6 +165,29 @@ export class TaskManager {
    */
   private completedSignaled = new Set<string>();
   /**
+   * Per-task counter of consecutive codex auto-resume attempts. Codex's
+   * `exec` is single-shot per turn — when the process exits without
+   * the agent signaling `agentd-progress --done` AND the exit looks
+   * abnormal (failed status, or an auto-compaction fired mid-turn),
+   * the task gets stuck with the work half-done. We respawn it with
+   * `codex exec resume <thread_id>` and a short "continue" nudge, up
+   * to MAX_AUTO_RESUME_ATTEMPTS times per burst. The counter resets
+   * on either (a) the agent calling `agentd-progress --done`, or
+   * (b) any operator-driven send / steer / fireQueued. Without the
+   * cap a genuinely broken loop would burn tokens forever.
+   */
+  private autoResumeAttempts = new Map<string, number>();
+  /**
+   * Codex tasks where an `auto_compacted` event fired during the
+   * current turn. Combined with no `--done` signal at exit, this is
+   * one of the auto-resume triggers — codex sometimes treats the
+   * compaction itself as the natural end of a turn and stops short
+   * even when the user-level task isn't actually finished. Cleared
+   * on each spawn and on exit.
+   */
+  private autoCompactedThisTurn = new Set<string>();
+  private static readonly MAX_AUTO_RESUME_ATTEMPTS = 3;
+  /**
    * Per-task in-memory snapshot of file content captured AFTER each
    * codex `file_change`. Codex's JSONL stream only carries `{path,
    * kind}` for edits — to render the same inline-diff claude rows
@@ -377,6 +400,8 @@ export class TaskManager {
     }
     this.running.delete(taskId);
     this.completedSignaled.delete(taskId);
+    this.autoResumeAttempts.delete(taskId);
+    this.autoCompactedThisTurn.delete(taskId);
     this.codexFileSnapshots.delete(taskId);
     this.turnStartedAt.delete(taskId);
     this.lastActivityAt.delete(taskId);
@@ -490,6 +515,9 @@ export class TaskManager {
       // doesn't get classified as "failed" if the CLI returns a
       // non-zero code on stdin EOF.
       this.completedSignaled.add(taskId);
+      // Agent confirmed the task is finished — drop any pending
+      // auto-resume budget so a future steer starts from zero.
+      this.autoResumeAttempts.delete(taskId);
       const session = this.running.get(taskId);
       if (session?.runner.supportsLiveInput && session.runner.running) {
         // Fire-and-forget — `stop` closes stdin then waits for exit.
@@ -950,6 +978,9 @@ export class TaskManager {
   async sendInput(taskId: string, text: string): Promise<void> {
     const task = getTask(this.db, taskId);
     if (!task) throw new Error("task not found");
+    // The operator just took deliberate action — reset the codex
+    // auto-resume budget so a fresh spiral can run if needed.
+    this.autoResumeAttempts.delete(taskId);
     // 1. If the agent is blocked on an `agentd-ask`, this input is its
     //    answer. Resolve the pending Promise — the agent's curl call
     //    unblocks and the runner keeps going.
@@ -1020,6 +1051,8 @@ export class TaskManager {
   ): Promise<void> {
     const task = getTask(this.db, taskId);
     if (!task) throw new Error("task not found");
+    // Operator-driven action — reset the codex auto-resume budget.
+    this.autoResumeAttempts.delete(taskId);
     // Block-on-ask wins: if there's a pending decision, this becomes the
     // answer regardless of the requested steer mode. The agent unblocks
     // and continues, so neither queue nor interrupt is appropriate.
@@ -1058,6 +1091,8 @@ export class TaskManager {
   async fireQueued(taskId: string, index: number): Promise<string[]> {
     const task = getTask(this.db, taskId);
     if (!task) throw new Error("task not found");
+    // Operator-driven action — reset the codex auto-resume budget.
+    this.autoResumeAttempts.delete(taskId);
     const cur = this.inputQueue.get(taskId);
     if (!cur || index < 0 || index >= cur.length) {
       return cur?.slice() ?? [];
@@ -1306,6 +1341,9 @@ export class TaskManager {
     // A new run starts fresh — drop any stale done-signal from a prior
     // spawn so this run's exit is classified on its own merits.
     this.completedSignaled.delete(task.id);
+    // Per-turn flag for the auto-resume heuristic — only the current
+    // turn's compaction events count.
+    this.autoCompactedThisTurn.delete(task.id);
     // Seed the watchdog's activity clock so the stall sweep doesn't
     // immediately fire on a fresh spawn that hasn't emitted its first
     // event yet (claude's first stream-json line can take a few seconds).
@@ -1709,6 +1747,10 @@ export class TaskManager {
       // mirror, the web shows the full history while the agent only
       // sees the summary, and the divergence accumulates with every
       // subsequent steer.
+      // Flag the turn so the exit handler can decide whether to
+      // auto-resume — codex sometimes treats a mid-turn compaction
+      // as the natural end of the turn and stops short.
+      this.autoCompactedThisTurn.add(taskId);
       this.handleAutoCompacted(taskId, event);
     } else if (event.kind === "rate_limit") {
       // Account-wide signal — mirror onto the singleton row keyed by
@@ -1746,8 +1788,16 @@ export class TaskManager {
         session.unsubscribe();
         this.running.delete(taskId);
       }
+      // Capture per-turn signals BEFORE clearing — the codex
+      // auto-resume path inside runCompletionHooks needs to know
+      // (a) whether the agent signaled `--done` cleanly and
+      // (b) whether the runner emitted an auto_compacted event
+      // during this turn. Both Sets are cleared right after.
+      const cleanlyDone = this.completedSignaled.has(taskId);
+      const compactedThisTurn = this.autoCompactedThisTurn.has(taskId);
       // Reset the done-signal flag so a future steer starts fresh.
       this.completedSignaled.delete(taskId);
+      this.autoCompactedThisTurn.delete(taskId);
       // Drop the codex per-file snapshots — a fresh run rebuilds them
       // from HEAD on first sighting.
       this.codexFileSnapshots.delete(taskId);
@@ -1758,7 +1808,7 @@ export class TaskManager {
       // Drop the watchdog activity clock — the next spawn re-seeds it.
       this.lastActivityAt.delete(taskId);
       // Fire-and-forget; commit + push + PR all run after the agent exits.
-      void this.runCompletionHooks(taskId);
+      void this.runCompletionHooks(taskId, { cleanlyDone, compactedThisTurn });
     } else if (event.kind === "raw" && event.stream === "stdout") {
       // CodexRunner emits a `[codex thread] <uuid>` marker the first
       // time it sees `thread.started`. Persist the id on the task so
@@ -1780,7 +1830,10 @@ export class TaskManager {
     this.bus.publish({ taskId, event, ts: Date.now() });
   }
 
-  private async runCompletionHooks(taskId: string): Promise<void> {
+  private async runCompletionHooks(
+    taskId: string,
+    signals: { cleanlyDone: boolean; compactedThisTurn: boolean },
+  ): Promise<void> {
     const task = getTask(this.db, taskId);
     if (!task) return;
     // Auto-commit + auto-push are operator-toggleable per task.
@@ -1816,6 +1869,11 @@ export class TaskManager {
           });
         }
       }
+    } else if (task.agent === "codex") {
+      // No operator input pending — consider auto-resuming codex if
+      // the turn ended abnormally without a clean `--done` signal.
+      // See `maybeAutoResumeCodex` for the trigger conditions.
+      await this.maybeAutoResumeCodex(taskId, signals);
     }
     // Council hook — if this task is part of a council, see whether all
     // siblings have settled and run the judge if so.
@@ -1832,6 +1890,92 @@ export class TaskManager {
       );
     } else {
       void this.maybeChainNextSlice(taskId);
+    }
+  }
+
+  /**
+   * Codex's `exec` is single-shot — when it exits, the task sits
+   * stuck unless someone steers it. That's almost always what we
+   * want, with two exceptions worth automating:
+   *
+   *   1. The run failed mid-turn (model API error, transient
+   *      network blip, sandboxed command refused). Status: failed.
+   *   2. Codex auto-compacted DURING the turn. Codex sometimes
+   *      treats the compaction itself as the natural end of the
+   *      turn and exits cleanly even when the user-level task
+   *      isn't actually finished. The agent never called
+   *      `agentd-progress --done`, so we know the work isn't done.
+   *
+   * In either case we respawn `codex exec resume <thread_id>` with
+   * a short "continue" nudge — codex preserves the conversation
+   * context across resume, so the agent picks up where it left
+   * off without re-stuffing tokens.
+   *
+   * Capped by MAX_AUTO_RESUME_ATTEMPTS to bound the spiral if the
+   * agent is genuinely stuck. The counter resets on a clean
+   * `--done` signal or any operator-driven send / steer / fire.
+   */
+  private async maybeAutoResumeCodex(
+    taskId: string,
+    signals: { cleanlyDone: boolean; compactedThisTurn: boolean },
+  ): Promise<void> {
+    if (signals.cleanlyDone) {
+      // Agent confirmed completion — no retry. The done-signal
+      // handler already cleared the budget; mirror it here so the
+      // path is obviously safe to skip.
+      this.autoResumeAttempts.delete(taskId);
+      return;
+    }
+    const fresh = getTask(this.db, taskId);
+    if (!fresh) return;
+    if (fresh.agent !== "codex") return;
+    // Operator-driven endpoints (stop, dependent cancel) own these
+    // states — don't rescue what they explicitly ended.
+    if (fresh.status === "stopped" || fresh.status === "pending") return;
+    // Without a thread id we'd start a fresh `codex exec` and lose
+    // the conversation context. Better to leave the task stuck and
+    // let the operator decide than to silently restart from zero.
+    if (!fresh.codexThreadId) return;
+    const failed = fresh.status === "failed";
+    if (!failed && !signals.compactedThisTurn) return;
+    const attempts = this.autoResumeAttempts.get(taskId) ?? 0;
+    if (attempts >= TaskManager.MAX_AUTO_RESUME_ATTEMPTS) {
+      appendMessage(
+        this.db,
+        taskId,
+        "system",
+        `[auto-resume] gave up after ${attempts} attempts — send a new message to continue`,
+      );
+      this.autoResumeAttempts.delete(taskId);
+      const refreshed = getTask(this.db, taskId);
+      if (refreshed) {
+        this.bus.publishSystem({ kind: "task_changed", task: refreshed });
+      }
+      return;
+    }
+    const next = attempts + 1;
+    this.autoResumeAttempts.set(taskId, next);
+    const reason = failed ? "exited with failure" : "auto-compacted mid-turn";
+    appendMessage(
+      this.db,
+      taskId,
+      "system",
+      `[auto-resume ${next}/${TaskManager.MAX_AUTO_RESUME_ATTEMPTS}] previous turn ${reason} — continuing`,
+    );
+    const prompt =
+      "Continue. The previous turn ended unexpectedly. Pick up where you left off without redoing finished work, and call `agentd-progress --done` when the task is truly complete.";
+    try {
+      await this.spawnRunner(fresh, prompt, true);
+    } catch (e) {
+      this.bus.publish({
+        taskId,
+        event: {
+          kind: "raw",
+          stream: "stderr",
+          text: `[auto-resume failed to spawn] ${(e as Error).message}`,
+        },
+        ts: Date.now(),
+      });
     }
   }
 
