@@ -117,21 +117,6 @@ const config: Config = {
           "0%": { backgroundPosition: "-200% 0" },
           "100%": { backgroundPosition: "200% 0" },
         },
-        // Vertical drop for `<TransitioningText>`, applied per
-        // letter with an index-based stagger so the wave rolls
-        // left→right. Each letter starts one line-height above
-        // the slot and drops to rest (in) or starts at rest and
-        // continues one line-height down (out). Parent has
-        // `overflow-hidden` so letters are clipped above/below
-        // the row instead of ghosting past the line.
-        "letter-in": {
-          "0%": { opacity: "0", transform: "translateY(-100%)" },
-          "100%": { opacity: "1", transform: "translateY(0)" },
-        },
-        "letter-out": {
-          "0%": { opacity: "1", transform: "translateY(0)" },
-          "100%": { opacity: "0", transform: "translateY(100%)" },
-        },
         "fade-in": {
           "0%": { opacity: "0", transform: "translateY(4px)" },
           "100%": { opacity: "1", transform: "translateY(0)" },
@@ -239,8 +224,6 @@ const config: Config = {
         shimmer: "shimmer 2s linear infinite",
         "thinking-pulse": "thinking-pulse 2.4s ease-in-out infinite",
         "fade-in": "fade-in 0.25s ease-out both",
-        "letter-in": "letter-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both",
-        "letter-out": "letter-out 0.3s cubic-bezier(0.55, 0.06, 0.68, 0.19) both",
         rise: "rise 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both",
         blink: "blink 1.6s ease-in-out infinite",
         "pulse-ring": "pulse_ring 1.6s cubic-bezier(0.2, 0.7, 0.2, 1) infinite",
