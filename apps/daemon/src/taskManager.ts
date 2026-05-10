@@ -165,25 +165,28 @@ export class TaskManager {
    */
   private completedSignaled = new Set<string>();
   /**
-   * Per-task counter of consecutive codex auto-resume attempts. Codex's
-   * `exec` is single-shot per turn — when the process exits without
-   * the agent signaling `agentd-progress --done` AND the exit looks
-   * abnormal (failed status, or an auto-compaction fired mid-turn),
-   * the task gets stuck with the work half-done. We respawn it with
-   * `codex exec resume <thread_id>` and a short "continue" nudge, up
-   * to MAX_AUTO_RESUME_ATTEMPTS times per burst. The counter resets
+   * Per-task counter of consecutive auto-resume attempts. When the
+   * runner exits without the agent signaling `agentd-progress --done`
+   * AND the exit looks abnormal (failed status, or an auto-compaction
+   * fired mid-turn), the task gets stuck with the work half-done. We
+   * respawn the runner in resume mode (`codex exec resume <thread_id>`
+   * for codex, `--continue` for claude) with a short "continue" nudge,
+   * up to MAX_AUTO_RESUME_ATTEMPTS times per burst. The counter resets
    * on either (a) the agent calling `agentd-progress --done`, or
    * (b) any operator-driven send / steer / fireQueued. Without the
    * cap a genuinely broken loop would burn tokens forever.
    */
   private autoResumeAttempts = new Map<string, number>();
   /**
-   * Codex tasks where an `auto_compacted` event fired during the
-   * current turn. Combined with no `--done` signal at exit, this is
-   * one of the auto-resume triggers — codex sometimes treats the
-   * compaction itself as the natural end of a turn and stops short
-   * even when the user-level task isn't actually finished. Cleared
-   * on each spawn and on exit.
+   * Tasks where an `auto_compacted` event fired during the current
+   * turn. Combined with no `--done` signal at exit, this is one of
+   * the auto-resume triggers — codex sometimes treats the compaction
+   * itself as the natural end of a turn and stops short even when the
+   * user-level task isn't actually finished. Claude in stream-json
+   * mode usually continues past compaction, so this trigger rarely
+   * fires for claude in practice, but we still flag it so a CLI crash
+   * around compaction doesn't get misclassified. Cleared on each
+   * spawn and on exit.
    */
   private autoCompactedThisTurn = new Set<string>();
   private static readonly MAX_AUTO_RESUME_ATTEMPTS = 3;
@@ -978,7 +981,7 @@ export class TaskManager {
   async sendInput(taskId: string, text: string): Promise<void> {
     const task = getTask(this.db, taskId);
     if (!task) throw new Error("task not found");
-    // The operator just took deliberate action — reset the codex
+    // The operator just took deliberate action — reset the
     // auto-resume budget so a fresh spiral can run if needed.
     this.autoResumeAttempts.delete(taskId);
     // 1. If the agent is blocked on an `agentd-ask`, this input is its
@@ -1051,7 +1054,7 @@ export class TaskManager {
   ): Promise<void> {
     const task = getTask(this.db, taskId);
     if (!task) throw new Error("task not found");
-    // Operator-driven action — reset the codex auto-resume budget.
+    // Operator-driven action — reset the auto-resume budget.
     this.autoResumeAttempts.delete(taskId);
     // Block-on-ask wins: if there's a pending decision, this becomes the
     // answer regardless of the requested steer mode. The agent unblocks
@@ -1091,7 +1094,7 @@ export class TaskManager {
   async fireQueued(taskId: string, index: number): Promise<string[]> {
     const task = getTask(this.db, taskId);
     if (!task) throw new Error("task not found");
-    // Operator-driven action — reset the codex auto-resume budget.
+    // Operator-driven action — reset the auto-resume budget.
     this.autoResumeAttempts.delete(taskId);
     const cur = this.inputQueue.get(taskId);
     if (!cur || index < 0 || index >= cur.length) {
@@ -1869,11 +1872,11 @@ export class TaskManager {
           });
         }
       }
-    } else if (task.agent === "codex") {
-      // No operator input pending — consider auto-resuming codex if
-      // the turn ended abnormally without a clean `--done` signal.
-      // See `maybeAutoResumeCodex` for the trigger conditions.
-      await this.maybeAutoResumeCodex(taskId, signals);
+    } else {
+      // No operator input pending — consider auto-resuming the agent
+      // if the turn ended abnormally without a clean `--done` signal.
+      // See `maybeAutoResume` for the trigger conditions.
+      await this.maybeAutoResume(taskId, signals);
     }
     // Council hook — if this task is part of a council, see whether all
     // siblings have settled and run the judge if so.
@@ -1894,28 +1897,32 @@ export class TaskManager {
   }
 
   /**
-   * Codex's `exec` is single-shot — when it exits, the task sits
-   * stuck unless someone steers it. That's almost always what we
-   * want, with two exceptions worth automating:
+   * When the runner exits, the task sits stuck unless someone steers
+   * it. That's almost always what we want, with two exceptions worth
+   * automating:
    *
    *   1. The run failed mid-turn (model API error, transient
    *      network blip, sandboxed command refused). Status: failed.
-   *   2. Codex auto-compacted DURING the turn. Codex sometimes
+   *   2. The CLI auto-compacted DURING the turn. Codex sometimes
    *      treats the compaction itself as the natural end of the
    *      turn and exits cleanly even when the user-level task
    *      isn't actually finished. The agent never called
    *      `agentd-progress --done`, so we know the work isn't done.
+   *      Claude's stream-json mode usually keeps going past
+   *      compaction, so this trigger is a codex-leaning safety net
+   *      that also catches the rare claude crash near a compaction.
    *
-   * In either case we respawn `codex exec resume <thread_id>` with
-   * a short "continue" nudge — codex preserves the conversation
-   * context across resume, so the agent picks up where it left
-   * off without re-stuffing tokens.
+   * In either case we respawn the runner in resume mode with a short
+   * "continue" nudge — codex via `codex exec resume <thread_id>`,
+   * claude via `--continue` (which picks up the most recent session
+   * for that cwd). Both preserve conversation context so the agent
+   * doesn't redo finished work.
    *
    * Capped by MAX_AUTO_RESUME_ATTEMPTS to bound the spiral if the
    * agent is genuinely stuck. The counter resets on a clean
    * `--done` signal or any operator-driven send / steer / fire.
    */
-  private async maybeAutoResumeCodex(
+  private async maybeAutoResume(
     taskId: string,
     signals: { cleanlyDone: boolean; compactedThisTurn: boolean },
   ): Promise<void> {
@@ -1928,14 +1935,15 @@ export class TaskManager {
     }
     const fresh = getTask(this.db, taskId);
     if (!fresh) return;
-    if (fresh.agent !== "codex") return;
     // Operator-driven endpoints (stop, dependent cancel) own these
     // states — don't rescue what they explicitly ended.
     if (fresh.status === "stopped" || fresh.status === "pending") return;
-    // Without a thread id we'd start a fresh `codex exec` and lose
-    // the conversation context. Better to leave the task stuck and
-    // let the operator decide than to silently restart from zero.
-    if (!fresh.codexThreadId) return;
+    // Codex needs a captured thread id — without it `codex exec
+    // resume` has nothing to attach to and would silently restart
+    // from zero, losing the conversation context. Claude's
+    // `--continue` resolves the session from the cwd alone, so
+    // there's no equivalent gate for claude.
+    if (fresh.agent === "codex" && !fresh.codexThreadId) return;
     const failed = fresh.status === "failed";
     if (!failed && !signals.compactedThisTurn) return;
     const attempts = this.autoResumeAttempts.get(taskId) ?? 0;
