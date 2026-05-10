@@ -1079,7 +1079,8 @@ function buildCommitPrompt(
     "Subject line must be lowercase, in imperative mood, under 70 characters total.",
     shape.includeBody
       ? "After the subject add a blank line, then 1-3 short bullet points explaining what changed. No test plan, no AI attribution."
-      : "Subject line only — no body.",
+      : "Subject line only, no body.",
+    "Do NOT add any git trailers. No `Co-authored-by:`, no `Signed-off-by:`, no `Generated-by:`, no `Reviewed-by:`, no `Helped-by:`, nothing of that form. The commit message ends after the subject (and bullets, if any).",
     shape.hint?.trim() ? `Operator hint: ${shape.hint.trim()}` : "",
     extraInstructions?.trim()
       ? `Project-wide commit guidance:\n${extraInstructions.trim()}`
@@ -1091,11 +1092,26 @@ function buildCommitPrompt(
 }
 
 function cleanCommitOutput(raw: string): string {
-  return raw
+  const stripped = raw
     .trim()
     .replace(/^```[a-z]*\n?|```$/g, "")
     .replace(/^["']|["']$/g, "")
     .trim();
+  // Defense in depth: even though the prompt forbids trailers, helpers
+  // sometimes sneak `Co-authored-by:` (or similar) onto the end. Drop any
+  // trailing block of trailer-looking lines so they never reach git.
+  const trailerRe =
+    /^(co-authored-by|signed-off-by|generated-by|generated with|reviewed-by|helped-by|assisted-by|acked-by|tested-by|reported-by|suggested-by|cc):/i;
+  const lines = stripped.split("\n");
+  while (lines.length > 0) {
+    const last = lines[lines.length - 1]!.trim();
+    if (last === "" || trailerRe.test(last)) {
+      lines.pop();
+      continue;
+    }
+    break;
+  }
+  return lines.join("\n").trimEnd();
 }
 
 /**
