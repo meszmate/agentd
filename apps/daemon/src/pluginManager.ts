@@ -20,6 +20,17 @@ interface PluginProcessState {
   startedAt: number;
   restarts: number;
   lastError: string | null;
+  /**
+   * Set when stderr from this run contained `Cannot find module '@agentd/...'`.
+   * Triggers a one-shot `bun install` recovery in `watchExit`.
+   */
+  sawMissingWorkspaceModule: boolean;
+  /**
+   * Guards against looping: once `bun install` has been attempted for the
+   * current spawn cycle, don't re-run it. Cleared by `restart()`/`reload()`
+   * and by a successful run (>=30s alive).
+   */
+  installRecoveryAttempted: boolean;
 }
 
 export interface PluginStatus {
@@ -34,6 +45,14 @@ export interface PluginStatus {
 
 const RESTART_BACKOFF_MS = [1000, 2000, 5000, 15000, 30000];
 const MAX_RESTARTS_PER_HOUR = 8;
+
+/**
+ * Matches Bun's "Cannot find module '@agentd/...'" error. Triggers a
+ * one-shot `bun install` recovery — the operator pulled a new workspace
+ * package without re-running install, so all the symlinks the spawned
+ * subprocess needs are stale.
+ */
+const MISSING_WORKSPACE_MODULE_RE = /Cannot find module ['"]@agentd\//;
 
 export class PluginManager {
   private states = new Map<PluginName, PluginProcessState>();
@@ -52,6 +71,8 @@ export class PluginManager {
         startedAt: 0,
         restarts: 0,
         lastError: null,
+        sawMissingWorkspaceModule: false,
+        installRecoveryAttempted: false,
       });
       this.restartHistory.set(name, []);
     }
@@ -124,6 +145,8 @@ export class PluginManager {
     // isn't blocked by the "too many restarts" guard.
     this.restartHistory.set(name, []);
     if (st.lastError) st.lastError = null;
+    // Operator intent re-enables the one-shot install recovery path.
+    st.installRecoveryAttempted = false;
 
     if (st.proc && st.proc.exitCode == null) {
       try {
@@ -146,6 +169,9 @@ export class PluginManager {
     for (const name of ["telegram", "discord"] as const) {
       const want = cfg.plugins[name].enabled;
       const st = this.states.get(name)!;
+      // Operator intent re-enables the one-shot install recovery path.
+      st.installRecoveryAttempted = false;
+      this.restartHistory.set(name, []);
       const running = !!st.proc && st.proc.exitCode == null;
       if (want && !running) {
         this.spawn(name, cfg, sessionToken);
@@ -221,6 +247,7 @@ export class PluginManager {
     st.proc = proc;
     st.startedAt = Date.now();
     st.lastError = null;
+    st.sawMissingWorkspaceModule = false;
 
     void this.pipeOutput(name, proc.stdout);
     void this.pipeOutput(name, proc.stderr, true);
@@ -246,6 +273,10 @@ export class PluginManager {
           buffer = buffer.slice(idx + 1);
           const stream = isErr ? "stderr" : "stdout";
           console.log(`[${name}:${stream}] ${line}`);
+          if (isErr && MISSING_WORKSPACE_MODULE_RE.test(line)) {
+            const st = this.states.get(name);
+            if (st) st.sawMissingWorkspaceModule = true;
+          }
         }
       }
       if (buffer.trim()) console.log(`[${name}] ${buffer}`);
@@ -267,7 +298,56 @@ export class PluginManager {
       return;
     }
     this.recordError(name, `exited with code ${code}`);
+    if (st.sawMissingWorkspaceModule && !st.installRecoveryAttempted) {
+      st.installRecoveryAttempted = true;
+      const ok = await this.tryInstallRecovery(name);
+      if (ok) {
+        // Symlinks should be in place now — clear the backoff history so
+        // the respawn isn't penalized for the install drift, and skip the
+        // delay since we've already paused for the install duration.
+        this.restartHistory.set(name, []);
+        const cfg = loadConfig(this.rootDir);
+        const sessionToken = this.ensurePluginSession(cfg);
+        st.restarts += 1;
+        this.spawn(name, cfg, sessionToken);
+        return;
+      }
+    }
     this.scheduleRestart(name);
+  }
+
+  /**
+   * One-shot self-heal for stale workspace installs: run `bun install` in
+   * the repo root so newly-added workspace packages get linked into the
+   * subprocess apps' `node_modules`. Returns true on success.
+   */
+  private async tryInstallRecovery(name: PluginName): Promise<boolean> {
+    console.log(
+      `[${name}] missing workspace module detected — running 'bun install' to refresh symlinks`,
+    );
+    try {
+      const proc = Bun.spawn({
+        cmd: ["bun", "install"],
+        cwd: ROOT,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const code = await proc.exited;
+      if (code !== 0) {
+        const err = await new Response(proc.stderr).text();
+        this.recordError(
+          name,
+          `auto 'bun install' failed (code ${code}): ${err.trim().slice(0, 300)}`,
+        );
+        return false;
+      }
+      console.log(`[${name}] 'bun install' completed — respawning`);
+      return true;
+    } catch (e) {
+      this.recordError(name, `auto 'bun install' threw: ${(e as Error).message}`);
+      return false;
+    }
   }
 
   private scheduleRestart(name: PluginName): void {
