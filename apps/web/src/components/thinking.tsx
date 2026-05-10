@@ -9,10 +9,11 @@ import { cn } from "@/lib/utils";
  */
 
 /**
- * Living text label. Renders a readable solid orange (orange-700 on
- * the cream paper, orange-300 on the near-black ink) with a slow
- * opacity pulse so the line reads as "alive thinking" without
- * relying on `background-clip: text`.
+ * "Thinking" label with a gradient wave that sweeps across the
+ * text - the same look the task timeline uses (codex-style status
+ * line). A 200%-wide three-stop gradient is clipped to the text
+ * and slid via the `shimmer` keyframe so a brighter highlight
+ * travels left→right while the mid-tone stays readable.
  */
 export function ShimmerText({
   children,
@@ -24,8 +25,10 @@ export function ShimmerText({
   return (
     <span
       className={cn(
-        "text-orange-700 dark:text-orange-300",
-        "animate-thinking-pulse",
+        "bg-clip-text text-transparent",
+        "bg-[linear-gradient(90deg,rgba(194,65,12,0.45),rgba(194,65,12,1),rgba(194,65,12,0.45))]",
+        "dark:bg-[linear-gradient(90deg,rgba(252,165,107,0.4),rgba(252,165,107,1),rgba(252,165,107,0.4))]",
+        "bg-[length:200%_100%] animate-shimmer",
         className,
       )}
     >
