@@ -19,10 +19,8 @@ import { WorkCard, pairToolEvents } from "@/components/tool-line";
 import { Markdown } from "@/components/markdown";
 import {
   ShimmerText,
-  TransitioningText,
   formatElapsed,
   useElapsedMs,
-  useRotatingLabel,
 } from "@/components/thinking";
 
 interface ChatTurn {
@@ -634,10 +632,6 @@ function LiveAgentRow({
   const toolPairs = pairToolEvents(events);
   const showReply = !!turn.text.trim();
 
-  // Phase: until the agent has started typing, label as "scouting".
-  // Once text is flowing, use "chatting".
-  const label = useRotatingLabel(showReply ? "chatting" : "scouting");
-
   if (showReply) {
     return (
       <li>
@@ -676,7 +670,7 @@ function LiveAgentRow({
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-2 mb-2 flex-wrap">
             <ShimmerText className="text-[12.5px] font-medium">
-              <TransitioningText>{label}</TransitioningText>
+              agent is thinking
             </ShimmerText>
             <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
               {formatElapsed(elapsedMs)}

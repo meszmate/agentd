@@ -117,37 +117,6 @@ const config: Config = {
           "0%": { backgroundPosition: "-200% 0" },
           "100%": { backgroundPosition: "200% 0" },
         },
-        // Per-letter entrance + exit for `<TransitioningText>`. Eased
-        // with `easeOutExpo` (in) / `easeInQuad` (out) so the motion
-        // decelerates into rest rather than feeling mechanical, and
-        // the blur stays subtle (1px) so it reads as soft focus, not
-        // a glitch. Translation kept short (0.3em) to keep the word
-        // feeling anchored rather than flying.
-        "letter-in": {
-          "0%": {
-            opacity: "0",
-            transform: "translateY(0.3em)",
-            filter: "blur(1px)",
-          },
-          "55%": { filter: "blur(0)" },
-          "100%": {
-            opacity: "1",
-            transform: "translateY(0)",
-            filter: "blur(0)",
-          },
-        },
-        "letter-out": {
-          "0%": {
-            opacity: "1",
-            transform: "translateY(0)",
-            filter: "blur(0)",
-          },
-          "100%": {
-            opacity: "0",
-            transform: "translateY(-0.3em)",
-            filter: "blur(1px)",
-          },
-        },
         "fade-in": {
           "0%": { opacity: "0", transform: "translateY(4px)" },
           "100%": { opacity: "1", transform: "translateY(0)" },
@@ -255,8 +224,6 @@ const config: Config = {
         shimmer: "shimmer 2s linear infinite",
         "thinking-pulse": "thinking-pulse 2.4s ease-in-out infinite",
         "fade-in": "fade-in 0.25s ease-out both",
-        "letter-in": "letter-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) both",
-        "letter-out": "letter-out 0.4s cubic-bezier(0.32, 0, 0.67, 0) both",
         rise: "rise 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both",
         blink: "blink 1.6s ease-in-out infinite",
         "pulse-ring": "pulse_ring 1.6s cubic-bezier(0.2, 0.7, 0.2, 1) infinite",

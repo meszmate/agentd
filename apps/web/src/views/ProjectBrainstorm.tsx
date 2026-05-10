@@ -60,11 +60,8 @@ import {
 } from "@/components/ui/popover";
 import {
   ShimmerText,
-  TransitioningText,
-  useRotatingLabel,
   useElapsedMs,
   formatElapsed,
-  type ThinkingPhase,
 } from "@/components/thinking";
 import { useApp, useClient } from "@/AppContext";
 import {
@@ -1038,11 +1035,9 @@ function ValidatingFeed({
           <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-ember-500" />
         </span>
         <ShimmerText className="text-[11px] font-medium">
-          <TransitioningText>
-            {pairs.length === 0
-              ? `${label} reading the repo`
-              : `${label} scoring`}
-          </TransitioningText>
+          {pairs.length === 0
+            ? `${label} reading the repo`
+            : `${label} scoring`}
         </ShimmerText>
         <span className="ml-auto font-mono text-[9.5px] tabular-nums text-ember-700/70 dark:text-ember-300/70">
           {formatElapsed(elapsedMs)}
@@ -2034,11 +2029,6 @@ function IdeaTurnRow({
     );
   }
   const elapsedMs = useElapsedMs(streaming);
-  // Rotating phase label — if the agent has tools running, frame
-  // it as scouting; once it starts replying, "chatting".
-  const phase: ThinkingPhase =
-    streaming && tools.length === 0 ? "scouting" : "chatting";
-  const label = useRotatingLabel(phase);
   // Hide the shimmer header once the agent has started typing —
   // the live cursor below is enough indication.
   const showShimmerHeader = streaming && !isUser && !turn.text.trim();
@@ -2061,7 +2051,7 @@ function IdeaTurnRow({
         <div className="flex items-baseline gap-2 mb-1.5 flex-wrap">
           {showShimmerHeader ? (
             <ShimmerText className="text-[12.5px] font-medium">
-              <TransitioningText>{label}</TransitioningText>
+              agent is thinking
             </ShimmerText>
           ) : (
             <span
@@ -2150,12 +2140,6 @@ function LiveTurn({
   tools: IdeationEvent[];
   onCancel: () => void;
 }) {
-  // Phase auto-shifts based on what the agent's actually doing —
-  // "scouting" while it's still inspecting the repo, "brainstorming"
-  // once the first option lands.
-  const phase: ThinkingPhase =
-    options.length === 0 ? "scouting" : "brainstorming";
-  const label = useRotatingLabel(phase);
   const elapsedMs = useElapsedMs(true);
   // Clarifying-question turn: agent decided the brief was too vague.
   // Skip the option layout and just render the question card.
@@ -2181,7 +2165,7 @@ function LiveTurn({
             </span>
           </span>
           <ShimmerText className="text-[12.5px] font-medium">
-            <TransitioningText>{label}</TransitioningText>
+            agent is thinking
           </ShimmerText>
           <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
             {formatElapsed(elapsedMs)}

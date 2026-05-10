@@ -1,21 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 
 /**
- * Shared "agent is alive" primitives — the ShimmerText label, a
- * pool-rotating thinking message, an elapsed-ms ticker, and a small
- * formatter. Both the brainstorm thread and the idea workshop pull
- * from here so the in-flight feel is consistent.
+ * Shared "agent is alive" primitives - the ShimmerText label, an
+ * elapsed-ms ticker, and a small formatter. Both the brainstorm
+ * thread and the idea workshop pull from here so the in-flight feel
+ * is consistent with the task timeline.
  */
 
 /**
- * Living text label. Renders a readable solid orange (orange-700 on
- * the cream paper, orange-300 on the near-black ink) with a slow
- * opacity pulse so the line reads as "alive thinking" without
- * relying on `background-clip: text`. The previous gradient-clip
- * approach didn't paint reliably through the nested
- * `<TransitioningText>` letter grid — the label rendered as
- * transparent text and was invisible on both backgrounds.
+ * "Thinking" label with a gradient wave that sweeps across the
+ * text - the same look the task timeline uses (codex-style status
+ * line). A 200%-wide three-stop gradient is clipped to the text
+ * and slid via the `shimmer` keyframe so a brighter highlight
+ * travels left→right while the mid-tone stays readable.
  */
 export function ShimmerText({
   children,
@@ -27,187 +25,16 @@ export function ShimmerText({
   return (
     <span
       className={cn(
-        "text-orange-700 dark:text-orange-300",
-        "animate-thinking-pulse",
+        "bg-clip-text text-transparent",
+        "bg-[linear-gradient(90deg,rgba(194,65,12,0.45),rgba(194,65,12,1),rgba(194,65,12,0.45))]",
+        "dark:bg-[linear-gradient(90deg,rgba(252,165,107,0.4),rgba(252,165,107,1),rgba(252,165,107,0.4))]",
+        "bg-[length:200%_100%] animate-shimmer",
         className,
       )}
     >
       {children}
     </span>
   );
-}
-
-/**
- * Crossfades string content with a per-letter wave. When the text
- * changes, the old characters drift up and blur out while the new
- * characters rise from below and sharpen in — each letter staggered
- * by ~18ms so the wave reads as a quick ripple, not a single beat.
- *
- * Both copies render in the same grid cell so the container only
- * sizes for the longer of the two and the gradient on a parent
- * `<ShimmerText>` clips through both copies cleanly. Stagger caps
- * around 250ms so the whole transition stays under ~half a second
- * even on long labels.
- */
-export function TransitioningText({
-  children,
-  className,
-}: {
-  children: string;
-  className?: string;
-}) {
-  const text = children;
-  const [exiting, setExiting] = useState<string | null>(null);
-  const prev = useRef(text);
-  useEffect(() => {
-    if (prev.current === text) return;
-    setExiting(prev.current);
-    prev.current = text;
-    const t = setTimeout(() => setExiting(null), 520);
-    return () => clearTimeout(t);
-  }, [text]);
-  return (
-    <span
-      className={cn(
-        "relative inline-grid align-baseline [&>*]:[grid-area:1/1]",
-        className,
-      )}
-    >
-      {exiting !== null && (
-        <Letters key={`out-${exiting}`} text={exiting} kind="out" />
-      )}
-      <Letters key={`in-${text}`} text={text} kind="in" />
-    </span>
-  );
-}
-
-function Letters({ text, kind }: { text: string; kind: "in" | "out" }) {
-  const safe = text ?? "";
-  // Tighter stagger so the letters move as a soft wave instead of
-  // a rolling banner. Capped to keep total animation under ~half a
-  // second on long phrases.
-  const stagger = Math.min(16, Math.max(6, 180 / Math.max(safe.length, 1)));
-  return (
-    <span className="inline-flex whitespace-pre" aria-hidden={kind === "out"}>
-      {[...safe].map((c, i) => (
-        <span
-          key={i}
-          className={cn(
-            "inline-block will-change-transform",
-            kind === "in" ? "animate-letter-in" : "animate-letter-out",
-          )}
-          style={{
-            animationDelay: `${i * stagger}ms`,
-            animationFillMode: kind === "in" ? "backwards" : "forwards",
-          }}
-        >
-          {c === " " ? " " : c}
-        </span>
-      ))}
-    </span>
-  );
-}
-
-/**
- * What flavor of work the agent is doing right now. Drives both the
- * label pool and any phase-specific UI affordances.
- */
-export type ThinkingPhase =
-  | "scouting"
-  | "chatting"
-  | "challenging"
-  | "planDrafting"
-  | "planRefining"
-  | "brainstorming";
-
-/**
- * Pools of "vibe" labels the rotating shimmer text picks from. Goal:
- * feel like a thinking partner, not a loading spinner. Each pool is
- * 6+ entries so the same line doesn't recur in a single turn.
- */
-const THINKING_LABELS: Record<ThinkingPhase, string[]> = {
-  scouting: [
-    "scouting the repo",
-    "tracing call sites",
-    "skimming the imports",
-    "mapping the territory",
-    "checking what already exists",
-    "reading between the lines",
-    "pinning down the files",
-    "feeling out the shape",
-  ],
-  chatting: [
-    "thinking it through",
-    "weighing the trade-offs",
-    "lining up an answer",
-    "sitting with the question",
-    "looking for the right angle",
-    "circling the point",
-  ],
-  challenging: [
-    "looking for cracks",
-    "stress-testing assumptions",
-    "playing devil's advocate",
-    "poking holes",
-    "questioning the premise",
-    "imagining the failure modes",
-  ],
-  planDrafting: [
-    "shaping the plan",
-    "writing the spec",
-    "spelling out the steps",
-    "stitching the approach together",
-    "naming the files",
-    "anchoring the acceptance",
-  ],
-  planRefining: [
-    "rewriting the plan",
-    "filling in the gaps",
-    "tightening the steps",
-    "patching the spec",
-    "reworking the approach",
-    "smoothing the edges",
-  ],
-  brainstorming: [
-    "spinning up angles",
-    "casting a wide net",
-    "pulling threads",
-    "riffing on the brief",
-    "warming up",
-    "circling the brief",
-    "freewheeling",
-    "throwing options at the wall",
-  ],
-};
-
-/**
- * Cycles through a phase's label pool every `intervalMs`. Phase
- * change resets to a fresh random label so the transition is visible
- * (e.g. "scouting" → "shaping the plan" the moment the first
- * tool result lands and we know we're past reconnaissance).
- */
-export function useRotatingLabel(
-  phase: ThinkingPhase,
-  intervalMs = 2600,
-): string {
-  const pool = THINKING_LABELS[phase];
-  const [idx, setIdx] = useState(() =>
-    Math.floor(Math.random() * pool.length),
-  );
-  useEffect(() => {
-    setIdx(Math.floor(Math.random() * pool.length));
-  }, [phase]);
-  useEffect(() => {
-    const id = setInterval(() => {
-      setIdx((i) => (i + 1) % pool.length);
-    }, intervalMs);
-    return () => clearInterval(id);
-  }, [phase, intervalMs, pool.length]);
-  // Defensive modulo: when `phase` changes to a pool with fewer
-  // entries than the current `idx`, the setIdx in the effect above
-  // hasn't fired yet for this render — so a raw pool[idx] would
-  // return undefined and crash <TransitioningText>'s letter loop.
-  return pool[idx % pool.length] ?? pool[0]!;
 }
 
 /**
@@ -239,7 +66,7 @@ export function formatElapsed(ms: number): string {
   if (ms < 1000) return `${(ms / 1000).toFixed(1)}s`;
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
+  const m = Math.floor(ms / 1000 / 60);
   const rem = s % 60;
   return `${m}m ${rem.toString().padStart(2, "0")}s`;
 }

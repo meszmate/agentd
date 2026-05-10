@@ -67,13 +67,7 @@ import {
 import { Markdown } from "@/components/markdown";
 import { IdeaQuestionCard } from "@/components/idea-question-card";
 import { WorkCard, pairToolEvents } from "@/components/tool-line";
-import {
-  ShimmerText,
-  TransitioningText,
-  useRotatingLabel,
-  formatElapsed,
-  type ThinkingPhase,
-} from "@/components/thinking";
+import { ShimmerText, formatElapsed } from "@/components/thinking";
 import { useApp, useClient } from "@/AppContext";
 import {
   qk,
@@ -1043,15 +1037,11 @@ function TimelineItem({
 function ThinkingItem({
   events,
   showReply,
-  mode,
   elapsedMs,
-  hasPlan,
 }: {
   events: IdeaChatEvent[];
   showReply: boolean;
-  mode: "chat" | "challenge" | "plan" | null;
   elapsedMs: number;
-  hasPlan: boolean;
 }) {
   const toolPairs = pairToolEvents(events);
 
@@ -1059,20 +1049,6 @@ function ThinkingItem({
   // already renders the tool rows above its body (via TimelineItem).
   // Suppress this thinking row to avoid duplicates.
   if (showReply) return null;
-
-  // Pick the rotating-label phase based on what the agent's actually
-  // doing right now, not just the operator's button choice.
-  const phase: ThinkingPhase =
-    toolPairs.length === 0
-      ? "scouting"
-      : mode === "plan"
-        ? hasPlan
-          ? "planRefining"
-          : "planDrafting"
-        : mode === "challenge"
-          ? "challenging"
-          : "chatting";
-  const label = useRotatingLabel(phase);
 
   return (
     <li>
@@ -1083,7 +1059,7 @@ function ThinkingItem({
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-2 mb-2 flex-wrap">
             <ShimmerText className="text-[12.5px] font-medium">
-              <TransitioningText>{label}</TransitioningText>
+              agent is thinking
             </ShimmerText>
             <span className="font-mono text-[10px] tabular-nums text-ember-700/80 dark:text-ember-300/80">
               {formatElapsed(elapsedMs)}
@@ -1219,9 +1195,7 @@ function ChatColumn({
                 <ThinkingItem
                   events={streamingTools}
                   showReply={!!streamingReply && streamingMode !== "plan"}
-                  mode={streamingMode}
                   elapsedMs={elapsedMs}
-                  hasPlan={hasPlan}
                 />
               )}
             </ol>
@@ -1483,7 +1457,6 @@ function PlanColumn({
           ) : isPlanning ? (
             <PlanWaitingFeed
               events={streamingTools}
-              hasPlan={!!planDraft}
               elapsedMs={elapsedMs}
             />
           ) : planDraft ? (
@@ -1528,24 +1501,15 @@ function PlanColumn({
  */
 function PlanWaitingFeed({
   events,
-  hasPlan,
   elapsedMs,
 }: {
   events: IdeaChatEvent[];
-  hasPlan: boolean;
   elapsedMs: number;
 }) {
   const tools = events.filter((e) => e.kind === "tool_use") as Array<
     Extract<IdeaChatEvent, { kind: "tool_use" }>
   >;
   const lastTool = tools[tools.length - 1];
-  const phase: ThinkingPhase =
-    tools.length === 0
-      ? "scouting"
-      : hasPlan
-        ? "planRefining"
-        : "planDrafting";
-  const label = useRotatingLabel(phase);
   return (
     <div className="space-y-4 max-w-md">
       <div className="flex items-center gap-2.5 flex-wrap">
@@ -1554,7 +1518,7 @@ function PlanWaitingFeed({
           <span className="relative inline-flex h-2 w-2 rounded-full bg-ember-500" />
         </span>
         <ShimmerText className="text-[12.5px] font-medium">
-          <TransitioningText>{label}</TransitioningText>
+          agent is thinking
         </ShimmerText>
       </div>
       <div className="flex items-center gap-3 font-mono text-[10.5px] tabular-nums text-ink-500 dark:text-ink-400 pl-4">
