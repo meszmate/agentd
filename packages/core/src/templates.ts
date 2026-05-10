@@ -16,7 +16,12 @@ export interface CreateTemplateInput {
   kind?: TemplateKind;
   projectId?: string | null;
   repoPath: string;
-  baseBranch: string;
+  /**
+   * Optional. Empty string means "auto-detect at run time" — useful so
+   * a template doesn't bake in `main` for a repo whose default is
+   * `master`/`trunk`/etc.
+   */
+  baseBranch?: string;
   promptTemplate: string;
   autoPush: boolean;
   permissionMode?: PermissionMode;
@@ -74,7 +79,7 @@ export function createTemplate(db: Db, input: CreateTemplateInput): Template {
       kind: input.kind ?? "task",
       projectId: input.projectId ?? null,
       repoPath: input.repoPath,
-      baseBranch: input.baseBranch,
+      baseBranch: input.baseBranch ?? "",
       promptTemplate: input.promptTemplate,
       autoPush: input.autoPush ? 1 : 0,
       permissionMode: input.permissionMode ?? "bypassPermissions",

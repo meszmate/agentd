@@ -42,6 +42,7 @@ import {
   useModels,
   usePatchPrefs,
   usePrefs,
+  useProjectBranches,
   useProjects,
   useSchedules,
   useTasks,
@@ -297,7 +298,10 @@ function Composer({ firstRun }: { firstRun: boolean }) {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [hydrated, setHydrated] = useState(false);
 
-  // Hydrate the form from server-side prefs once.
+  // Hydrate the form from server-side prefs once. baseBranch is left
+  // empty here; the project-default effect below fills it once we know
+  // which project the form is targeting (so we get `master` / `trunk` /
+  // whatever rather than always defaulting to `main`).
   useEffect(() => {
     if (hydrated) return;
     const p = prefsQ.data?.prefs;
@@ -315,11 +319,25 @@ function Composer({ firstRun }: { firstRun: boolean }) {
       workspaceMode: p.workspaceMode,
       branchMode: p.branchMode,
       branchName: "",
-      baseBranch: p.lastBase || "main",
+      baseBranch: p.lastBase || "",
       pullLatest: p.pullLatest,
     });
     setHydrated(true);
   }, [prefsQ.data, hydrated]);
+
+  // Fill the "base" field with the project's actual default branch
+  // (`main`/`master`/`trunk`/...) whenever it's empty — either because
+  // prefs had no last base, or because the operator switched projects
+  // and we want the new project's default to win. The user can still
+  // type any branch they want; we never overwrite a custom value.
+  const branchesQ = useProjectBranches(projectId || null);
+  useEffect(() => {
+    const detected = branchesQ.data?.default;
+    if (!detected) return;
+    setWorkspace((cur) =>
+      cur.baseBranch.trim() ? cur : { ...cur, baseBranch: detected },
+    );
+  }, [branchesQ.data?.default, projectId]);
 
   // Swap model whenever the agent changes after hydration.
   useEffect(() => {
@@ -356,7 +374,7 @@ function Composer({ firstRun }: { firstRun: boolean }) {
       return;
     }
     try {
-      const finalBase = workspace.baseBranch.trim() || "main";
+      const finalBase = workspace.baseBranch.trim();
       const res = await create.mutateAsync({
         agent,
         repoPath: path,

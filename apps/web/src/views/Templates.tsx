@@ -35,6 +35,7 @@ import {
   useCreateTemplate,
   useDeleteTemplate,
   useModels,
+  useProjectBranches,
   useRunTemplate,
   useTasks,
   useTemplates,
@@ -304,7 +305,7 @@ function CreateTemplateSheet({
   const [name, setName] = useState("");
   const [agent, setAgent] = useState<"claude" | "codex">("claude");
   const [projectId, setProjectId] = useState("");
-  const [baseBranch, setBaseBranch] = useState("main");
+  const [baseBranch, setBaseBranch] = useState("");
   const [autoPush, setAutoPush] = useState(false);
   const [promptTemplate, setPromptTemplate] = useState("");
   const [permissionMode, setPermissionMode] = useState<
@@ -323,18 +324,31 @@ function CreateTemplateSheet({
     setThinkingLevel((cur) => clampThinkingLevel(agent, cur));
   }, [agent]);
 
+  // Pre-fill base with the picked project's actual default branch
+  // (`main`/`master`/`trunk`/...) so a template on a master-default
+  // repo doesn't bake in `main`.
+  const branchesQ = useProjectBranches(projectId || null);
+  useEffect(() => {
+    const detected = branchesQ.data?.default;
+    if (!detected) return;
+    setBaseBranch((cur) => (cur.trim() ? cur : detected));
+  }, [branchesQ.data?.default, projectId]);
+
   const submit = async () => {
     if (!name.trim() || !projectId || !promptTemplate.trim()) {
       toast("Name, project, and prompt are required", true);
       return;
     }
     try {
+      // Empty = template runs against the project's actual default
+      // branch detected at run time.
+      const finalBase = baseBranch.trim();
       await create.mutateAsync({
         name: name.trim(),
         agent,
         kind,
         projectId,
-        baseBranch: baseBranch.trim() || "main",
+        baseBranch: finalBase,
         promptTemplate,
         // Ideation templates never spawn an agent task themselves —
         // they propose options. Auto flags don't apply to them.
@@ -473,6 +487,7 @@ function CreateTemplateSheet({
                   id="tpl-base"
                   value={baseBranch}
                   onChange={(e) => setBaseBranch(e.target.value)}
+                  placeholder="auto · repo's default"
                   className="font-mono"
                   spellCheck={false}
                 />

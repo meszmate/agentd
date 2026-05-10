@@ -149,7 +149,11 @@ export type Council = z.infer<typeof Council>;
 export const CreateCouncilRequest = z.object({
   projectId: z.string().optional(),
   repoPath: z.string().min(1),
-  baseBranch: z.string().default("main"),
+  /**
+   * Optional. When omitted, the daemon detects the repo's default
+   * branch (`main`/`master`/`trunk`/...) instead of forcing `main`.
+   */
+  baseBranch: z.string().optional(),
   prompt: z.string().min(1),
   /** 2–5 members. Each spawns its own task + worktree on a unique branch. */
   members: z.array(CouncilMember).min(2).max(5),
@@ -690,7 +694,11 @@ export type AgentEvent = z.infer<typeof AgentEvent>;
 export const CreateTaskRequest = z.object({
   agent: AgentKind,
   repoPath: z.string().min(1),
-  baseBranch: z.string().default("main"),
+  /**
+   * Optional. When omitted, the daemon detects the repo's default
+   * branch (`main`/`master`/`trunk`/...) instead of forcing `main`.
+   */
+  baseBranch: z.string().optional(),
   prompt: z.string().min(1),
   title: z.string().optional(),
   // Pre-spawn toggles for what happens after the agent finishes a turn.
@@ -717,7 +725,11 @@ export const CreateTemplateRequest = z.object({
   /** Either projectId OR repoPath is required. projectId wins if both set. */
   projectId: z.string().optional(),
   repoPath: z.string().optional(),
-  baseBranch: z.string().default("main"),
+  /**
+   * Optional. When omitted, runs based on the project's actual default
+   * branch (`main`/`master`/`trunk`/...) at template-run time.
+   */
+  baseBranch: z.string().optional(),
   promptTemplate: z.string().min(1),
   autoPush: z.boolean().default(false),
   permissionMode: PermissionMode.optional(),

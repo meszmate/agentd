@@ -12,6 +12,7 @@ import {
   useModels,
   usePatchPrefs,
   usePrefs,
+  useProjectBranches,
   useSkills,
   useSpawnTasksMulti,
 } from "@/queries";
@@ -103,7 +104,7 @@ export function SpawnSheet({
 
   const [projectId, setProjectId] = useState<string>("");
   const [repoPath, setRepoPath] = useState("");
-  const [baseBranch, setBaseBranch] = useState("main");
+  const [baseBranch, setBaseBranch] = useState("");
   const [agent, setAgent] = useState<"claude" | "codex">("claude");
   const [prompt, setPrompt] = useState("");
   const [title, setTitle] = useState("");
@@ -114,7 +115,7 @@ export function SpawnSheet({
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("high");
   const [model, setModel] = useState<string>("");
   const [workspace, setWorkspace] = useState<WorkspaceSetupValue>(() =>
-    defaultWorkspaceSetup("main"),
+    defaultWorkspaceSetup(""),
   );
   const [activeSkills, setActiveSkills] = useState<string[]>([]);
   const [autoFilledForPath, setAutoFilledForPath] = useState<string>("");
@@ -126,7 +127,7 @@ export function SpawnSheet({
     if (!p) return;
     setProjectId(p.lastProjectId);
     setRepoPath(p.lastRepo);
-    setBaseBranch(p.lastBase || "main");
+    setBaseBranch(p.lastBase || "");
     setAgent(p.lastAgent);
     setAutoCommit(p.lastAutoCommit);
     setAutoPush(p.lastAutoPush);
@@ -139,11 +140,25 @@ export function SpawnSheet({
       workspaceMode: p.workspaceMode,
       branchMode: p.branchMode,
       branchName: "",
-      baseBranch: p.lastBase || "main",
+      baseBranch: p.lastBase || "",
       pullLatest: p.pullLatest,
     });
     setHydrated(true);
   }, [prefsQ.data, hydrated]);
+
+  // Pre-fill the base field with the project's actual default branch
+  // (`main`/`master`/`trunk`/...) once we know which project we're
+  // targeting. The operator can still type any branch they want; we
+  // never overwrite a non-empty value.
+  const branchesQ = useProjectBranches(projectId || null);
+  useEffect(() => {
+    const detected = branchesQ.data?.default;
+    if (!detected) return;
+    setBaseBranch((cur) => (cur.trim() ? cur : detected));
+    setWorkspace((cur) =>
+      cur.baseBranch.trim() ? cur : { ...cur, baseBranch: detected },
+    );
+  }, [branchesQ.data?.default, projectId]);
 
   useEffect(() => {
     if (!hydrated || !prefsQ.data) return;
@@ -205,7 +220,8 @@ export function SpawnSheet({
       return;
     }
     try {
-      const finalBase = (workspace.baseBranch || baseBranch).trim() || "main";
+      // Empty = let the daemon detect the repo's default branch.
+      const finalBase = (workspace.baseBranch || baseBranch).trim();
 
       if (phaseMode) {
         if (slices.length === 0) {

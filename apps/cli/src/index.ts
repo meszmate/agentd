@@ -134,10 +134,12 @@ async function cmdNew(argv: string[]) {
   const prompt = positionals.join(" ");
   const agent =
     values.agent === "codex" ? ("codex" as const) : ("claude" as const);
+  // When --base isn't passed, omit it so the daemon detects the repo's
+  // actual default branch (`main`/`master`/`trunk`/...).
   const req = {
     agent,
     repoPath: resolve(String(values.repo)),
-    baseBranch: values.base ? String(values.base) : "main",
+    ...(values.base ? { baseBranch: String(values.base) } : {}),
     prompt,
     ...(values.title ? { title: String(values.title) } : {}),
     ...(values.push ? { autoPush: true } : {}),
@@ -419,11 +421,13 @@ async function cmdTemplate(argv: string[]) {
     });
     if (!values.repo) { console.error("--repo is required"); process.exit(2); }
     if (positionals.length === 0) { console.error("prompt is required"); process.exit(2); }
+    // Omit baseBranch when --base isn't passed so the template runs
+    // against the repo's actual default branch detected at run time.
     const req = {
       name,
       agent: (values.agent === "codex" ? "codex" : "claude") as "claude" | "codex",
       repoPath: resolve(String(values.repo)),
-      baseBranch: values.base ? String(values.base) : "main",
+      ...(values.base ? { baseBranch: String(values.base) } : {}),
       promptTemplate: positionals.join(" "),
       autoPush: !!values.push,
     };

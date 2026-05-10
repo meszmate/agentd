@@ -2096,6 +2096,13 @@ export class AgentdClient {
     current: string | null;
     local: string[];
     remote: { remote: string; ref: string }[];
+    /**
+     * The repo's default branch (`main`, `master`, `trunk`, …). The
+     * spawn forms use this as the initial value of the "base" field
+     * so a fresh task on a master-default repo doesn't try to base
+     * off a non-existent `main`.
+     */
+    default: string;
   }> {
     return this.req(
       `/api/projects/${encodeURIComponent(idOrSlug)}/branches`,

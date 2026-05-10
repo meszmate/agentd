@@ -85,12 +85,53 @@ export async function isGitRepo(path: string): Promise<boolean> {
   return r.exitCode === 0 && r.stdout.trim() === "true";
 }
 
+/**
+ * Detect the repo's *default* branch — the one we should base new task
+ * branches off when the operator hasn't picked one. We try the most
+ * authoritative sources first and only fall back to the current HEAD as
+ * a last resort, because in worktree-mode the operator's HEAD is often
+ * already on a feature branch and basing off it is rarely what they want.
+ *
+ * Order:
+ *   1. `refs/remotes/origin/HEAD` (set by `git clone` to the remote's
+ *      default — e.g. `origin/main` or `origin/master`).
+ *   2. `init.defaultBranch` if that branch exists locally.
+ *   3. Common defaults that exist locally (`main`, `master`, `trunk`,
+ *      `develop`).
+ *   4. Whatever the current HEAD points at.
+ *   5. Hard fallback: `"main"` (only reached when none of the above
+ *      resolved — typically a freshly `git init`'d repo with no commits).
+ */
 export async function detectDefaultBranch(repoPath: string): Promise<string> {
-  const r = await run(
+  const remoteHead = await run(
+    ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    repoPath,
+  );
+  if (remoteHead.exitCode === 0) {
+    const v = remoteHead.stdout.trim();
+    const slash = v.indexOf("/");
+    const branch = slash > 0 ? v.slice(slash + 1) : v;
+    if (branch) return branch;
+  }
+  const initDefault = await run(
+    ["git", "config", "--get", "init.defaultBranch"],
+    repoPath,
+  );
+  if (initDefault.exitCode === 0) {
+    const v = initDefault.stdout.trim();
+    if (v && (await localBranchExists(repoPath, v))) return v;
+  }
+  for (const candidate of ["main", "master", "trunk", "develop"]) {
+    if (await localBranchExists(repoPath, candidate)) return candidate;
+  }
+  const head = await run(
     ["git", "symbolic-ref", "--short", "HEAD"],
     repoPath,
   );
-  if (r.exitCode === 0) return r.stdout.trim();
+  if (head.exitCode === 0) {
+    const v = head.stdout.trim();
+    if (v) return v;
+  }
   return "main";
 }
 
@@ -187,6 +228,19 @@ async function localBranchExists(
 }
 
 /**
+ * True when `ref` resolves to *anything* git can use as a branch base —
+ * a local branch, a remote tracking branch (`origin/master`,
+ * `origin/main`, …), a tag, or a raw commit. Used by `createWorktree`
+ * to decide whether to honor the operator's requested base or fall
+ * back to the detected default.
+ */
+async function refExists(repoPath: string, ref: string): Promise<boolean> {
+  if (!ref) return false;
+  const r = await run(["git", "rev-parse", "--verify", "--quiet", ref], repoPath);
+  return r.exitCode === 0;
+}
+
+/**
  * Walk `<branch>`, `<branch>-2`, `<branch>-3`, … until we land on a name
  * that is NOT a local branch. Used by `createWorktree` in the `new`
  * branch mode so two tasks with the same AI-suggested slug don't
@@ -230,7 +284,6 @@ export async function createWorktree(
     repoPath,
     worktreeRoot,
     taskId,
-    baseBranch,
     branchName,
     workspaceMode = "worktree",
     branchMode = "new",
@@ -239,6 +292,22 @@ export async function createWorktree(
   } = opts;
   if (!(await isGitRepo(repoPath))) {
     throw new Error(`not a git repository: ${repoPath}`);
+  }
+
+  // Resolve the base branch. The UI / CLI hardcode "main" as their form
+  // default, which is wrong on repos whose default is `master` (or
+  // `trunk`, etc.). Rather than fail with `unknown revision 'main'`, fall
+  // back to the repo's actual default branch when the requested base
+  // doesn't resolve to anything git knows.
+  let baseBranch = opts.baseBranch;
+  if (branchMode !== "existing" && baseBranch && !(await refExists(repoPath, baseBranch))) {
+    const detected = await detectDefaultBranch(repoPath);
+    if (detected && detected !== baseBranch && (await refExists(repoPath, detected))) {
+      console.warn(
+        `[worktrees] base branch "${baseBranch}" not found in ${repoPath}; falling back to detected default "${detected}"`,
+      );
+      baseBranch = detected;
+    }
   }
 
   // Pull-latest happens BEFORE branch creation so the new branch starts
