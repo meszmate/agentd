@@ -684,10 +684,11 @@ export async function runProjectAction(
 
   if (kind === "new") {
     try {
+      // Omit baseBranch so the daemon detects the repo's actual
+      // default branch (`main`/`master`/`trunk`/...).
       const { task } = await ctx.client.createTask({
         agent: "claude",
         repoPath: project.path,
-        baseBranch: "main",
         prompt,
       });
       ctx.state.focus.set(chatId, task.id);

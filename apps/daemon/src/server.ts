@@ -75,6 +75,7 @@ import {
   createPr,
   gitStatus,
   listBranches,
+  detectDefaultBranch,
   generateBranchName,
   generateCommitMessage,
   streamCommitMessage,
@@ -4655,15 +4656,19 @@ export function buildServer(opts: BuildServerOptions) {
   });
 
   // Branch list for the spawn picker. Local branches plus remote tracking
-  // refs grouped by remote.
+  // refs grouped by remote, and the repo's *default* branch (the right
+  // base for new worktrees — `main`/`master`/whatever this repo uses).
   api.get("/projects/:idOrSlug/branches", async (c) => {
     const key = c.req.param("idOrSlug");
     const project =
       getProjectById(db, key) ?? getProjectBySlug(db, key);
     if (!project) return c.json({ error: "not found" }, 404);
     try {
-      const branches = await listBranches(project.path);
-      return c.json(branches);
+      const [branches, defaultBranch] = await Promise.all([
+        listBranches(project.path),
+        detectDefaultBranch(project.path),
+      ]);
+      return c.json({ ...branches, default: defaultBranch });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 500);
     }

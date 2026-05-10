@@ -1128,6 +1128,21 @@ export function usePullProject() {
 }
 
 /**
+ * Fetches the project's branches plus its default branch (`main`,
+ * `master`, `trunk`, …). The spawn forms read `default` to pre-fill
+ * the "base" field correctly even on repos whose default isn't `main`.
+ */
+export function useProjectBranches(idOrSlug: string | null | undefined) {
+  const client = useClient();
+  return useQuery({
+    queryKey: ["project", idOrSlug ?? "_none", "branches"] as const,
+    queryFn: () => client.listProjectBranches(idOrSlug!),
+    enabled: !!idOrSlug,
+    staleTime: 30_000,
+  });
+}
+
+/**
  * Cross-device "last used" defaults for the spawn flow. Backed by the
  * daemon's config.json under `prefs`. Replaces the old agentd.last*
  * localStorage keys.

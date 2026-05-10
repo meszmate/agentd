@@ -614,8 +614,12 @@ export class TaskManager {
     // git operations would just fail, and the operator clearly didn't
     // intend version control here (otherwise they'd have run `git init`).
     const isGit = await isGitRepo(params.repoPath);
+    // Treat empty / whitespace baseBranch as "not provided" so we
+    // auto-detect the right default — `master`, `trunk`, whatever
+    // this repo uses — instead of forcing `main`.
+    const requestedBase = params.baseBranch?.trim();
     const baseBranch = isGit
-      ? (params.baseBranch ?? (await detectDefaultBranch(params.repoPath)))
+      ? (requestedBase || (await detectDefaultBranch(params.repoPath)))
       : "";
     const title = params.title ?? params.prompt.split("\n")[0]!.slice(0, 80);
     const taskId = newId("task");
@@ -796,8 +800,9 @@ export class TaskManager {
     // in_place against the project path; tasks.create() already handles
     // the per-slice fallback (no auto-commit/push, empty branch).
     const isGit = await isGitRepo(params.repoPath);
+    const requestedBase = params.baseBranch?.trim();
     const baseBranch = isGit
-      ? (params.baseBranch ?? (await detectDefaultBranch(params.repoPath)))
+      ? (requestedBase || (await detectDefaultBranch(params.repoPath)))
       : "";
     const project = ensureProjectForPath(this.db, params.repoPath);
     const planGroupId = newId("grp");
@@ -2161,8 +2166,9 @@ export class TaskManager {
         `council needs a git repository at ${params.repoPath} (each member runs on its own branch)`,
       );
     }
+    const requestedBase = params.baseBranch?.trim();
     const baseBranch =
-      params.baseBranch ?? (await detectDefaultBranch(params.repoPath));
+      requestedBase || (await detectDefaultBranch(params.repoPath));
     const title = params.title ?? params.prompt.split("\n")[0]!.slice(0, 80);
     const project = params.projectId
       ? null

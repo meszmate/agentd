@@ -37,8 +37,11 @@ export interface WorkspaceSetupValue {
 /**
  * Defaults used when no server prefs are loaded yet. Real defaults come
  * from `usePrefs()` and are applied by the parent form on hydration.
+ * `baseFallback` is empty by default — the parent form fills it in with
+ * the project's actual default branch (`main`/`master`/`trunk`/...) once
+ * the project is known.
  */
-export function defaultWorkspaceSetup(baseFallback = "main"): WorkspaceSetupValue {
+export function defaultWorkspaceSetup(baseFallback = ""): WorkspaceSetupValue {
   return {
     workspaceMode: "worktree",
     branchMode: "new",
@@ -153,7 +156,7 @@ export function WorkspaceSetup({
         <input
           value={value.baseBranch}
           onChange={(e) => update({ baseBranch: e.target.value })}
-          placeholder="main"
+          placeholder="auto"
           spellCheck={false}
           className="font-mono text-[11px] bg-transparent border-0 outline-none focus:ring-0 text-ink-900 dark:text-ink-50 placeholder:text-ink-400 w-20"
         />

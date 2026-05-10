@@ -70,6 +70,7 @@ import {
   usePatchPrefs,
   usePrefs,
   useProject,
+  useProjectBranches,
   useProjectGitState,
   usePullProject,
   useSkills,
@@ -597,7 +598,7 @@ function ProjectComposer({
     useState<PermissionMode>("bypassPermissions");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("high");
   const [model, setModel] = useState<string>("");
-  const [base, setBase] = useState("main");
+  const [base, setBase] = useState("");
   const [autoCommit, setAutoCommit] = useState(true);
   const [autoPush, setAutoPush] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -614,11 +615,20 @@ function ProjectComposer({
     setModel(
       p.lastAgent === "claude" ? p.lastModelClaude : p.lastModelCodex,
     );
-    setBase(p.lastBase || "main");
+    setBase(p.lastBase || "");
     setAutoCommit(p.lastAutoCommit);
     setAutoPush(p.lastAutoPush);
     setHydrated(true);
   }, [prefsQ.data, hydrated]);
+
+  // Pre-fill the base field with this project's actual default branch
+  // (`main`/`master`/`trunk`/...) when the operator hasn't typed one.
+  const branchesQ = useProjectBranches(project.id);
+  useEffect(() => {
+    const detected = branchesQ.data?.default;
+    if (!detected) return;
+    setBase((cur) => (cur.trim() ? cur : detected));
+  }, [branchesQ.data?.default, project.id]);
 
   // Swap model whenever the agent changes after hydration.
   useEffect(() => {
@@ -644,10 +654,12 @@ function ProjectComposer({
     }
     setBusy(true);
     try {
+      // Empty = let the daemon detect the repo's default branch.
+      const finalBase = base.trim();
       const res = await create.mutateAsync({
         agent,
         repoPath: project.path,
-        baseBranch: base.trim() || "main",
+        baseBranch: finalBase,
         prompt: p,
         autoCommit,
         autoPush,
@@ -665,7 +677,7 @@ function ProjectComposer({
         ...(agent === "claude"
           ? { lastModelClaude: model.trim() }
           : { lastModelCodex: model.trim() }),
-        lastBase: base.trim() || "main",
+        lastBase: finalBase,
       });
       setPrompt("");
       onSpawned?.();
