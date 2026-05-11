@@ -255,6 +255,13 @@ function buildAiHelperArgv(
     "--permission-mode",
     "bypassPermissions",
     "--allow-dangerously-skip-permissions",
+    // Helpers are one-shot; never let them write a session file. Without
+    // this, claude indexes the helper's session under the worktree cwd
+    // and the task runner's `--continue` (which picks "the most recent
+    // session for this cwd") inherits the helper's tiny conversation
+    // instead of the task's. Compacting then summarizes the helper —
+    // e.g. "I suggested a branch name…" — for an unrelated task.
+    "--no-session-persistence",
     "--effort",
     opts.effort ?? "medium",
   ];
