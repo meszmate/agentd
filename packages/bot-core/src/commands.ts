@@ -6,7 +6,7 @@
  *
  * The verbs cover what operators do in the dashboard:
  *   project session:  /projects /project /pclear
- *   tasks:            /new /ls /show /use /in /stop /diff /log /close /reopen /rm
+ *   tasks:            /new /ls /closed /show /use /in /stop /diff /log /close /reopen /rm
  *   git workflow:     /commit /push /pr /revert /files /st
  *   task metadata:    /model /think /autocommit /autopush /skills
  *   steer:            /steer /ask /compact
@@ -39,7 +39,8 @@ const HELP_TEXT_LINES = [
   "",
   "Tasks:",
   "/new <prompt> — spawn a task in focused project (or asks)",
-  "/ls — list tasks",
+  "/ls — list open tasks (/ls all to include closed)",
+  "/closed [page] — list closed tasks, paginated",
   "/show <id?> — show task (or focused)",
   "/in <text> — send input to focused task",
   "/use <id> — set focused task",
@@ -391,24 +392,73 @@ export async function cmdMirrors(
   }
 }
 
+const CLOSED_PAGE_SIZE = 20;
+
 export async function cmdLs(
   ctx: BotContext,
   msg: IncomingMessage,
+  arg: string,
 ): Promise<void> {
+  const wantAll = arg.trim().toLowerCase() === "all";
   try {
     const { tasks } = await ctx.client.listTasks();
-    if (tasks.length === 0) {
-      await msg.reply("(no tasks)");
+    const visible = wantAll ? tasks : tasks.filter((t) => !t.closedAt);
+    if (visible.length === 0) {
+      const hiddenClosed = !wantAll && tasks.some((t) => t.closedAt);
+      await msg.reply(
+        hiddenClosed ? "(no open tasks — /closed to see closed)" : "(no tasks)",
+      );
       return;
     }
     const fmt = ctx.adapter.fmt;
-    const body = tasks
-      .slice(0, 20)
-      .map((t) => shortTaskLine(t, fmt))
-      .join("\n");
-    await msg.reply(body);
+    const shown = visible.slice(0, 20);
+    const lines = shown.map((t) => shortTaskLine(t, fmt));
+    const hiddenClosed = !wantAll
+      ? tasks.filter((t) => t.closedAt).length
+      : 0;
+    if (hiddenClosed > 0) {
+      lines.push("");
+      lines.push(`(+${hiddenClosed} closed — /closed to list)`);
+    } else if (visible.length > shown.length) {
+      lines.push("");
+      lines.push(`(+${visible.length - shown.length} more)`);
+    }
+    await msg.reply(lines.join("\n"));
   } catch (e) {
     await msg.reply(`ls failed: ${(e as Error).message}`);
+  }
+}
+
+export async function cmdClosed(
+  ctx: BotContext,
+  msg: IncomingMessage,
+  arg: string,
+): Promise<void> {
+  const rawPage = parseInt(arg.trim(), 10);
+  const page = Number.isFinite(rawPage) && rawPage > 0 ? rawPage : 1;
+  try {
+    const { tasks } = await ctx.client.listTasks();
+    const closed = tasks
+      .filter((t) => t.closedAt)
+      .sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0));
+    if (closed.length === 0) {
+      await msg.reply("(no closed tasks)");
+      return;
+    }
+    const totalPages = Math.max(1, Math.ceil(closed.length / CLOSED_PAGE_SIZE));
+    const clamped = Math.min(page, totalPages);
+    const start = (clamped - 1) * CLOSED_PAGE_SIZE;
+    const slice = closed.slice(start, start + CLOSED_PAGE_SIZE);
+    const fmt = ctx.adapter.fmt;
+    const lines = slice.map((t) => shortTaskLine(t, fmt));
+    lines.push("");
+    lines.push(
+      `closed ${start + 1}-${start + slice.length} of ${closed.length} · page ${clamped}/${totalPages}` +
+        (clamped < totalPages ? ` · /closed ${clamped + 1} for next` : ""),
+    );
+    await msg.reply(lines.join("\n"));
+  } catch (e) {
+    await msg.reply(`closed failed: ${(e as Error).message}`);
   }
 }
 
@@ -1689,7 +1739,10 @@ export async function runCommand(
       await cmdMirrors(ctx, msg);
       return true;
     case "ls":
-      await cmdLs(ctx, msg);
+      await cmdLs(ctx, msg, args.trim());
+      return true;
+    case "closed":
+      await cmdClosed(ctx, msg, args.trim());
       return true;
     case "use":
       await cmdUse(ctx, msg, args.trim());
