@@ -222,6 +222,18 @@ export const Task = z.object({
    * over instead of re-paying the cost on every steer.
    */
   codexThreadId: z.string().nullable().optional(),
+  /**
+   * Claude session id captured from the first `system/init` event the
+   * stream-json runner emits. Used on subsequent spawns to call
+   * `claude --resume <id>` so resume targets THIS task's session by
+   * id, not the most-recent session for the cwd. Without it,
+   * `--continue` can pick up an unrelated session (a sibling plan
+   * slice in the same worktree, a branch-naming AI helper that ran
+   * in `process.cwd()`, etc.) and the task ends up resuming with
+   * someone else's context — a bug operators saw as "the compacted
+   * summary belongs to a different task".
+   */
+  claudeSessionId: z.string().nullable().optional(),
   totalInputTokens: z.number().optional(),
   totalOutputTokens: z.number().optional(),
   totalCacheReadTokens: z.number().optional(),

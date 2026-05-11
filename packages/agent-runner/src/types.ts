@@ -41,6 +41,17 @@ export interface RunnerStartOptions {
    */
   resumeThreadId?: string;
   /**
+   * Claude-only — when set, spawn `claude --resume <id>` instead of
+   * `--continue`. `--continue` resolves the prior session by cwd
+   * alone, so any other session that happens to live in the same
+   * project dir (a sibling plan slice, a branch-naming helper) can
+   * win the lookup. Resuming by id pins this task to its own session.
+   * Captured by the runner from the first `system/init` event and
+   * persisted on the task; the daemon passes it back here on every
+   * subsequent spawn. Other runners ignore this field.
+   */
+  resumeSessionId?: string;
+  /**
    * Extra directories the agent is allowed to Read outside its cwd. Used
    * to grant access to active skill directories so the agent can load
    * the catalog entries it cares about mid-conversation.

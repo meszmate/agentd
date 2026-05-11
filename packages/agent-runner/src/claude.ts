@@ -211,13 +211,26 @@ export class ClaudeRunner implements AgentRunner {
       "--include-partial-messages",
       "--verbose",
     ];
-    // Resume the prior session when respawning after a daemon restart
-    // so the agent doesn't lose context. claude-code keeps session
-    // history in `~/.claude/projects/<cwd-slug>/...` and `--continue`
-    // pulls the most recent one for this cwd. The first turn of a
-    // fresh task passes resume=false (no prior session to resume).
+    // Resume the prior session when respawning. We prefer
+    // `--resume <session-id>` over `--continue` because `--continue`
+    // resolves the most-recent session by cwd alone, and the cwd is
+    // not unique to a task — a sibling plan slice in the same
+    // worktree, or an AI helper (branch naming, commit drafting)
+    // that happens to spawn `claude` in the same project dir, can
+    // leave a more-recent session that `--continue` will pick up.
+    // The resumed run then carries the wrong conversation history,
+    // which surfaces as "the compacted summary belongs to a
+    // different task". The session-id path pins resume to THIS
+    // task's session. We capture the id from the first
+    // `system/init` event below; until we have one, fall back to
+    // `--continue` so legacy tasks that pre-date this column still
+    // resume something.
     if (opts.resume) {
-      args.push("--continue");
+      if (opts.resumeSessionId) {
+        args.push("--resume", opts.resumeSessionId);
+      } else {
+        args.push("--continue");
+      }
     }
     const mode =
       opts.permissionMode ??
@@ -529,7 +542,27 @@ export class ClaudeRunner implements AgentRunner {
         });
         return;
       }
-      // Other CLI bookkeeping (init, status pings, hook lifecycle, …) —
+      // The very first event each run is `{type:"system",subtype:"init",
+      // session_id:"<uuid>", …}`. Capture the id and forward it as a
+      // raw stdout marker — the daemon parses `[claude session] <uuid>`
+      // and persists it on the task so subsequent spawns can use
+      // `--resume <uuid>` instead of cwd-based `--continue`. The
+      // session_id can come from a brand-new session OR a resumed one
+      // (claude-code preserves the id across `--resume` unless the
+      // operator passed `--fork-session`), so it's safe to emit on
+      // every init — the daemon dedupes on its end.
+      if (parsed.subtype === "init") {
+        const sid = (parsed as { session_id?: unknown }).session_id;
+        if (typeof sid === "string" && sid.length > 0) {
+          this.emit({
+            kind: "raw",
+            stream: "stdout",
+            text: `[claude session] ${sid}`,
+          });
+        }
+        return;
+      }
+      // Other CLI bookkeeping (status pings, hook lifecycle, …) —
       // the operator can't act on any of it, so it stays off the timeline.
       return;
     }

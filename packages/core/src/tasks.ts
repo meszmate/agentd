@@ -97,6 +97,7 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     autoPush: row.autoPush === 1,
     prUrl: row.prUrl ?? null,
     codexThreadId: row.codexThreadId ?? null,
+    claudeSessionId: row.claudeSessionId ?? null,
     totalInputTokens: row.totalInputTokens ?? 0,
     totalOutputTokens: row.totalOutputTokens ?? 0,
     totalCacheReadTokens: row.totalCacheReadTokens ?? 0,
@@ -455,6 +456,26 @@ export function setTaskCodexThreadId(
 ): void {
   db.update(tasks)
     .set({ codexThreadId: threadId, updatedAt: Date.now() })
+    .where(eq(tasks.id, id))
+    .run();
+}
+
+/**
+ * Persist the Claude session id captured from the runner's first
+ * `system/init` stream event. Subsequent spawns read this back and
+ * call `claude --resume <id>` instead of `--continue`, which is
+ * keyed only on the cwd and can resolve to an unrelated session
+ * (e.g. a sibling plan slice in the same worktree, or the branch-
+ * naming AI helper that ran in the daemon's `process.cwd()`).
+ * Idempotent — same id can be written repeatedly without harm.
+ */
+export function setTaskClaudeSessionId(
+  db: Db,
+  id: string,
+  sessionId: string | null,
+): void {
+  db.update(tasks)
+    .set({ claudeSessionId: sessionId, updatedAt: Date.now() })
     .where(eq(tasks.id, id))
     .run();
 }

@@ -36,6 +36,15 @@ export const tasks = sqliteTable("tasks", {
    * context instead of re-initializing.
    */
   codexThreadId: text("codex_thread_id"),
+  /**
+   * Claude session id — captured from the first `system/init` event
+   * the stream-json runner emits, then passed to subsequent spawns as
+   * `claude --resume <id>` so the resume targets THIS task's session
+   * by id (not the most-recent session for the cwd, which `--continue`
+   * uses and which can collide with sibling tasks or helper invocations
+   * that wrote sessions into the same project dir).
+   */
+  claudeSessionId: text("claude_session_id"),
   totalInputTokens: integer("total_input_tokens").notNull().default(0),
   totalOutputTokens: integer("total_output_tokens").notNull().default(0),
   totalCacheReadTokens: integer("total_cache_read_tokens").notNull().default(0),
@@ -461,6 +470,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   auto_pr INTEGER NOT NULL DEFAULT 0,
   pr_url TEXT,
   codex_thread_id TEXT,
+  claude_session_id TEXT,
   total_input_tokens INTEGER NOT NULL DEFAULT 0,
   total_output_tokens INTEGER NOT NULL DEFAULT 0,
   total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
@@ -737,6 +747,7 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE tasks ADD COLUMN github_issue_state TEXT",
   "ALTER TABLE idea_messages ADD COLUMN question_json TEXT",
   "ALTER TABLE suggestions ADD COLUMN question_json TEXT",
+  "ALTER TABLE tasks ADD COLUMN claude_session_id TEXT",
 ];
 
 function migrate(sqlite: Database): void {

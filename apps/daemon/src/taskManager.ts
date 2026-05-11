@@ -58,6 +58,7 @@ import {
   setProviderRateLimitWindow,
   syncAgentPlan,
   setTaskCodexThreadId,
+  setTaskClaudeSessionId,
   setTaskPlanGroupId,
   updateTaskStatus,
   createWorktree,
@@ -1274,6 +1275,16 @@ export class TaskManager {
     pruneTaskMessagesBefore(this.db, taskId, summary?.ts ?? pending.startedAt);
     markTaskCompacted(this.db, taskId);
     setTaskCodexThreadId(this.db, taskId, null);
+    // Mirror for claude: drop the captured session id so the next
+    // spawn starts a brand-new claude session instead of resuming
+    // the one whose full history just got summarized. The daemon's
+    // `appendParts` block re-injects the compacted summary as
+    // system context on that fresh session, so the agent picks up
+    // where it left off without paying for the now-redundant prior
+    // turns. Auto-compaction (claude's mid-stream `compact_boundary`)
+    // is different — the session continues naturally with the
+    // summary inline, so handleAutoCompacted does NOT clear this.
+    setTaskClaudeSessionId(this.db, taskId, null);
     const fresh = getTask(this.db, taskId);
     if (fresh) this.bus.publishSystem({ kind: "task_changed", task: fresh });
     const session = this.running.get(taskId);
@@ -1500,6 +1511,14 @@ export class TaskManager {
         task.agent === "codex" && resume && task.codexThreadId
           ? task.codexThreadId
           : undefined;
+      // Claude-only counterpart — pins resume to THIS task's session
+      // by id rather than the cwd-based `--continue` lookup, which
+      // can resolve to an unrelated session sharing the same project
+      // dir (see ClaudeRunner.start for the full rationale).
+      const resumeSessionId =
+        task.agent === "claude" && resume && task.claudeSessionId
+          ? task.claudeSessionId
+          : undefined;
       // Codex-only baseline for the auto-compact heuristic — see
       // CodexRunner's priorInputTokens / handleStdoutLine. Each `codex
       // exec` is single-shot, so the runner can't track turn-over-turn
@@ -1517,6 +1536,7 @@ export class TaskManager {
         cwd: task.worktreePath,
         resume,
         ...(resumeThreadId ? { resumeThreadId } : {}),
+        ...(resumeSessionId ? { resumeSessionId } : {}),
         ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
         permissionMode: task.permissionMode ?? "bypassPermissions",
         thinkingLevel: task.thinkingLevel ?? "high",
@@ -1829,6 +1849,22 @@ export class TaskManager {
         }
         return;
       }
+      // ClaudeRunner emits `[claude session] <uuid>` from the first
+      // `system/init` event. Persist it so every subsequent spawn can
+      // pass `--resume <uuid>` instead of `--continue` — `--continue`
+      // is keyed only on the cwd and silently picks up an unrelated
+      // session when one exists in the same project dir (sibling plan
+      // slices, AI helper invocations). Suppress the event after we
+      // consume it — same reasoning as the codex thread marker above.
+      const cs = /^\[claude session\] ([0-9a-f-]{36})$/i.exec(event.text.trim());
+      if (cs) {
+        const sid = cs[1]!;
+        const cur = getTask(this.db, taskId);
+        if (cur && cur.claudeSessionId !== sid) {
+          setTaskClaudeSessionId(this.db, taskId, sid);
+        }
+        return;
+      }
     }
     this.bus.publish({ taskId, event, ts: Date.now() });
   }
@@ -1914,9 +1950,10 @@ export class TaskManager {
    *
    * In either case we respawn the runner in resume mode with a short
    * "continue" nudge — codex via `codex exec resume <thread_id>`,
-   * claude via `--continue` (which picks up the most recent session
-   * for that cwd). Both preserve conversation context so the agent
-   * doesn't redo finished work.
+   * claude via `--resume <session_id>` (captured from the first
+   * `system/init` event), falling back to `--continue` only when no
+   * session id has been captured yet. Both preserve conversation
+   * context so the agent doesn't redo finished work.
    *
    * Capped by MAX_AUTO_RESUME_ATTEMPTS to bound the spiral if the
    * agent is genuinely stuck. The counter resets on a clean
@@ -1940,9 +1977,9 @@ export class TaskManager {
     if (fresh.status === "stopped" || fresh.status === "pending") return;
     // Codex needs a captured thread id — without it `codex exec
     // resume` has nothing to attach to and would silently restart
-    // from zero, losing the conversation context. Claude's
-    // `--continue` resolves the session from the cwd alone, so
-    // there's no equivalent gate for claude.
+    // from zero, losing the conversation context. Claude has a
+    // captured session id too (`claudeSessionId`) but falls back to
+    // `--continue` when missing, so no hard gate is needed here.
     if (fresh.agent === "codex" && !fresh.codexThreadId) return;
     const failed = fresh.status === "failed";
     if (!failed && !signals.compactedThisTurn) return;
