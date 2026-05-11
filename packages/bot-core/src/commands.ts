@@ -39,7 +39,7 @@ const HELP_TEXT_LINES = [
   "",
   "Tasks:",
   "/new <prompt> — spawn a task in focused project (or asks)",
-  "/ls — list open tasks (/ls all to include closed)",
+  "/ls [page] — list open tasks (/ls all [page] to include closed)",
   "/closed [page] — list closed tasks, paginated",
   "/show <id?> — show task (or focused)",
   "/in <text> — send input to focused task",
@@ -392,14 +392,29 @@ export async function cmdMirrors(
   }
 }
 
-const CLOSED_PAGE_SIZE = 20;
+const TASK_PAGE_SIZE = 20;
+
+function parseLsArgs(arg: string): { wantAll: boolean; page: number } {
+  const tokens = arg.trim().split(/\s+/).filter(Boolean);
+  let wantAll = false;
+  let page = 1;
+  for (const tok of tokens) {
+    if (tok.toLowerCase() === "all") {
+      wantAll = true;
+    } else {
+      const n = parseInt(tok, 10);
+      if (Number.isFinite(n) && n > 0) page = n;
+    }
+  }
+  return { wantAll, page };
+}
 
 export async function cmdLs(
   ctx: BotContext,
   msg: IncomingMessage,
   arg: string,
 ): Promise<void> {
-  const wantAll = arg.trim().toLowerCase() === "all";
+  const { wantAll, page } = parseLsArgs(arg);
   try {
     const { tasks } = await ctx.client.listTasks();
     const visible = wantAll ? tasks : tasks.filter((t) => !t.closedAt);
@@ -410,18 +425,24 @@ export async function cmdLs(
       );
       return;
     }
+    const totalPages = Math.max(1, Math.ceil(visible.length / TASK_PAGE_SIZE));
+    const clamped = Math.min(page, totalPages);
+    const start = (clamped - 1) * TASK_PAGE_SIZE;
+    const slice = visible.slice(start, start + TASK_PAGE_SIZE);
     const fmt = ctx.adapter.fmt;
-    const shown = visible.slice(0, 20);
-    const lines = shown.map((t) => shortTaskLine(t, fmt));
-    const hiddenClosed = !wantAll
-      ? tasks.filter((t) => t.closedAt).length
-      : 0;
-    if (hiddenClosed > 0) {
-      lines.push("");
-      lines.push(`(+${hiddenClosed} closed — /closed to list)`);
-    } else if (visible.length > shown.length) {
-      lines.push("");
-      lines.push(`(+${visible.length - shown.length} more)`);
+    const lines = slice.map((t) => shortTaskLine(t, fmt));
+    const label = wantAll ? "tasks" : "open";
+    const nextCmd = wantAll ? `/ls all ${clamped + 1}` : `/ls ${clamped + 1}`;
+    lines.push("");
+    lines.push(
+      `${label} ${start + 1}-${start + slice.length} of ${visible.length} · page ${clamped}/${totalPages}` +
+        (clamped < totalPages ? ` · ${nextCmd} for next` : ""),
+    );
+    if (!wantAll) {
+      const hiddenClosed = tasks.filter((t) => t.closedAt).length;
+      if (hiddenClosed > 0) {
+        lines.push(`(+${hiddenClosed} closed — /closed to list)`);
+      }
     }
     await msg.reply(lines.join("\n"));
   } catch (e) {
@@ -445,10 +466,10 @@ export async function cmdClosed(
       await msg.reply("(no closed tasks)");
       return;
     }
-    const totalPages = Math.max(1, Math.ceil(closed.length / CLOSED_PAGE_SIZE));
+    const totalPages = Math.max(1, Math.ceil(closed.length / TASK_PAGE_SIZE));
     const clamped = Math.min(page, totalPages);
-    const start = (clamped - 1) * CLOSED_PAGE_SIZE;
-    const slice = closed.slice(start, start + CLOSED_PAGE_SIZE);
+    const start = (clamped - 1) * TASK_PAGE_SIZE;
+    const slice = closed.slice(start, start + TASK_PAGE_SIZE);
     const fmt = ctx.adapter.fmt;
     const lines = slice.map((t) => shortTaskLine(t, fmt));
     lines.push("");
