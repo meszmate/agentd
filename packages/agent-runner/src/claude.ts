@@ -213,11 +213,21 @@ export class ClaudeRunner implements AgentRunner {
     ];
     // Resume the prior session when respawning after a daemon restart
     // so the agent doesn't lose context. claude-code keeps session
-    // history in `~/.claude/projects/<cwd-slug>/...` and `--continue`
-    // pulls the most recent one for this cwd. The first turn of a
+    // history in `~/.claude/projects/<cwd-slug>/...`. Prefer
+    // `--resume <id>` when the daemon has the task's captured session
+    // id — `--continue` grabs whichever session was touched last in
+    // this cwd, which is wrong when sibling tasks or `in_place` tasks
+    // share a worktree (one task's compaction would summarize a
+    // different task's conversation entirely). Fall back to
+    // `--continue` for tasks that ran before session-id capture
+    // landed and don't have an id stored yet. The first turn of a
     // fresh task passes resume=false (no prior session to resume).
     if (opts.resume) {
-      args.push("--continue");
+      if (opts.resumeSessionId) {
+        args.push("--resume", opts.resumeSessionId);
+      } else {
+        args.push("--continue");
+      }
     }
     const mode =
       opts.permissionMode ??
@@ -529,8 +539,26 @@ export class ClaudeRunner implements AgentRunner {
         });
         return;
       }
-      // Other CLI bookkeeping (init, status pings, hook lifecycle, …) —
-      // the operator can't act on any of it, so it stays off the timeline.
+      // The `init` system message carries the session_id that claude
+      // will use for the JSONL session file in
+      // `~/.claude/projects/<cwd-slug>/`. Surface it as a raw marker
+      // so the daemon can persist it on the task; future spawns then
+      // pass it as `--resume <id>` instead of the looser `--continue`,
+      // which would pick the most-recent session in the cwd (wrong
+      // when sibling tasks or `in_place` tasks share a worktree).
+      if (parsed.subtype === "init") {
+        const sid = (parsed as { session_id?: unknown }).session_id;
+        if (typeof sid === "string" && sid.length > 0) {
+          this.emit({
+            kind: "raw",
+            stream: "stdout",
+            text: `[claude session] ${sid}`,
+          });
+        }
+        return;
+      }
+      // Other CLI bookkeeping (status pings, hook lifecycle, …) — the
+      // operator can't act on any of it, so it stays off the timeline.
       return;
     }
     if (type === "rate_limit_event") {

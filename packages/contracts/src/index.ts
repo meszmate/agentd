@@ -222,6 +222,16 @@ export const Task = z.object({
    * over instead of re-paying the cost on every steer.
    */
   codexThreadId: z.string().nullable().optional(),
+  /**
+   * Claude session id captured from the runner's first `system/init`
+   * event. Used on subsequent spawns to call `claude --resume <id>`
+   * instead of the looser `--continue` (which just grabs the most
+   * recently used session in the cwd — wrong when sibling tasks or
+   * `in_place` tasks share a worktree). Pinning by id makes resume
+   * deterministic and prevents one task's compaction from summarizing
+   * another task's conversation.
+   */
+  claudeSessionId: z.string().nullable().optional(),
   totalInputTokens: z.number().optional(),
   totalOutputTokens: z.number().optional(),
   totalCacheReadTokens: z.number().optional(),

@@ -97,6 +97,7 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     autoPush: row.autoPush === 1,
     prUrl: row.prUrl ?? null,
     codexThreadId: row.codexThreadId ?? null,
+    claudeSessionId: row.claudeSessionId ?? null,
     totalInputTokens: row.totalInputTokens ?? 0,
     totalOutputTokens: row.totalOutputTokens ?? 0,
     totalCacheReadTokens: row.totalCacheReadTokens ?? 0,
@@ -455,6 +456,25 @@ export function setTaskCodexThreadId(
 ): void {
   db.update(tasks)
     .set({ codexThreadId: threadId, updatedAt: Date.now() })
+    .where(eq(tasks.id, id))
+    .run();
+}
+
+/**
+ * Persist the claude-code session id captured from the runner's first
+ * `system/init` event. Subsequent claude spawns read this back and call
+ * `claude --resume <id>` instead of the looser `--continue`, which is
+ * essential when sibling tasks or `in_place` workspace tasks share a
+ * worktree — `--continue` would otherwise pick the most-recently used
+ * session in the cwd, possibly belonging to a different task entirely.
+ */
+export function setTaskClaudeSessionId(
+  db: Db,
+  id: string,
+  sessionId: string | null,
+): void {
+  db.update(tasks)
+    .set({ claudeSessionId: sessionId, updatedAt: Date.now() })
     .where(eq(tasks.id, id))
     .run();
 }
