@@ -107,6 +107,7 @@ import {
   listSavedIdeas,
   listSuggestions,
   markSavedIdeaSpawned,
+  resolveSuggestion as dbResolveSuggestion,
   runIdeation,
   streamIdeaConversation,
   streamIdeation,
@@ -4528,6 +4529,30 @@ export function buildServer(opts: BuildServerOptions) {
           : {}),
       });
       const updated = markSavedIdeaSpawned(db, id, task.id) ?? idea;
+      // If this idea was starred from a brainstorm option, mark the
+      // linked suggestion as resolved with the spawned task id so the
+      // brainstorm view stops showing it as pending. Best-effort: a
+      // suggestion the operator already dismissed (or that auto-
+      // expired) stays in its current state — the saved idea is the
+      // authoritative record from here on.
+      if (idea.suggestionId) {
+        const linked = getSuggestion(db, idea.suggestionId);
+        if (linked && linked.status === "pending") {
+          const resolvedSug = dbResolveSuggestion(
+            db,
+            idea.suggestionId,
+            idea.optionIndex ?? null,
+            promptText,
+            task.id,
+          );
+          if (resolvedSug) {
+            bus.publishSystem({
+              kind: "suggestion_updated",
+              suggestion: resolvedSug,
+            });
+          }
+        }
+      }
       pubTaskChanged(task.id);
       return c.json({ idea: updated, task });
     } catch (e) {
@@ -4569,6 +4594,29 @@ export function buildServer(opts: BuildServerOptions) {
       });
       const firstTask = created[0]!;
       const updated = markSavedIdeaSpawned(db, id, firstTask.id) ?? idea;
+      // Mirror the single-spawn behaviour: best-effort resolve any
+      // pending suggestion this idea was starred from, so the
+      // brainstorm view stops showing it as pending.
+      if (idea.suggestionId) {
+        const linked = getSuggestion(db, idea.suggestionId);
+        if (linked && linked.status === "pending") {
+          const seedText =
+            parsed.data.slices[0]?.prompt ?? idea.planDraft ?? idea.text;
+          const resolvedSug = dbResolveSuggestion(
+            db,
+            idea.suggestionId,
+            idea.optionIndex ?? null,
+            seedText,
+            firstTask.id,
+          );
+          if (resolvedSug) {
+            bus.publishSystem({
+              kind: "suggestion_updated",
+              suggestion: resolvedSug,
+            });
+          }
+        }
+      }
       for (const t of created) pubTaskChanged(t.id);
       return c.json({ idea: updated, tasks: created });
     } catch (e) {

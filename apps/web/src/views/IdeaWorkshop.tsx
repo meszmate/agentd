@@ -77,7 +77,6 @@ import {
   useIdeaActiveTurn,
   useModels,
   useProject,
-  useResolveSuggestion,
   useSpawnMultiFromSavedIdea,
   useUpdateIdea,
 } from "@/queries";
@@ -148,7 +147,6 @@ export function IdeaWorkshop() {
   const activeTurnQ = useIdeaActiveTurn(id ?? null);
   const update = useUpdateIdea();
   const remove = useDeleteSavedIdea();
-  const resolve = useResolveSuggestion();
   const spawnMulti = useSpawnMultiFromSavedIdea();
   const cancelTurn = useCancelIdeaTurn();
   const modelsQ = useModels();
@@ -814,34 +812,21 @@ export function IdeaWorkshop() {
               idea.description?.trim() ||
               idea.text.trim());
           try {
-            if (idea.suggestionId && idea.optionIndex != null) {
-              const r = await resolve.mutateAsync({
-                id: idea.suggestionId,
-                pick: {
-                  index: idea.optionIndex,
-                  text: prompt,
-                  title: idea.text.split("\n")[0]!.slice(0, 80),
-                  agent,
-                  ...(model ? { model } : {}),
-                  ...(thinkingLevel ? { thinkingLevel } : {}),
-                },
-              });
-              await update.mutateAsync({ id, status: "spawned" });
-              toast(`spawned ${r.task.id.slice(-8)}`);
-              setSpawnOpen(false);
-              navigate(`/tasks/${r.task.id}`);
-            } else {
-              const r = await client.spawnFromSavedIdea(id, {
-                prompt,
-                title: idea.text.split("\n")[0]!.slice(0, 80),
-                agent,
-                ...(model ? { model } : {}),
-                ...(thinkingLevel ? { thinkingLevel } : {}),
-              });
-              toast(`spawned ${r.task.id.slice(-8)}`);
-              setSpawnOpen(false);
-              navigate(`/tasks/${r.task.id}`);
-            }
+            // Always spawn through the saved-idea endpoint. The idea
+            // is its own record — it owns the spawn lifecycle here.
+            // The endpoint best-effort marks any linked suggestion
+            // as resolved, but works fine when the suggestion was
+            // dismissed or auto-expired.
+            const r = await client.spawnFromSavedIdea(id, {
+              prompt,
+              title: idea.text.split("\n")[0]!.slice(0, 80),
+              agent,
+              ...(model ? { model } : {}),
+              ...(thinkingLevel ? { thinkingLevel } : {}),
+            });
+            toast(`spawned ${r.task.id.slice(-8)}`);
+            setSpawnOpen(false);
+            navigate(`/tasks/${r.task.id}`);
           } catch (e) {
             toast((e as Error).message, true);
           }
