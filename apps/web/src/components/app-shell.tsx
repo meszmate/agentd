@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { Menu, Plus, Search } from "lucide-react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Sidebar } from "@/components/sidebar";
@@ -12,10 +12,19 @@ import { Wordmark } from "@/components/wordmark";
 import { useLegacyPrefsMigration } from "@/lib/legacyPrefsMigrator";
 import { cn } from "@/lib/utils";
 
+// Lazy-loaded so the grid overlay (and the heavy TaskPane component it
+// pulls in) only land in the bundle on the first open. The overlay
+// renders nothing when closed, but the import still pays for itself in
+// initial paint; lazy keeps it out of the first chunk.
+const GridOverlay = lazy(() =>
+  import("@/views/Grid").then((m) => ({ default: m.GridOverlay })),
+);
+
 export function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
+  const [gridOpen, setGridOpen] = useState(false);
   // Mobile sidebar drawer. Closes automatically on route change so
   // tapping a sidebar nav row on mobile feels right.
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -64,6 +73,7 @@ export function AppShell() {
           <Sidebar
             onOpenPalette={() => setPaletteOpen(true)}
             onSpawn={() => setSpawnOpen(true)}
+            onOpenGrid={() => setGridOpen(true)}
           />
         </div>
 
@@ -94,6 +104,10 @@ export function AppShell() {
                 setMobileNavOpen(false);
                 setSpawnOpen(true);
               }}
+              onOpenGrid={() => {
+                setMobileNavOpen(false);
+                setGridOpen(true);
+              }}
             />
           </div>
         </div>
@@ -122,6 +136,12 @@ export function AppShell() {
       />
       <HelpOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
       <SpawnSheet open={spawnOpen} onClose={() => setSpawnOpen(false)} />
+      {/* Grid overlay — fullscreen live dashboard. Mounts lazily on
+          first open. Renders null when closed, so paying the lazy
+          chunk cost is deferred until the operator actually opens it. */}
+      <Suspense fallback={null}>
+        <GridOverlay open={gridOpen} onClose={() => setGridOpen(false)} />
+      </Suspense>
       <KeyboardShortcuts
         onPalette={() => setPaletteOpen(true)}
         onHelp={() => setHelpOpen(true)}

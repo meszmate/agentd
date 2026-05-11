@@ -9,7 +9,7 @@ import { cn, formatTokens } from "@/lib/utils";
 import { StatusDot } from "@/components/ui/status-dot";
 
 /**
- * Read-only live view of a single task for the `/grid` dashboard.
+ * Read-only live view of a single task for the grid overlay.
  *
  * The full task page (TaskTimeline + composer) is way too dense to fit
  * 6+ to a screen, so this pane shows only the signal that matters at a

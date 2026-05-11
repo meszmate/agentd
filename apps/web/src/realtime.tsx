@@ -786,7 +786,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         }
 
         // Surface permission asks globally — the operator may be on
-        // /grid, /home, /settings, anywhere. Skip if they're already
+        // the grid overlay, /home, /settings, anywhere. Skip if they're already
         // looking at the task's own page (the in-page card is the
         // primary surface there). Dedupe per task so back-to-back
         // requests for the same task don't stack.

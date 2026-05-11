@@ -72,9 +72,6 @@ const IdeaWorkshop = lazy(() =>
 const TerminalView = lazy(() =>
   import("@/views/Terminal").then((m) => ({ default: m.TerminalView })),
 );
-const Grid = lazy(() =>
-  import("@/views/Grid").then((m) => ({ default: m.Grid })),
-);
 
 function ViewSuspense({ children }: { children: React.ReactNode }) {
   return (
@@ -112,14 +109,6 @@ const router = createBrowserRouter([
           </ViewSuspense>
         ),
         children: [{ path: ":taskId" }],
-      },
-      {
-        path: "grid",
-        element: (
-          <ViewSuspense>
-            <Grid />
-          </ViewSuspense>
-        ),
       },
       {
         path: "templates",
