@@ -244,7 +244,10 @@ function buildAiHelperArgv(
     // option '--config'". Modern codex still accepts `-c` as the
     // canonical short form.
     argv.push("-c", `model_reasoning_effort="${codexEffort}"`);
-    if (cwd) argv.push("--cd", cwd);
+    // No `--cd` flag: older codex builds reject it outright with
+    // "invalid option --cd" and the rater bubbles that up as a parse
+    // failure. Bun.spawn's `cwd` (set by the caller) already pins the
+    // process working directory, which is what `--cd` was meant to do.
     argv.push(prompt);
     return argv;
   }
