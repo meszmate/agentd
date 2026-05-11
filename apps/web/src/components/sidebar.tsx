@@ -10,6 +10,7 @@ import {
   GitPullRequest,
   Home,
   Inbox,
+  LayoutGrid,
   Plug,
   Plus,
   Search,
@@ -68,6 +69,7 @@ const SECTIONS: {
     items: [
       { to: "/home", label: "Home", icon: Home, kbd: "g h" },
       { to: "/tasks", label: "Tasks", icon: Inbox, kbd: "g t" },
+      { to: "/grid", label: "Grid", icon: LayoutGrid, kbd: "g g" },
       { to: "/templates", label: "Templates", icon: FileTerminal, kbd: "g e" },
       { to: "/schedules", label: "Schedules", icon: CalendarClock, kbd: "g s" },
       { to: "/triggers", label: "Triggers", icon: Zap, kbd: "g w" },
@@ -110,6 +112,20 @@ export function Sidebar({
         t.status === "waiting_input" ||
         t.status === "waiting_perm" ||
         t.status === "idle",
+    ).length ?? 0;
+  // Only running / waiting tasks are what the grid actually renders —
+  // idle ones are inert and the dashboard filters them out.
+  const gridCount =
+    tasksQ.data?.tasks.filter(
+      (t) =>
+        !t.closedAt &&
+        (t.status === "running" ||
+          t.status === "waiting_input" ||
+          t.status === "waiting_perm"),
+    ).length ?? 0;
+  const needsApprovalCount =
+    tasksQ.data?.tasks.filter(
+      (t) => !t.closedAt && t.status === "waiting_perm",
     ).length ?? 0;
 
   return (
@@ -182,6 +198,23 @@ export function Sidebar({
                         {it.to === "/tasks" && activeCount > 0 && (
                           <span className="font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300">
                             {activeCount}
+                          </span>
+                        )}
+                        {it.to === "/grid" && gridCount > 0 && (
+                          <span
+                            className={cn(
+                              "font-mono text-[10px] tabular-nums",
+                              needsApprovalCount > 0
+                                ? "text-amber-700 dark:text-amber-300 animate-blink"
+                                : "text-ember-700 dark:text-ember-300",
+                            )}
+                            title={
+                              needsApprovalCount > 0
+                                ? `${needsApprovalCount} need approval · ${gridCount} live`
+                                : `${gridCount} live`
+                            }
+                          >
+                            {gridCount}
                           </span>
                         )}
                         {it.kbd && (

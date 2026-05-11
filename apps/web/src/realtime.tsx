@@ -9,6 +9,7 @@ import {
 } from "react";
 import type { ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { toast as sonnerToast } from "sonner";
 import type {
   AgentEvent,
   Message,
@@ -22,6 +23,7 @@ import type {
 } from "@agentd/contracts";
 import { useApp } from "@/AppContext";
 import { qk } from "@/queries";
+import { navigateTo } from "@/router-ref";
 import { useStore } from "@/store";
 import { parsePlanFromTool, shapeMessageFromEvent } from "@/lib/agent-event";
 import {
@@ -203,6 +205,15 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
 
   // Title cache — populated from cached tasks list.
   const titleCache = useRef(new Map<string, { title: string; agent: string }>());
+
+  // Active permission-prompt toasts, keyed by taskId. When the daemon
+  // resolves the prompt (status flips out of waiting_perm, or the task
+  // exits / dies) we dismiss the corresponding toast so a stale "task
+  // needs approval" banner doesn't linger after the operator already
+  // answered. One toast per task — repeated permission_request events
+  // for the same task are deduped because the existing toast id stays
+  // in the map until dismissed.
+  const permToasts = useRef(new Map<string, string | number>());
 
   useEffect(() => {
     const unsub = qc.getQueryCache().subscribe((event) => {
@@ -755,6 +766,59 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
             ...cur,
             [msg.taskId]: { status: st, ts: msg.ts },
           }));
+          // Any status flip OUT of waiting_perm means the prompt was
+          // resolved — dismiss the global toast so it doesn't linger.
+          if (st !== "waiting_perm") {
+            const tid = permToasts.current.get(msg.taskId);
+            if (tid != null) {
+              sonnerToast.dismiss(tid);
+              permToasts.current.delete(msg.taskId);
+            }
+          }
+        }
+        if (msg.event.kind === "exit") {
+          // Process death cancels any outstanding permission prompt.
+          const tid = permToasts.current.get(msg.taskId);
+          if (tid != null) {
+            sonnerToast.dismiss(tid);
+            permToasts.current.delete(msg.taskId);
+          }
+        }
+
+        // Surface permission asks globally — the operator may be on
+        // /grid, /home, /settings, anywhere. Skip if they're already
+        // looking at the task's own page (the in-page card is the
+        // primary surface there). Dedupe per task so back-to-back
+        // requests for the same task don't stack.
+        if (msg.event.kind === "permission_request") {
+          const onTaskPage = typeof window !== "undefined" &&
+            window.location.pathname === `/tasks/${msg.taskId}`;
+          if (!onTaskPage && !permToasts.current.has(msg.taskId)) {
+            const meta = titleCache.current.get(msg.taskId);
+            const title = meta?.title ?? "task";
+            const tool = msg.event.tool;
+            const target = `/tasks/${msg.taskId}`;
+            const tid = sonnerToast(`${title} · needs approval`, {
+              description: `${tool} is waiting on a decision`,
+              duration: Infinity,
+              action: {
+                label: "Open task",
+                onClick: () => {
+                  // SPA navigation via the shared router instance —
+                  // window.location.href would force a full reload and
+                  // tear down the realtime WS for no reason.
+                  navigateTo(target);
+                },
+              },
+              onDismiss: () => {
+                permToasts.current.delete(msg.taskId);
+              },
+              onAutoClose: () => {
+                permToasts.current.delete(msg.taskId);
+              },
+            });
+            permToasts.current.set(msg.taskId, tid);
+          }
         }
 
         // No invalidation needed: the server now follows up these events
