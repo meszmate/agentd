@@ -204,6 +204,13 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   // Title cache — populated from cached tasks list.
   const titleCache = useRef(new Map<string, { title: string; agent: string }>());
 
+  // When we last heard from the server. Used by the visibilitychange
+  // handler to detect a silently-dead WS after tab backgrounding.
+  // Without this, questions/permission prompts that arrived while the
+  // tab was hidden only show up after a second tab-switch (whenever
+  // the browser finally notices the TCP timeout and fires `close`).
+  const lastMessageAtRef = useRef(Date.now());
+
   useEffect(() => {
     const unsub = qc.getQueryCache().subscribe((event) => {
       if (event.type !== "updated") return;
@@ -233,6 +240,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       console.log("[rt] opening WS to", client.baseUrl);
       openedAt = Date.now();
       ws = client.watch(null, (msg: WsServerEvent) => {
+        lastMessageAtRef.current = Date.now();
         if (msg.type === "hello") {
           console.log("[rt] hello", msg);
           helloCount += 1;
@@ -881,8 +889,31 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       });
     };
     open();
+
+    // Refocus probe: when the tab comes back to the foreground after
+    // having been hidden, the WS may be silently dead even though
+    // readyState still says OPEN (TCP/proxy timeouts, browser hiber-
+    // nation, network resume). If we've been quiet for a few seconds
+    // since last receive, force a close so the existing reconnect
+    // path runs the helloCount>1 invalidation and replays anything
+    // we missed (waiting_input flips, ask events, permission prompts).
+    const onVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      const idleMs = Date.now() - lastMessageAtRef.current;
+      if (idleMs > 5000 && ws?.readyState === WebSocket.OPEN) {
+        console.log("[rt] refocus after", idleMs, "ms idle, reconnecting");
+        try {
+          ws.close();
+        } catch {
+          // already closed; the close handler will reconnect anyway
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
       closed = true;
+      document.removeEventListener("visibilitychange", onVisibility);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       try {
         ws?.close();
