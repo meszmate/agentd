@@ -639,6 +639,37 @@ export class TaskManager {
     return false;
   }
 
+  /**
+   * Skip a pending ask without answering it. Two cases this exists for:
+   *
+   *   1. The agent is still blocked on `agentd-ask` and the operator
+   *      wants to redirect rather than answer the literal question.
+   *      We resolve the bash curl with `"(dismissed)"` so the agent
+   *      unblocks; whatever the operator types next is a fresh steer.
+   *
+   *   2. The `[ask · askId]` row is orphaned (daemon restart, runner
+   *      crash, or expiry cleared `pendingAsks` while the breadcrumb
+   *      survived in the DB). `answerAsk` returns false in that case
+   *      without writing the paired `[answer · askId]` row, so the
+   *      web composer's `openAskId` never clears and the operator is
+   *      stuck in answer-mode. Writing the answer row here pairs the
+   *      ask as closed and unsticks the UI.
+   */
+  dismissAsk(taskId: string, askId: string): boolean {
+    const entry = this.pendingAsks.get(askId);
+    if (entry && entry.taskId === taskId) {
+      this.pendingAsks.delete(askId);
+      entry.resolve("(dismissed)");
+    }
+    appendMessage(this.db, taskId, "system", `[answer · ${askId}] (dismissed)`);
+    this.bus.publish({
+      taskId,
+      event: { kind: "answer", askId, answer: "(dismissed)" },
+      ts: Date.now(),
+    });
+    return true;
+  }
+
   async create(params: CreateTaskParams): Promise<Task> {
     // When the project folder isn't a git repo, fall back to running
     // directly inside it: no worktree, no branch, no auto-commit/push.

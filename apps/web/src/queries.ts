@@ -349,6 +349,23 @@ export function useAnswerTask(taskId: string) {
   });
 }
 
+/**
+ * Skip a pending ask without answering. Wired to the "Dismiss" buttons
+ * on the interactive AskCard and the composer's answer-mode strip so a
+ * stuck question (stale on daemon restart, or one the operator wants to
+ * redirect past) can be closed without typing a literal answer.
+ */
+export function useDismissTaskAsk(taskId: string) {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (askId: string) => client.dismissTaskAsk(taskId, askId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.task(taskId) });
+    },
+  });
+}
+
 /** Live snapshot of a task's running state + steer queue. */
 export function useTaskSteer(taskId: string) {
   const client = useClient();
