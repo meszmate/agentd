@@ -58,6 +58,7 @@ import {
   setProviderRateLimitWindow,
   syncAgentPlan,
   setTaskCodexThreadId,
+  setTaskClaudeSessionId,
   setTaskPlanGroupId,
   updateTaskStatus,
   createWorktree,
@@ -1305,6 +1306,13 @@ export class TaskManager {
     pruneTaskMessagesBefore(this.db, taskId, summary?.ts ?? pending.startedAt);
     markTaskCompacted(this.db, taskId);
     setTaskCodexThreadId(this.db, taskId, null);
+    // Same reasoning as codex above — manual /compact pruned our DB
+    // view of history, so the next spawn should NOT lean on the
+    // prior claude session (which still has the pre-compaction
+    // transcript intact). Dropping the id forces a fresh session and
+    // the spawnRunner appends the captured summary to the system
+    // prompt so the agent still has continuity.
+    setTaskClaudeSessionId(this.db, taskId, null);
     const fresh = getTask(this.db, taskId);
     if (fresh) this.bus.publishSystem({ kind: "task_changed", task: fresh });
     const session = this.running.get(taskId);
@@ -1531,6 +1539,16 @@ export class TaskManager {
         task.agent === "codex" && resume && task.codexThreadId
           ? task.codexThreadId
           : undefined;
+      // Claude-only counterpart — pin resume to the exact session
+      // captured on this task instead of leaning on `--continue`'s
+      // "most recent in cwd" heuristic. Without this, sibling tasks
+      // and `in_place` tasks that share a worktree can end up resuming
+      // each other's conversation, which is how operators were seeing
+      // /compact return a summary of a completely different task.
+      const resumeSessionId =
+        task.agent === "claude" && resume && task.claudeSessionId
+          ? task.claudeSessionId
+          : undefined;
       // Codex-only baseline for the auto-compact heuristic — see
       // CodexRunner's priorInputTokens / handleStdoutLine. Each `codex
       // exec` is single-shot, so the runner can't track turn-over-turn
@@ -1548,6 +1566,7 @@ export class TaskManager {
         cwd: task.worktreePath,
         resume,
         ...(resumeThreadId ? { resumeThreadId } : {}),
+        ...(resumeSessionId ? { resumeSessionId } : {}),
         ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
         permissionMode: task.permissionMode ?? "bypassPermissions",
         thinkingLevel: task.thinkingLevel ?? "high",
@@ -1857,6 +1876,22 @@ export class TaskManager {
         const cur = getTask(this.db, taskId);
         if (cur && cur.codexThreadId !== tid) {
           setTaskCodexThreadId(this.db, taskId, tid);
+        }
+        return;
+      }
+      // ClaudeRunner does the same with `[claude session] <uuid>` —
+      // captured from the runner's first `system/init` event. Persist
+      // it so the next spawn passes `--resume <id>` instead of
+      // `--continue`. Suppress after consumption so it doesn't render
+      // in the timeline.
+      const cm = /^\[claude session\] ([0-9a-f-]{36})$/i.exec(
+        event.text.trim(),
+      );
+      if (cm) {
+        const sid = cm[1]!;
+        const cur = getTask(this.db, taskId);
+        if (cur && cur.claudeSessionId !== sid) {
+          setTaskClaudeSessionId(this.db, taskId, sid);
         }
         return;
       }

@@ -36,6 +36,14 @@ export const tasks = sqliteTable("tasks", {
    * context instead of re-initializing.
    */
   codexThreadId: text("codex_thread_id"),
+  /**
+   * Claude session id — captured from claude-code's first `system/init`
+   * stream event, then passed to subsequent spawns as `--resume <id>`
+   * instead of `--continue`. `--continue` picks the cwd's most-recent
+   * session which is wrong when sibling tasks or `in_place` tasks share
+   * a worktree.
+   */
+  claudeSessionId: text("claude_session_id"),
   totalInputTokens: integer("total_input_tokens").notNull().default(0),
   totalOutputTokens: integer("total_output_tokens").notNull().default(0),
   totalCacheReadTokens: integer("total_cache_read_tokens").notNull().default(0),
@@ -737,6 +745,7 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE tasks ADD COLUMN github_issue_state TEXT",
   "ALTER TABLE idea_messages ADD COLUMN question_json TEXT",
   "ALTER TABLE suggestions ADD COLUMN question_json TEXT",
+  "ALTER TABLE tasks ADD COLUMN claude_session_id TEXT",
 ];
 
 function migrate(sqlite: Database): void {
