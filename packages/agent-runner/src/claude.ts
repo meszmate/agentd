@@ -619,11 +619,19 @@ export class ClaudeRunner implements AgentRunner {
       this.inTurn = true;
       this.emit({ kind: "status", status: "running" });
     }
+    // Claude's CLI parses messages whose first character is `/` as slash
+    // commands (/clear, /compact, etc.) even via stream-json stdin, and
+    // silently swallows the message when the command is unrecognized.
+    // Operators routinely send messages like "/ls all for example…" to
+    // talk about chat-bot commands, so prepend a zero-width space to
+    // bypass the slash-command parser without changing what the agent
+    // reads. The DB row keeps the original text.
+    const safeText = text.startsWith("/") ? `​${text}` : text;
     const userMsg = {
       type: "user",
       message: {
         role: "user",
-        content: [{ type: "text", text }],
+        content: [{ type: "text", text: safeText }],
       },
     };
     const line = JSON.stringify(userMsg) + "\n";
