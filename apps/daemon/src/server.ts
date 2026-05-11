@@ -1662,6 +1662,26 @@ export function buildServer(opts: BuildServerOptions) {
   });
 
   /**
+   * Skip a pending ask without answering. Unblocks the agent (resolves
+   * its `agentd-ask` curl with "(dismissed)") and pairs the `[ask · …]`
+   * breadcrumb with a `[answer · …] (dismissed)` row so the web composer
+   * exits answer-mode. Also recovers stale asks (daemon restart, agent
+   * crash) that `/answer` can't resolve.
+   */
+  api.post("/tasks/:id/dismiss-ask", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => null)) as {
+      askId?: string;
+    } | null;
+    const askId = (body?.askId ?? "").trim();
+    if (!askId) return c.json({ error: "askId required" }, 400);
+    tasks.dismissAsk(id, askId);
+    return c.json({ ok: true });
+  });
+
+  /**
    * Update the task's model override. Empty string clears it (next runner
    * spawn falls back to the configured default for the agent kind).
    */

@@ -27,6 +27,7 @@ import { ToolLine, WorkCard, pairToolEvents } from "@/components/tool-line";
 import type { TaskPlanItem } from "@/views/TaskPlan";
 import {
   useAnswerTask,
+  useDismissTaskAsk,
   useFireQueuedSteer,
   useCompactTask,
   useRemoveQueuedSteer,
@@ -444,6 +445,7 @@ const TaskComposer = memo(function TaskComposer({
   const [text, setText] = useState("");
   const send = useSendInput(taskId);
   const answerMut = useAnswerTask(taskId);
+  const dismissAskMut = useDismissTaskAsk(taskId);
   const client = useClient();
   const steerQ = useTaskSteer(taskId);
   const removeQueued = useRemoveQueuedSteer(taskId);
@@ -492,6 +494,15 @@ const TaskComposer = memo(function TaskComposer({
   const fireRow = async (index: number) => {
     try {
       await fireQueued.mutateAsync(index);
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
+
+  const dismissOpenAsk = async () => {
+    if (!openAskId) return;
+    try {
+      await dismissAskMut.mutateAsync(openAskId);
     } catch (e) {
       onError((e as Error).message);
     }
@@ -562,6 +573,28 @@ const TaskComposer = memo(function TaskComposer({
                 </li>
               ))}
             </ul>
+          </div>
+        )}
+
+        {openAskId && (
+          <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-amber-500/30 bg-amber-500/[0.06] px-2.5 py-1 animate-fade-in">
+            <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-amber-700 dark:text-amber-300 truncate">
+              answering agent's question — type below or
+            </span>
+            <button
+              type="button"
+              onClick={() => void dismissOpenAsk()}
+              disabled={dismissAskMut.isPending}
+              title="Skip this question. The agent unblocks and the input goes back to normal chat."
+              className="inline-flex items-center gap-1 shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-600 hover:text-amber-700 dark:text-ink-300 dark:hover:text-amber-300 disabled:opacity-50 transition-colors"
+            >
+              {dismissAskMut.isPending ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <X className="h-3 w-3" />
+              )}
+              dismiss
+            </button>
           </div>
         )}
 
@@ -1183,6 +1216,7 @@ function AskCard({
   taskId?: string;
 }) {
   const answerMut = useAnswerTask(taskId ?? "");
+  const dismissMut = useDismissTaskAsk(taskId ?? "");
   const [custom, setCustom] = useState("");
   const [pending, setPending] = useState<string | null>(null);
   // Once an answer lands the parent re-renders with `answer` set. The
@@ -1203,6 +1237,17 @@ function AskCard({
       // Surface to console — the timeline doesn't have a toast hook
       // here and the parent's onError is wired only to the composer.
       console.error("answer failed", e);
+    }
+  };
+
+  const dismiss = async () => {
+    if (!taskId || !askId || locked) return;
+    setPending("(dismissed)");
+    try {
+      await dismissMut.mutateAsync(askId);
+    } catch (e) {
+      setPending(null);
+      console.error("dismiss failed", e);
     }
   };
 
@@ -1311,6 +1356,25 @@ function AskCard({
             )}
           </Button>
         </form>
+      )}
+
+      {interactive && !locked && (
+        <div className="mt-1.5 flex justify-end">
+          <button
+            type="button"
+            onClick={() => void dismiss()}
+            disabled={dismissMut.isPending}
+            title="Skip this question. The agent unblocks and you can type freely."
+            className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-500 hover:text-amber-700 dark:text-ink-400 dark:hover:text-amber-300 disabled:opacity-50 transition-colors"
+          >
+            {dismissMut.isPending ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <X className="h-3 w-3" />
+            )}
+            dismiss
+          </button>
+        </div>
       )}
 
       {locked && shownAnswer && options.indexOf(shownAnswer) === -1 && (

@@ -1283,6 +1283,20 @@ export class AgentdClient {
     });
   }
 
+  /**
+   * Skip a pending ask without answering it. Useful when the operator
+   * wants to redirect the agent without their next chat message being
+   * captured as the literal answer, or when the ask is stale (agent
+   * already moved on / crashed). Unblocks the agent with "(dismissed)"
+   * and writes the paired `[answer · askId] (dismissed)` row.
+   */
+  async dismissTaskAsk(id: string, askId: string): Promise<{ ok: true }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/dismiss-ask`, {
+      method: "POST",
+      body: JSON.stringify({ askId }),
+    });
+  }
+
   async stopTask(id: string): Promise<void> {
     await this.req(`/api/tasks/${id}/stop`, { method: "POST" });
   }
