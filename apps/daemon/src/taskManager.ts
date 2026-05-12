@@ -2728,11 +2728,21 @@ export class TaskManager {
       generated && ai.message.includes("\n")
         ? ai.message.split("\n").slice(1).join("\n").trim() || undefined
         : (lastUserMsg ?? undefined);
+    // Same identity inheritance as spawnRunner — if no `user.email` is
+    // configured we'd otherwise commit as `agentd <agentd@local>`,
+    // which GitHub still squashes as a co-author trailer on merge.
+    const identity = await resolveAutoCommitIdentity(
+      task.worktreePath,
+      task.baseCommitSha || task.baseBranch,
+    );
     try {
       const result = await autoCommit({
         cwd: task.worktreePath,
         title: subject,
         body,
+        ...(identity
+          ? { authorName: identity.name, authorEmail: identity.email }
+          : {}),
       });
       if (result.committed) {
         appendMessage(
