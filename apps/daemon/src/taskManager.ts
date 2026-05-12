@@ -231,6 +231,18 @@ export class TaskManager {
    */
   private lastPersistedStderr = new Map<string, string>();
   /**
+   * Tasks where the current run hit a context-overflow / prompt-too-long
+   * failure. Set from stderr pattern matching in `handleEvent`, read by
+   * the exit-time auto-resume path. Resuming the same claude session
+   * after this error is futile — the next claude reads the same too-long
+   * history off disk and bounces with the same error — so the auto-resume
+   * skips its retries, clears the dead claudeSessionId so the next
+   * operator message spawns a fresh session, and surfaces an actionable
+   * system row. Survives the exit event (read before clear); cleared on
+   * the next spawn and on operator-driven actions that reset the budget.
+   */
+  private contextOverflowed = new Set<string>();
+  /**
    * setInterval handle for the stall watchdog. Started by the daemon
    * after `recoverOrphans()`; stopped on shutdown.
    */
@@ -1068,6 +1080,7 @@ export class TaskManager {
     // The operator just took deliberate action — reset the
     // auto-resume budget so a fresh spiral can run if needed.
     this.autoResumeAttempts.delete(taskId);
+    this.contextOverflowed.delete(taskId);
     // 1. If the agent is blocked on an `agentd-ask`, this input is its
     //    answer. Resolve the pending Promise — the agent's curl call
     //    unblocks and the runner keeps going.
@@ -1140,6 +1153,7 @@ export class TaskManager {
     if (!task) throw new Error("task not found");
     // Operator-driven action — reset the auto-resume budget.
     this.autoResumeAttempts.delete(taskId);
+    this.contextOverflowed.delete(taskId);
     // Block-on-ask wins: if there's a pending decision, this becomes the
     // answer regardless of the requested steer mode. The agent unblocks
     // and continues, so neither queue nor interrupt is appropriate.
@@ -1180,6 +1194,7 @@ export class TaskManager {
     if (!task) throw new Error("task not found");
     // Operator-driven action — reset the auto-resume budget.
     this.autoResumeAttempts.delete(taskId);
+    this.contextOverflowed.delete(taskId);
     const cur = this.inputQueue.get(taskId);
     if (!cur || index < 0 || index >= cur.length) {
       return cur?.slice() ?? [];
@@ -1438,6 +1453,10 @@ export class TaskManager {
     // Per-turn flag for the auto-resume heuristic — only the current
     // turn's compaction events count.
     this.autoCompactedThisTurn.delete(task.id);
+    // Same lifecycle as autoCompactedThisTurn — the context-overflow
+    // flag is per-run; a fresh spawn starts unflagged so a healthy turn
+    // doesn't inherit a stale overflow signal from a prior run.
+    this.contextOverflowed.delete(task.id);
     // Seed the watchdog's activity clock so the stall sweep doesn't
     // immediately fire on a fresh spawn that hasn't emitted its first
     // event yet (claude's first stream-json line can take a few seconds).
@@ -1977,6 +1996,15 @@ export class TaskManager {
           this.lastPersistedStderr.set(taskId, text);
           appendMessage(this.db, taskId, "system", text);
         }
+        // Flag context-overflow failures so the exit-time auto-resume
+        // path can skip the futile retry loop. Resuming the same claude
+        // session after this error reads the same too-long history off
+        // disk and bounces with the same error — burning three resume
+        // attempts before giving up. From the operator's POV the task
+        // "just stopped" after context filled.
+        if (isContextOverflowText(text)) {
+          this.contextOverflowed.add(taskId);
+        }
       }
     }
     this.bus.publish({ taskId, event, ts: Date.now() });
@@ -2095,6 +2123,32 @@ export class TaskManager {
     if (fresh.agent === "codex" && !fresh.codexThreadId) return;
     const failed = fresh.status === "failed";
     if (!failed && !signals.compactedThisTurn) return;
+    // Context-overflow short-circuit. Resuming the same claude session
+    // after a context-length error would just reload the same too-long
+    // history off disk and re-emit the same error — burning three
+    // pointless retries before "gave up after 3 attempts" lands. Skip
+    // the retries, drop the dead session id so the next operator
+    // message spawns a fresh claude (no `--resume`), and post one
+    // clear actionable row instead of a wall of duplicate failure
+    // stderr.
+    if (this.contextOverflowed.has(taskId)) {
+      this.contextOverflowed.delete(taskId);
+      this.autoResumeAttempts.delete(taskId);
+      if (fresh.agent === "claude" && fresh.claudeSessionId) {
+        setTaskClaudeSessionId(this.db, taskId, null);
+      }
+      appendMessage(
+        this.db,
+        taskId,
+        "system",
+        "[auto-resume] context window overflowed — skipping retries (resuming would hit the same error). Send a new message with the relevant context to continue; a fresh session will spawn without prior memory.",
+      );
+      const refreshed = getTask(this.db, taskId);
+      if (refreshed) {
+        this.bus.publishSystem({ kind: "task_changed", task: refreshed });
+      }
+      return;
+    }
     const attempts = this.autoResumeAttempts.get(taskId) ?? 0;
     if (attempts >= TaskManager.MAX_AUTO_RESUME_ATTEMPTS) {
       appendMessage(
@@ -2783,6 +2837,26 @@ export class TaskManager {
     };
   }
 
+}
+
+/**
+ * Recognise context-overflow / prompt-too-long failures in a stderr
+ * line. Mirrors the patterns claude / codex CLIs emit when the model
+ * rejects the request because the conversation no longer fits the
+ * window. Same string lands both as the raw API error body and via
+ * the runner-side friendly prefix (`[claude] …\nHint: Context window
+ * full …`) so the check works on either flavor.
+ */
+function isContextOverflowText(text: string): boolean {
+  const t = text.toLowerCase();
+  if (t.includes("prompt is too long")) return true;
+  if (t.includes("context_length_exceeded")) return true;
+  if (t.includes("context length exceeded")) return true;
+  if (t.includes("context window full")) return true;
+  if (t.includes("input length") && t.includes("exceed")) return true;
+  if (t.includes("context") && t.includes("limit") && t.includes("exceed"))
+    return true;
+  return false;
 }
 
 function findLastUserMessage(db: Db, taskId: string): string | null {
