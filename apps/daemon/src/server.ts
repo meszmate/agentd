@@ -1091,12 +1091,17 @@ export function buildServer(opts: BuildServerOptions) {
         // No upstream yet — count commits unique to this branch vs. the
         // base branch, not the entire HEAD history (which would include
         // every commit on main and report a wildly inflated count).
+        // Prefer the SHA frozen at task creation so the count stays
+        // accurate after `baseBranch` later advances past HEAD (e.g.
+        // after this task's PR merges and the operator pulls main —
+        // the live `main..HEAD` then reports zero ahead).
+        const baseRefForAhead = task.baseCommitSha || task.baseBranch;
         const vsBase = Bun.spawn({
           cmd: [
             "git",
             "rev-list",
             "--count",
-            `${task.baseBranch}..HEAD`,
+            `${baseRefForAhead}..HEAD`,
           ],
           cwd: task.worktreePath,
           stdout: "pipe",
@@ -1124,10 +1129,20 @@ export function buildServer(opts: BuildServerOptions) {
     const id = c.req.param("id");
     const task = tasks.get(id);
     if (!task) return c.json({ error: "not found" }, 404);
-    const base = c.req.query("base") ?? task.baseBranch;
+    // Same reasoning as `/diff`: prefer the frozen SHA so per-file
+    // status doesn't go blank once the live base advances past HEAD.
+    const baseForGit =
+      c.req.query("base") ?? task.baseCommitSha ?? task.baseBranch;
+    // Keep the human-readable name in the response so the UI badge
+    // stays sensible regardless of which ref we actually diffed against.
+    const baseLabel = task.baseBranch || baseForGit;
     try {
-      const entries = await gitStatus(task.worktreePath, base);
-      return c.json({ worktreePath: task.worktreePath, entries, base });
+      const entries = await gitStatus(task.worktreePath, baseForGit);
+      return c.json({
+        worktreePath: task.worktreePath,
+        entries,
+        base: baseLabel,
+      });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 500);
     }
@@ -1158,7 +1173,7 @@ export function buildServer(opts: BuildServerOptions) {
       wip: !!body.wip,
       ...(body.hint ? { hint: body.hint } : {}),
       fallbackHint: task.title,
-      baseRef: task.baseBranch,
+      baseRef: task.baseCommitSha || task.baseBranch,
       helper: helperForTask(task),
       ...(cfg.commitInstructions
         ? { extraInstructions: cfg.commitInstructions }
@@ -1184,7 +1199,7 @@ export function buildServer(opts: BuildServerOptions) {
       wip: !!body.wip,
       ...(body.hint ? { hint: body.hint } : {}),
       fallbackHint: task.title,
-      baseRef: task.baseBranch,
+      baseRef: task.baseCommitSha || task.baseBranch,
       helper: helperForTask(task),
       ...(cfg.commitInstructions
         ? { extraInstructions: cfg.commitInstructions }
@@ -1257,7 +1272,7 @@ export function buildServer(opts: BuildServerOptions) {
     const opts = {
       ...(body.hint ? { hint: body.hint } : {}),
       includeBullets: body.includeBullets !== false,
-      baseRef: task.baseBranch,
+      baseRef: task.baseCommitSha || task.baseBranch,
       taskPrompt,
       taskTitle: task.title,
       helper: helperForTask(task),
@@ -1368,7 +1383,7 @@ export function buildServer(opts: BuildServerOptions) {
       const cfg = loadConfig(paths.root);
       const ai = await generateCommitMessage(task.worktreePath, {
         fallbackHint: task.title,
-        baseRef: task.baseBranch,
+        baseRef: task.baseCommitSha || task.baseBranch,
         helper: helperForTask(task),
         ...(cfg.commitInstructions
           ? { extraInstructions: cfg.commitInstructions }
@@ -1752,8 +1767,23 @@ export function buildServer(opts: BuildServerOptions) {
     const id = c.req.param("id");
     const task = tasks.get(id);
     if (!task) return c.json({ error: "not found" }, 404);
-    const baseRef = c.req.query("base") ?? task.baseBranch;
+    // Operator can pin the comparison to any ref via `?base=…` (used by
+    // the council judge etc.). Otherwise prefer the SHA captured at task
+    // creation: `baseBranch...HEAD` shifts merge-base when the live ref
+    // advances past HEAD (typical after a PR merges this task's work
+    // back into main — the dynamic range then resolves to empty and the
+    // Diff tab goes blank). The frozen SHA stays anchored to where the
+    // branch actually forked. Fall back to the live name for rows
+    // created before `baseCommitSha` existed.
+    const baseRef =
+      c.req.query("base") ?? task.baseCommitSha ?? task.baseBranch;
     const result = await diffAgainst(task.worktreePath, baseRef);
+    // Keep the friendly branch name visible in the UI badge even when
+    // we diffed against a raw SHA — operators don't want to read 40
+    // hex chars in "vs <baseRef>".
+    if (!c.req.query("base") && task.baseCommitSha && task.baseBranch) {
+      result.baseRef = task.baseBranch;
+    }
     return c.json(result);
   });
 

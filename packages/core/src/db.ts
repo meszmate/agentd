@@ -14,6 +14,17 @@ export const tasks = sqliteTable("tasks", {
   worktreePath: text("worktree_path").notNull(),
   branch: text("branch").notNull(),
   baseBranch: text("base_branch").notNull(),
+  /**
+   * Commit SHA captured at worktree-creation time — the point this task
+   * branched off `baseBranch`. Frozen; never updated. The diff endpoint
+   * prefers this over the live `base_branch` ref so "what changed vs
+   * base" stays stable after the base branch advances past HEAD
+   * (e.g. after the task's PR merges and the operator pulls main —
+   * the dynamic `main...HEAD` then resolves to empty because main
+   * contains HEAD's history). NULL for rows created before this
+   * column existed; those fall back to the live ref.
+   */
+  baseCommitSha: text("base_commit_sha"),
   status: text("status").notNull(),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
@@ -460,6 +471,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   worktree_path TEXT NOT NULL,
   branch TEXT NOT NULL,
   base_branch TEXT NOT NULL,
+  base_commit_sha TEXT,
   status TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -746,6 +758,7 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE idea_messages ADD COLUMN question_json TEXT",
   "ALTER TABLE suggestions ADD COLUMN question_json TEXT",
   "ALTER TABLE tasks ADD COLUMN claude_session_id TEXT",
+  "ALTER TABLE tasks ADD COLUMN base_commit_sha TEXT",
 ];
 
 function migrate(sqlite: Database): void {

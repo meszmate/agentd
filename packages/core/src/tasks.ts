@@ -20,6 +20,8 @@ export interface CreateTaskInput {
   worktreePath: string;
   branch: string;
   baseBranch: string;
+  /** Commit SHA at branch-off time — see `Task.baseCommitSha` in contracts. */
+  baseCommitSha?: string | null;
   templateId?: string | null;
   scheduleId?: string | null;
   projectId?: string | null;
@@ -87,6 +89,7 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     worktreePath: row.worktreePath,
     branch: row.branch,
     baseBranch: row.baseBranch,
+    baseCommitSha: row.baseCommitSha ?? null,
     status: row.status as TaskStatus,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -228,6 +231,7 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       worktreePath: input.worktreePath,
       branch: input.branch,
       baseBranch: input.baseBranch,
+      baseCommitSha: input.baseCommitSha ?? null,
       status: "pending",
       createdAt: now,
       updatedAt: now,
