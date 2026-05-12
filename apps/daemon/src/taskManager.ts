@@ -222,6 +222,15 @@ export class TaskManager {
    */
   private lastActivityAt = new Map<string, number>();
   /**
+   * Most recent stderr line we wrote to the messages table for each
+   * task. The claude CLI sometimes flushes the same fatal error blob
+   * (one big JSON, then a friendly summary) twice in a row before
+   * exiting — without this guard the timeline would carry two copies
+   * of the same context-length explanation. Cleared on `exit` so a
+   * fresh spawn starts from a clean dedupe state.
+   */
+  private lastPersistedStderr = new Map<string, string>();
+  /**
    * setInterval handle for the stall watchdog. Started by the daemon
    * after `recoverOrphans()`; stopped on shutdown.
    */
@@ -417,6 +426,7 @@ export class TaskManager {
     this.codexFileSnapshots.delete(taskId);
     this.turnStartedAt.delete(taskId);
     this.lastActivityAt.delete(taskId);
+    this.lastPersistedStderr.delete(taskId);
     const cur = getTask(this.db, taskId);
     if (
       cur &&
@@ -1748,15 +1758,18 @@ export class TaskManager {
       // so a codex run that fires ~100+ tool calls doesn't push the
       // task's persisted history into the hundreds-of-KB range. A
       // typical bash stdout, MCP result, or error blurb fits well
-      // under this; large compile/test dumps get a clear `(N more
-      // chars truncated)` marker so the operator knows to scroll the
-      // live event for the full text.
+      // under this; large compile/test dumps get a marker showing the
+      // FULL raw size so the operator scanning a failed task's history
+      // can immediately spot which result filled claude's context (the
+      // chars persisted here are not what claude saw — claude saw the
+      // un-truncated output, and a single 200KB Read can easily blow
+      // the window without leaving a trace in the lean message text).
       const okFlag = event.ok ? "ok" : "err";
       const PERSIST_LIMIT = 1500;
       const raw = event.output;
       const trimmed =
         raw.length > PERSIST_LIMIT
-          ? `${raw.slice(0, PERSIST_LIMIT)}\n… (${raw.length - PERSIST_LIMIT} more chars truncated)`
+          ? `${raw.slice(0, PERSIST_LIMIT)}\n… (truncated; full output was ${raw.length.toLocaleString()} chars)`
           : raw;
       const meta = [
         event.parentToolUseId ? `p:${event.parentToolUseId}` : null,
@@ -1907,6 +1920,9 @@ export class TaskManager {
       this.turnStartedAt.delete(taskId);
       // Drop the watchdog activity clock — the next spawn re-seeds it.
       this.lastActivityAt.delete(taskId);
+      // Drop the stderr dedupe key so the next spawn's first error
+      // line is always persisted, even if it matches the previous run.
+      this.lastPersistedStderr.delete(taskId);
       // Fire-and-forget; commit + push + PR all run after the agent exits.
       void this.runCompletionHooks(taskId, { cleanlyDone, compactedThisTurn });
     } else if (event.kind === "raw" && event.stream === "stdout") {
@@ -1941,6 +1957,26 @@ export class TaskManager {
           setTaskClaudeSessionId(this.db, taskId, sid);
         }
         return;
+      }
+    } else if (event.kind === "raw" && event.stream === "stderr") {
+      // Persist stderr as a system message so the failure reason
+      // survives reload. Without this, claude's `[claude] context_length
+      // _exceeded …` (and every other fatal API error) lived only on
+      // the live bus — operators reopening a failed task saw a blank
+      // chat above the red "failed" pill with no explanation. The
+      // runner-side filter (claude.ts > formatClaudeStderrLine, the
+      // "no stdin data received" suppression) has already dropped
+      // non-actionable noise by this point, so what reaches here is
+      // worth storing. Dedupe back-to-back identical lines so a CLI
+      // that flushes the same error twice before exit doesn't
+      // double-row the timeline.
+      const text = event.text.trim();
+      if (text.length > 0) {
+        const last = this.lastPersistedStderr.get(taskId);
+        if (last !== text) {
+          this.lastPersistedStderr.set(taskId, text);
+          appendMessage(this.db, taskId, "system", text);
+        }
       }
     }
     this.bus.publish({ taskId, event, ts: Date.now() });

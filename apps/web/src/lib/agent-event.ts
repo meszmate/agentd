@@ -52,13 +52,24 @@ export function shapeMessageFromEvent(
       ts,
     };
   }
+  if (event.kind === "raw" && event.stream === "stderr") {
+    const text = event.text.trim();
+    if (text.length === 0) return null;
+    return {
+      id: liveId(ts),
+      taskId,
+      role: "system",
+      content: text,
+      ts,
+    };
+  }
   if (event.kind === "tool_result") {
     const okFlag = event.ok ? "ok" : "err";
     const PERSIST_LIMIT = 1500;
     const raw = event.output;
     const trimmed =
       raw.length > PERSIST_LIMIT
-        ? `${raw.slice(0, PERSIST_LIMIT)}\n… (${raw.length - PERSIST_LIMIT} more chars truncated)`
+        ? `${raw.slice(0, PERSIST_LIMIT)}\n… (truncated; full output was ${raw.length.toLocaleString()} chars)`
         : raw;
     const meta = [
       event.parentToolUseId ? `p:${event.parentToolUseId}` : null,
