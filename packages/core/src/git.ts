@@ -655,55 +655,10 @@ export async function hasChanges(cwd: string): Promise<boolean> {
   return r.stdout.trim().length > 0;
 }
 
-/**
- * Resolve an explicit git identity for automated commits in this
- * worktree. Returns null when `user.name` AND `user.email` are already
- * set (system / global / local) — git will pick them up and the
- * operator clearly configured them on purpose. When unset, falls back
- * to the most recent commit author on `baseRef` (then HEAD), which
- * matches whoever's been pushing to this repo and therefore lines up
- * with their GitHub-linked identity. Returns null only when no
- * commits exist anywhere to copy from.
- *
- * Why this matters: without a configured `user.email`, git auto-derives
- * `${USER}@$(hostname)` (e.g. `meszmate@Matts-MacBook-Air.local`). That
- * email is not the one linked to the operator's GitHub account, so when
- * a PR is squash-merged GitHub treats the in-PR commits as a different
- * author and tacks on `Co-authored-by: …@…local` trailers. Inheriting
- * the latest base-branch author keeps the agent's commits attributed
- * to the same identity the operator pushes under, so squash-merges
- * see one author and skip the trailer.
- */
-export async function resolveAutoCommitIdentity(
-  cwd: string,
-  baseRef?: string,
-): Promise<{ name: string; email: string } | null> {
-  const cfgEmail = await run(["git", "config", "--get", "user.email"], cwd);
-  const cfgName = await run(["git", "config", "--get", "user.name"], cwd);
-  const hasEmail = cfgEmail.exitCode === 0 && cfgEmail.stdout.trim().length > 0;
-  const hasName = cfgName.exitCode === 0 && cfgName.stdout.trim().length > 0;
-  if (hasEmail && hasName) return null;
-  const refs = [baseRef, "HEAD"].filter((r): r is string => !!r && r.length > 0);
-  for (const ref of refs) {
-    const r = await run(
-      ["git", "log", "-1", "--format=%an%n%ae", ref],
-      cwd,
-    );
-    if (r.exitCode !== 0) continue;
-    const [name = "", email = ""] = r.stdout.split("\n");
-    const tn = name.trim();
-    const te = email.trim();
-    if (tn && te) return { name: tn, email: te };
-  }
-  return null;
-}
-
 export interface AutoCommitInput {
   cwd: string;
   title: string;
   body?: string;
-  authorName?: string;
-  authorEmail?: string;
 }
 
 export interface AutoCommitResult {
@@ -718,20 +673,7 @@ export async function autoCommit(input: AutoCommitInput): Promise<AutoCommitResu
   if (add.exitCode !== 0) {
     throw new Error(`git add failed: ${add.stderr || add.stdout}`);
   }
-  const author = `${input.authorName ?? "agentd"} <${input.authorEmail ?? "agentd@local"}>`;
-  const args = [
-    "git",
-    "-c",
-    `user.name=${input.authorName ?? "agentd"}`,
-    "-c",
-    `user.email=${input.authorEmail ?? "agentd@local"}`,
-    "commit",
-    "--author",
-    author,
-    "--no-verify",
-    "-m",
-    input.title,
-  ];
+  const args = ["git", "commit", "--no-verify", "-m", input.title];
   if (input.body && input.body.trim().length > 0) {
     args.push("-m", input.body);
   }
