@@ -6,12 +6,18 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { AgentdClient } from "@agentd/client";
 import { loadCliConfig, saveCliConfig } from "./config.ts";
+import { cmdSetup } from "./setup.ts";
 
 const HELP = `agentd — remote coding-agent orchestrator
 
-Deploy (single command — runs the daemon + serves the web UI on one port):
+Deploy (one-shot install as a service on this box, auto-start + auto-update):
+  agentd setup                      install + start; daily auto-update
+  agentd setup --public             bind 0.0.0.0 for LAN / tailnet
+  agentd setup --uninstall          remove the service (data is preserved)
+
+Run (foreground, no service registration):
   agentd serve                      bind to 127.0.0.1:3773 (local)
-  agentd serve --public             bind to 0.0.0.0 (LAN / tailnet / "little server")
+  agentd serve --public             bind to 0.0.0.0 ("little server" mode)
   agentd serve --port 8080 --root /var/lib/agentd
 
 Tasks:
@@ -1003,6 +1009,12 @@ async function main() {
     case "serve":
     case "start":
       return cmdServe(rest);
+    case "setup":
+    case "install":
+      return cmdSetup(rest);
+    case "unsetup":
+    case "uninstall":
+      return cmdSetup(["--uninstall", ...rest]);
     case "pair":
       return cmdPair(rest);
     case "ls":

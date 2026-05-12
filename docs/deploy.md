@@ -1,11 +1,39 @@
 # Deploy on a server
 
 How to run `agentd` as a long-lived background service that survives reboots,
-shell logouts, and `ssh` disconnects. Pick the recipe that matches your box.
+shell logouts, and `ssh` disconnects.
 
-If you only need it running until you log out, skip to
-[Quick & dirty (nohup / tmux)](#quick--dirty-nohup--tmux) at the bottom — but
-on a real server you almost certainly want systemd or Docker.
+## Skip the manual setup: `agentd setup`
+
+For the common case, you do not need anything in this doc except this:
+
+```bash
+# linux (system-level systemd unit, daily auto-update timer)
+sudo -E env "PATH=$PATH" agentd setup --public
+
+# macos (per-user LaunchAgent, no sudo)
+agentd setup --public
+```
+
+`agentd setup` detects your OS, writes the appropriate unit file (systemd
+service / LaunchAgent), enables it on boot, installs a daily auto-update
+timer, starts the daemon, and prints the URL + pairing token. To remove:
+`agentd setup --uninstall`. Your data at `--data-dir` is preserved.
+
+Flags worth knowing:
+
+- `--data-dir <path>` — default `/var/lib/agentd` on linux, `~/.agentd` on
+  macos. Bind a stable path on production servers.
+- `--port <n>` — default `3773`.
+- `--public` — bind `0.0.0.0` instead of `127.0.0.1`. Required for any
+  other machine to reach it; pair with Tailscale or a firewall.
+- `--no-auto-update` — skip the daily npm-update timer/agent if you want
+  to pin and update by hand.
+- `--dry-run` — print the unit files + commands without writing anything.
+
+The rest of this doc is the manual recipe — useful if you want to tweak
+the unit, learn what `agentd setup` actually does, or run on a platform
+the setup command doesn't support (BSDs, alpine + openrc, Windows).
 
 ---
 

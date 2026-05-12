@@ -48,6 +48,18 @@ the web UI on the same port — open the URL it prints, pair your first device
 with the token shown in the terminal, and you're in. Bun is required at
 runtime; everything else is bundled into the npm package.
 
+### On a real server (auto-start + auto-update)
+
+```bash
+sudo -E env "PATH=$PATH" agentd setup --public      # linux
+agentd setup --public                               # macos (no sudo needed)
+```
+
+`agentd setup` writes the right service unit for your OS (systemd on linux,
+LaunchAgent on macos), enables it on boot, installs a daily auto-update
+timer, and prints the URL + pairing token to use. `agentd setup --uninstall`
+reverses it; your data at `--data-dir` is preserved.
+
 ## Features
 
 - **Multi-agent**: Claude Code and Codex (OpenAI) supported, picked per task or per template.
