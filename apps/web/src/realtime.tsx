@@ -563,6 +563,12 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           // Web ignores these — they're meant for the discord subprocess.
           return;
         }
+        if (msg.type === "update_info") {
+          // Single-row cache: replace the whole snapshot. The banner
+          // reads `info.updateAvailable` and renders/hides based on it.
+          qc.setQueryData(qk.updateInfo(), { info: msg.info });
+          return;
+        }
         if (msg.type === "provider_rate_limit_updated") {
           // Replace the entry for this provider in the cached list,
           // appending if it's the first time we've seen it. Falling

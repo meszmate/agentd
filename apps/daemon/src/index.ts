@@ -1,6 +1,8 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync } from "node:fs";
+import { networkInterfaces, hostname as osHostname } from "node:os";
+import { spawnSync } from "node:child_process";
 import qrcode from "qrcode-terminal";
 import {
   EventBus,
@@ -20,17 +22,97 @@ import { TaskManager } from "./taskManager.ts";
 import { PluginManager } from "./pluginManager.ts";
 import { Scheduler } from "./scheduler.ts";
 import { BrainstormSweep } from "./brainstormSweep.ts";
+import { UpdateChecker } from "./updateChecker.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const WEB_DIST = resolve(HERE, "..", "..", "web", "dist");
+const REPO_ROOT = resolve(HERE, "..", "..", "..");
+const WEB_DIST = resolve(REPO_ROOT, "apps", "web", "dist");
 const WEB_INDEX = resolve(WEB_DIST, "index.html");
+const WEB_PKG = resolve(REPO_ROOT, "apps", "web", "package.json");
+const ROOT_PKG = resolve(REPO_ROOT, "package.json");
 
-const VERSION = "0.0.1";
+// Pull the version from the root package.json so the daemon, the npm-update
+// banner, and the `agentd --version` output never drift. Falls back to a
+// safe placeholder if the file isn't there (shouldn't happen — would mean
+// the daemon was bundled in a weird way).
+function readVersion(): string {
+  try {
+    const raw = readFileSync(ROOT_PKG, "utf8");
+    const v = JSON.parse(raw).version;
+    if (typeof v === "string" && v) return v;
+  } catch {
+    // fallthrough
+  }
+  return "0.0.0";
+}
+
+const VERSION = readVersion();
+
+/**
+ * Build the web bundle on the fly when running from a source checkout and
+ * `apps/web/dist/index.html` isn't there yet. Lets `bun apps/daemon/src/index.ts`
+ * be a true single command — no separate `bun --filter @agentd/web build`
+ * step required for a first run.
+ *
+ * We only attempt this when the workspace package.json exists (i.e. we
+ * really are inside the monorepo, not running from a packaged bundle).
+ * `AGENTD_NO_AUTOBUILD=1` opts out for operators who want to control the
+ * build themselves.
+ */
+function ensureWebBuilt(): void {
+  if (existsSync(WEB_INDEX)) return;
+  if (process.env.AGENTD_NO_AUTOBUILD === "1") return;
+  if (!existsSync(WEB_PKG)) return;
+
+  console.log("web bundle not found — building once (apps/web/dist)…");
+  const r = spawnSync("bun", ["--filter", "@agentd/web", "build"], {
+    cwd: REPO_ROOT,
+    stdio: "inherit",
+  });
+  if (r.status !== 0) {
+    console.error(
+      "warning: web build failed — daemon will start without the UI.\n" +
+        "         fix the build and restart, or run `bun --filter @agentd/web build` manually.",
+    );
+  }
+}
+
+/**
+ * Enumerate the URLs this host is reachable at on the LAN/tailnet/etc.
+ * Used in the startup banner when the daemon is bound to 0.0.0.0 — so
+ * the operator deploying on a "little server" sees the concrete URL to
+ * paste into a browser rather than the un-routable wildcard address.
+ */
+function listReachableUrls(port: number): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const host = osHostname();
+  if (host && !seen.has(host)) {
+    out.push(`http://${host}:${port}`);
+    seen.add(host);
+  }
+  const ifaces = networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const i of ifaces[name] ?? []) {
+      if (i.internal) continue;
+      // Skip IPv6 — URLs need brackets and most operators want the v4 they
+      // can DNS / put in a docs link. If only v6 is configured, the
+      // hostname row above still gives them something to copy.
+      if (i.family !== "IPv4") continue;
+      if (seen.has(i.address)) continue;
+      seen.add(i.address);
+      out.push(`http://${i.address}:${port}`);
+    }
+  }
+  return out;
+}
 
 async function main() {
   const cfg = loadConfig();
   const paths = resolvePaths(cfg.rootDir);
   ensurePaths(paths);
+
+  ensureWebBuilt();
 
   const { db } = openDb(paths.db);
   const bus = new EventBus();
@@ -66,12 +148,15 @@ async function main() {
 
   const plugins = new PluginManager(paths.root, baseUrl, db);
 
+  const updateChecker = new UpdateChecker(bus, VERSION);
+
   const { app, wsHandler, upgradeRequest } = buildServer({
     db,
     bus,
     paths,
     tasks,
     plugins,
+    updateChecker,
     version: VERSION,
   });
 
@@ -157,6 +242,16 @@ async function main() {
   const announceUrl = `http://${cfg.host}:${server.port}`;
   console.log(`agentd v${VERSION}`);
   console.log(`listening on ${announceUrl}`);
+  if (cfg.host === "0.0.0.0" || cfg.host === "::") {
+    // Bound to every interface — list the actual reachable URLs so the
+    // operator can copy/paste one into a browser instead of staring at
+    // 0.0.0.0 wondering which IP to use.
+    const reachable = listReachableUrls(server.port ?? cfg.port);
+    if (reachable.length > 0) {
+      console.log("reachable at:");
+      for (const u of reachable) console.log(`  ${u}`);
+    }
+  }
   console.log(
     `web ui:    ${webHtml ? announceUrl + "/" : "(not built — run `bun --filter @agentd/web build`)"}`,
   );
@@ -171,6 +266,8 @@ async function main() {
 
   const brainstormSweep = new BrainstormSweep(db, bus, paths);
   brainstormSweep.start();
+
+  updateChecker.start();
 
   plugins.startAll();
   const pluginStatuses = plugins.status();
@@ -188,6 +285,7 @@ async function main() {
     tasks.stopStallWatchdog();
     scheduler.stop();
     brainstormSweep.stop();
+    updateChecker.stop();
     await plugins.stopAll();
     server.stop();
     process.exit(0);

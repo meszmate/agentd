@@ -8,6 +8,7 @@ import type {
   TerminalSession,
   TerminalWindow,
   Trigger,
+  UpdateInfo,
 } from "@agentd/contracts";
 
 export type TaskEventEnvelope = {
@@ -151,7 +152,14 @@ export type SystemEvent =
   | { kind: "trigger_created"; trigger: Trigger }
   | { kind: "trigger_updated"; trigger: Trigger }
   | { kind: "trigger_deleted"; triggerId: string }
-  | { kind: "trigger_fired"; trigger: Trigger; taskId: string | null };
+  | { kind: "trigger_fired"; trigger: Trigger; taskId: string | null }
+  /**
+   * npm-update check completed (success or failure). The daemon polls
+   * `https://registry.npmjs.org/@meszmate/agentd/latest` on boot + every
+   * 24h and broadcasts the full snapshot so the web banner can render
+   * without its own polling loop.
+   */
+  | { kind: "update_info"; info: UpdateInfo };
 
 export type SystemEventEnvelope = {
   event: SystemEvent;

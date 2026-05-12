@@ -2033,6 +2033,31 @@ export const SendTerminalKeysRequest = z.object({
 });
 export type SendTerminalKeysRequest = z.infer<typeof SendTerminalKeysRequest>;
 
+// State of the npm-update check. The daemon polls
+// https://registry.npmjs.org/@meszmate/agentd/latest on boot and every 24h
+// and publishes this snapshot via the event bus so every connected surface
+// can show an "update available" banner without polling on its own.
+//
+// `currentVersion` always reflects the running daemon. `latestVersion` is
+// nullable because the first response can fire before any check completes
+// (or while the box is offline). `updateAvailable` is the cheap consumer
+// predicate so UI code doesn't have to parse semver.
+export const UpdateInfo = z.object({
+  currentVersion: z.string(),
+  latestVersion: z.string().nullable(),
+  checkedAt: z.number().nullable(),
+  error: z.string().nullable(),
+  updateAvailable: z.boolean(),
+  // True when the daemon was launched by a service manager (systemd on
+  // linux, launchd on macos) and can therefore one-click update itself:
+  // we exit non-zero after `bun install -g` and the manager restarts us.
+  // For a foreground `agentd serve`, this is false and the web banner
+  // disables the "Update now" button (the daemon would download the new
+  // version, exit, and nothing would bring it back).
+  serviceManaged: z.boolean(),
+});
+export type UpdateInfo = z.infer<typeof UpdateInfo>;
+
 export const WsServerEvent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("event"),
@@ -2220,6 +2245,15 @@ export const WsServerEvent = z.discriminatedUnion("type", [
     type: z.literal("trigger_fired"),
     trigger: Trigger,
     taskId: z.string().nullable(),
+    ts: z.number(),
+  }),
+  // Update-check result. Fired on boot once the first check completes and
+  // every 24h after, plus on demand when the daemon retries a previously
+  // failed check. The whole snapshot rides each event so a late-joining
+  // client doesn't need a separate refetch.
+  z.object({
+    type: z.literal("update_info"),
+    info: UpdateInfo,
     ts: z.number(),
   }),
 ]);

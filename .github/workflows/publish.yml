@@ -1,0 +1,105 @@
+name: Publish to npm
+
+# Tag-triggered. Push `vX.Y.Z` to publish that version to the npm registry as
+# @meszmate/agentd. The version in the tag MUST match `version` in package.json
+# or `npm publish` will reject it.
+#
+# Auth is via npm trusted publishing (OIDC). No NPM_TOKEN secret is used —
+# GitHub Actions mints a short-lived signed token, npm verifies it against the
+# trusted-publisher config on the package's npmjs.com settings page.
+#
+# One-time bootstrap (chicken-and-egg: the trusted-publisher form on npmjs.com
+# only exists once the package does):
+#
+#   1. From a laptop: `npm login` then `npm publish --access public` — gets
+#      0.0.x onto the registry.
+#   2. Visit https://www.npmjs.com/package/@meszmate/agentd/access → "Trusted
+#      Publisher" → GitHub Actions. Fill in:
+#        Organization or user: meszmate
+#        Repository:           agentd
+#        Workflow filename:    publish.yml
+#        Environment:          (leave empty)
+#   3. Bump version in package.json, commit, tag `git tag vX.Y.Z && git push
+#      --tags`. This workflow takes it from there.
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual fallback if a tag-push doesn't trigger or you want to re-run on the
+  # same ref.
+  workflow_dispatch:
+
+# Cancel parallel runs on the same tag — re-tagging shouldn't race the prior
+# publish attempt.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: npm publish (trusted)
+    runs-on: ubuntu-latest
+
+    # `id-token: write` is the magic permission that lets the runner mint an
+    # OIDC token npm can verify. Without it the publish falls through to
+    # token auth and fails (no NPM_TOKEN exists).
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Bun runs the build + typecheck. The monorepo is Bun-native — we don't
+      # use npm to install or build, only to publish.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+
+      # Node + npm CLI are needed only for the `npm publish` step itself.
+      # Trusted publishing requires npm >= 11.5.1; the upgrade step below
+      # pulls the latest regardless of what setup-node ships with.
+      #
+      # No `registry-url` / `always-auth` here: once trusted publishing is
+      # configured, those cause `npm publish` to 404 because it tries token
+      # auth instead of OIDC.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Upgrade npm to latest (>= 11.5.1 for trusted publishing)
+        run: npm install -g npm@latest
+
+      - name: Install workspace deps
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck all workspaces
+        run: bun --filter '*' typecheck
+
+      # Builds apps/web/dist so the published tarball ships a working UI.
+      # The package.json `prepublishOnly` script also does this, but running
+      # it explicitly here makes the failure mode obvious in the job log.
+      - name: Build web bundle
+        run: bun --filter @agentd/web build
+
+      # Sanity-check: the git tag must match the version in package.json.
+      # Without this guard you can ship a tag `v0.0.5` that publishes `0.0.4`,
+      # which is harmless on the registry but creates confusing release notes.
+      - name: Verify tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      # `--access public` is redundant given publishConfig in package.json,
+      # but harmless and explicit. Provenance is auto-attached because the
+      # workflow has id-token:write and the package was published via OIDC.
+      - name: Publish to npm
+        run: npm publish --access public

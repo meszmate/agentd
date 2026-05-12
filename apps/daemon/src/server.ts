@@ -208,6 +208,7 @@ import {
 import type { PluginManager } from "./pluginManager.ts";
 import { requireSession, bearerOrHeader } from "./auth.ts";
 import type { TaskManager } from "./taskManager.ts";
+import type { UpdateChecker } from "./updateChecker.ts";
 import { WindowWatcher } from "./windowWatcher.ts";
 
 interface EventsWsData {
@@ -228,11 +229,12 @@ export interface BuildServerOptions {
   paths: AgentdPaths;
   tasks: TaskManager;
   plugins: PluginManager;
+  updateChecker: UpdateChecker;
   version: string;
 }
 
 export function buildServer(opts: BuildServerOptions) {
-  const { db, bus, paths, tasks, plugins, version } = opts;
+  const { db, bus, paths, tasks, plugins, updateChecker, version } = opts;
   const windowWatcher = new WindowWatcher(bus);
   const app = new Hono();
 
@@ -773,6 +775,39 @@ export function buildServer(opts: BuildServerOptions) {
   api.get("/rate-limits", (c) =>
     c.json({ rateLimits: listProviderRateLimits(db) }),
   );
+
+  /**
+   * Current npm-update snapshot. The web reads this once on mount; the
+   * `update_info` system event keeps the cache fresh after that.
+   */
+  api.get("/update-info", (c) => c.json({ info: updateChecker.getInfo() }));
+
+  /**
+   * Force a re-check now. Surfaces a "Check again" button on the
+   * settings page so an operator who just published a new version can
+   * confirm the banner shows up without waiting 24h. Returns the
+   * post-check snapshot so the UI can update immediately.
+   */
+  api.post("/update-info/check", async (c) => {
+    const info = await updateChecker.checkNow();
+    return c.json({ info });
+  });
+
+  /**
+   * One-click update. Refuses unless the daemon is service-managed
+   * (systemd/launchd) — a foreground daemon would download the new
+   * version, exit, and leave the operator without a running server.
+   * Returns 202 immediately; the actual install + restart happens
+   * asynchronously, the web sees the WS drop and reconnect after the
+   * service manager respawns us.
+   */
+  api.post("/update-info/apply", (c) => {
+    const r = updateChecker.applyUpdate();
+    if (!r.started) {
+      return c.json({ ok: false, error: r.reason ?? "could not start" }, 400);
+    }
+    return c.json({ ok: true, status: "updating" }, 202);
+  });
 
   /* ── Councils ─────────────────────────────────────────────────────── */
 
@@ -6017,6 +6052,12 @@ export function buildServer(opts: BuildServerOptions) {
               type: "trigger_fired",
               trigger: env.event.trigger,
               taskId: env.event.taskId,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "update_info") {
+            send({
+              type: "update_info",
+              info: env.event.info,
               ts: env.ts,
             });
           }
