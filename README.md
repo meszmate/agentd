@@ -13,6 +13,7 @@
   </p>
 
   <p>
+    <a href="https://www.npmjs.com/package/@meszmate/agentd"><img src="https://img.shields.io/npm/v/@meszmate/agentd?color=cb3837&logo=npm&label=%40meszmate%2Fagentd" alt="npm: @meszmate/agentd"></a>
     <a href="https://github.com/meszmate/agentd/actions/workflows/ci.yml"><img src="https://github.com/meszmate/agentd/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT"></a>
     <img src="https://img.shields.io/badge/runtime-bun-000000?logo=bun&logoColor=white" alt="Bun">
@@ -32,6 +33,19 @@
 
 Designed for one operator with many devices. Reachable from anywhere over Tailscale
 (or any other private network) without exposing your repos to the public internet.
+
+## Quick start
+
+```bash
+npm i -g @meszmate/agentd        # or: bun install -g @meszmate/agentd
+agentd serve                     # local-only, http://127.0.0.1:3773
+agentd serve --public            # bind every interface, print reachable URLs
+```
+
+That's the whole setup. One command starts the daemon, the WebSocket bus, and
+the web UI on the same port — open the URL it prints, pair your first device
+with the token shown in the terminal, and you're in. Bun is required at
+runtime; everything else is bundled into the npm package.
 
 ## Features
 
