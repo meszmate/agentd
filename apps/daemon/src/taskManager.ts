@@ -1711,15 +1711,18 @@ export class TaskManager {
       // so a codex run that fires ~100+ tool calls doesn't push the
       // task's persisted history into the hundreds-of-KB range. A
       // typical bash stdout, MCP result, or error blurb fits well
-      // under this; large compile/test dumps get a clear `(N more
-      // chars truncated)` marker so the operator knows to scroll the
-      // live event for the full text.
+      // under this; large compile/test dumps get a marker showing the
+      // FULL raw size so the operator scanning a failed task's history
+      // can immediately spot which result filled claude's context (the
+      // chars persisted here are not what claude saw — claude saw the
+      // un-truncated output, and a single 200KB Read can easily blow
+      // the window without leaving a trace in the lean message text).
       const okFlag = event.ok ? "ok" : "err";
       const PERSIST_LIMIT = 1500;
       const raw = event.output;
       const trimmed =
         raw.length > PERSIST_LIMIT
-          ? `${raw.slice(0, PERSIST_LIMIT)}\n… (${raw.length - PERSIST_LIMIT} more chars truncated)`
+          ? `${raw.slice(0, PERSIST_LIMIT)}\n… (truncated; full output was ${raw.length.toLocaleString()} chars)`
           : raw;
       const meta = [
         event.parentToolUseId ? `p:${event.parentToolUseId}` : null,
