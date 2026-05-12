@@ -659,8 +659,6 @@ export interface AutoCommitInput {
   cwd: string;
   title: string;
   body?: string;
-  authorName?: string;
-  authorEmail?: string;
 }
 
 export interface AutoCommitResult {
@@ -675,20 +673,7 @@ export async function autoCommit(input: AutoCommitInput): Promise<AutoCommitResu
   if (add.exitCode !== 0) {
     throw new Error(`git add failed: ${add.stderr || add.stdout}`);
   }
-  const author = `${input.authorName ?? "agentd"} <${input.authorEmail ?? "agentd@local"}>`;
-  const args = [
-    "git",
-    "-c",
-    `user.name=${input.authorName ?? "agentd"}`,
-    "-c",
-    `user.email=${input.authorEmail ?? "agentd@local"}`,
-    "commit",
-    "--author",
-    author,
-    "--no-verify",
-    "-m",
-    input.title,
-  ];
+  const args = ["git", "commit", "--no-verify", "-m", input.title];
   if (input.body && input.body.trim().length > 0) {
     args.push("-m", input.body);
   }
