@@ -55,6 +55,7 @@ import {
   touchProject,
   pushBranch,
   removeWorktree,
+  resolveRefSha,
   setProviderRateLimitWindow,
   syncAgentPlan,
   setTaskCodexThreadId,
@@ -126,6 +127,13 @@ export interface CreateTaskParams {
    * branch the worktree is checked out on.
    */
   sharedBranch?: string;
+  /**
+   * Base commit SHA captured by the batch when it created the shared
+   * worktree. Threaded into every sibling so they all diff against the
+   * same starting point, regardless of which slice happens to commit
+   * first. Optional — falls back to a fresh resolve if absent.
+   */
+  sharedBaseCommitSha?: string | null;
   /**
    * GitHub-spawn metadata. When `githubPr` is set, the manager runs
    * `gh pr checkout <n>` inside the freshly-created worktree before
@@ -690,6 +698,7 @@ export class TaskManager {
     const branchMode = params.branchMode ?? "new";
     let branch: string;
     let worktreePath: string;
+    let baseCommitSha: string | null = null;
     if (!isGit) {
       if (params.githubPr) {
         throw new Error(
@@ -717,6 +726,16 @@ export class TaskManager {
       // the same checkout.
       worktreePath = params.sharedWorktreePath;
       branch = params.sharedBranch;
+      // Reuse the parent slice's frozen base SHA — every sibling on
+      // the shared branch should diff against the same starting point.
+      if (params.sharedBaseCommitSha) {
+        baseCommitSha = params.sharedBaseCommitSha;
+      } else {
+        // No sibling has one yet (legacy batch / pre-fix path): resolve
+        // `baseBranch` once now so at least the first slice's tip is
+        // captured. Best-effort — null on failure.
+        baseCommitSha = await resolveRefSha(worktreePath, baseBranch);
+      }
     } else {
       // Auto-name the branch when the caller didn't provide one. The
       // AI helper picks both the conventional prefix (feature/fix/
@@ -756,6 +775,12 @@ export class TaskManager {
       // line all reference the real ref. The PR-checkout block below
       // can still override this for `params.githubPr` runs.
       branch = result.branch;
+      // Capture the base SHA as observed at worktree creation. The diff
+      // endpoint anchors `git diff <sha>...HEAD` to this commit so the
+      // comparison stays meaningful after baseBranch advances past HEAD
+      // (typical aftermath of merging the task's PR — the live
+      // `main...HEAD` then resolves to empty).
+      baseCommitSha = result.baseCommitSha;
       // PR task: switch the worktree onto the PR's branch so the agent
       // sees the proposed changes (and any commits we add land back on
       // the right branch). `gh pr checkout` resolves the head ref —
@@ -778,6 +803,12 @@ export class TaskManager {
         const head = (await new Response(headProc.stdout).text()).trim();
         await headProc.exited;
         if (head) branch = head;
+        // For PR tasks the agentd-generated branch we just resolved is a
+        // throwaway — what we really diff against is `baseBranch` at the
+        // moment we checked out the PR. Re-resolve so the SHA matches the
+        // PR's actual fork point as the operator sees it.
+        const prBaseSha = await resolveRefSha(worktreePath, baseBranch);
+        if (prBaseSha) baseCommitSha = prBaseSha;
       }
     }
     // Auto-create or look up the project for this repo path. Tasks belong
@@ -791,6 +822,7 @@ export class TaskManager {
       worktreePath,
       branch,
       baseBranch,
+      baseCommitSha,
       templateId: params.templateId ?? null,
       scheduleId: params.scheduleId ?? null,
       projectId: project.id,
@@ -875,6 +907,7 @@ export class TaskManager {
 
     let sharedWorktreePath: string | undefined;
     let sharedBranch: string | undefined;
+    let sharedBaseCommitSha: string | null = null;
     if (shareWorktree) {
       let branchName = params.branchName?.trim();
       if (!branchName) {
@@ -903,6 +936,7 @@ export class TaskManager {
       });
       sharedWorktreePath = result.worktreePath;
       sharedBranch = result.branch;
+      sharedBaseCommitSha = result.baseCommitSha;
     }
 
     const created: Task[] = [];
@@ -935,6 +969,9 @@ export class TaskManager {
         planGroupId,
         ...(sharedWorktreePath ? { sharedWorktreePath } : {}),
         ...(sharedBranch ? { sharedBranch } : {}),
+        ...(sharedBaseCommitSha
+          ? { sharedBaseCommitSha }
+          : {}),
       });
       created.push(task);
       prevId = task.id;
@@ -1007,6 +1044,11 @@ export class TaskManager {
       // commit history as everything else in this group.
       sharedWorktreePath: parent.worktreePath,
       sharedBranch: parent.branch,
+      // Inherit the parent's frozen base SHA so the sibling's diff
+      // anchors to the same starting point.
+      ...(parent.baseCommitSha
+        ? { sharedBaseCommitSha: parent.baseCommitSha }
+        : {}),
     });
   }
 
@@ -2446,7 +2488,11 @@ export class TaskManager {
       memberLabels.push(label);
       const taskId = newId("task");
       const requestedBranch = `${ai.prefix}/${baseSlug}-${safeLabel}-${taskId.slice(-4)}`;
-      const { worktreePath, branch: actualBranch } = await createWorktree({
+      const {
+        worktreePath,
+        branch: actualBranch,
+        baseCommitSha,
+      } = await createWorktree({
         repoPath: params.repoPath,
         worktreeRoot: this.paths.worktrees,
         taskId,
@@ -2464,6 +2510,7 @@ export class TaskManager {
         worktreePath,
         branch: actualBranch,
         baseBranch,
+        baseCommitSha,
         projectId,
         // Council members default to no auto-push — the operator picks
         // a winner via the manual Ship action.
@@ -2518,7 +2565,7 @@ export class TaskManager {
         id: t.id,
         label: t.title.replace(/^\[([^\]]+)\].*/, "$1") || t.agent,
         cwd: t.worktreePath,
-        baseRef: t.baseBranch,
+        baseRef: t.baseCommitSha || t.baseBranch,
       })),
       { helper: cfg.aiHelpers },
     );
@@ -2551,7 +2598,7 @@ export class TaskManager {
     // system rules so the message matches their style.
     const ai = await generateCommitMessage(task.worktreePath, {
       fallbackHint: task.title,
-      baseRef: task.baseBranch,
+      baseRef: task.baseCommitSha || task.baseBranch,
       helper: this.helperForTask({
         agent: task.agent,
         model: task.model,

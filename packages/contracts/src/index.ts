@@ -201,6 +201,16 @@ export const Task = z.object({
   worktreePath: z.string(),
   branch: z.string(),
   baseBranch: z.string(),
+  /**
+   * Commit SHA the task branched off, captured at worktree-creation time.
+   * Frozen — never updated. Used by the diff endpoint so "what changed
+   * vs base" stays stable even after `baseBranch` advances past HEAD
+   * (typical after a PR merges the task's work into main: the dynamic
+   * `baseBranch...HEAD` then resolves to nothing because main now
+   * contains HEAD). Optional for tasks created before this column
+   * existed; those fall back to the live `baseBranch` ref.
+   */
+  baseCommitSha: z.string().nullable().optional(),
   status: TaskStatus,
   createdAt: z.number(),
   updatedAt: z.number(),

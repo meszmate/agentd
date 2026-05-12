@@ -50,6 +50,33 @@ export function worktreePathForGroup(
 export interface CreateWorktreeResult {
   worktreePath: string;
   branch: string;
+  /**
+   * Commit SHA the task branched off — resolved from `baseBranch` (or
+   * the existing branch's tip for `existing` mode) after any pull-latest
+   * and fallback resolution, but before the new branch is created.
+   * Frozen on the task row so diffs stay anchored even when the live
+   * base ref later advances past HEAD. `null` when we couldn't resolve
+   * the base (no commits yet, missing ref, etc.) — callers persist null.
+   */
+  baseCommitSha: string | null;
+}
+
+/**
+ * Resolve a ref (branch name, tag, commit-ish, …) to its full commit SHA
+ * in `repoPath`. Returns null when the ref doesn't resolve — empty string,
+ * unknown branch, fresh repo with no commits, etc. Used by the task
+ * manager to freeze a task's branch-off point at creation time so diffs
+ * stay anchored even after the live base ref advances.
+ */
+export async function resolveRefSha(
+  repoPath: string,
+  ref: string,
+): Promise<string | null> {
+  if (!ref) return null;
+  const r = await run(["git", "rev-parse", "--verify", "--quiet", ref], repoPath);
+  if (r.exitCode !== 0) return null;
+  const sha = r.stdout.trim();
+  return sha || null;
 }
 
 async function run(
@@ -322,6 +349,24 @@ export async function createWorktree(
     }
   }
 
+  // Snapshot the base commit BEFORE we create / switch onto the new
+  // branch. For `existing` mode the base is the branch tip the task
+  // will start from; for `new` / `shared` it's `baseBranch`'s tip.
+  // Resolved after any pull-latest above so the SHA matches what the
+  // worktree actually inherits. `null` when nothing resolves (fresh
+  // repo with no commits, missing ref, etc.) — diffs fall back to the
+  // live name. For existing-branch mode we prefer the local ref (that's
+  // what `git worktree add <branch>` will check out) and only fall
+  // through to `<remote>/<branch>` when no local branch exists yet.
+  let baseCommitSha: string | null = null;
+  if (branchMode === "existing") {
+    baseCommitSha =
+      (await resolveRefSha(repoPath, branchName)) ??
+      (await resolveRefSha(repoPath, `${remote}/${branchName}`));
+  } else {
+    baseCommitSha = await resolveRefSha(repoPath, baseBranch);
+  }
+
   if (workspaceMode === "in_place") {
     if (await hasUncommittedChanges(repoPath)) {
       throw new Error(
@@ -353,9 +398,9 @@ export async function createWorktree(
           `git checkout -b ${free} failed: ${r.stderr || r.stdout}`,
         );
       }
-      return { worktreePath: repoPath, branch: free };
+      return { worktreePath: repoPath, branch: free, baseCommitSha };
     }
-    return { worktreePath: repoPath, branch: branchName };
+    return { worktreePath: repoPath, branch: branchName, baseCommitSha };
   }
 
   // ── worktree mode ──
@@ -370,7 +415,9 @@ export async function createWorktree(
       // Verify the path is actually checked out on the expected branch
       // before reusing it; fall through to a recreate if not.
       const cur = await currentBranchAt(worktreePath);
-      if (cur === branchName) return { worktreePath, branch: branchName };
+      if (cur === branchName) {
+        return { worktreePath, branch: branchName, baseCommitSha };
+      }
       // Different branch: switch the existing worktree onto branchName.
       // Try checkout first (existing branch), else create.
       const exists = await localBranchExists(repoPath, branchName);
@@ -383,7 +430,7 @@ export async function createWorktree(
           `git checkout in shared worktree failed: ${r.stderr || r.stdout}`,
         );
       }
-      return { worktreePath, branch: branchName };
+      return { worktreePath, branch: branchName, baseCommitSha };
     }
     // First call for this group: create the worktree on a new branch
     // off baseBranch. If branchName already exists locally we attach to it.
@@ -397,7 +444,7 @@ export async function createWorktree(
         `git worktree add (shared) failed: ${r.stderr || r.stdout}`,
       );
     }
-    return { worktreePath, branch: branchName };
+    return { worktreePath, branch: branchName, baseCommitSha };
   }
   const worktreePath = join(worktreeRoot, taskId);
   if (branchMode === "existing") {
@@ -410,7 +457,7 @@ export async function createWorktree(
         `git worktree add (existing branch) failed: ${r.stderr || r.stdout}`,
       );
     }
-    return { worktreePath, branch: branchName };
+    return { worktreePath, branch: branchName, baseCommitSha };
   }
   // Default `new` mode: auto-suffix `-2`, `-3`, … if the AI-chosen
   // branch name is already taken (a prior task with the same slug,
@@ -427,7 +474,7 @@ export async function createWorktree(
       `git worktree add failed (exit ${r.exitCode}): ${r.stderr || r.stdout}`,
     );
   }
-  return { worktreePath, branch: free };
+  return { worktreePath, branch: free, baseCommitSha };
 }
 
 export async function removeWorktree(
