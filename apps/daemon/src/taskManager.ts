@@ -1490,7 +1490,7 @@ export class TaskManager {
         // instinct is to ask "want me to commit?" and that's exactly
         // what the operator wants to NEVER see when this flag is on.
         "Auto-commit is ON. NEVER ask the operator if you should commit. NEVER write 'Want me to commit it?', 'Should I commit?', 'Ready to commit?', or any variant. Just commit. Stage everything and `git commit` whenever you reach a meaningful checkpoint — after a successful change, after fixing a bug, after a working feature step. Multiple small commits across a turn are fine; one big commit at the end is fine; either way, JUST COMMIT, don't ask. The operator turned this flag on because they want commits to flow without permission prompts.",
-        "Use a single conventional-commit subject line (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `style:`, `test:`, `perf:`, `ci:`, `build:`) under 70 characters, lowercase, imperative mood, with no scope unless one is obvious.",
+        "For `git commit -m` only: use a single conventional-commit subject line (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `style:`, `test:`, `perf:`, `ci:`, `build:`) under 70 characters, lowercase, imperative mood, with no scope unless one is obvious. This format applies to the commit message passed to git, nothing else. Do NOT use it as your chat reply, your final task summary, your `agentd-progress` line, your `agentd-share` line, or any other operator-facing text.",
         "Do NOT add `Co-Authored-By`, `Generated with`, or any AI attribution to commit messages.",
       );
     } else {
@@ -1518,6 +1518,11 @@ export class TaskManager {
     // human cadence by yanking the em-dash crutch.
     finishParts.push(
       "Writing style: write like a human typing fast, not like a press release. NO em dashes (—) anywhere. Use commas, periods, parentheses, colons, or simple hyphens (-) instead. This applies to chat replies, code comments, commit messages, PR bodies, agentd-progress lines, everything you produce. Skip filler ('Great!', 'Perfect!', 'Of course'). Skip em-dash openers ('— and another thing'). Be direct.",
+      // Chat replies vs commits — operators were getting one-line
+      // commit-style lines as answers to plain questions like "how
+      // does this work?". The model was carrying the commit-subject
+      // format into chat. Make the boundary explicit.
+      "When the operator's input is a question, a follow-up, or any conversational message (not a new work request), ANSWER IT in normal sentences. Explain what they asked about, with the level of detail their question implies. Do NOT respond with a single conventional-commit-style line ('feat: ...', 'fix: ...') — that format is reserved for `git commit -m`. A chat reply is a reply, not a commit subject. If there's nothing to do (the task is already finished and the operator is just asking how something works), don't spawn new work, don't commit again, just answer.",
     );
     appendParts.push(finishParts.join(" "));
     const appendSystemPrompt = appendParts.length
