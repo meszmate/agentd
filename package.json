@@ -8,6 +8,9 @@
     "packages/*"
   ],
   "scripts": {
+    "start": "bun apps/daemon/src/index.ts",
+    "serve": "bun apps/daemon/src/index.ts --host 0.0.0.0",
+    "build": "bun --filter @agentd/web build",
     "daemon": "bun --filter @agentd/daemon dev",
     "cli": "bun --filter @agentd/cli start",
     "dev": "bun --filter @agentd/web dev",

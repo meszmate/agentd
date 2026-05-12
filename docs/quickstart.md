@@ -21,8 +21,10 @@ curl -fsSL https://bun.sh/install | bash       # bun
 git clone https://github.com/meszmate/agentd ~/agentd
 cd ~/agentd
 bun install
-bun --filter @agentd/web build
 ```
+
+No separate web build step needed — the daemon auto-builds the React bundle
+the first time it starts.
 
 ## 3. (Optional) Tailscale
 
@@ -36,15 +38,22 @@ tailscale ip -4   # note this address
 
 ## 4. Start the daemon
 
+One command. One process. Web UI + HTTP API + WebSocket bus, all on one port.
+
 ```bash
 # local-only
-bun apps/daemon/src/index.ts
+bun start
 
-# or remote (over tailscale)
-bun apps/daemon/src/index.ts --host $(tailscale ip -4)
+# or "deploy on a little server" — bind every interface and print the
+# reachable URLs so you can hit it from another device
+bun serve
+
+# or a specific tailnet IP
+bun start -- --host $(tailscale ip -4)
 ```
 
-It prints a one-time pairing token + QR code.
+It prints a one-time pairing token + QR code on every startup (unless you
+pass `--no-pair`).
 
 ## 5. Pair a device
 

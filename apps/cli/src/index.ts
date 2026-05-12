@@ -1,11 +1,18 @@
 #!/usr/bin/env bun
 import { hostname } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { AgentdClient } from "@agentd/client";
 import { loadCliConfig, saveCliConfig } from "./config.ts";
 
 const HELP = `agentd — remote coding-agent orchestrator
+
+Deploy (single command — runs the daemon + serves the web UI on one port):
+  agentd serve                      bind to 127.0.0.1:3773 (local)
+  agentd serve --public             bind to 0.0.0.0 (LAN / tailnet / "little server")
+  agentd serve --port 8080 --root /var/lib/agentd
 
 Tasks:
   agentd pair --server <url> --token <pairing-token>
@@ -66,6 +73,80 @@ Env:
   AGENTD_SERVER   default server URL (overrides saved config)
   AGENTD_TOKEN    default session token (overrides saved config)
 `;
+
+/**
+ * `agentd serve` — single command to run the daemon (which also serves the
+ * web UI on the same port). The point is to give operators one entry point
+ * for "deploy this on a little server", instead of remembering to build the
+ * web bundle separately and then run the daemon. The daemon auto-builds the
+ * web bundle on first start, so this is genuinely one command.
+ *
+ * Flags map to the daemon's own argv parser; we just decorate `--public` as
+ * a friendlier alias for `--host 0.0.0.0`.
+ */
+function cmdServe(argv: string[]) {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      host: { type: "string" },
+      port: { type: "string" },
+      root: { type: "string" },
+      public: { type: "boolean" },
+      "no-pair": { type: "boolean" },
+    },
+    allowPositionals: false,
+    strict: false,
+  });
+
+  // Resolve the daemon entry script. The CLI ships inside the monorepo —
+  // `apps/cli/src/index.ts` is two levels up from `apps/daemon/src/index.ts`.
+  // This keeps `bun apps/cli/src/index.ts serve`, `agentd serve` from a
+  // `bun install -g .` global install, and the Docker image all working.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const daemonEntry = resolve(here, "..", "..", "daemon", "src", "index.ts");
+  if (!existsSync(daemonEntry)) {
+    console.error(
+      `serve: daemon entry not found at ${daemonEntry}\n` +
+        "       run `bun apps/daemon/src/index.ts` directly, or reinstall agentd from a full checkout.",
+    );
+    process.exit(1);
+  }
+
+  const host =
+    typeof values.host === "string" && values.host.length > 0
+      ? values.host
+      : values.public
+        ? "0.0.0.0"
+        : undefined;
+
+  const daemonArgs: string[] = [daemonEntry];
+  if (host) daemonArgs.push("--host", host);
+  if (typeof values.port === "string" && values.port) {
+    daemonArgs.push("--port", values.port);
+  }
+  if (typeof values.root === "string" && values.root) {
+    daemonArgs.push("--root", values.root);
+  }
+  if (values["no-pair"]) daemonArgs.push("--no-pair");
+
+  const proc = Bun.spawn({
+    cmd: ["bun", ...daemonArgs],
+    stdio: ["inherit", "inherit", "inherit"],
+  });
+  // Forward signals so Ctrl-C in `agentd serve` cleanly stops the daemon.
+  const forward = (sig: "SIGINT" | "SIGTERM") => () => {
+    try {
+      proc.kill(sig);
+    } catch {
+      /* daemon already gone */
+    }
+  };
+  process.on("SIGINT", forward("SIGINT"));
+  process.on("SIGTERM", forward("SIGTERM"));
+  return proc.exited.then((code) => {
+    process.exit(code ?? 0);
+  });
+}
 
 async function cmdPair(argv: string[]) {
   const { values } = parseArgs({
@@ -919,6 +1000,9 @@ async function cmdSkills(argv: string[]) {
 async function main() {
   const [, , cmd, ...rest] = process.argv;
   switch (cmd) {
+    case "serve":
+    case "start":
+      return cmdServe(rest);
     case "pair":
       return cmdPair(rest);
     case "ls":
