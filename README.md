@@ -23,6 +23,7 @@
 
   <p>
     <a href="./docs/quickstart.md">Quickstart</a> ·
+    <a href="./docs/deploy.md">Deploy on a server</a> ·
     <a href="./docs/docker.md">Docker</a> ·
     <a href="./docs/architecture.md">Architecture</a> ·
     <a href="./CONTRIBUTING.md">Contributing</a>
@@ -132,6 +133,10 @@ agentd serve --public --port 8080 --root /var/lib/agentd
 globally-installed `agentd` binary works the same way. The very first run
 compiles the web bundle (`apps/web/dist`) automatically; subsequent runs reuse
 it.
+
+For a real server (auto-start on boot, background, auto-update from npm), see
+[docs/deploy.md](./docs/deploy.md) — has copy-paste systemd, launchd, and
+Watchtower recipes.
 
 The daemon runs as your user, on your filesystem, with your `$PATH`. That
 means **everything you do in the web tmux is a real shell on your machine**:
