@@ -31,6 +31,7 @@ export const qk = {
   project: (idOrSlug: string) => ["project", idOrSlug] as const,
   bridgeSummary: () => ["bridge-summary"] as const,
   rateLimits: () => ["rate-limits"] as const,
+  updateInfo: () => ["update-info"] as const,
   discordChannels: () => ["discord-channels"] as const,
   projectSuggestions: (projectId: string) =>
     ["project-suggestions", projectId] as const,
@@ -77,6 +78,31 @@ export function useProjects() {
     // No polling — the realtime bus invalidates this on task_updated /
     // status / exit events. Initial fetch + WS-driven refresh only.
     staleTime: 60_000,
+  });
+}
+
+/**
+ * The daemon's npm-update snapshot. Read once on mount; the realtime
+ * `update_info` event patches the cache after that, so the banner stays
+ * live across the daemon's 24h check interval without polling.
+ */
+export function useUpdateInfo() {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.updateInfo(),
+    queryFn: () => client.getUpdateInfo(),
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useCheckUpdate() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => client.checkUpdateInfo(),
+    onSuccess: (res) => {
+      qc.setQueryData(qk.updateInfo(), res);
+    },
   });
 }
 

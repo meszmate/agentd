@@ -22,14 +22,31 @@ import { TaskManager } from "./taskManager.ts";
 import { PluginManager } from "./pluginManager.ts";
 import { Scheduler } from "./scheduler.ts";
 import { BrainstormSweep } from "./brainstormSweep.ts";
+import { UpdateChecker } from "./updateChecker.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..", "..");
 const WEB_DIST = resolve(REPO_ROOT, "apps", "web", "dist");
 const WEB_INDEX = resolve(WEB_DIST, "index.html");
 const WEB_PKG = resolve(REPO_ROOT, "apps", "web", "package.json");
+const ROOT_PKG = resolve(REPO_ROOT, "package.json");
 
-const VERSION = "0.0.1";
+// Pull the version from the root package.json so the daemon, the npm-update
+// banner, and the `agentd --version` output never drift. Falls back to a
+// safe placeholder if the file isn't there (shouldn't happen — would mean
+// the daemon was bundled in a weird way).
+function readVersion(): string {
+  try {
+    const raw = readFileSync(ROOT_PKG, "utf8");
+    const v = JSON.parse(raw).version;
+    if (typeof v === "string" && v) return v;
+  } catch {
+    // fallthrough
+  }
+  return "0.0.0";
+}
+
+const VERSION = readVersion();
 
 /**
  * Build the web bundle on the fly when running from a source checkout and
@@ -131,12 +148,15 @@ async function main() {
 
   const plugins = new PluginManager(paths.root, baseUrl, db);
 
+  const updateChecker = new UpdateChecker(bus, VERSION);
+
   const { app, wsHandler, upgradeRequest } = buildServer({
     db,
     bus,
     paths,
     tasks,
     plugins,
+    updateChecker,
     version: VERSION,
   });
 
@@ -247,6 +267,8 @@ async function main() {
   const brainstormSweep = new BrainstormSweep(db, bus, paths);
   brainstormSweep.start();
 
+  updateChecker.start();
+
   plugins.startAll();
   const pluginStatuses = plugins.status();
   for (const p of pluginStatuses) {
@@ -263,6 +285,7 @@ async function main() {
     tasks.stopStallWatchdog();
     scheduler.stop();
     brainstormSweep.stop();
+    updateChecker.stop();
     await plugins.stopAll();
     server.stop();
     process.exit(0);
