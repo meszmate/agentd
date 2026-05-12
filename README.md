@@ -68,6 +68,22 @@ Designed for one operator with many devices. Reachable from anywhere over Tailsc
 
 ## Install
 
+Two ways. Pick whichever fits — both put the `agentd` command on your PATH.
+
+### npm (one-liner, no clone)
+
+```bash
+bun install -g @meszmate/agentd        # or: npm i -g @meszmate/agentd
+agentd serve                           # local-only, 127.0.0.1:3773
+agentd serve --public                  # bind every interface; print reachable URLs
+```
+
+Bun is required at runtime (the daemon and CLI are Bun scripts). The
+published tarball ships the pre-built web bundle, so there's no extra build
+step after install.
+
+### From source
+
 ```bash
 git clone https://github.com/meszmate/agentd ~/agentd
 cd ~/agentd
