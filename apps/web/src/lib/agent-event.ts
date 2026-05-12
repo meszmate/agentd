@@ -77,6 +77,49 @@ export function shapeMessageFromEvent(
       ts,
     };
   }
+  // The agent's structured calls land as system-role rows the timeline
+  // parses back via parseSystemMessage. Mirror the daemon's wire format
+  // exactly so the live row pairs up with (and dedups against) the
+  // persisted row a later refetch will return.
+  if (event.kind === "ask") {
+    const optionsBlock = event.options.length
+      ? `\n${event.options.map((o, i) => `${i + 1}. ${o}`).join("\n")}`
+      : "";
+    return {
+      id: liveId(ts),
+      taskId,
+      role: "system",
+      content: `[ask · ${event.askId}] ${event.prompt}${optionsBlock}`,
+      ts,
+    };
+  }
+  if (event.kind === "answer") {
+    return {
+      id: liveId(ts),
+      taskId,
+      role: "system",
+      content: `[answer · ${event.askId}] ${event.answer}`,
+      ts,
+    };
+  }
+  if (event.kind === "share") {
+    return {
+      id: liveId(ts),
+      taskId,
+      role: "system",
+      content: `[share] ${event.text}`,
+      ts,
+    };
+  }
+  if (event.kind === "progress") {
+    return {
+      id: liveId(ts),
+      taskId,
+      role: "system",
+      content: event.done ? `[progress · done] ${event.text}` : `[progress] ${event.text}`,
+      ts,
+    };
+  }
   return null;
 }
 
