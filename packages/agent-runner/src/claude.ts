@@ -105,6 +105,21 @@ function formatClaudeStderrLine(line: string): string | null {
   if (lc.includes("model") && lc.includes("not found")) {
     return `[claude] ${trimmed}\nHint: Unknown model. Check the model field in task settings.`;
   }
+  // Context-overflow surfaces in several flavours depending on the CLI
+  // path (auto-compact failed, hard prompt limit, etc). The API body usually
+  // says "prompt is too long: N tokens > M maximum" or
+  // "input length and `max_tokens` exceed context limit". Match early so
+  // the daemon can recognise the failure and stop pointlessly resuming
+  // the same dead session.
+  if (
+    lc.includes("prompt is too long") ||
+    lc.includes("context_length_exceeded") ||
+    lc.includes("context length exceeded") ||
+    (lc.includes("input length") && lc.includes("exceed")) ||
+    (lc.includes("context") && lc.includes("limit") && lc.includes("exceed"))
+  ) {
+    return `[claude] ${trimmed}\nHint: Context window full. The session can't be resumed — send a new message to start a fresh claude with the relevant context.`;
+  }
   return null;
 }
 
@@ -128,8 +143,13 @@ function claudeErrorHint(
   if (type === "not_found_error") {
     return "Model not found. Check the model field in task settings.";
   }
-  if (m.includes("context") && m.includes("length")) {
-    return "Context window full. Run `/compact` or restart the task.";
+  if (
+    (m.includes("context") && m.includes("length")) ||
+    m.includes("prompt is too long") ||
+    (m.includes("input length") && m.includes("exceed")) ||
+    (m.includes("context") && m.includes("limit") && m.includes("exceed"))
+  ) {
+    return "Context window full. The session can't be resumed — send a new message to start a fresh claude with the relevant context.";
   }
   return null;
 }
