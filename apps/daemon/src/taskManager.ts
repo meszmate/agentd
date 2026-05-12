@@ -55,6 +55,7 @@ import {
   touchProject,
   pushBranch,
   removeWorktree,
+  resolveAutoCommitIdentity,
   resolveRefSha,
   setProviderRateLimitWindow,
   syncAgentPlan,
@@ -1637,6 +1638,18 @@ export class TaskManager {
         task.agent === "codex" && resume && task.latestTurnInputTokens
           ? task.latestTurnInputTokens
           : undefined;
+      // When the operator hasn't configured `user.email`/`user.name`
+      // (global or local), git falls back to `${USER}@$(hostname)` —
+      // e.g. `meszmate@Matts-MacBook-Air.local` — which doesn't match
+      // their GitHub-linked email. GitHub then treats the agent's
+      // commits as a separate author and tacks on `Co-authored-by:`
+      // trailers when squash-merging the PR. Inherit the identity
+      // from the base branch's most recent author so squash-merges
+      // see one author and skip the trailer.
+      const identity = await resolveAutoCommitIdentity(
+        task.worktreePath,
+        task.baseCommitSha || task.baseBranch,
+      );
       await runner.start({
         prompt,
         cwd: task.worktreePath,
@@ -1656,6 +1669,14 @@ export class TaskManager {
           // Prepend the daemon's bin dir so the agent always finds
           // `agentd-progress` on its PATH regardless of host install.
           PATH: `${this.paths.bin}:${process.env.PATH ?? ""}`,
+          ...(identity
+            ? {
+                GIT_AUTHOR_NAME: identity.name,
+                GIT_AUTHOR_EMAIL: identity.email,
+                GIT_COMMITTER_NAME: identity.name,
+                GIT_COMMITTER_EMAIL: identity.email,
+              }
+            : {}),
         },
       });
     } catch (err) {
