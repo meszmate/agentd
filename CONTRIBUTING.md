@@ -94,6 +94,36 @@ Don't include AI-attribution trailers (`Co-Authored-By:`, `Generated with`, etc.
 commit messages. The agent system prompt agentd ships is configured to suppress them in
 its own output too.
 
+## Releasing to npm
+
+The package is published as [`@meszmate/agentd`](https://www.npmjs.com/package/@meszmate/agentd)
+via the `.github/workflows/publish.yml` workflow. It uses
+[npm trusted publishing](https://docs.npmjs.com/trusted-publishers) — OIDC,
+no long-lived `NPM_TOKEN` secret — and attaches a provenance attestation
+automatically.
+
+Cutting a release once the trusted-publisher config exists:
+
+```bash
+# bump version (no scope, no body needed — the workflow validates the tag)
+npm version patch                  # or minor / major
+git push origin main --follow-tags
+```
+
+The tag push triggers the workflow: typecheck → web build → `npm publish`.
+
+**One-time bootstrap** (only needed if the trusted publisher isn't configured
+yet, e.g. on a fresh package name):
+
+1. From a laptop, `npm login` and `npm publish --access public` to put the
+   first version on the registry. This exists only so step 2 has a package
+   page to configure.
+2. Go to `https://www.npmjs.com/package/@meszmate/agentd/access` → "Trusted
+   Publisher" → GitHub Actions. Fill in `meszmate` / `agentd` / `publish.yml`
+   (leave environment blank).
+3. From now on, every `git push --tags` publishes via OIDC. You can delete
+   any classic publish tokens from your npm account.
+
 ## Reporting bugs
 
 Include:
