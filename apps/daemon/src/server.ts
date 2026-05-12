@@ -793,6 +793,22 @@ export function buildServer(opts: BuildServerOptions) {
     return c.json({ info });
   });
 
+  /**
+   * One-click update. Refuses unless the daemon is service-managed
+   * (systemd/launchd) — a foreground daemon would download the new
+   * version, exit, and leave the operator without a running server.
+   * Returns 202 immediately; the actual install + restart happens
+   * asynchronously, the web sees the WS drop and reconnect after the
+   * service manager respawns us.
+   */
+  api.post("/update-info/apply", (c) => {
+    const r = updateChecker.applyUpdate();
+    if (!r.started) {
+      return c.json({ ok: false, error: r.reason ?? "could not start" }, 400);
+    }
+    return c.json({ ok: true, status: "updating" }, 202);
+  });
+
   /* ── Councils ─────────────────────────────────────────────────────── */
 
   api.get("/councils", (c) => c.json({ councils: listCouncils(db) }));

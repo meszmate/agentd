@@ -19,9 +19,28 @@ const REGISTRY_URL = "https://registry.npmjs.org/@meszmate/agentd/latest";
 const NORMAL_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const RETRY_INTERVAL_MS = 60 * 60 * 1000;
 
+/**
+ * Are we running under a service manager that will restart us on a
+ * non-zero exit? systemd sets `INVOCATION_ID` for every spawned unit;
+ * launchd sets `XPC_SERVICE_NAME` for Launch{Agents,Daemons}. Anything
+ * else (foreground `agentd serve`, Docker without --restart, etc.)
+ * doesn't qualify — the one-click update button would download the new
+ * version, exit, and the daemon would stay down.
+ */
+export function isServiceManaged(): boolean {
+  if (process.platform === "linux") {
+    return !!process.env.INVOCATION_ID;
+  }
+  if (process.platform === "darwin") {
+    return !!process.env.XPC_SERVICE_NAME;
+  }
+  return false;
+}
+
 export class UpdateChecker {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private info: UpdateInfo;
+  private applying = false;
 
   constructor(
     private readonly bus: EventBus,
@@ -33,6 +52,7 @@ export class UpdateChecker {
       checkedAt: null,
       error: null,
       updateAvailable: false,
+      serviceManaged: isServiceManaged(),
     };
   }
 
@@ -58,6 +78,75 @@ export class UpdateChecker {
    */
   async checkNow(): Promise<UpdateInfo> {
     return this.check();
+  }
+
+  /**
+   * One-click update: spawn `bun install -g @meszmate/agentd@latest`,
+   * wait for it, then exit non-zero so the service manager restarts
+   * us into the freshly installed version.
+   *
+   * Returns immediately (the HTTP handler responds before the install
+   * starts) — the actual install runs async in the background and the
+   * daemon eventually exits. The web client sees the WS disconnect,
+   * reconnects when systemd/launchd respawns us, and picks up the new
+   * version via the boot probe.
+   *
+   * Refuses to act if we're not service-managed: a foreground daemon
+   * would just download and exit, leaving the operator stuck.
+   * Idempotent — concurrent calls collapse to one in-flight install.
+   */
+  applyUpdate(): { started: boolean; reason?: string } {
+    if (!this.info.serviceManaged) {
+      return {
+        started: false,
+        reason:
+          "daemon is not service-managed (run `agentd setup` to enable one-click updates)",
+      };
+    }
+    if (this.applying) {
+      return { started: false, reason: "update already in progress" };
+    }
+    this.applying = true;
+    // setImmediate so the HTTP response leaves the wire before we
+    // start a multi-second `bun install` that may saturate the process.
+    setImmediate(() => void this.doApply());
+    return { started: true };
+  }
+
+  private async doApply(): Promise<void> {
+    try {
+      console.log("[update] running: bun install -g @meszmate/agentd@latest");
+      // process.execPath is the bun binary running us. Reuse it so the
+      // child install goes to the same global prefix we'll be restarting
+      // out of, regardless of the service manager's PATH.
+      const proc = Bun.spawn({
+        cmd: [
+          process.execPath,
+          "install",
+          "-g",
+          "@meszmate/agentd@latest",
+        ],
+        stdio: ["ignore", "inherit", "inherit"],
+      });
+      const code = await proc.exited;
+      if (code !== 0) {
+        console.error(
+          `[update] install exited with code ${code}; not restarting`,
+        );
+        this.applying = false;
+        return;
+      }
+      console.log(
+        "[update] install complete; exiting so service manager restarts us",
+      );
+      // Exit non-zero so systemd's Restart=on-failure picks us up. launchd's
+      // KeepAlive=true doesn't care about exit code — it restarts on any
+      // exit. Code 1 is the conventional "intentional failure" marker.
+      process.exit(1);
+    } catch (e) {
+      console.error("[update] failed:", (e as Error).message);
+      this.applying = false;
+    }
   }
 
   private async tick(): Promise<void> {
@@ -89,6 +178,7 @@ export class UpdateChecker {
         checkedAt: Date.now(),
         error: null,
         updateAvailable: isNewer(latest, this.info.currentVersion),
+        serviceManaged: this.info.serviceManaged,
       };
     } catch (e) {
       next = {
@@ -97,6 +187,7 @@ export class UpdateChecker {
         checkedAt: Date.now(),
         error: (e as Error).message,
         updateAvailable: this.info.updateAvailable,
+        serviceManaged: this.info.serviceManaged,
       };
     }
 

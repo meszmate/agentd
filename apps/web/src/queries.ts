@@ -106,6 +106,19 @@ export function useCheckUpdate() {
   });
 }
 
+/**
+ * Trigger the daemon's one-click update flow. On success the daemon
+ * exits and its service manager restarts it; the WS auto-reconnects
+ * and the new version's UpdateInfo arrives via the boot probe. The
+ * banner removes itself when `updateAvailable` flips false.
+ */
+export function useApplyUpdate() {
+  const client = useClient();
+  return useMutation({
+    mutationFn: () => client.applyUpdate(),
+  });
+}
+
 export function useProject(idOrSlug: string | null | undefined) {
   const client = useClient();
   return useQuery({

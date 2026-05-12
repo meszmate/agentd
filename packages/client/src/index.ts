@@ -377,6 +377,16 @@ export class AgentdClient {
     return this.req("/api/update-info/check", { method: "POST" });
   }
 
+  /**
+   * Trigger the one-click update flow. The daemon runs `bun install -g`
+   * asynchronously and then exits non-zero so its service manager
+   * restarts it. Throws on 4xx (e.g. if the daemon is not
+   * service-managed). On success returns 202 + the status string.
+   */
+  async applyUpdate(): Promise<{ ok: true; status: string }> {
+    return this.req("/api/update-info/apply", { method: "POST" });
+  }
+
   // ── suggestions ──
   async listSuggestions(opts?: {
     status?: "pending" | "resolved" | "dismissed";

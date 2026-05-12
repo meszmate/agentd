@@ -2038,6 +2038,13 @@ export const UpdateInfo = z.object({
   checkedAt: z.number().nullable(),
   error: z.string().nullable(),
   updateAvailable: z.boolean(),
+  // True when the daemon was launched by a service manager (systemd on
+  // linux, launchd on macos) and can therefore one-click update itself:
+  // we exit non-zero after `bun install -g` and the manager restarts us.
+  // For a foreground `agentd serve`, this is false and the web banner
+  // disables the "Update now" button (the daemon would download the new
+  // version, exit, and nothing would bring it back).
+  serviceManaged: z.boolean(),
 });
 export type UpdateInfo = z.infer<typeof UpdateInfo>;
 
