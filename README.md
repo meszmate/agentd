@@ -5,7 +5,7 @@
   </picture>
 
   <p>
-    <strong>A self-hosted orchestrator for coding agents.</strong><br>
+    <strong>Self-host your coding agents. Reach them from anywhere.</strong><br>
     Spawn parallel agents, each in its own git worktree.<br>
     Chat from web, terminal, Telegram, or Discord.<br>
     Auto-commit, auto-push, auto-PR. Cron schedules. Templates.<br>
