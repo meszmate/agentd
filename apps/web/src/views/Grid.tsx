@@ -130,12 +130,19 @@ export function GridOverlay({
       }
     }
     // Sort live: waiting_perm first (blocked, needs eyes), then by
-    // recency. Sort recent: most-recently-finished first.
+    // CREATION time (stable). We deliberately do NOT sort by
+    // updatedAt — every agent token bumps updatedAt and the grid
+    // would re-shuffle on every WS event, which is disorienting and
+    // makes tracking a specific tile by position impossible. Stable
+    // creation-order means a tile's position only changes when its
+    // status crosses the waiting_perm boundary (something that
+    // genuinely needs the operator's attention), not every time it
+    // exhales a token.
     liveTasks.sort((a, b) => {
       const pa = a.status === "waiting_perm" ? 0 : 1;
       const pb = b.status === "waiting_perm" ? 0 : 1;
       if (pa !== pb) return pa - pb;
-      return b.updatedAt - a.updatedAt;
+      return a.createdAt - b.createdAt;
     });
     recentTasks.sort((a, b) => {
       const fa = lastStatusChange[a.id]?.ts ?? a.updatedAt;
