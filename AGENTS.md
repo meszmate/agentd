@@ -158,8 +158,8 @@ curl -s http://127.0.0.1:3773/health
 ## Daemon conventions
 
 - **One Hono app, one event bus, one DB.** `apps/daemon/src/server.ts`
-  is intentionally a single 1500-line file — keep new endpoints there
-  unless you have a real reason to split.
+  is intentionally one big file (currently ~6k lines). Keep new
+  endpoints there unless you have a real reason to split.
 - **WebSocket fan-out via `EventBus`.** Publish task events through
   the bus; the `/ws` upgrade handler subscribes per session. Never
   push directly to a websocket from a request handler.
