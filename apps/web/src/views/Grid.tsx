@@ -14,6 +14,7 @@ import {
 import { usePatchPrefs, usePrefs, useTasks } from "@/queries";
 import { useRealtime } from "@/realtime";
 import { TaskPane } from "@/components/task-pane";
+import { StatusDot } from "@/components/ui/status-dot";
 import { cn } from "@/lib/utils";
 
 const ACTIVE_STATUSES = new Set<Task["status"]>([
@@ -157,13 +158,24 @@ export function GridOverlay({
 
   const [focusedId, setFocusedId] = useState<string | null>(null);
 
-  // If the focused task drops off the active list (turn finished /
-  // closed / removed), release focus so the layout doesn't keep a
-  // phantom slot reserved for a pane that no longer renders.
-  const liveIds = useMemo(() => new Set(live.map((t) => t.id)), [live]);
+  // All tasks the operator can focus from inside the overlay: every
+  // currently-active task plus everything that wrapped within the
+  // recent window. Finished tasks intentionally remain focusable so
+  // the operator can scroll back through their transcript / diff /
+  // log without leaving the grid.
+  const focusable = useMemo(() => [...live, ...recent], [live, recent]);
+
+  // If the focused task drops off the focusable set (closed /
+  // removed / aged out of the recent window), release focus so the
+  // layout doesn't keep a phantom slot reserved for a pane that no
+  // longer renders.
+  const focusableIds = useMemo(
+    () => new Set(focusable.map((t) => t.id)),
+    [focusable],
+  );
   useEffect(() => {
-    if (focusedId && !liveIds.has(focusedId)) setFocusedId(null);
-  }, [focusedId, liveIds]);
+    if (focusedId && !focusableIds.has(focusedId)) setFocusedId(null);
+  }, [focusedId, focusableIds]);
 
   // Reset focus each time the overlay opens — stale focus from a
   // previous session would expand the wrong pane on next open.
@@ -217,6 +229,15 @@ export function GridOverlay({
             panel itself. Scale+fade in from 97% for a tasteful lift. */}
         <DialogPrimitive.Content
           aria-describedby={undefined}
+          onEscapeKeyDown={(e) => {
+            // Esc as a "back one level" gesture: when a pane is
+            // focused, peel it back to the grid first; only close
+            // the overlay when nothing is focused (Radix's default).
+            if (focusedId) {
+              e.preventDefault();
+              setFocusedId(null);
+            }
+          }}
           className={cn(
             "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
             "w-[calc(100vw-2rem)] h-[calc(100vh-2rem)]",
@@ -331,11 +352,12 @@ export function GridOverlay({
               ) : totalShown === 0 ? (
                 <EmptyState />
               ) : focusedId &&
-                live.some((t) => t.id === focusedId) ? (
+                focusableIds.has(focusedId) ? (
                 <FocusedLayout
-                  tasks={live}
+                  tasks={focusable}
                   focusedId={focusedId}
-                  onToggleFocus={toggleFocus}
+                  onFocus={(id) => setFocusedId(id)}
+                  onUnfocus={() => setFocusedId(null)}
                   verbose={verbose}
                 />
               ) : (
@@ -440,95 +462,115 @@ function GridLayout({
 }
 
 /**
- * Focused layout — the operator picked a task to dive into. The big
- * focused pane takes the entire vertical canvas; a thin horizontal
- * rail above it shows compact tiles for the OTHER live tasks so the
- * operator keeps peripheral vision (and can hop with one click).
+ * Focused layout — the operator picked a task to dive into.
  *
- * Each task keeps its `layoutId` from the unfocused GridLayout, so the
- * morph from "tile in a 4x3 grid" to either "tile in the rail" or
- * "the big focused pane below" animates as a single coordinated FLIP
- * transition — the clicked tile smoothly grows into the focused
- * region while the others reshape into the rail.
+ * Layout: vertical rail on the left listing every focusable task
+ * (live + recently-finished, so finished tasks remain inspectable),
+ * with the big focused pane filling the rest. The focused pane
+ * itself is a split: TaskTimeline (chat) on the left, TaskWorkspace
+ * (Live / Diff / Todos / Files / Log / Context / Term tabs) on the
+ * right — the same shape as `/tasks/:id`, just embedded in the
+ * overlay.
  *
- * The rail is hidden entirely when there's only one live task, since
- * a one-tile rail would just be visual noise.
+ * Keyboard nav (vim-style):
+ *   - j / ArrowDown: focus the next task in the rail
+ *   - k / ArrowUp:   focus the previous task
+ *   - g:             jump to the first task
+ *   - G:             jump to the last task
+ *   - 1..9:          jump to the Nth task in the rail
+ *   - Esc:           unfocus → back to the grid (Radix dialog also
+ *                    closes on Esc, but our handler runs first so
+ *                    the unfocus is a "back one level" gesture
+ *                    before the overlay itself closes on a second
+ *                    press)
+ *
+ * Typing into the composer is unaffected — the handler bails when
+ * an editable element has focus so j / k / 1 don't hijack input.
+ *
+ * Each task keeps its `layoutId` from the unfocused GridLayout so
+ * the morph between "tile in the grid" → "row in the rail" /
+ * "focused pane" animates via FLIP rather than snapping.
  */
 function FocusedLayout({
   tasks,
   focusedId,
-  onToggleFocus,
+  onFocus,
+  onUnfocus,
   verbose,
 }: {
   tasks: Task[];
   focusedId: string;
-  onToggleFocus: (id: string) => void;
+  onFocus: (id: string) => void;
+  onUnfocus: () => void;
   verbose: boolean;
 }) {
   const focusedTask = tasks.find((t) => t.id === focusedId);
-  const others = tasks.filter((t) => t.id !== focusedId);
+  const focusedIdx = tasks.findIndex((t) => t.id === focusedId);
 
-  // Defensive: useEffect in the parent releases focus when the
-  // focused task drops off the live list, but on the same render
-  // tick it's possible we're here with a stale id. Render nothing
-  // and let the parent un-focus on the next tick.
+  // Keyboard navigation. Attached to window so it works no matter
+  // where focus sits, but bails when the target is an editable
+  // element so the operator's typing isn't hijacked.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const editable =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+      if (editable) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const n = tasks.length;
+      if (n === 0) return;
+      const cur = focusedIdx;
+      if (e.key === "j" || e.key === "ArrowDown") {
+        e.preventDefault();
+        const next = tasks[(cur + 1 + n) % n];
+        if (next) onFocus(next.id);
+      } else if (e.key === "k" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const prev = tasks[(cur - 1 + n) % n];
+        if (prev) onFocus(prev.id);
+      } else if (e.key === "g") {
+        e.preventDefault();
+        const first = tasks[0];
+        if (first) onFocus(first.id);
+      } else if (e.key === "G") {
+        e.preventDefault();
+        const last = tasks[n - 1];
+        if (last) onFocus(last.id);
+      } else if (/^[1-9]$/.test(e.key)) {
+        e.preventDefault();
+        const idx = parseInt(e.key, 10) - 1;
+        const t = tasks[idx];
+        if (t) onFocus(t.id);
+      }
+      // Esc is handled at the Dialog level (onEscapeKeyDown) so a
+      // single press goes "focused pane → grid → close overlay"
+      // in two presses without racing this window listener.
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [tasks, focusedIdx, onFocus]);
+
+  // Defensive: parent releases focus when the focused id drops out
+  // of the focusable set, but on the same render tick it's possible
+  // we're here with a stale id. Render nothing and let the parent
+  // un-focus on the next tick.
   if (!focusedTask) return null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3">
-      {others.length > 0 && (
-        <div className="shrink-0">
-          <div className="flex items-center gap-2 px-1 pb-1.5">
-            <span className="font-mono text-[9.5px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
-              other live
-            </span>
-            <span className="h-px flex-1 bg-gradient-to-r from-ink-900/10 via-ink-900/5 to-transparent dark:from-ink-50/10 dark:via-ink-50/5" />
-            <span className="font-mono text-[9.5px] tabular-nums text-ink-400 dark:text-ink-500">
-              {others.length}
-            </span>
-          </div>
-          {/* Horizontal scrolling rail. Fixed tile width keeps the
-              rail height stable as tasks come and go. */}
-          <div className="overflow-x-auto">
-            <div className="flex gap-3 h-[160px]">
-              <AnimatePresence mode="popLayout" initial={false}>
-                {others.map((t) => (
-                  <motion.div
-                    key={t.id}
-                    layout
-                    layoutId={t.id}
-                    initial={{ opacity: 0, scale: 0.94 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{
-                      opacity: 0,
-                      scale: 0.92,
-                      transition: { duration: 0.18 },
-                    }}
-                    transition={{
-                      layout: {
-                        type: "spring",
-                        stiffness: 320,
-                        damping: 32,
-                      },
-                      opacity: { duration: 0.22 },
-                    }}
-                    className="w-[260px] shrink-0"
-                  >
-                    <TaskPane
-                      task={t}
-                      focused={false}
-                      onToggleFocus={() => onToggleFocus(t.id)}
-                      density="tile"
-                      verbose={verbose}
-                    />
-                  </motion.div>
-                ))}
-              </AnimatePresence>
-            </div>
-          </div>
-        </div>
+    <div className="flex h-full min-h-0 gap-3">
+      {tasks.length > 1 && (
+        <RailSidebar
+          tasks={tasks}
+          focusedId={focusedId}
+          onFocus={onFocus}
+        />
       )}
-      {/* Big focused pane — fills whatever vertical space remains. */}
+      {/* Big focused pane — fills the remaining width. layoutId
+          preserved so the morph from grid tile → focused pane
+          animates rather than snapping. */}
       <motion.div
         layout
         layoutId={focusedTask.id}
@@ -536,17 +578,164 @@ function FocusedLayout({
         transition={{
           layout: { type: "spring", stiffness: 280, damping: 30 },
         }}
-        className="flex-1 min-h-0"
+        className="flex-1 min-w-0 min-h-0"
       >
         <TaskPane
           task={focusedTask}
           focused
-          onToggleFocus={() => onToggleFocus(focusedTask.id)}
+          onToggleFocus={onUnfocus}
           density="focused"
           verbose={verbose}
         />
       </motion.div>
     </div>
+  );
+}
+
+/**
+ * Vertical rail listing every focusable task. Each row is a thin
+ * card (status dot, agent badge, title, optional approve pulse, hint
+ * + tokens), small enough to fit a dozen in view. The currently-
+ * focused row gets an ember border + filled background so it reads
+ * as the selected item in a list.
+ *
+ * Per-row footnotes show keybind index (1-9) for the first nine
+ * tasks so the operator learns the shortcut without a tutorial.
+ */
+function RailSidebar({
+  tasks,
+  focusedId,
+  onFocus,
+}: {
+  tasks: Task[];
+  focusedId: string;
+  onFocus: (id: string) => void;
+}) {
+  return (
+    <div className="shrink-0 w-[220px] flex flex-col gap-1.5">
+      <div className="flex items-center gap-2 px-1 shrink-0">
+        <span className="font-mono text-[9.5px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+          tasks
+        </span>
+        <span className="h-px flex-1 bg-gradient-to-r from-ink-900/10 via-ink-900/5 to-transparent dark:from-ink-50/10 dark:via-ink-50/5" />
+        <span className="font-mono text-[9.5px] tabular-nums text-ink-400 dark:text-ink-500">
+          {tasks.length}
+        </span>
+      </div>
+      <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-1">
+        <AnimatePresence mode="popLayout" initial={false}>
+          {tasks.map((t, i) => (
+            <motion.div
+              key={t.id}
+              layout
+              layoutId={t.id}
+              initial={{ opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -8, transition: { duration: 0.15 } }}
+              transition={{
+                layout: { type: "spring", stiffness: 320, damping: 32 },
+                opacity: { duration: 0.18 },
+              }}
+            >
+              <RailRow
+                task={t}
+                index={i}
+                focused={t.id === focusedId}
+                onClick={() => onFocus(t.id)}
+              />
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+      <div className="shrink-0 px-1 pt-1 border-t border-ink-900/[0.06] dark:border-ink-50/[0.06]">
+        <div className="font-mono text-[9px] leading-relaxed text-ink-400 dark:text-ink-500">
+          <kbd className="text-ink-500 dark:text-ink-400">j</kbd>
+          <kbd className="text-ink-500 dark:text-ink-400">k</kbd>
+          {" cycle · "}
+          <kbd className="text-ink-500 dark:text-ink-400">1-9</kbd>
+          {" jump · "}
+          <kbd className="text-ink-500 dark:text-ink-400">esc</kbd>
+          {" unfocus"}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RailRow({
+  task,
+  index,
+  focused,
+  onClick,
+}: {
+  task: Task;
+  index: number;
+  focused: boolean;
+  onClick: () => void;
+}) {
+  const { latestByTask, pulses } = useRealtime();
+  const latest = latestByTask[task.id];
+  const pulseTs = pulses[task.id] ?? 0;
+  const hot = Date.now() - pulseTs < 1500;
+  const needsApproval = task.status === "waiting_perm";
+  const isRunning =
+    task.status === "running" ||
+    task.status === "waiting_input" ||
+    task.status === "waiting_perm";
+  const isFinished =
+    task.status === "done" ||
+    task.status === "failed" ||
+    task.status === "stopped";
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={task.title}
+      className={cn(
+        "group w-full text-left flex flex-col gap-1 rounded-md border px-2 py-1.5 transition-colors",
+        focused
+          ? "border-ember-500/40 bg-ember-500/[0.06] dark:bg-ember-500/[0.08]"
+          : "border-ink-900/[0.08] hover:bg-ink-900/[0.03] dark:border-ink-50/[0.08] dark:hover:bg-ink-50/[0.03]",
+        needsApproval && !focused && "border-amber-500/40 bg-amber-500/[0.05]",
+        isFinished && !focused && "opacity-65 hover:opacity-100",
+      )}
+    >
+      <div className="flex items-center gap-1.5 min-w-0">
+        <StatusDot status={task.status} size="sm" />
+        <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 shrink-0 w-3">
+          {index < 9 ? index + 1 : ""}
+        </span>
+        <span
+          className={cn(
+            "flex-1 min-w-0 truncate text-[11.5px] font-medium",
+            focused
+              ? "text-ink-900 dark:text-ink-50"
+              : "text-ink-700 dark:text-ink-200",
+          )}
+        >
+          {task.title}
+        </span>
+        {needsApproval && (
+          <span className="shrink-0 inline-flex items-center justify-center h-3.5 w-3.5 rounded font-mono text-[9px] bg-amber-500/20 text-amber-700 dark:text-amber-300 animate-pulse">
+            !
+          </span>
+        )}
+        {hot && !needsApproval && !focused && (
+          <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink" />
+        )}
+      </div>
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500 shrink-0">
+          {task.agent}
+        </span>
+        <span className="font-mono text-[9.5px] text-ink-500 dark:text-ink-400 truncate min-w-0 flex-1">
+          {isRunning
+            ? latest?.text ?? "…"
+            : task.branch}
+        </span>
+      </div>
+    </button>
   );
 }
 

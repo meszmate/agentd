@@ -10,6 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { agentContextWindow, type Message, type Task } from "@agentd/contracts";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { useApp } from "@/AppContext";
 import { qk, useModels, useTask } from "@/queries";
 import { useTaskRt } from "@/store";
@@ -18,6 +19,7 @@ import { cn, formatTokens } from "@/lib/utils";
 import { StatusDot } from "@/components/ui/status-dot";
 import { parseToolCall, TOOL_ICONS } from "@/components/tool-line";
 import { TaskTimeline } from "@/views/TaskTimeline";
+import { TaskWorkspace } from "@/views/TaskWorkspace";
 
 /**
  * Live view of a single task for the grid overlay. Two modes:
@@ -364,12 +366,13 @@ export function TaskPane({
 }
 
 /**
- * Renders the full TaskTimeline (thinking pulse, streams, paired
- * tool diffs, ask/answer, queue, plan strip, send/queue composer)
- * inside the grid overlay's focused pane. Mirrors how TaskDetail
- * wires up the timeline — same context-token + context-window math,
- * same optimistic appendLocal pattern, same disabled-while-running
- * rule — so the focused pane experience is the task experience.
+ * Renders the full task-page experience — chat timeline + workspace
+ * tabs (Live tool feed, Diff, Todos, Files, Log, Context, Term) —
+ * inside the grid overlay's focused pane. Mirrors TaskDetail's body:
+ * same PanelGroup split, same TaskTimeline + TaskWorkspace, same
+ * context-token + context-window math, same optimistic appendLocal.
+ * The operator gets the actual task experience without leaving the
+ * overlay.
  */
 function FocusedBody({ task }: { task: Task }) {
   const { toast } = useApp();
@@ -449,21 +452,38 @@ function FocusedBody({ task }: { task: Task }) {
   );
 
   return (
-    <TaskTimeline
-      taskId={task.id}
-      messages={messages}
-      appendLocal={appendLocal}
-      onError={onError}
-      disabled={isRunning}
-      lastToolHint={lastToolHint}
-      streams={streams}
-      totalTokens={contextTokens}
-      contextWindow={contextWindow}
-      turn={turn}
-      plan={plan}
-      compactedAt={task.lastCompactedAt ?? null}
-      dense
-    />
+    <PanelGroup
+      direction="horizontal"
+      className="h-full"
+      autoSaveId={`grid-focused-${task.id}`}
+    >
+      <Panel id={`tl-${task.id}`} defaultSize={55} minSize={32}>
+        <TaskTimeline
+          taskId={task.id}
+          messages={messages}
+          appendLocal={appendLocal}
+          onError={onError}
+          disabled={isRunning}
+          lastToolHint={lastToolHint}
+          streams={streams}
+          totalTokens={contextTokens}
+          contextWindow={contextWindow}
+          turn={turn}
+          plan={plan}
+          compactedAt={task.lastCompactedAt ?? null}
+          dense
+        />
+      </Panel>
+      <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-ember-500/40 transition-colors dark:bg-ink-50/10" />
+      <Panel id={`ws-${task.id}`} defaultSize={45} minSize={24}>
+        <TaskWorkspace
+          task={task}
+          onError={onError}
+          plan={plan}
+          messages={messages}
+        />
+      </Panel>
+    </PanelGroup>
   );
 }
 
