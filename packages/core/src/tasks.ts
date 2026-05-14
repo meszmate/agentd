@@ -20,6 +20,8 @@ export interface CreateTaskInput {
   worktreePath: string;
   branch: string;
   baseBranch: string;
+  /** Commit SHA at branch-off time — see `Task.baseCommitSha` in contracts. */
+  baseCommitSha?: string | null;
   templateId?: string | null;
   scheduleId?: string | null;
   projectId?: string | null;
@@ -87,6 +89,7 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     worktreePath: row.worktreePath,
     branch: row.branch,
     baseBranch: row.baseBranch,
+    baseCommitSha: row.baseCommitSha ?? null,
     status: row.status as TaskStatus,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -228,6 +231,7 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       worktreePath: input.worktreePath,
       branch: input.branch,
       baseBranch: input.baseBranch,
+      baseCommitSha: input.baseCommitSha ?? null,
       status: "pending",
       createdAt: now,
       updatedAt: now,
@@ -461,13 +465,12 @@ export function setTaskCodexThreadId(
 }
 
 /**
- * Persist the Claude session id captured from the runner's first
- * `system/init` stream event. Subsequent spawns read this back and
- * call `claude --resume <id>` instead of `--continue`, which is
- * keyed only on the cwd and can resolve to an unrelated session
- * (e.g. a sibling plan slice in the same worktree, or the branch-
- * naming AI helper that ran in the daemon's `process.cwd()`).
- * Idempotent — same id can be written repeatedly without harm.
+ * Persist the claude-code session id captured from the runner's first
+ * `system/init` event. Subsequent claude spawns read this back and call
+ * `claude --resume <id>` instead of the looser `--continue`, which is
+ * essential when sibling tasks or `in_place` workspace tasks share a
+ * worktree — `--continue` would otherwise pick the most-recently used
+ * session in the cwd, possibly belonging to a different task entirely.
  */
 export function setTaskClaudeSessionId(
   db: Db,

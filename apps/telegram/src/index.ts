@@ -595,16 +595,51 @@ async function main() {
 }
 
 /**
- * Wraps `bot.start()` so a 409 ("terminated by other getUpdates request")
- * doesn't crash the subprocess. Telegram's long-poll TTL is ~30s, so a
- * stale previous poll always releases within that window — we just have
- * to outwait it. Crashing instead burns the daemon's per-hour restart
- * budget (8 tries) before any natural recovery can happen.
+ * Clear any webhook that's set on this bot before we start polling.
  *
- * Only 409 is retried in-process; any other error still propagates so
- * fatal config issues (bad token, network down) surface promptly.
+ * A leftover webhook is the other common cause of 409s: as long as one
+ * is configured, every `getUpdates` call fails forever (Telegram won't
+ * let you mix the two delivery modes). `deleteWebhook` is idempotent —
+ * returns `true` if there was nothing to clear — so it's safe to call
+ * unconditionally. `drop_pending_updates: false` preserves any queued
+ * updates so we still see messages sent during the swap.
+ */
+async function clearWebhookDefensively(bot: Bot): Promise<void> {
+  try {
+    await bot.api.deleteWebhook({ drop_pending_updates: false });
+  } catch (e) {
+    // Non-fatal: if the token is bad, bot.start() will surface it
+    // properly. Just log and move on.
+    console.warn(
+      `telegram: deleteWebhook preflight failed (continuing): ${(e as Error).message}`,
+    );
+  }
+}
+
+/**
+ * Wraps `bot.start()` so a 409 ("terminated by other getUpdates request")
+ * doesn't crash the subprocess.
+ *
+ * 409 is purely environmental — it means another poller (another agentd
+ * instance, a stale process, a configured webhook) is holding the slot.
+ * Once that other party goes away we can claim it instantly, so the
+ * right strategy is to retry indefinitely with bounded backoff rather
+ * than give up. Giving up just burns the daemon's per-hour restart
+ * budget (8 tries) and produces louder failure modes without helping.
+ *
+ * Backoff schedule: 35s, 35s, 70s, 140s, 280s, then steady at 300s.
+ * The first two short retries cover the common case (stale poll, ~30s
+ * TTL on Telegram's side). After that we back off so we don't spam
+ * Telegram or the operator's logs while waiting for a live competitor
+ * to go away.
+ *
+ * Only 409 is retried; any other error still propagates so fatal
+ * config issues (bad token, network down) surface promptly.
  */
 async function startWithConflictRetry(bot: Bot): Promise<void> {
+  await clearWebhookDefensively(bot);
+  const BACKOFF_MS = [35_000, 35_000, 70_000, 140_000, 280_000];
+  const BACKOFF_CAP_MS = 300_000;
   let consecutiveConflicts = 0;
   while (true) {
     try {
@@ -613,19 +648,27 @@ async function startWithConflictRetry(bot: Bot): Promise<void> {
     } catch (e) {
       if (e instanceof GrammyError && e.error_code === 409) {
         consecutiveConflicts += 1;
-        const waitMs = 35_000;
-        console.error(
-          `telegram: 409 conflict (another getUpdates poller holds the slot). ` +
+        const waitMs =
+          BACKOFF_MS[consecutiveConflicts - 1] ?? BACKOFF_CAP_MS;
+        // Loud the first couple of times so the operator notices, then
+        // quiet down — at that point we're just waiting out a live
+        // competing instance and repeating the same line every few
+        // minutes adds nothing.
+        const verbose = consecutiveConflicts <= 2;
+        const msg = verbose
+          ? `telegram: 409 conflict (another getUpdates poller holds the slot). ` +
             `Waiting ${waitMs / 1000}s for it to release. ` +
             `If this repeats, another agentd / bot instance is running with the same TELEGRAM_BOT_TOKEN. ` +
-            `(consecutive=${consecutiveConflicts})`,
-        );
-        if (consecutiveConflicts >= 6) {
-          throw new Error(
-            "telegram: 409 conflict persisted across 6 retries (~3.5min) — another bot instance is using this token. Stop it or rotate the token.",
-          );
-        }
+            `(consecutive=${consecutiveConflicts})`
+          : `telegram: still 409 (consecutive=${consecutiveConflicts}), waiting ${waitMs / 1000}s`;
+        console.error(msg);
         await new Promise((r) => setTimeout(r, waitMs));
+        // Re-clear webhook on persistent conflict — if the other party
+        // is actually a webhook that got (re)configured externally,
+        // dropping it again lets us recover without a process restart.
+        if (consecutiveConflicts % 5 === 0) {
+          await clearWebhookDefensively(bot);
+        }
         continue;
       }
       throw e;

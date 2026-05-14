@@ -31,6 +31,7 @@ export const qk = {
   project: (idOrSlug: string) => ["project", idOrSlug] as const,
   bridgeSummary: () => ["bridge-summary"] as const,
   rateLimits: () => ["rate-limits"] as const,
+  updateInfo: () => ["update-info"] as const,
   discordChannels: () => ["discord-channels"] as const,
   projectSuggestions: (projectId: string) =>
     ["project-suggestions", projectId] as const,
@@ -77,6 +78,44 @@ export function useProjects() {
     // No polling — the realtime bus invalidates this on task_updated /
     // status / exit events. Initial fetch + WS-driven refresh only.
     staleTime: 60_000,
+  });
+}
+
+/**
+ * The daemon's npm-update snapshot. Read once on mount; the realtime
+ * `update_info` event patches the cache after that, so the banner stays
+ * live across the daemon's 24h check interval without polling.
+ */
+export function useUpdateInfo() {
+  const client = useClient();
+  return useQuery({
+    queryKey: qk.updateInfo(),
+    queryFn: () => client.getUpdateInfo(),
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useCheckUpdate() {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => client.checkUpdateInfo(),
+    onSuccess: (res) => {
+      qc.setQueryData(qk.updateInfo(), res);
+    },
+  });
+}
+
+/**
+ * Trigger the daemon's one-click update flow. On success the daemon
+ * exits and its service manager restarts it; the WS auto-reconnects
+ * and the new version's UpdateInfo arrives via the boot probe. The
+ * banner removes itself when `updateAvailable` flips false.
+ */
+export function useApplyUpdate() {
+  const client = useClient();
+  return useMutation({
+    mutationFn: () => client.applyUpdate(),
   });
 }
 
@@ -343,6 +382,23 @@ export function useAnswerTask(taskId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (answer: string) => client.answerTask(taskId, answer),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.task(taskId) });
+    },
+  });
+}
+
+/**
+ * Skip a pending ask without answering. Wired to the "Dismiss" buttons
+ * on the interactive AskCard and the composer's answer-mode strip so a
+ * stuck question (stale on daemon restart, or one the operator wants to
+ * redirect past) can be closed without typing a literal answer.
+ */
+export function useDismissTaskAsk(taskId: string) {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (askId: string) => client.dismissTaskAsk(taskId, askId),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qk.task(taskId) });
     },

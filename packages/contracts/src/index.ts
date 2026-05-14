@@ -201,6 +201,16 @@ export const Task = z.object({
   worktreePath: z.string(),
   branch: z.string(),
   baseBranch: z.string(),
+  /**
+   * Commit SHA the task branched off, captured at worktree-creation time.
+   * Frozen — never updated. Used by the diff endpoint so "what changed
+   * vs base" stays stable even after `baseBranch` advances past HEAD
+   * (typical after a PR merges the task's work into main: the dynamic
+   * `baseBranch...HEAD` then resolves to nothing because main now
+   * contains HEAD). Optional for tasks created before this column
+   * existed; those fall back to the live `baseBranch` ref.
+   */
+  baseCommitSha: z.string().nullable().optional(),
   status: TaskStatus,
   createdAt: z.number(),
   updatedAt: z.number(),
@@ -223,15 +233,13 @@ export const Task = z.object({
    */
   codexThreadId: z.string().nullable().optional(),
   /**
-   * Claude session id captured from the first `system/init` event the
-   * stream-json runner emits. Used on subsequent spawns to call
-   * `claude --resume <id>` so resume targets THIS task's session by
-   * id, not the most-recent session for the cwd. Without it,
-   * `--continue` can pick up an unrelated session (a sibling plan
-   * slice in the same worktree, a branch-naming AI helper that ran
-   * in `process.cwd()`, etc.) and the task ends up resuming with
-   * someone else's context — a bug operators saw as "the compacted
-   * summary belongs to a different task".
+   * Claude session id captured from the runner's first `system/init`
+   * event. Used on subsequent spawns to call `claude --resume <id>`
+   * instead of the looser `--continue` (which just grabs the most
+   * recently used session in the cwd — wrong when sibling tasks or
+   * `in_place` tasks share a worktree). Pinning by id makes resume
+   * deterministic and prevents one task's compaction from summarizing
+   * another task's conversation.
    */
   claudeSessionId: z.string().nullable().optional(),
   totalInputTokens: z.number().optional(),
@@ -2025,6 +2033,31 @@ export const SendTerminalKeysRequest = z.object({
 });
 export type SendTerminalKeysRequest = z.infer<typeof SendTerminalKeysRequest>;
 
+// State of the npm-update check. The daemon polls
+// https://registry.npmjs.org/@meszmate/agentd/latest on boot and every 24h
+// and publishes this snapshot via the event bus so every connected surface
+// can show an "update available" banner without polling on its own.
+//
+// `currentVersion` always reflects the running daemon. `latestVersion` is
+// nullable because the first response can fire before any check completes
+// (or while the box is offline). `updateAvailable` is the cheap consumer
+// predicate so UI code doesn't have to parse semver.
+export const UpdateInfo = z.object({
+  currentVersion: z.string(),
+  latestVersion: z.string().nullable(),
+  checkedAt: z.number().nullable(),
+  error: z.string().nullable(),
+  updateAvailable: z.boolean(),
+  // True when the daemon was launched by a service manager (systemd on
+  // linux, launchd on macos) and can therefore one-click update itself:
+  // we exit non-zero after `bun install -g` and the manager restarts us.
+  // For a foreground `agentd serve`, this is false and the web banner
+  // disables the "Update now" button (the daemon would download the new
+  // version, exit, and nothing would bring it back).
+  serviceManaged: z.boolean(),
+});
+export type UpdateInfo = z.infer<typeof UpdateInfo>;
+
 export const WsServerEvent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("event"),
@@ -2212,6 +2245,15 @@ export const WsServerEvent = z.discriminatedUnion("type", [
     type: z.literal("trigger_fired"),
     trigger: Trigger,
     taskId: z.string().nullable(),
+    ts: z.number(),
+  }),
+  // Update-check result. Fired on boot once the first check completes and
+  // every 24h after, plus on demand when the daemon retries a previously
+  // failed check. The whole snapshot rides each event so a late-joining
+  // client doesn't need a separate refetch.
+  z.object({
+    type: z.literal("update_info"),
+    info: UpdateInfo,
     ts: z.number(),
   }),
 ]);

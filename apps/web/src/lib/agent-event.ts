@@ -52,13 +52,24 @@ export function shapeMessageFromEvent(
       ts,
     };
   }
+  if (event.kind === "raw" && event.stream === "stderr") {
+    const text = event.text.trim();
+    if (text.length === 0) return null;
+    return {
+      id: liveId(ts),
+      taskId,
+      role: "system",
+      content: text,
+      ts,
+    };
+  }
   if (event.kind === "tool_result") {
     const okFlag = event.ok ? "ok" : "err";
     const PERSIST_LIMIT = 1500;
     const raw = event.output;
     const trimmed =
       raw.length > PERSIST_LIMIT
-        ? `${raw.slice(0, PERSIST_LIMIT)}\n… (${raw.length - PERSIST_LIMIT} more chars truncated)`
+        ? `${raw.slice(0, PERSIST_LIMIT)}\n… (truncated; full output was ${raw.length.toLocaleString()} chars)`
         : raw;
     const meta = [
       event.parentToolUseId ? `p:${event.parentToolUseId}` : null,
@@ -74,6 +85,49 @@ export function shapeMessageFromEvent(
       taskId,
       role: "tool",
       content: `${header} ${trimmed}`,
+      ts,
+    };
+  }
+  // The agent's structured calls land as system-role rows the timeline
+  // parses back via parseSystemMessage. Mirror the daemon's wire format
+  // exactly so the live row pairs up with (and dedups against) the
+  // persisted row a later refetch will return.
+  if (event.kind === "ask") {
+    const optionsBlock = event.options.length
+      ? `\n${event.options.map((o, i) => `${i + 1}. ${o}`).join("\n")}`
+      : "";
+    return {
+      id: liveId(ts),
+      taskId,
+      role: "system",
+      content: `[ask · ${event.askId}] ${event.prompt}${optionsBlock}`,
+      ts,
+    };
+  }
+  if (event.kind === "answer") {
+    return {
+      id: liveId(ts),
+      taskId,
+      role: "system",
+      content: `[answer · ${event.askId}] ${event.answer}`,
+      ts,
+    };
+  }
+  if (event.kind === "share") {
+    return {
+      id: liveId(ts),
+      taskId,
+      role: "system",
+      content: `[share] ${event.text}`,
+      ts,
+    };
+  }
+  if (event.kind === "progress") {
+    return {
+      id: liveId(ts),
+      taskId,
+      role: "system",
+      content: event.done ? `[progress · done] ${event.text}` : `[progress] ${event.text}`,
       ts,
     };
   }

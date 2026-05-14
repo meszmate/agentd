@@ -42,13 +42,13 @@ export interface RunnerStartOptions {
   resumeThreadId?: string;
   /**
    * Claude-only — when set, spawn `claude --resume <id>` instead of
-   * `--continue`. `--continue` resolves the prior session by cwd
-   * alone, so any other session that happens to live in the same
-   * project dir (a sibling plan slice, a branch-naming helper) can
-   * win the lookup. Resuming by id pins this task to its own session.
-   * Captured by the runner from the first `system/init` event and
-   * persisted on the task; the daemon passes it back here on every
-   * subsequent spawn. Other runners ignore this field.
+   * `--continue`. `--continue` grabs the most-recently used session
+   * in the cwd, which is wrong when sibling tasks or `in_place` tasks
+   * share a worktree (you can end up summarizing or steering a
+   * different task's conversation entirely). The session id is
+   * captured from claude's first `system/init` event and persisted on
+   * the task; the daemon passes it back on every subsequent spawn.
+   * Other runners ignore this field.
    */
   resumeSessionId?: string;
   /**

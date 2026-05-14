@@ -105,6 +105,21 @@ function formatClaudeStderrLine(line: string): string | null {
   if (lc.includes("model") && lc.includes("not found")) {
     return `[claude] ${trimmed}\nHint: Unknown model. Check the model field in task settings.`;
   }
+  // Context-overflow surfaces in several flavours depending on the CLI
+  // path (auto-compact failed, hard prompt limit, etc). The API body usually
+  // says "prompt is too long: N tokens > M maximum" or
+  // "input length and `max_tokens` exceed context limit". Match early so
+  // the daemon can recognise the failure and stop pointlessly resuming
+  // the same dead session.
+  if (
+    lc.includes("prompt is too long") ||
+    lc.includes("context_length_exceeded") ||
+    lc.includes("context length exceeded") ||
+    (lc.includes("input length") && lc.includes("exceed")) ||
+    (lc.includes("context") && lc.includes("limit") && lc.includes("exceed"))
+  ) {
+    return `[claude] ${trimmed}\nHint: Context window full. The session can't be resumed — send a new message to start a fresh claude with the relevant context.`;
+  }
   return null;
 }
 
@@ -128,8 +143,13 @@ function claudeErrorHint(
   if (type === "not_found_error") {
     return "Model not found. Check the model field in task settings.";
   }
-  if (m.includes("context") && m.includes("length")) {
-    return "Context window full. Run `/compact` or restart the task.";
+  if (
+    (m.includes("context") && m.includes("length")) ||
+    m.includes("prompt is too long") ||
+    (m.includes("input length") && m.includes("exceed")) ||
+    (m.includes("context") && m.includes("limit") && m.includes("exceed"))
+  ) {
+    return "Context window full. The session can't be resumed — send a new message to start a fresh claude with the relevant context.";
   }
   return null;
 }
@@ -211,20 +231,17 @@ export class ClaudeRunner implements AgentRunner {
       "--include-partial-messages",
       "--verbose",
     ];
-    // Resume the prior session when respawning. We prefer
-    // `--resume <session-id>` over `--continue` because `--continue`
-    // resolves the most-recent session by cwd alone, and the cwd is
-    // not unique to a task — a sibling plan slice in the same
-    // worktree, or an AI helper (branch naming, commit drafting)
-    // that happens to spawn `claude` in the same project dir, can
-    // leave a more-recent session that `--continue` will pick up.
-    // The resumed run then carries the wrong conversation history,
-    // which surfaces as "the compacted summary belongs to a
-    // different task". The session-id path pins resume to THIS
-    // task's session. We capture the id from the first
-    // `system/init` event below; until we have one, fall back to
-    // `--continue` so legacy tasks that pre-date this column still
-    // resume something.
+    // Resume the prior session when respawning after a daemon restart
+    // so the agent doesn't lose context. claude-code keeps session
+    // history in `~/.claude/projects/<cwd-slug>/...`. Prefer
+    // `--resume <id>` when the daemon has the task's captured session
+    // id — `--continue` grabs whichever session was touched last in
+    // this cwd, which is wrong when sibling tasks or `in_place` tasks
+    // share a worktree (one task's compaction would summarize a
+    // different task's conversation entirely). Fall back to
+    // `--continue` for tasks that ran before session-id capture
+    // landed and don't have an id stored yet. The first turn of a
+    // fresh task passes resume=false (no prior session to resume).
     if (opts.resume) {
       if (opts.resumeSessionId) {
         args.push("--resume", opts.resumeSessionId);
@@ -542,15 +559,13 @@ export class ClaudeRunner implements AgentRunner {
         });
         return;
       }
-      // The very first event each run is `{type:"system",subtype:"init",
-      // session_id:"<uuid>", …}`. Capture the id and forward it as a
-      // raw stdout marker — the daemon parses `[claude session] <uuid>`
-      // and persists it on the task so subsequent spawns can use
-      // `--resume <uuid>` instead of cwd-based `--continue`. The
-      // session_id can come from a brand-new session OR a resumed one
-      // (claude-code preserves the id across `--resume` unless the
-      // operator passed `--fork-session`), so it's safe to emit on
-      // every init — the daemon dedupes on its end.
+      // The `init` system message carries the session_id that claude
+      // will use for the JSONL session file in
+      // `~/.claude/projects/<cwd-slug>/`. Surface it as a raw marker
+      // so the daemon can persist it on the task; future spawns then
+      // pass it as `--resume <id>` instead of the looser `--continue`,
+      // which would pick the most-recent session in the cwd (wrong
+      // when sibling tasks or `in_place` tasks share a worktree).
       if (parsed.subtype === "init") {
         const sid = (parsed as { session_id?: unknown }).session_id;
         if (typeof sid === "string" && sid.length > 0) {
@@ -562,8 +577,8 @@ export class ClaudeRunner implements AgentRunner {
         }
         return;
       }
-      // Other CLI bookkeeping (status pings, hook lifecycle, …) —
-      // the operator can't act on any of it, so it stays off the timeline.
+      // Other CLI bookkeeping (status pings, hook lifecycle, …) — the
+      // operator can't act on any of it, so it stays off the timeline.
       return;
     }
     if (type === "rate_limit_event") {
@@ -624,11 +639,19 @@ export class ClaudeRunner implements AgentRunner {
       this.inTurn = true;
       this.emit({ kind: "status", status: "running" });
     }
+    // Claude's CLI parses messages whose first character is `/` as slash
+    // commands (/clear, /compact, etc.) even via stream-json stdin, and
+    // silently swallows the message when the command is unrecognized.
+    // Operators routinely send messages like "/ls all for example…" to
+    // talk about chat-bot commands, so prepend a zero-width space to
+    // bypass the slash-command parser without changing what the agent
+    // reads. The DB row keeps the original text.
+    const safeText = text.startsWith("/") ? `​${text}` : text;
     const userMsg = {
       type: "user",
       message: {
         role: "user",
-        content: [{ type: "text", text }],
+        content: [{ type: "text", text: safeText }],
       },
     };
     const line = JSON.stringify(userMsg) + "\n";

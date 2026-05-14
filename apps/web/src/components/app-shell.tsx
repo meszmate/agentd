@@ -8,6 +8,7 @@ import { SpawnSheet } from "@/components/spawn-sheet";
 import { ErrorBoundary } from "@/ErrorBoundary";
 import { KeyboardShortcuts } from "@/components/keyboard-shortcuts";
 import { RouteProgress } from "@/components/route-progress";
+import { UpdateBanner } from "@/components/update-banner";
 import { Wordmark } from "@/components/wordmark";
 import { useLegacyPrefsMigration } from "@/lib/legacyPrefsMigrator";
 import { cn } from "@/lib/utils";
@@ -114,6 +115,7 @@ export function AppShell() {
 
         <div className="relative flex min-w-0 flex-1 flex-col">
           <RouteProgress />
+          <UpdateBanner />
           <main className="flex-1 min-h-0 overflow-hidden">
             <ErrorBoundary>
               <Outlet />

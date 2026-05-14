@@ -13,6 +13,7 @@
   </p>
 
   <p>
+    <a href="https://www.npmjs.com/package/@meszmate/agentd"><img src="https://img.shields.io/npm/v/@meszmate/agentd?color=cb3837&logo=npm&label=%40meszmate%2Fagentd" alt="npm: @meszmate/agentd"></a>
     <a href="https://github.com/meszmate/agentd/actions/workflows/ci.yml"><img src="https://github.com/meszmate/agentd/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT"></a>
     <img src="https://img.shields.io/badge/runtime-bun-000000?logo=bun&logoColor=white" alt="Bun">
@@ -22,6 +23,7 @@
 
   <p>
     <a href="./docs/quickstart.md">Quickstart</a> ·
+    <a href="./docs/deploy.md">Deploy on a server</a> ·
     <a href="./docs/docker.md">Docker</a> ·
     <a href="./docs/architecture.md">Architecture</a> ·
     <a href="./CONTRIBUTING.md">Contributing</a>
@@ -32,6 +34,31 @@
 
 Designed for one operator with many devices. Reachable from anywhere over Tailscale
 (or any other private network) without exposing your repos to the public internet.
+
+## Quick start
+
+```bash
+npm i -g @meszmate/agentd        # or: bun install -g @meszmate/agentd
+agentd serve                     # local-only, http://127.0.0.1:3773
+agentd serve --public            # bind every interface, print reachable URLs
+```
+
+That's the whole setup. One command starts the daemon, the WebSocket bus, and
+the web UI on the same port — open the URL it prints, pair your first device
+with the token shown in the terminal, and you're in. Bun is required at
+runtime; everything else is bundled into the npm package.
+
+### On a real server (auto-start + auto-update)
+
+```bash
+sudo -E env "PATH=$PATH" agentd setup --public      # linux
+agentd setup --public                               # macos (no sudo needed)
+```
+
+`agentd setup` writes the right service unit for your OS (systemd on linux,
+LaunchAgent on macos), enables it on boot, installs a daily auto-update
+timer, and prints the URL + pairing token to use. `agentd setup --uninstall`
+reverses it; your data at `--data-dir` is preserved.
 
 ## Features
 
@@ -68,30 +95,60 @@ Designed for one operator with many devices. Reachable from anywhere over Tailsc
 
 ## Install
 
+Two ways. Pick whichever fits — both put the `agentd` command on your PATH.
+
+### npm (one-liner, no clone)
+
+```bash
+bun install -g @meszmate/agentd        # or: npm i -g @meszmate/agentd
+agentd serve                           # local-only, 127.0.0.1:3773
+agentd serve --public                  # bind every interface; print reachable URLs
+```
+
+Bun is required at runtime (the daemon and CLI are Bun scripts). The
+published tarball ships the pre-built web bundle, so there's no extra build
+step after install.
+
+### From source
+
 ```bash
 git clone https://github.com/meszmate/agentd ~/agentd
 cd ~/agentd
 bun install
-bun --filter @agentd/web build
 ```
+
+That's it — no separate web build step. The daemon serves the React UI from
+the same port and auto-builds the bundle the first time it starts.
 
 ## Run
 
-There are two ways to run the daemon. **Pick the right one for your goal —
-they don't behave the same.**
+One process. One command. The HTTP API, the WebSocket bus, and the web UI all
+live on the same port — you don't run "web" and "daemon" separately. **Pick
+host-direct or Docker depending on what the box is for.**
 
-### Host-direct (recommended for dev)
+### Host-direct (recommended for dev — and for "drop on a little server")
 
 ```bash
 # local-only (default 127.0.0.1:3773)
-bun apps/daemon/src/index.ts
+bun start                            # or: agentd serve
 
-# remote (bind to tailnet IP)
-bun apps/daemon/src/index.ts --host $(tailscale ip -4)
+# server mode — bind every interface so you can hit it from another machine
+bun serve                            # or: agentd serve --public
+                                     # ↑ binds 0.0.0.0; prints the reachable URLs
 
-# alternative bind options
-bun apps/daemon/src/index.ts --host 0.0.0.0 --port 8080 --root /var/lib/agentd
+# bind a specific IP / port / root
+agentd serve --host $(tailscale ip -4)
+agentd serve --public --port 8080 --root /var/lib/agentd
 ```
+
+`bun start` and `agentd serve` are equivalent — the CLI subcommand exists so a
+globally-installed `agentd` binary works the same way. The very first run
+compiles the web bundle (`apps/web/dist`) automatically; subsequent runs reuse
+it.
+
+For a real server (auto-start on boot, background, auto-update from npm), see
+[docs/deploy.md](./docs/deploy.md) — has copy-paste systemd, launchd, and
+Watchtower recipes.
 
 The daemon runs as your user, on your filesystem, with your `$PATH`. That
 means **everything you do in the web tmux is a real shell on your machine**:
@@ -124,8 +181,8 @@ develop on, a shared host, CI), but it's not what you want if the goal is
 above.
 
 You can switch between modes any time: `docker compose down` and then
-`bun apps/daemon/src/index.ts`. The two have separate state directories
-(`/data` volume vs `~/.agentd/`) so they don't collide.
+`bun start`. The two have separate state directories (`/data` volume vs
+`~/.agentd/`) so they don't collide.
 
 ### Desktop app (optional)
 
@@ -133,14 +190,14 @@ Same UI, native window. Useful if you'd rather click an app icon than
 keep a browser tab pinned.
 
 ```bash
-bun --filter @agentd/web build           # one-time, builds the web bundle
 bun --filter @agentd/desktop start       # opens an Electron window
 ```
 
 On launch the desktop app:
 
 1. tries to attach to a daemon on `127.0.0.1:3773`,
-2. spawns `bun apps/daemon/src/index.ts` if none is reachable,
+2. spawns `bun start` (the daemon) if none is reachable — building the web
+   bundle on the fly if it isn't there yet,
 3. tears that spawned daemon down on quit.
 
 If Bun isn't installed and no local daemon is running, the app opens a

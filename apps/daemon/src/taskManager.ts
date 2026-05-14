@@ -55,6 +55,7 @@ import {
   touchProject,
   pushBranch,
   removeWorktree,
+  resolveRefSha,
   setProviderRateLimitWindow,
   syncAgentPlan,
   setTaskCodexThreadId,
@@ -126,6 +127,13 @@ export interface CreateTaskParams {
    * branch the worktree is checked out on.
    */
   sharedBranch?: string;
+  /**
+   * Base commit SHA captured by the batch when it created the shared
+   * worktree. Threaded into every sibling so they all diff against the
+   * same starting point, regardless of which slice happens to commit
+   * first. Optional — falls back to a fresh resolve if absent.
+   */
+  sharedBaseCommitSha?: string | null;
   /**
    * GitHub-spawn metadata. When `githubPr` is set, the manager runs
    * `gh pr checkout <n>` inside the freshly-created worktree before
@@ -213,6 +221,27 @@ export class TaskManager {
    * instead of hanging forever.
    */
   private lastActivityAt = new Map<string, number>();
+  /**
+   * Most recent stderr line we wrote to the messages table for each
+   * task. The claude CLI sometimes flushes the same fatal error blob
+   * (one big JSON, then a friendly summary) twice in a row before
+   * exiting — without this guard the timeline would carry two copies
+   * of the same context-length explanation. Cleared on `exit` so a
+   * fresh spawn starts from a clean dedupe state.
+   */
+  private lastPersistedStderr = new Map<string, string>();
+  /**
+   * Tasks where the current run hit a context-overflow / prompt-too-long
+   * failure. Set from stderr pattern matching in `handleEvent`, read by
+   * the exit-time auto-resume path. Resuming the same claude session
+   * after this error is futile — the next claude reads the same too-long
+   * history off disk and bounces with the same error — so the auto-resume
+   * skips its retries, clears the dead claudeSessionId so the next
+   * operator message spawns a fresh session, and surfaces an actionable
+   * system row. Survives the exit event (read before clear); cleared on
+   * the next spawn and on operator-driven actions that reset the budget.
+   */
+  private contextOverflowed = new Set<string>();
   /**
    * setInterval handle for the stall watchdog. Started by the daemon
    * after `recoverOrphans()`; stopped on shutdown.
@@ -409,6 +438,7 @@ export class TaskManager {
     this.codexFileSnapshots.delete(taskId);
     this.turnStartedAt.delete(taskId);
     this.lastActivityAt.delete(taskId);
+    this.lastPersistedStderr.delete(taskId);
     const cur = getTask(this.db, taskId);
     if (
       cur &&
@@ -640,6 +670,37 @@ export class TaskManager {
     return false;
   }
 
+  /**
+   * Skip a pending ask without answering it. Two cases this exists for:
+   *
+   *   1. The agent is still blocked on `agentd-ask` and the operator
+   *      wants to redirect rather than answer the literal question.
+   *      We resolve the bash curl with `"(dismissed)"` so the agent
+   *      unblocks; whatever the operator types next is a fresh steer.
+   *
+   *   2. The `[ask · askId]` row is orphaned (daemon restart, runner
+   *      crash, or expiry cleared `pendingAsks` while the breadcrumb
+   *      survived in the DB). `answerAsk` returns false in that case
+   *      without writing the paired `[answer · askId]` row, so the
+   *      web composer's `openAskId` never clears and the operator is
+   *      stuck in answer-mode. Writing the answer row here pairs the
+   *      ask as closed and unsticks the UI.
+   */
+  dismissAsk(taskId: string, askId: string): boolean {
+    const entry = this.pendingAsks.get(askId);
+    if (entry && entry.taskId === taskId) {
+      this.pendingAsks.delete(askId);
+      entry.resolve("(dismissed)");
+    }
+    appendMessage(this.db, taskId, "system", `[answer · ${askId}] (dismissed)`);
+    this.bus.publish({
+      taskId,
+      event: { kind: "answer", askId, answer: "(dismissed)" },
+      ts: Date.now(),
+    });
+    return true;
+  }
+
   async create(params: CreateTaskParams): Promise<Task> {
     // When the project folder isn't a git repo, fall back to running
     // directly inside it: no worktree, no branch, no auto-commit/push.
@@ -659,6 +720,7 @@ export class TaskManager {
     const branchMode = params.branchMode ?? "new";
     let branch: string;
     let worktreePath: string;
+    let baseCommitSha: string | null = null;
     if (!isGit) {
       if (params.githubPr) {
         throw new Error(
@@ -686,6 +748,16 @@ export class TaskManager {
       // the same checkout.
       worktreePath = params.sharedWorktreePath;
       branch = params.sharedBranch;
+      // Reuse the parent slice's frozen base SHA — every sibling on
+      // the shared branch should diff against the same starting point.
+      if (params.sharedBaseCommitSha) {
+        baseCommitSha = params.sharedBaseCommitSha;
+      } else {
+        // No sibling has one yet (legacy batch / pre-fix path): resolve
+        // `baseBranch` once now so at least the first slice's tip is
+        // captured. Best-effort — null on failure.
+        baseCommitSha = await resolveRefSha(worktreePath, baseBranch);
+      }
     } else {
       // Auto-name the branch when the caller didn't provide one. The
       // AI helper picks both the conventional prefix (feature/fix/
@@ -725,6 +797,12 @@ export class TaskManager {
       // line all reference the real ref. The PR-checkout block below
       // can still override this for `params.githubPr` runs.
       branch = result.branch;
+      // Capture the base SHA as observed at worktree creation. The diff
+      // endpoint anchors `git diff <sha>...HEAD` to this commit so the
+      // comparison stays meaningful after baseBranch advances past HEAD
+      // (typical aftermath of merging the task's PR — the live
+      // `main...HEAD` then resolves to empty).
+      baseCommitSha = result.baseCommitSha;
       // PR task: switch the worktree onto the PR's branch so the agent
       // sees the proposed changes (and any commits we add land back on
       // the right branch). `gh pr checkout` resolves the head ref —
@@ -747,6 +825,12 @@ export class TaskManager {
         const head = (await new Response(headProc.stdout).text()).trim();
         await headProc.exited;
         if (head) branch = head;
+        // For PR tasks the agentd-generated branch we just resolved is a
+        // throwaway — what we really diff against is `baseBranch` at the
+        // moment we checked out the PR. Re-resolve so the SHA matches the
+        // PR's actual fork point as the operator sees it.
+        const prBaseSha = await resolveRefSha(worktreePath, baseBranch);
+        if (prBaseSha) baseCommitSha = prBaseSha;
       }
     }
     // Auto-create or look up the project for this repo path. Tasks belong
@@ -760,6 +844,7 @@ export class TaskManager {
       worktreePath,
       branch,
       baseBranch,
+      baseCommitSha,
       templateId: params.templateId ?? null,
       scheduleId: params.scheduleId ?? null,
       projectId: project.id,
@@ -844,6 +929,7 @@ export class TaskManager {
 
     let sharedWorktreePath: string | undefined;
     let sharedBranch: string | undefined;
+    let sharedBaseCommitSha: string | null = null;
     if (shareWorktree) {
       let branchName = params.branchName?.trim();
       if (!branchName) {
@@ -872,6 +958,7 @@ export class TaskManager {
       });
       sharedWorktreePath = result.worktreePath;
       sharedBranch = result.branch;
+      sharedBaseCommitSha = result.baseCommitSha;
     }
 
     const created: Task[] = [];
@@ -904,6 +991,9 @@ export class TaskManager {
         planGroupId,
         ...(sharedWorktreePath ? { sharedWorktreePath } : {}),
         ...(sharedBranch ? { sharedBranch } : {}),
+        ...(sharedBaseCommitSha
+          ? { sharedBaseCommitSha }
+          : {}),
       });
       created.push(task);
       prevId = task.id;
@@ -976,6 +1066,11 @@ export class TaskManager {
       // commit history as everything else in this group.
       sharedWorktreePath: parent.worktreePath,
       sharedBranch: parent.branch,
+      // Inherit the parent's frozen base SHA so the sibling's diff
+      // anchors to the same starting point.
+      ...(parent.baseCommitSha
+        ? { sharedBaseCommitSha: parent.baseCommitSha }
+        : {}),
     });
   }
 
@@ -985,6 +1080,7 @@ export class TaskManager {
     // The operator just took deliberate action — reset the
     // auto-resume budget so a fresh spiral can run if needed.
     this.autoResumeAttempts.delete(taskId);
+    this.contextOverflowed.delete(taskId);
     // 1. If the agent is blocked on an `agentd-ask`, this input is its
     //    answer. Resolve the pending Promise — the agent's curl call
     //    unblocks and the runner keeps going.
@@ -1057,6 +1153,7 @@ export class TaskManager {
     if (!task) throw new Error("task not found");
     // Operator-driven action — reset the auto-resume budget.
     this.autoResumeAttempts.delete(taskId);
+    this.contextOverflowed.delete(taskId);
     // Block-on-ask wins: if there's a pending decision, this becomes the
     // answer regardless of the requested steer mode. The agent unblocks
     // and continues, so neither queue nor interrupt is appropriate.
@@ -1097,6 +1194,7 @@ export class TaskManager {
     if (!task) throw new Error("task not found");
     // Operator-driven action — reset the auto-resume budget.
     this.autoResumeAttempts.delete(taskId);
+    this.contextOverflowed.delete(taskId);
     const cur = this.inputQueue.get(taskId);
     if (!cur || index < 0 || index >= cur.length) {
       return cur?.slice() ?? [];
@@ -1275,15 +1373,15 @@ export class TaskManager {
     pruneTaskMessagesBefore(this.db, taskId, summary?.ts ?? pending.startedAt);
     markTaskCompacted(this.db, taskId);
     setTaskCodexThreadId(this.db, taskId, null);
-    // Mirror for claude: drop the captured session id so the next
-    // spawn starts a brand-new claude session instead of resuming
-    // the one whose full history just got summarized. The daemon's
-    // `appendParts` block re-injects the compacted summary as
-    // system context on that fresh session, so the agent picks up
-    // where it left off without paying for the now-redundant prior
-    // turns. Auto-compaction (claude's mid-stream `compact_boundary`)
-    // is different — the session continues naturally with the
-    // summary inline, so handleAutoCompacted does NOT clear this.
+    // Same reasoning as codex above — manual /compact pruned our DB
+    // view of history, so the next spawn should NOT lean on the
+    // prior claude session (which still has the pre-compaction
+    // transcript intact). Dropping the id forces a fresh session and
+    // the spawnRunner appends the captured summary to the system
+    // prompt so the agent still has continuity. Auto-compaction
+    // (claude's mid-stream `compact_boundary`) is different — the
+    // session continues naturally with the summary inline, so
+    // handleAutoCompacted does NOT clear this.
     setTaskClaudeSessionId(this.db, taskId, null);
     const fresh = getTask(this.db, taskId);
     if (fresh) this.bus.publishSystem({ kind: "task_changed", task: fresh });
@@ -1358,6 +1456,10 @@ export class TaskManager {
     // Per-turn flag for the auto-resume heuristic — only the current
     // turn's compaction events count.
     this.autoCompactedThisTurn.delete(task.id);
+    // Same lifecycle as autoCompactedThisTurn — the context-overflow
+    // flag is per-run; a fresh spawn starts unflagged so a healthy turn
+    // doesn't inherit a stale overflow signal from a prior run.
+    this.contextOverflowed.delete(task.id);
     // Seed the watchdog's activity clock so the stall sweep doesn't
     // immediately fire on a fresh spawn that hasn't emitted its first
     // event yet (claude's first stream-json line can take a few seconds).
@@ -1462,7 +1564,7 @@ export class TaskManager {
         // instinct is to ask "want me to commit?" and that's exactly
         // what the operator wants to NEVER see when this flag is on.
         "Auto-commit is ON. NEVER ask the operator if you should commit. NEVER write 'Want me to commit it?', 'Should I commit?', 'Ready to commit?', or any variant. Just commit. Stage everything and `git commit` whenever you reach a meaningful checkpoint — after a successful change, after fixing a bug, after a working feature step. Multiple small commits across a turn are fine; one big commit at the end is fine; either way, JUST COMMIT, don't ask. The operator turned this flag on because they want commits to flow without permission prompts.",
-        "Use a single conventional-commit subject line (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `style:`, `test:`, `perf:`, `ci:`, `build:`) under 70 characters, lowercase, imperative mood, with no scope unless one is obvious.",
+        "For `git commit -m` only: use a single conventional-commit subject line (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `style:`, `test:`, `perf:`, `ci:`, `build:`) under 70 characters, lowercase, imperative mood, with no scope unless one is obvious. This format applies to the commit message passed to git, nothing else. Do NOT use it as your chat reply, your final task summary, your `agentd-progress` line, your `agentd-share` line, or any other operator-facing text.",
         "Do NOT add `Co-Authored-By`, `Generated with`, or any AI attribution to commit messages.",
       );
     } else {
@@ -1490,6 +1592,11 @@ export class TaskManager {
     // human cadence by yanking the em-dash crutch.
     finishParts.push(
       "Writing style: write like a human typing fast, not like a press release. NO em dashes (—) anywhere. Use commas, periods, parentheses, colons, or simple hyphens (-) instead. This applies to chat replies, code comments, commit messages, PR bodies, agentd-progress lines, everything you produce. Skip filler ('Great!', 'Perfect!', 'Of course'). Skip em-dash openers ('— and another thing'). Be direct.",
+      // Chat replies vs commits — operators were getting one-line
+      // commit-style lines as answers to plain questions like "how
+      // does this work?". The model was carrying the commit-subject
+      // format into chat. Make the boundary explicit.
+      "When the operator's input is a question, a follow-up, or any conversational message (not a new work request), ANSWER IT in normal sentences. Explain what they asked about, with the level of detail their question implies. Do NOT respond with a single conventional-commit-style line ('feat: ...', 'fix: ...') — that format is reserved for `git commit -m`. A chat reply is a reply, not a commit subject. If there's nothing to do (the task is already finished and the operator is just asking how something works), don't spawn new work, don't commit again, just answer.",
     );
     appendParts.push(finishParts.join(" "));
     const appendSystemPrompt = appendParts.length
@@ -1511,10 +1618,12 @@ export class TaskManager {
         task.agent === "codex" && resume && task.codexThreadId
           ? task.codexThreadId
           : undefined;
-      // Claude-only counterpart — pins resume to THIS task's session
-      // by id rather than the cwd-based `--continue` lookup, which
-      // can resolve to an unrelated session sharing the same project
-      // dir (see ClaudeRunner.start for the full rationale).
+      // Claude-only counterpart — pin resume to the exact session
+      // captured on this task instead of leaning on `--continue`'s
+      // "most recent in cwd" heuristic. Without this, sibling tasks
+      // and `in_place` tasks that share a worktree can end up resuming
+      // each other's conversation, which is how operators were seeing
+      // /compact return a summary of a completely different task.
       const resumeSessionId =
         task.agent === "claude" && resume && task.claudeSessionId
           ? task.claudeSessionId
@@ -1671,15 +1780,18 @@ export class TaskManager {
       // so a codex run that fires ~100+ tool calls doesn't push the
       // task's persisted history into the hundreds-of-KB range. A
       // typical bash stdout, MCP result, or error blurb fits well
-      // under this; large compile/test dumps get a clear `(N more
-      // chars truncated)` marker so the operator knows to scroll the
-      // live event for the full text.
+      // under this; large compile/test dumps get a marker showing the
+      // FULL raw size so the operator scanning a failed task's history
+      // can immediately spot which result filled claude's context (the
+      // chars persisted here are not what claude saw — claude saw the
+      // un-truncated output, and a single 200KB Read can easily blow
+      // the window without leaving a trace in the lean message text).
       const okFlag = event.ok ? "ok" : "err";
       const PERSIST_LIMIT = 1500;
       const raw = event.output;
       const trimmed =
         raw.length > PERSIST_LIMIT
-          ? `${raw.slice(0, PERSIST_LIMIT)}\n… (${raw.length - PERSIST_LIMIT} more chars truncated)`
+          ? `${raw.slice(0, PERSIST_LIMIT)}\n… (truncated; full output was ${raw.length.toLocaleString()} chars)`
           : raw;
       const meta = [
         event.parentToolUseId ? `p:${event.parentToolUseId}` : null,
@@ -1830,6 +1942,9 @@ export class TaskManager {
       this.turnStartedAt.delete(taskId);
       // Drop the watchdog activity clock — the next spawn re-seeds it.
       this.lastActivityAt.delete(taskId);
+      // Drop the stderr dedupe key so the next spawn's first error
+      // line is always persisted, even if it matches the previous run.
+      this.lastPersistedStderr.delete(taskId);
       // Fire-and-forget; commit + push + PR all run after the agent exits.
       void this.runCompletionHooks(taskId, { cleanlyDone, compactedThisTurn });
     } else if (event.kind === "raw" && event.stream === "stdout") {
@@ -1849,21 +1964,50 @@ export class TaskManager {
         }
         return;
       }
-      // ClaudeRunner emits `[claude session] <uuid>` from the first
-      // `system/init` event. Persist it so every subsequent spawn can
-      // pass `--resume <uuid>` instead of `--continue` — `--continue`
-      // is keyed only on the cwd and silently picks up an unrelated
-      // session when one exists in the same project dir (sibling plan
-      // slices, AI helper invocations). Suppress the event after we
-      // consume it — same reasoning as the codex thread marker above.
-      const cs = /^\[claude session\] ([0-9a-f-]{36})$/i.exec(event.text.trim());
-      if (cs) {
-        const sid = cs[1]!;
+      // ClaudeRunner does the same with `[claude session] <uuid>` —
+      // captured from the runner's first `system/init` event. Persist
+      // it so the next spawn passes `--resume <id>` instead of
+      // `--continue`. Suppress after consumption so it doesn't render
+      // in the timeline.
+      const cm = /^\[claude session\] ([0-9a-f-]{36})$/i.exec(
+        event.text.trim(),
+      );
+      if (cm) {
+        const sid = cm[1]!;
         const cur = getTask(this.db, taskId);
         if (cur && cur.claudeSessionId !== sid) {
           setTaskClaudeSessionId(this.db, taskId, sid);
         }
         return;
+      }
+    } else if (event.kind === "raw" && event.stream === "stderr") {
+      // Persist stderr as a system message so the failure reason
+      // survives reload. Without this, claude's `[claude] context_length
+      // _exceeded …` (and every other fatal API error) lived only on
+      // the live bus — operators reopening a failed task saw a blank
+      // chat above the red "failed" pill with no explanation. The
+      // runner-side filter (claude.ts > formatClaudeStderrLine, the
+      // "no stdin data received" suppression) has already dropped
+      // non-actionable noise by this point, so what reaches here is
+      // worth storing. Dedupe back-to-back identical lines so a CLI
+      // that flushes the same error twice before exit doesn't
+      // double-row the timeline.
+      const text = event.text.trim();
+      if (text.length > 0) {
+        const last = this.lastPersistedStderr.get(taskId);
+        if (last !== text) {
+          this.lastPersistedStderr.set(taskId, text);
+          appendMessage(this.db, taskId, "system", text);
+        }
+        // Flag context-overflow failures so the exit-time auto-resume
+        // path can skip the futile retry loop. Resuming the same claude
+        // session after this error reads the same too-long history off
+        // disk and bounces with the same error — burning three resume
+        // attempts before giving up. From the operator's POV the task
+        // "just stopped" after context filled.
+        if (isContextOverflowText(text)) {
+          this.contextOverflowed.add(taskId);
+        }
       }
     }
     this.bus.publish({ taskId, event, ts: Date.now() });
@@ -1983,6 +2127,32 @@ export class TaskManager {
     if (fresh.agent === "codex" && !fresh.codexThreadId) return;
     const failed = fresh.status === "failed";
     if (!failed && !signals.compactedThisTurn) return;
+    // Context-overflow short-circuit. Resuming the same claude session
+    // after a context-length error would just reload the same too-long
+    // history off disk and re-emit the same error — burning three
+    // pointless retries before "gave up after 3 attempts" lands. Skip
+    // the retries, drop the dead session id so the next operator
+    // message spawns a fresh claude (no `--resume`), and post one
+    // clear actionable row instead of a wall of duplicate failure
+    // stderr.
+    if (this.contextOverflowed.has(taskId)) {
+      this.contextOverflowed.delete(taskId);
+      this.autoResumeAttempts.delete(taskId);
+      if (fresh.agent === "claude" && fresh.claudeSessionId) {
+        setTaskClaudeSessionId(this.db, taskId, null);
+      }
+      appendMessage(
+        this.db,
+        taskId,
+        "system",
+        "[auto-resume] context window overflowed — skipping retries (resuming would hit the same error). Send a new message with the relevant context to continue; a fresh session will spawn without prior memory.",
+      );
+      const refreshed = getTask(this.db, taskId);
+      if (refreshed) {
+        this.bus.publishSystem({ kind: "task_changed", task: refreshed });
+      }
+      return;
+    }
     const attempts = this.autoResumeAttempts.get(taskId) ?? 0;
     if (attempts >= TaskManager.MAX_AUTO_RESUME_ATTEMPTS) {
       appendMessage(
@@ -2412,7 +2582,11 @@ export class TaskManager {
       memberLabels.push(label);
       const taskId = newId("task");
       const requestedBranch = `${ai.prefix}/${baseSlug}-${safeLabel}-${taskId.slice(-4)}`;
-      const { worktreePath, branch: actualBranch } = await createWorktree({
+      const {
+        worktreePath,
+        branch: actualBranch,
+        baseCommitSha,
+      } = await createWorktree({
         repoPath: params.repoPath,
         worktreeRoot: this.paths.worktrees,
         taskId,
@@ -2430,6 +2604,7 @@ export class TaskManager {
         worktreePath,
         branch: actualBranch,
         baseBranch,
+        baseCommitSha,
         projectId,
         // Council members default to no auto-push — the operator picks
         // a winner via the manual Ship action.
@@ -2484,7 +2659,7 @@ export class TaskManager {
         id: t.id,
         label: t.title.replace(/^\[([^\]]+)\].*/, "$1") || t.agent,
         cwd: t.worktreePath,
-        baseRef: t.baseBranch,
+        baseRef: t.baseCommitSha || t.baseBranch,
       })),
       { helper: cfg.aiHelpers },
     );
@@ -2517,7 +2692,7 @@ export class TaskManager {
     // system rules so the message matches their style.
     const ai = await generateCommitMessage(task.worktreePath, {
       fallbackHint: task.title,
-      baseRef: task.baseBranch,
+      baseRef: task.baseCommitSha || task.baseBranch,
       helper: this.helperForTask({
         agent: task.agent,
         model: task.model,
@@ -2666,6 +2841,26 @@ export class TaskManager {
     };
   }
 
+}
+
+/**
+ * Recognise context-overflow / prompt-too-long failures in a stderr
+ * line. Mirrors the patterns claude / codex CLIs emit when the model
+ * rejects the request because the conversation no longer fits the
+ * window. Same string lands both as the raw API error body and via
+ * the runner-side friendly prefix (`[claude] …\nHint: Context window
+ * full …`) so the check works on either flavor.
+ */
+function isContextOverflowText(text: string): boolean {
+  const t = text.toLowerCase();
+  if (t.includes("prompt is too long")) return true;
+  if (t.includes("context_length_exceeded")) return true;
+  if (t.includes("context length exceeded")) return true;
+  if (t.includes("context window full")) return true;
+  if (t.includes("input length") && t.includes("exceed")) return true;
+  if (t.includes("context") && t.includes("limit") && t.includes("exceed"))
+    return true;
+  return false;
 }
 
 function findLastUserMessage(db: Db, taskId: string): string | null {

@@ -208,6 +208,7 @@ import {
 import type { PluginManager } from "./pluginManager.ts";
 import { requireSession, bearerOrHeader } from "./auth.ts";
 import type { TaskManager } from "./taskManager.ts";
+import type { UpdateChecker } from "./updateChecker.ts";
 import { WindowWatcher } from "./windowWatcher.ts";
 
 interface EventsWsData {
@@ -228,11 +229,12 @@ export interface BuildServerOptions {
   paths: AgentdPaths;
   tasks: TaskManager;
   plugins: PluginManager;
+  updateChecker: UpdateChecker;
   version: string;
 }
 
 export function buildServer(opts: BuildServerOptions) {
-  const { db, bus, paths, tasks, plugins, version } = opts;
+  const { db, bus, paths, tasks, plugins, updateChecker, version } = opts;
   const windowWatcher = new WindowWatcher(bus);
   const app = new Hono();
 
@@ -774,6 +776,39 @@ export function buildServer(opts: BuildServerOptions) {
     c.json({ rateLimits: listProviderRateLimits(db) }),
   );
 
+  /**
+   * Current npm-update snapshot. The web reads this once on mount; the
+   * `update_info` system event keeps the cache fresh after that.
+   */
+  api.get("/update-info", (c) => c.json({ info: updateChecker.getInfo() }));
+
+  /**
+   * Force a re-check now. Surfaces a "Check again" button on the
+   * settings page so an operator who just published a new version can
+   * confirm the banner shows up without waiting 24h. Returns the
+   * post-check snapshot so the UI can update immediately.
+   */
+  api.post("/update-info/check", async (c) => {
+    const info = await updateChecker.checkNow();
+    return c.json({ info });
+  });
+
+  /**
+   * One-click update. Refuses unless the daemon is service-managed
+   * (systemd/launchd) — a foreground daemon would download the new
+   * version, exit, and leave the operator without a running server.
+   * Returns 202 immediately; the actual install + restart happens
+   * asynchronously, the web sees the WS drop and reconnect after the
+   * service manager respawns us.
+   */
+  api.post("/update-info/apply", (c) => {
+    const r = updateChecker.applyUpdate();
+    if (!r.started) {
+      return c.json({ ok: false, error: r.reason ?? "could not start" }, 400);
+    }
+    return c.json({ ok: true, status: "updating" }, 202);
+  });
+
   /* ── Councils ─────────────────────────────────────────────────────── */
 
   api.get("/councils", (c) => c.json({ councils: listCouncils(db) }));
@@ -1091,12 +1126,17 @@ export function buildServer(opts: BuildServerOptions) {
         // No upstream yet — count commits unique to this branch vs. the
         // base branch, not the entire HEAD history (which would include
         // every commit on main and report a wildly inflated count).
+        // Prefer the SHA frozen at task creation so the count stays
+        // accurate after `baseBranch` later advances past HEAD (e.g.
+        // after this task's PR merges and the operator pulls main —
+        // the live `main..HEAD` then reports zero ahead).
+        const baseRefForAhead = task.baseCommitSha || task.baseBranch;
         const vsBase = Bun.spawn({
           cmd: [
             "git",
             "rev-list",
             "--count",
-            `${task.baseBranch}..HEAD`,
+            `${baseRefForAhead}..HEAD`,
           ],
           cwd: task.worktreePath,
           stdout: "pipe",
@@ -1124,10 +1164,20 @@ export function buildServer(opts: BuildServerOptions) {
     const id = c.req.param("id");
     const task = tasks.get(id);
     if (!task) return c.json({ error: "not found" }, 404);
-    const base = c.req.query("base") ?? task.baseBranch;
+    // Same reasoning as `/diff`: prefer the frozen SHA so per-file
+    // status doesn't go blank once the live base advances past HEAD.
+    const baseForGit =
+      c.req.query("base") ?? task.baseCommitSha ?? task.baseBranch;
+    // Keep the human-readable name in the response so the UI badge
+    // stays sensible regardless of which ref we actually diffed against.
+    const baseLabel = task.baseBranch || baseForGit;
     try {
-      const entries = await gitStatus(task.worktreePath, base);
-      return c.json({ worktreePath: task.worktreePath, entries, base });
+      const entries = await gitStatus(task.worktreePath, baseForGit);
+      return c.json({
+        worktreePath: task.worktreePath,
+        entries,
+        base: baseLabel,
+      });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 500);
     }
@@ -1158,7 +1208,7 @@ export function buildServer(opts: BuildServerOptions) {
       wip: !!body.wip,
       ...(body.hint ? { hint: body.hint } : {}),
       fallbackHint: task.title,
-      baseRef: task.baseBranch,
+      baseRef: task.baseCommitSha || task.baseBranch,
       helper: helperForTask(task),
       ...(cfg.commitInstructions
         ? { extraInstructions: cfg.commitInstructions }
@@ -1184,7 +1234,7 @@ export function buildServer(opts: BuildServerOptions) {
       wip: !!body.wip,
       ...(body.hint ? { hint: body.hint } : {}),
       fallbackHint: task.title,
-      baseRef: task.baseBranch,
+      baseRef: task.baseCommitSha || task.baseBranch,
       helper: helperForTask(task),
       ...(cfg.commitInstructions
         ? { extraInstructions: cfg.commitInstructions }
@@ -1257,7 +1307,7 @@ export function buildServer(opts: BuildServerOptions) {
     const opts = {
       ...(body.hint ? { hint: body.hint } : {}),
       includeBullets: body.includeBullets !== false,
-      baseRef: task.baseBranch,
+      baseRef: task.baseCommitSha || task.baseBranch,
       taskPrompt,
       taskTitle: task.title,
       helper: helperForTask(task),
@@ -1368,7 +1418,7 @@ export function buildServer(opts: BuildServerOptions) {
       const cfg = loadConfig(paths.root);
       const ai = await generateCommitMessage(task.worktreePath, {
         fallbackHint: task.title,
-        baseRef: task.baseBranch,
+        baseRef: task.baseCommitSha || task.baseBranch,
         helper: helperForTask(task),
         ...(cfg.commitInstructions
           ? { extraInstructions: cfg.commitInstructions }
@@ -1662,6 +1712,26 @@ export function buildServer(opts: BuildServerOptions) {
   });
 
   /**
+   * Skip a pending ask without answering. Unblocks the agent (resolves
+   * its `agentd-ask` curl with "(dismissed)") and pairs the `[ask · …]`
+   * breadcrumb with a `[answer · …] (dismissed)` row so the web composer
+   * exits answer-mode. Also recovers stale asks (daemon restart, agent
+   * crash) that `/answer` can't resolve.
+   */
+  api.post("/tasks/:id/dismiss-ask", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => null)) as {
+      askId?: string;
+    } | null;
+    const askId = (body?.askId ?? "").trim();
+    if (!askId) return c.json({ error: "askId required" }, 400);
+    tasks.dismissAsk(id, askId);
+    return c.json({ ok: true });
+  });
+
+  /**
    * Update the task's model override. Empty string clears it (next runner
    * spawn falls back to the configured default for the agent kind).
    */
@@ -1732,8 +1802,23 @@ export function buildServer(opts: BuildServerOptions) {
     const id = c.req.param("id");
     const task = tasks.get(id);
     if (!task) return c.json({ error: "not found" }, 404);
-    const baseRef = c.req.query("base") ?? task.baseBranch;
+    // Operator can pin the comparison to any ref via `?base=…` (used by
+    // the council judge etc.). Otherwise prefer the SHA captured at task
+    // creation: `baseBranch...HEAD` shifts merge-base when the live ref
+    // advances past HEAD (typical after a PR merges this task's work
+    // back into main — the dynamic range then resolves to empty and the
+    // Diff tab goes blank). The frozen SHA stays anchored to where the
+    // branch actually forked. Fall back to the live name for rows
+    // created before `baseCommitSha` existed.
+    const baseRef =
+      c.req.query("base") ?? task.baseCommitSha ?? task.baseBranch;
     const result = await diffAgainst(task.worktreePath, baseRef);
+    // Keep the friendly branch name visible in the UI badge even when
+    // we diffed against a raw SHA — operators don't want to read 40
+    // hex chars in "vs <baseRef>".
+    if (!c.req.query("base") && task.baseCommitSha && task.baseBranch) {
+      result.baseRef = task.baseBranch;
+    }
     return c.json(result);
   });
 
@@ -5967,6 +6052,12 @@ export function buildServer(opts: BuildServerOptions) {
               type: "trigger_fired",
               trigger: env.event.trigger,
               taskId: env.event.taskId,
+              ts: env.ts,
+            });
+          } else if (env.event.kind === "update_info") {
+            send({
+              type: "update_info",
+              info: env.event.info,
               ts: env.ts,
             });
           }

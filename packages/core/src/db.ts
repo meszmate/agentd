@@ -14,6 +14,17 @@ export const tasks = sqliteTable("tasks", {
   worktreePath: text("worktree_path").notNull(),
   branch: text("branch").notNull(),
   baseBranch: text("base_branch").notNull(),
+  /**
+   * Commit SHA captured at worktree-creation time — the point this task
+   * branched off `baseBranch`. Frozen; never updated. The diff endpoint
+   * prefers this over the live `base_branch` ref so "what changed vs
+   * base" stays stable after the base branch advances past HEAD
+   * (e.g. after the task's PR merges and the operator pulls main —
+   * the dynamic `main...HEAD` then resolves to empty because main
+   * contains HEAD's history). NULL for rows created before this
+   * column existed; those fall back to the live ref.
+   */
+  baseCommitSha: text("base_commit_sha"),
   status: text("status").notNull(),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
@@ -37,12 +48,11 @@ export const tasks = sqliteTable("tasks", {
    */
   codexThreadId: text("codex_thread_id"),
   /**
-   * Claude session id — captured from the first `system/init` event
-   * the stream-json runner emits, then passed to subsequent spawns as
-   * `claude --resume <id>` so the resume targets THIS task's session
-   * by id (not the most-recent session for the cwd, which `--continue`
-   * uses and which can collide with sibling tasks or helper invocations
-   * that wrote sessions into the same project dir).
+   * Claude session id — captured from claude-code's first `system/init`
+   * stream event, then passed to subsequent spawns as `--resume <id>`
+   * instead of `--continue`. `--continue` picks the cwd's most-recent
+   * session which is wrong when sibling tasks or `in_place` tasks share
+   * a worktree.
    */
   claudeSessionId: text("claude_session_id"),
   totalInputTokens: integer("total_input_tokens").notNull().default(0),
@@ -461,6 +471,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   worktree_path TEXT NOT NULL,
   branch TEXT NOT NULL,
   base_branch TEXT NOT NULL,
+  base_commit_sha TEXT,
   status TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -748,6 +759,7 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE idea_messages ADD COLUMN question_json TEXT",
   "ALTER TABLE suggestions ADD COLUMN question_json TEXT",
   "ALTER TABLE tasks ADD COLUMN claude_session_id TEXT",
+  "ALTER TABLE tasks ADD COLUMN base_commit_sha TEXT",
 ];
 
 function migrate(sqlite: Database): void {

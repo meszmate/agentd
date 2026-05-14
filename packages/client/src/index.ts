@@ -30,6 +30,7 @@ import type {
   Project,
   ProjectBridgeSummary,
   ProviderRateLimit,
+  UpdateInfo,
   BridgeDeliveryStats,
   RenameTerminalSessionRequest,
   RenameTerminalWindowRequest,
@@ -356,6 +357,34 @@ export class AgentdClient {
    */
   async listRateLimits(): Promise<{ rateLimits: ProviderRateLimit[] }> {
     return this.req("/api/rate-limits");
+  }
+
+  // ── npm update info ──
+  /**
+   * Latest known npm update state. Initial fetch only; the `update_info`
+   * WS event patches the cache after that so the banner stays live
+   * across the 24h check interval.
+   */
+  async getUpdateInfo(): Promise<{ info: UpdateInfo }> {
+    return this.req("/api/update-info");
+  }
+
+  /**
+   * Force a re-check now (skip the 24h interval). Used by the "Check
+   * again" button on the settings page.
+   */
+  async checkUpdateInfo(): Promise<{ info: UpdateInfo }> {
+    return this.req("/api/update-info/check", { method: "POST" });
+  }
+
+  /**
+   * Trigger the one-click update flow. The daemon runs `bun install -g`
+   * asynchronously and then exits non-zero so its service manager
+   * restarts it. Throws on 4xx (e.g. if the daemon is not
+   * service-managed). On success returns 202 + the status string.
+   */
+  async applyUpdate(): Promise<{ ok: true; status: string }> {
+    return this.req("/api/update-info/apply", { method: "POST" });
   }
 
   // ── suggestions ──
@@ -1280,6 +1309,20 @@ export class AgentdClient {
     return this.req(`/api/tasks/${encodeURIComponent(id)}/answer`, {
       method: "POST",
       body: JSON.stringify({ answer }),
+    });
+  }
+
+  /**
+   * Skip a pending ask without answering it. Useful when the operator
+   * wants to redirect the agent without their next chat message being
+   * captured as the literal answer, or when the ask is stale (agent
+   * already moved on / crashed). Unblocks the agent with "(dismissed)"
+   * and writes the paired `[answer · askId] (dismissed)` row.
+   */
+  async dismissTaskAsk(id: string, askId: string): Promise<{ ok: true }> {
+    return this.req(`/api/tasks/${encodeURIComponent(id)}/dismiss-ask`, {
+      method: "POST",
+      body: JSON.stringify({ askId }),
     });
   }
 

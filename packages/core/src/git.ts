@@ -659,8 +659,6 @@ export interface AutoCommitInput {
   cwd: string;
   title: string;
   body?: string;
-  authorName?: string;
-  authorEmail?: string;
 }
 
 export interface AutoCommitResult {
@@ -675,20 +673,7 @@ export async function autoCommit(input: AutoCommitInput): Promise<AutoCommitResu
   if (add.exitCode !== 0) {
     throw new Error(`git add failed: ${add.stderr || add.stdout}`);
   }
-  const author = `${input.authorName ?? "agentd"} <${input.authorEmail ?? "agentd@local"}>`;
-  const args = [
-    "git",
-    "-c",
-    `user.name=${input.authorName ?? "agentd"}`,
-    "-c",
-    `user.email=${input.authorEmail ?? "agentd@local"}`,
-    "commit",
-    "--author",
-    author,
-    "--no-verify",
-    "-m",
-    input.title,
-  ];
+  const args = ["git", "commit", "--no-verify", "-m", input.title];
   if (input.body && input.body.trim().length > 0) {
     args.push("-m", input.body);
   }
@@ -2442,8 +2427,26 @@ export async function* streamValidateIdea(
   // not a structured report. Use tools when grounding helps; reply
   // direct, short, no headings unless they're load-bearing.
   const directive = isFirstTurn
-    ? `The operator has an idea for THIS project. Use Read/Glob/Grep/Bash to ground yourself in the actual code when it'd sharpen your reply. Respond directly: how would this look here? what's the real shape of it? what's worth flagging? Cite specific files when you do. Keep it tight — under 200 words. No mandatory headings, no preamble.`
-    : `Continue the conversation. Reply directly to what they just said. Use tools when grounding helps. Keep it short — under 150 words. No headings.`;
+    ? [
+        `The operator has an idea for THIS project. Before you reply, actually look at the code: use Glob/Grep/Read to find the files that matter for this idea. Don't make claims about "the bus", "the schema", "the realtime layer" etc. without naming a real path.`,
+        ``,
+        `Required in your reply:`,
+        `- At least one concrete file reference in \`path/to/file.ext:line\` form when you discuss how the idea would fit. If you can't cite a real file, you haven't grounded enough yet.`,
+        `- Direct substance. Open with the actual point, not a verdict on feasibility.`,
+        ``,
+        `BANNED openers (do not start your reply with any of these or close paraphrases): "Totally doable", "Doable", "Definitely", "Absolutely", "Sure", "Of course", "Great idea", "Yes,", "Yeah", "Good question", "Interesting", "Nice", "Love it", or any other affirmation/verdict before the substance. Skip the warm-up and start with the thinking.`,
+        ``,
+        `If the operator signals uncertainty about shape or scope (phrases like "I don't know exactly", "something like", "things like that", "not sure how"), use the ask-user protocol to pin down what they actually want before you commit to an architectural take. Two or three concrete shapes as options beats a paragraph of speculation.`,
+        ``,
+        `Keep it under 200 words. No headings. No preamble. Honest critique is welcome; flag the catch, not just the path forward.`,
+      ].join("\n")
+    : [
+        `Continue the conversation. Reply directly to what they just said. Use tools when grounding helps and cite real file paths when you make claims about the code.`,
+        ``,
+        `Same banned openers as before: no "Yeah", "Right", "Got it", "Totally", "Sure", or any affirmation-then-substance pattern. Start with the substance.`,
+        ``,
+        `Keep it under 150 words. No headings.`,
+      ].join("\n");
 
   const ask = [
     directive,
