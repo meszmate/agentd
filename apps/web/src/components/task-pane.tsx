@@ -1,49 +1,43 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   ArrowUpRight,
   Check,
-  ChevronDown,
-  ChevronRight,
-  Loader2,
   Maximize2,
   Minimize2,
-  Send,
-  Trash2,
   X,
 } from "lucide-react";
-import type { Message, Task } from "@agentd/contracts";
-import type { TaskPlanItem } from "@/views/TaskPlan";
-import { useApp, useClient } from "@/AppContext";
-import {
-  useFireQueuedSteer,
-  useRemoveQueuedSteer,
-  useSendInput,
-  useTask,
-  useTaskSteer,
-} from "@/queries";
+import { agentContextWindow, type Message, type Task } from "@agentd/contracts";
+import { useApp } from "@/AppContext";
+import { qk, useModels, useTask } from "@/queries";
 import { useTaskRt } from "@/store";
 import { useRealtime } from "@/realtime";
 import { cn, formatTokens } from "@/lib/utils";
 import { StatusDot } from "@/components/ui/status-dot";
-import { ToolLine, parseToolCall, TOOL_ICONS } from "@/components/tool-line";
+import { parseToolCall, TOOL_ICONS } from "@/components/tool-line";
+import { TaskTimeline } from "@/views/TaskTimeline";
 
 /**
- * Read-only live view of a single task for the grid overlay.
+ * Live view of a single task for the grid overlay. Two modes:
  *
- * The full task page (TaskTimeline + composer) is way too dense to fit
- * 6+ to a screen, so this pane shows only the signal that matters at a
- * glance: status, latest stream / agent reply tail, current tool hint,
- * a "needs approval" pulse when waiting_perm. Click anywhere on the
- * pane (or the title) to navigate to /tasks/:id and steer it. The
- * focus toggle resizes the pane in-place — handled by the parent grid
- * via the `focused` prop + `onToggleFocus` callback.
+ * - `density="tile"` — compact at-a-glance card. Latest stream / agent
+ *   reply tail, status badge, tool hint, "needs approval" pulse when
+ *   waiting_perm. No composer. Designed to fit 6+ to a screen.
  *
- * Read-only by design: no composer, no mutations. All realtime data is
- * already cached by the global WS bus in qk.task(id) + useTaskRt(id), so
- * mounting a pane just subscribes to slices that another route is already
- * keeping fresh — no extra network round-trips.
+ * - `density="focused"` — full task experience embedded in the pane.
+ *   Renders the same TaskTimeline component that powers /tasks/:id:
+ *   thinking pulse with elapsed timer + tool hint, full markdown +
+ *   code blocks, paired tool diffs (WorkCard), ask/answer flow,
+ *   steer queue, plan strip, context-window warning, send/queue
+ *   composer with the same keyboard shortcuts. The operator can
+ *   manage the task from inside the overlay without dropping into
+ *   /tasks/:id.
+ *
+ * All realtime data lives in the global qk.task(id) cache + the
+ * per-task rt slice in zustand, so mounting either mode just
+ * subscribes to existing live state — no extra network calls.
  */
 export function TaskPane({
   task,
@@ -93,36 +87,31 @@ export function TaskPane({
   const flipTs = lastStatusChange[task.id]?.ts ?? 0;
   const justFinished = isFinished && Date.now() - flipTs < 1400;
 
-  // Build the visible transcript tail. Tiles see only the last few
-  // entries — there's no room for more and the goal is "what's it
-  // doing right now," not full history. Focused panes get a deeper
-  // slice AND always include tool calls (rendered with the full
-  // ToolLine, diffs visible) regardless of the verbose toggle — the
-  // operator just blew the pane up to 2x2, they want to see what
-  // the agent is doing. The verbose toggle only governs whether
-  // compact tiles include tool calls.
+  // Build the visible transcript tail for TILE mode only — focused
+  // panes hand rendering off to TaskTimeline, which walks the
+  // messages list itself. Tiles see the last few entries; tool calls
+  // come in via the verbose toggle so a quiet glance stays quiet.
   const tail = useMemo(() => {
-    const tailSize = density === "focused" ? 30 : verbose ? 8 : 5;
-    const includeTools = density === "focused" || verbose;
-    return collectTail(messages, tailSize, includeTools);
+    if (density === "focused") return [];
+    const tailSize = verbose ? 8 : 5;
+    return collectTail(messages, tailSize, verbose);
   }, [messages, density, verbose]);
 
-  // Auto-scroll to the bottom on new content, BUT only when the
-  // operator is already near the bottom. Focused panes show enough
-  // history that the operator might scroll up to read what the agent
-  // did three tool calls ago — auto-yanking them back to the bottom
-  // every time a new token lands would make that impossible. The
-  // "near the bottom" threshold is 48px so a small accidental scroll
-  // doesn't disable autoscroll.
+  // Auto-scroll the tile transcript on new content, but only when
+  // already near the bottom — the operator may have scrolled up to
+  // read older context and shouldn't get yanked back on every token.
+  // Focused panes don't use this; TaskTimeline has its own
+  // stick-to-bottom logic with a ResizeObserver + "↓ new" pill.
   const scrollRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
+    if (density === "focused") return;
     const el = scrollRef.current;
     if (!el) return;
     const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (fromBottom < 48) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [tail.length, rt.streams, rt.lastToolHint]);
+  }, [density, tail.length, rt.streams, rt.lastToolHint]);
 
   // "Hover lift" — driven from state rather than CSS :hover so we can
   // suppress it when the pane is already focused (focused panes have
@@ -290,366 +279,191 @@ export function TaskPane({
         </span>
       </div>
 
-      {/* Transcript tail */}
-      <div
-        ref={scrollRef}
-        className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2 text-[11.5px] leading-snug"
-      >
-        {tail.length === 0 && !streamText ? (
-          <div className="flex h-full items-center justify-center text-[11px] text-ink-400 dark:text-ink-500">
-            {isRunning ? "waking up…" : "no messages yet"}
-          </div>
-        ) : (
-          <ol className="space-y-1.5">
-            {tail.map((m, idx) => {
-              if (m.role === "tool") {
-                // Drop `[result <Tool>]` rows when we already rendered
-                // a full ToolLine for the call above — that path
-                // consumes the result and renders it inline. The
-                // compact ToolRow path still renders result rows as
-                // their own ← line.
-                if (focused && /^\[result /i.test(m.content)) {
-                  return null;
-                }
-                if (focused) {
-                  // Full ToolLine renders diffs, file paths, hit
-                  // counts, code blocks — the same "I can see what
-                  // the agent did" treatment the task page gets.
-                  // Look up the matching `[result]` immediately after
-                  // this call so failed calls render with a red dot
-                  // and the operator gets a one-shot snippet of
-                  // output without clicking through.
-                  const isCall = /^\[call /i.test(m.content);
-                  let result: { ok: boolean; output: string } | null = null;
-                  if (isCall) {
-                    for (let i = idx + 1; i < tail.length; i++) {
-                      const next = tail[i]!;
-                      if (next.role !== "tool") continue;
-                      const r = parseToolResult(next.content);
-                      if (r) {
-                        result = { ok: r.ok, output: r.output };
-                        break;
-                      }
-                    }
+      {focused ? (
+        // Full task experience: same TaskTimeline that powers
+        // /tasks/:id, just with dense padding so it fits the pane.
+        // Streams, thinking pulse, ask/answer, queue, plan strip,
+        // context-window warning, send/queue composer — all of it.
+        // No transcript tail / MiniComposer / footer in this mode;
+        // TaskTimeline handles all of that.
+        <div className="flex-1 min-h-0">
+          <FocusedBody task={task} />
+        </div>
+      ) : (
+        <>
+          {/* Transcript tail */}
+          <div
+            ref={scrollRef}
+            className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2 text-[11.5px] leading-snug"
+          >
+            {tail.length === 0 && !streamText ? (
+              <div className="flex h-full items-center justify-center text-[11px] text-ink-400 dark:text-ink-500">
+                {isRunning ? "waking up…" : "no messages yet"}
+              </div>
+            ) : (
+              <ol className="space-y-1.5">
+                {tail.map((m) => {
+                  if (m.role === "tool") {
+                    return (
+                      <li key={m.id}>
+                        <ToolRow message={m} />
+                      </li>
+                    );
                   }
                   return (
-                    <li key={m.id}>
-                      <ToolLine
-                        content={m.content}
-                        taskId={task.id}
-                        output={result?.output ?? null}
-                        outputOk={result?.ok}
+                    <li key={m.id} className="flex gap-1.5 min-w-0">
+                      <RoleGlyph role={m.role} streaming={false} />
+                      <AgentText
+                        text={m.content}
+                        role={m.role}
+                        verbose={verbose}
+                        density={density}
                       />
                     </li>
                   );
-                }
-                return (
-                  <li key={m.id}>
-                    <ToolRow message={m} />
+                })}
+                {streamText && (
+                  <li className="flex gap-1.5 min-w-0">
+                    {/* Streaming glyph breathes so the eye reads
+                        "actively generating" without watching the
+                        tokens themselves. */}
+                    <RoleGlyph role="agent" streaming />
+                    <AgentText
+                      text={streamText}
+                      role="agent"
+                      verbose={verbose}
+                      density={density}
+                      streaming
+                    />
                   </li>
-                );
-              }
-              return (
-                <li key={m.id} className="flex gap-1.5 min-w-0">
-                  <RoleGlyph role={m.role} streaming={false} />
-                  <AgentText
-                    text={m.content}
-                    role={m.role}
-                    verbose={verbose}
-                    density={density}
-                  />
-                </li>
-              );
-            })}
-            {streamText && (
-              <li className="flex gap-1.5 min-w-0">
-                {/* Streaming glyph breathes so the eye reads "actively
-                    generating" without watching the tokens themselves. */}
-                <RoleGlyph role="agent" streaming />
-                <AgentText
-                  text={streamText}
-                  role="agent"
-                  verbose={verbose}
-                  density={density}
-                  streaming
-                />
-              </li>
-            )}
-          </ol>
-        )}
-      </div>
-
-      {/* Focused-mode extras: plan progress + a steer/queue composer.
-          Tiles stay read-only — only the focused pane gets the
-          interactive bits because there's only one task you can
-          plausibly type into at a time and the textarea + queue list
-          would crowd out the transcript at tile size. */}
-      {focused && rt.plan && rt.plan.length > 0 && (
-        <MiniPlan plan={rt.plan} />
-      )}
-      {focused && !isFinished && <MiniComposer taskId={task.id} task={task} />}
-
-      {/* Footer — live hint + token meter. Finished tiles swap the
-          hint for a duration ("12m · done") so the operator can see at
-          a glance how long this one took, which is more useful than a
-          stale tool name once a task wraps. */}
-      <div className="flex h-6 items-center gap-2 border-t border-ink-900/[0.06] px-2.5 dark:border-ink-50/[0.06] shrink-0">
-        <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate min-w-0 flex-1">
-          {isRunning
-            ? hint ?? "…"
-            : isFinished && durationLabel
-              ? `${durationLabel} · ${statusLabel(task.status)}`
-              : statusLabel(task.status)}
-        </span>
-        <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 shrink-0">
-          {formatTokens(totalTok)} tok
-        </span>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Compact plan list for the focused pane — shows progress (N/total),
- * highlights the current in_progress item, lists every step. Skips
- * the expander UX the full PlanStrip has because the pane is already
- * "the focused view"; if the operator wants more detail they click
- * through to /tasks/:id which has the full TaskPlan view.
- */
-function MiniPlan({ plan }: { plan: TaskPlanItem[] }) {
-  const [expanded, setExpanded] = useState(false);
-  const done = plan.filter((p) => p.status === "completed").length;
-  const total = plan.length;
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-  const inProgress = plan.find((p) => p.status === "in_progress");
-  const pending = plan.filter((p) => p.status === "pending");
-  const head = inProgress ?? pending[0];
-
-  return (
-    <div className="shrink-0 border-t border-ink-900/[0.06] bg-paper-100/40 dark:border-ink-50/[0.06] dark:bg-ink-900/40">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-ink-900/[0.025] dark:hover:bg-ink-50/[0.025] transition-colors"
-        title={expanded ? "Collapse plan" : "Expand plan"}
-      >
-        {expanded ? (
-          <ChevronDown className="h-3 w-3 text-ink-400 dark:text-ink-500 shrink-0" />
-        ) : (
-          <ChevronRight className="h-3 w-3 text-ink-400 dark:text-ink-500 shrink-0" />
-        )}
-        <span className="font-mono text-[9.5px] uppercase tracking-[0.12em] font-semibold text-violet-700 dark:text-violet-300 shrink-0">
-          plan
-        </span>
-        <span className="relative h-1 w-12 rounded-full bg-ink-900/[0.08] dark:bg-ink-50/[0.08] overflow-hidden shrink-0">
-          <span
-            className="absolute inset-y-0 left-0 rounded-full bg-emerald-500 transition-all duration-500"
-            style={{ width: `${pct}%` }}
-          />
-        </span>
-        <span className="font-mono text-[10px] tabular-nums text-ink-500 dark:text-ink-400 shrink-0">
-          {done}/{total}
-        </span>
-        {!expanded && head && (
-          <span className="flex-1 min-w-0 truncate text-[11.5px] text-ink-700 dark:text-ink-200">
-            {head.activeForm ?? head.content}
-          </span>
-        )}
-      </button>
-      {expanded && (
-        <ul className="max-h-32 overflow-y-auto px-3 pb-2 space-y-0.5">
-          {plan.map((item, i) => (
-            <li
-              key={i}
-              className={cn(
-                "flex items-start gap-1.5 text-[11.5px] leading-snug py-0.5",
-                item.status === "in_progress" &&
-                  "text-ink-900 dark:text-ink-50 font-medium",
-                item.status === "completed" &&
-                  "text-emerald-700/85 dark:text-emerald-300/85 line-through decoration-emerald-500/70",
-                item.status === "pending" &&
-                  "text-ink-600 dark:text-ink-300",
-              )}
-            >
-              <span
-                className={cn(
-                  "shrink-0 mt-[5px] inline-block h-1.5 w-1.5 rounded-full",
-                  item.status === "in_progress" && "bg-ember-500 animate-pulse",
-                  item.status === "completed" && "bg-emerald-500",
-                  item.status === "pending" && "bg-ink-300 dark:bg-ink-600",
                 )}
-              />
-              <span className="flex-1 min-w-0">
-                {item.activeForm ?? item.content}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
+              </ol>
+            )}
+          </div>
 
-/**
- * Composer for the focused pane. Sends messages directly when the
- * task is idle / waiting on the operator; queues them via the steer
- * endpoint when the agent is mid-turn (so they fire after the next
- * tool call without interrupting). Renders the existing queue on top
- * with fire/remove buttons so the operator can manage what's pending
- * without clicking through to /tasks/:id.
- *
- * Hooked into the same mutations the full TaskComposer uses, so
- * everything stays consistent with the task page: same WS
- * invalidation, same optimistic updates, same daemon endpoints.
- */
-function MiniComposer({ taskId, task }: { taskId: string; task: Task }) {
-  const { toast } = useApp();
-  const client = useClient();
-  const send = useSendInput(taskId);
-  const steerQ = useTaskSteer(taskId);
-  const fireQ = useFireQueuedSteer(taskId);
-  const removeQ = useRemoveQueuedSteer(taskId);
-  const queue = steerQ.data?.queue ?? [];
-  const [text, setText] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-
-  // While the agent is mid-turn we queue; while idle (or waiting on
-  // the human) we sendInput directly. waiting_perm is a separate
-  // permission flow — we still steer/queue here because the operator
-  // can also drop a fresh message in (it just lands behind whatever
-  // permission decision they make).
-  const queueing =
-    task.status === "running" || task.status === "waiting_perm";
-
-  const submit = async () => {
-    const msg = text.trim();
-    if (!msg || submitting) return;
-    setSubmitting(true);
-    try {
-      if (queueing) {
-        await client.steerTask(taskId, msg, "queue");
-        await steerQ.refetch();
-      } else {
-        await send.mutateAsync(msg);
-      }
-      setText("");
-    } catch (e) {
-      toast((e as Error).message, true);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const fire = async (index: number) => {
-    try {
-      await fireQ.mutateAsync(index);
-    } catch (e) {
-      toast((e as Error).message, true);
-    }
-  };
-  const remove = async (index: number) => {
-    try {
-      await removeQ.mutateAsync(index);
-    } catch (e) {
-      toast((e as Error).message, true);
-    }
-  };
-
-  return (
-    <div className="shrink-0 border-t border-ink-900/[0.06] bg-paper-50 dark:border-ink-50/[0.06] dark:bg-ink-800">
-      {queue.length > 0 && (
-        <div className="border-b border-ink-900/[0.04] dark:border-ink-50/[0.04] px-2 py-1.5">
-          <div className="flex items-center gap-2 px-1 pb-1">
-            <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
-              queued
+          {/* Footer — live hint + token meter. Finished tiles swap
+              the hint for a duration ("12m · done") so the operator
+              can see at a glance how long this one took, which is
+              more useful than a stale tool name once a task wraps. */}
+          <div className="flex h-6 items-center gap-2 border-t border-ink-900/[0.06] px-2.5 dark:border-ink-50/[0.06] shrink-0">
+            <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate min-w-0 flex-1">
+              {isRunning
+                ? hint ?? "…"
+                : isFinished && durationLabel
+                  ? `${durationLabel} · ${statusLabel(task.status)}`
+                  : statusLabel(task.status)}
             </span>
-            <span className="rounded-sm bg-ink-900/[0.06] px-1 py-px font-mono text-[9px] tabular-nums text-ink-700 dark:bg-ink-50/[0.08] dark:text-ink-200">
-              {queue.length}
-            </span>
-            <span className="font-mono text-[9px] text-ink-400 dark:text-ink-500">
-              · fires after next tool call
+            <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 shrink-0">
+              {formatTokens(totalTok)} tok
             </span>
           </div>
-          <ul className="space-y-0.5">
-            {queue.map((q, i) => (
-              <li
-                key={i}
-                className="group flex items-center gap-1.5 rounded px-1 py-0.5 hover:bg-ink-900/[0.03] dark:hover:bg-ink-50/[0.03]"
-              >
-                <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 w-4 shrink-0">
-                  {i + 1}.
-                </span>
-                <span className="flex-1 min-w-0 truncate text-[11px] text-ink-700 dark:text-ink-200">
-                  {q}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => void fire(i)}
-                  title="Fire now"
-                  className="opacity-0 group-hover:opacity-100 inline-flex h-4 px-1 items-center rounded font-mono text-[9px] uppercase tracking-[0.06em] text-ember-700 hover:bg-ember-500/10 dark:text-ember-300 transition-opacity"
-                >
-                  steer
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void remove(i)}
-                  title="Remove from queue"
-                  aria-label="Remove"
-                  className="opacity-0 group-hover:opacity-100 inline-flex h-4 w-4 items-center justify-center rounded text-ink-400 hover:text-red-600 hover:bg-red-500/10 dark:text-ink-500 dark:hover:text-red-300 transition-opacity"
-                >
-                  <Trash2 className="h-3 w-3" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
+        </>
       )}
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit();
-        }}
-        className="flex items-end gap-1.5 px-2 py-1.5"
-      >
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            // Cmd/Ctrl+Enter submits; bare Enter inserts a newline so
-            // multi-line prompts work. Matches the main TaskComposer
-            // convention so muscle memory carries over.
-            if (
-              (e.metaKey || e.ctrlKey) &&
-              e.key === "Enter" &&
-              !e.nativeEvent.isComposing
-            ) {
-              e.preventDefault();
-              void submit();
-            }
-          }}
-          placeholder={queueing ? "queue a message…" : "send a message…"}
-          rows={1}
-          className="flex-1 min-w-0 resize-none rounded-md border border-ink-900/10 bg-paper-50 px-2 py-1 font-mono text-[11.5px] text-ink-900 placeholder:text-ink-400 focus:border-ember-500/40 focus:outline-none focus:ring-1 focus:ring-ember-500/20 dark:border-ink-50/10 dark:bg-ink-900/60 dark:text-ink-50 dark:placeholder:text-ink-500"
-        />
-        <button
-          type="submit"
-          disabled={!text.trim() || submitting}
-          title={
-            queueing
-              ? "Queue message (⌘↩)"
-              : "Send (⌘↩)"
-          }
-          className="inline-flex h-7 items-center gap-1 rounded-md border border-ember-500/30 bg-ember-500/10 px-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ember-700 transition-colors hover:bg-ember-500/20 disabled:opacity-40 disabled:cursor-not-allowed dark:text-ember-300"
-        >
-          {submitting ? (
-            <Loader2 className="h-3 w-3 animate-spin" />
-          ) : (
-            <Send className="h-3 w-3" />
-          )}
-          {queueing ? "queue" : "send"}
-        </button>
-      </form>
     </div>
+  );
+}
+
+/**
+ * Renders the full TaskTimeline (thinking pulse, streams, paired
+ * tool diffs, ask/answer, queue, plan strip, send/queue composer)
+ * inside the grid overlay's focused pane. Mirrors how TaskDetail
+ * wires up the timeline — same context-token + context-window math,
+ * same optimistic appendLocal pattern, same disabled-while-running
+ * rule — so the focused pane experience is the task experience.
+ */
+function FocusedBody({ task }: { task: Task }) {
+  const { toast } = useApp();
+  const taskQ = useTask(task.id);
+  const messages: Message[] = taskQ.data?.messages ?? [];
+  const rt = useTaskRt(task.id);
+  const { streams, plan, lastToolHint } = rt;
+  const turn = useMemo(
+    () => ({ startedAt: rt.turnStartedAt, tokens: rt.turnTokens }),
+    [rt.turnStartedAt, rt.turnTokens],
+  );
+  const modelsQ = useModels();
+  const qc = useQueryClient();
+
+  // Current-turn working-context tokens (NOT lifetime spend — that
+  // re-counts prior turns and would inflate the meter into the
+  // millions while the real working context is tiny). Same shape
+  // as TaskDetail.contextTokens.
+  const contextTokens = useMemo(() => {
+    const inT = task.latestTurnInputTokens;
+    const outT = task.latestTurnOutputTokens;
+    if (inT == null && outT == null) return 0;
+    return (inT ?? 0) + (outT ?? 0);
+  }, [task.latestTurnInputTokens, task.latestTurnOutputTokens]);
+  const contextWindow = useMemo(() => {
+    const agent = task.agent as "claude" | "codex";
+    const resolved = (
+      task.model?.trim() ||
+      modelsQ.data?.defaults?.[agent]?.trim() ||
+      ""
+    ).toLowerCase();
+    const entry = resolved
+      ? (modelsQ.data?.models?.[agent] ?? []).find(
+          (m) =>
+            m.id.toLowerCase() === resolved ||
+            m.aliases?.some((a) => a.toLowerCase() === resolved),
+        )
+      : undefined;
+    return entry?.contextWindow ?? agentContextWindow(task.agent);
+  }, [modelsQ.data, task.agent, task.model]);
+
+  const isRunning =
+    task.status === "running" ||
+    task.status === "waiting_input" ||
+    task.status === "waiting_perm";
+
+  const onError = useCallback((m: string) => toast(m, true), [toast]);
+
+  // Optimistic user-message append. Writes straight into the
+  // qk.task cache so the row shows the moment Send is pressed;
+  // the realtime bus then dedupes the server-shape row a few
+  // hundred ms later. Same pattern TaskDetail.appendLocal uses.
+  const appendLocal = useCallback(
+    (role: Message["role"], content: string) => {
+      const ts = Date.now();
+      qc.setQueryData(qk.task(task.id), (cur: unknown) => {
+        const prev = cur as
+          | { task: Task; messages: Message[] }
+          | undefined;
+        if (!prev || !prev.task) return cur;
+        return {
+          ...prev,
+          messages: [
+            ...prev.messages,
+            {
+              id: "tmp_" + Math.random().toString(36).slice(2),
+              taskId: task.id,
+              role,
+              content,
+              ts,
+            },
+          ],
+        };
+      });
+    },
+    [task.id, qc],
+  );
+
+  return (
+    <TaskTimeline
+      taskId={task.id}
+      messages={messages}
+      appendLocal={appendLocal}
+      onError={onError}
+      disabled={isRunning}
+      lastToolHint={lastToolHint}
+      streams={streams}
+      totalTokens={contextTokens}
+      contextWindow={contextWindow}
+      turn={turn}
+      plan={plan}
+      compactedAt={task.lastCompactedAt ?? null}
+      dense
+    />
   );
 }
 
