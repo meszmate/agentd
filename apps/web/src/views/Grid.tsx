@@ -162,26 +162,43 @@ export function GridOverlay({
   // currently-active task plus everything that wrapped within the
   // recent window. Finished tasks intentionally remain focusable so
   // the operator can scroll back through their transcript / diff /
-  // log without leaving the grid.
+  // log without leaving the grid. waiting_perm tasks float to the
+  // top so a blocked agent is the first thing the operator sees on
+  // open and after task transitions.
   const focusable = useMemo(() => [...live, ...recent], [live, recent]);
-
-  // If the focused task drops off the focusable set (closed /
-  // removed / aged out of the recent window), release focus so the
-  // layout doesn't keep a phantom slot reserved for a pane that no
-  // longer renders.
   const focusableIds = useMemo(
     () => new Set(focusable.map((t) => t.id)),
     [focusable],
   );
-  useEffect(() => {
-    if (focusedId && !focusableIds.has(focusedId)) setFocusedId(null);
-  }, [focusedId, focusableIds]);
 
-  // Reset focus each time the overlay opens — stale focus from a
-  // previous session would expand the wrong pane on next open.
+  // The overlay opens *into* a focused task — there's no separate
+  // tile-grid dashboard step. Pick whichever task wants the
+  // operator's attention most: blocked-on-permission first, then
+  // running, then anything in the focusable list. The rail on the
+  // left handles hopping between tasks; the focused pane is what
+  // the operator actually came here for (live activity, code, the
+  // composer to steer with). If the currently-focused task drops
+  // off the focusable set (closed, aged out), pick a replacement
+  // instead of falling back to a stale id.
+  const pickAutoFocus = (list: Task[]): string | null => {
+    if (list.length === 0) return null;
+    const blocked = list.find((t) => t.status === "waiting_perm");
+    if (blocked) return blocked.id;
+    const running = list.find((t) => t.status === "running");
+    if (running) return running.id;
+    return list[0]?.id ?? null;
+  };
+
   useEffect(() => {
-    if (!open) setFocusedId(null);
-  }, [open]);
+    if (!open) {
+      setFocusedId(null);
+      return;
+    }
+    if (!focusedId || !focusableIds.has(focusedId)) {
+      const next = pickAutoFocus(focusable);
+      setFocusedId(next);
+    }
+  }, [open, focusedId, focusableIds, focusable]);
 
   // Route change closes — clicking a pane (or the global permission
   // toast's "Open task" action) navigates to /tasks/:id, and we don't
@@ -201,11 +218,7 @@ export function GridOverlay({
     }
   }, [open, location.pathname, onClose]);
 
-  const toggleFocus = (id: string) => {
-    setFocusedId((cur) => (cur === id ? null : id));
-  };
-
-  const totalShown = live.length + recent.length;
+  const totalShown = focusable.length;
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(o) => !o && onClose()}>
@@ -229,15 +242,6 @@ export function GridOverlay({
             panel itself. Scale+fade in from 97% for a tasteful lift. */}
         <DialogPrimitive.Content
           aria-describedby={undefined}
-          onEscapeKeyDown={(e) => {
-            // Esc as a "back one level" gesture: when a pane is
-            // focused, peel it back to the grid first; only close
-            // the overlay when nothing is focused (Radix's default).
-            if (focusedId) {
-              e.preventDefault();
-              setFocusedId(null);
-            }
-          }}
           className={cn(
             "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
             "w-[calc(100vw-2rem)] h-[calc(100vh-2rem)]",
@@ -329,59 +333,29 @@ export function GridOverlay({
             </button>
           </PageTopbar>
 
-          {/* Body — flex column. Two distinct shapes here, switched
-              on whether a pane is focused:
+          {/* Body — always renders FocusedLayout when there's a
+              focusable task. The overlay opens directly into one
+              task (the most-attention-seeking one); the rail on
+              the left is the dashboard / hop list. No separate
+              tile-grid view — operators wanted "I'm IN the task"
+              by default, not "I'm surveying tiles."
 
-              - Unfocused: grid of equal-size tiles + the recent strip
-                docked at the bottom. The dashboard view.
-
-              - Focused: a compact rail of other-live tiles across the
-                top so the operator can hop tasks, then the focused
-                pane fills the remaining vertical space and gets the
-                full TaskTimeline experience. Recent strip is hidden in
-                this mode — operators wanted "feel like I'm in the
-                task" and finished-task fingertips compete with that.
-
-              LayoutGroup wraps both shapes so a task that shifts zones
-              (live → recent, tile → focused) animates between regions
-              via FLIP rather than dis/re-appearing. */}
-          <div className="flex-1 min-h-0 flex flex-col overflow-hidden p-3 gap-3">
+              LayoutGroup wraps the rail so tasks shifting position
+              (waiting_perm jumping to the top, live → recent)
+              animate between rows via FLIP rather than snapping. */}
+          <div className="flex-1 min-h-0 flex flex-col overflow-hidden p-3">
             <LayoutGroup>
               {tasksQ.isLoading && totalShown === 0 ? (
                 <LoadingState />
-              ) : totalShown === 0 ? (
+              ) : totalShown === 0 || !focusedId ? (
                 <EmptyState />
-              ) : focusedId &&
-                focusableIds.has(focusedId) ? (
+              ) : (
                 <FocusedLayout
                   tasks={focusable}
                   focusedId={focusedId}
                   onFocus={(id) => setFocusedId(id)}
-                  onUnfocus={() => setFocusedId(null)}
                   verbose={verbose}
                 />
-              ) : (
-                <>
-                  <div className="flex-1 min-h-0">
-                    {live.length === 0 ? (
-                      <IdleLiveZone hasRecent={recent.length > 0} />
-                    ) : (
-                      <GridLayout
-                        tasks={live}
-                        focusedId={focusedId}
-                        onToggleFocus={toggleFocus}
-                        verbose={verbose}
-                      />
-                    )}
-                  </div>
-                  {recent.length > 0 && (
-                    <RecentStrip
-                      tasks={recent}
-                      onToggleFocus={toggleFocus}
-                      verbose={verbose}
-                    />
-                  )}
-                </>
               )}
             </LayoutGroup>
           </div>
@@ -392,85 +366,14 @@ export function GridOverlay({
 }
 
 /**
- * Default grid layout — equal-size tiles, every pane visible without
- * scrolling. Auto-fit minmax so columns reflow with the window. Used
- * when no pane is focused; the focused state hands rendering off to
- * FocusedLayout below.
- *
- * Each tile is a `motion.div` with `layout` and `layoutId={task.id}` —
- * reorders (waiting_perm jumping to the front), migrations between
- * zones (live → recent), and the morph into FocusedLayout (this grid
- * cell → the big focused pane down there) all animate via FLIP rather
- * than snapping. AnimatePresence handles enter/exit.
- */
-function GridLayout({
-  tasks,
-  focusedId,
-  onToggleFocus,
-  verbose,
-}: {
-  tasks: Task[];
-  focusedId: string | null;
-  onToggleFocus: (id: string) => void;
-  verbose: boolean;
-}) {
-  // Smaller minimum when we're packing a lot of tiles so they don't all
-  // wrap into one column at common laptop widths. Above 6 tiles we drop
-  // to a ~240px minimum so the auto-fit can stage 4 columns at ~1280px.
-  const minTile = tasks.length > 6 ? 240 : 320;
-
-  return (
-    <div
-      className="grid h-full w-full gap-3"
-      style={{
-        gridTemplateColumns: `repeat(auto-fit, minmax(${minTile}px, 1fr))`,
-        gridAutoRows: "minmax(180px, 1fr)",
-      }}
-    >
-      <AnimatePresence mode="popLayout" initial={false}>
-        {tasks.map((t) => {
-          const focused = focusedId === t.id;
-          return (
-            <motion.div
-              key={t.id}
-              layout
-              layoutId={t.id}
-              initial={{ opacity: 0, scale: 0.94, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.92, transition: { duration: 0.18 } }}
-              transition={{
-                layout: { type: "spring", stiffness: 320, damping: 32 },
-                opacity: { duration: 0.22 },
-                scale: { duration: 0.22 },
-                y: { duration: 0.22 },
-              }}
-              className="min-h-0 min-w-0"
-            >
-              <TaskPane
-                task={t}
-                focused={focused}
-                onToggleFocus={() => onToggleFocus(t.id)}
-                density="tile"
-                verbose={verbose}
-              />
-            </motion.div>
-          );
-        })}
-      </AnimatePresence>
-    </div>
-  );
-}
-
-/**
- * Focused layout — the operator picked a task to dive into.
- *
- * Layout: vertical rail on the left listing every focusable task
- * (live + recently-finished, so finished tasks remain inspectable),
- * with the big focused pane filling the rest. The focused pane
- * itself is a split: TaskTimeline (chat) on the left, TaskWorkspace
- * (Live / Diff / Todos / Files / Log / Context / Term tabs) on the
- * right — the same shape as `/tasks/:id`, just embedded in the
- * overlay.
+ * The only layout the overlay renders — the operator is always
+ * inside one task. The rail on the left lists every focusable task
+ * (live + recently-finished, so finished tasks remain inspectable)
+ * for one-click hopping; the big focused pane on the right is a
+ * split: TaskTimeline (chat with thinking pulse + composer) on
+ * the left, TaskWorkspace (Live / Diff / Todos / Files / Log /
+ * Context / Term tabs) on the right — the same shape as
+ * `/tasks/:id`, just embedded in the overlay.
  *
  * Keyboard nav (vim-style):
  *   - j / ArrowDown: focus the next task in the rail
@@ -478,30 +381,25 @@ function GridLayout({
  *   - g:             jump to the first task
  *   - G:             jump to the last task
  *   - 1..9:          jump to the Nth task in the rail
- *   - Esc:           unfocus → back to the grid (Radix dialog also
- *                    closes on Esc, but our handler runs first so
- *                    the unfocus is a "back one level" gesture
- *                    before the overlay itself closes on a second
- *                    press)
+ *   - Esc:           close the overlay (Radix Dialog default —
+ *                    we don't intercept it because there's no
+ *                    intermediate state to step back to)
  *
  * Typing into the composer is unaffected — the handler bails when
  * an editable element has focus so j / k / 1 don't hijack input.
  *
- * Each task keeps its `layoutId` from the unfocused GridLayout so
- * the morph between "tile in the grid" → "row in the rail" /
- * "focused pane" animates via FLIP rather than snapping.
+ * Each task keeps its `layoutId` so reorderings (waiting_perm
+ * jumping to the top, status flips) animate via FLIP.
  */
 function FocusedLayout({
   tasks,
   focusedId,
   onFocus,
-  onUnfocus,
   verbose,
 }: {
   tasks: Task[];
   focusedId: string;
   onFocus: (id: string) => void;
-  onUnfocus: () => void;
   verbose: boolean;
 }) {
   const focusedTask = tasks.find((t) => t.id === focusedId);
@@ -569,8 +467,10 @@ function FocusedLayout({
         />
       )}
       {/* Big focused pane — fills the remaining width. layoutId
-          preserved so the morph from grid tile → focused pane
-          animates rather than snapping. */}
+          preserved so reorderings (waiting_perm flips to the top,
+          status changes) animate the rail+pane together rather
+          than snapping. onToggleFocus is a no-op here because the
+          focus toggle button is hidden in always-focused mode. */}
       <motion.div
         layout
         layoutId={focusedTask.id}
@@ -583,7 +483,7 @@ function FocusedLayout({
         <TaskPane
           task={focusedTask}
           focused
-          onToggleFocus={onUnfocus}
+          onToggleFocus={() => {}}
           density="focused"
           verbose={verbose}
         />
@@ -655,7 +555,7 @@ function RailSidebar({
           <kbd className="text-ink-500 dark:text-ink-400">1-9</kbd>
           {" jump · "}
           <kbd className="text-ink-500 dark:text-ink-400">esc</kbd>
-          {" unfocus"}
+          {" close"}
         </div>
       </div>
     </div>
@@ -740,83 +640,6 @@ function RailRow({
 }
 
 /**
- * Bottom strip of recently-finished tasks. Stays at a fixed height
- * (one row, narrower minimum width) so it doesn't compete for visual
- * weight with the live grid above. Each tile is the same TaskPane
- * component — opacity dimming + smaller dimensions are the only
- * differences, handled by TaskPane's own status-aware styling.
- *
- * Tiles here share `layoutId` with their corresponding live entry, so
- * when a task transitions running → done it animates DOWN from the
- * live grid into this strip instead of disappearing and re-appearing.
- */
-function RecentStrip({
-  tasks,
-  onToggleFocus,
-  verbose,
-}: {
-  tasks: Task[];
-  onToggleFocus: (id: string) => void;
-  verbose: boolean;
-}) {
-  return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25, ease: "easeOut" }}
-      className="shrink-0"
-    >
-      <div className="flex items-center gap-2 px-1 pb-1.5">
-        <span className="font-mono text-[9.5px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
-          recent
-        </span>
-        <span className="h-px flex-1 bg-gradient-to-r from-ink-900/10 via-ink-900/5 to-transparent dark:from-ink-50/10 dark:via-ink-50/5" />
-        <span className="font-mono text-[9.5px] tabular-nums text-ink-400 dark:text-ink-500">
-          {tasks.length}
-        </span>
-      </div>
-      <div
-        className="grid gap-3 h-[150px]"
-        style={{
-          gridTemplateColumns: `repeat(auto-fit, minmax(220px, 1fr))`,
-        }}
-      >
-        <AnimatePresence mode="popLayout" initial={false}>
-          {tasks.slice(0, 6).map((t) => (
-            <motion.div
-              key={t.id}
-              layout
-              layoutId={t.id}
-              initial={{ opacity: 0, scale: 0.94, y: -6 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{
-                opacity: 0,
-                scale: 0.92,
-                transition: { duration: 0.18 },
-              }}
-              transition={{
-                layout: { type: "spring", stiffness: 320, damping: 32 },
-                opacity: { duration: 0.22 },
-              }}
-              className="min-h-0 min-w-0"
-            >
-              <TaskPane
-                task={t}
-                focused={false}
-                onToggleFocus={() => onToggleFocus(t.id)}
-                density="tile"
-                verbose={verbose}
-              />
-            </motion.div>
-          ))}
-        </AnimatePresence>
-      </div>
-    </motion.div>
-  );
-}
-
-/**
  * Animated count chip. Number swap is animated (slide up + fade) so a
  * jump from 3 → 4 lives is perceivable without explicit attention.
  * Tone differentiates "live" (ember, animated dot) from "recent"
@@ -873,29 +696,6 @@ function CountTicker({
         {label}
       </span>
     </span>
-  );
-}
-
-/** Top zone when there are no live tasks but recent ones exist — keeps
- *  the layout balanced and tells the operator "nothing's running, but
- *  here's what just finished" rather than dropping them into a blank
- *  half-screen. */
-function IdleLiveZone({ hasRecent }: { hasRecent: boolean }) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 px-6">
-      <div className="relative flex h-3 w-3 items-center justify-center">
-        <span className="absolute inset-0 rounded-full bg-emerald-500/30 animate-pulse-ring" />
-        <span className="relative h-1.5 w-1.5 rounded-full bg-emerald-500" />
-      </div>
-      <div className="text-[13px] text-ink-700 dark:text-ink-200 font-medium">
-        All clear
-      </div>
-      <p className="max-w-sm text-center text-[12px] text-ink-500 dark:text-ink-400">
-        {hasRecent
-          ? "No live tasks. The strip below shows what just wrapped."
-          : "No live tasks. Anything you start will appear here."}
-      </p>
-    </div>
   );
 }
 

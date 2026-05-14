@@ -6,7 +6,6 @@ import {
   ArrowUpRight,
   Check,
   Maximize2,
-  Minimize2,
   X,
 } from "lucide-react";
 import { agentContextWindow, type Message, type Task } from "@agentd/contracts";
@@ -247,19 +246,17 @@ export function TaskPane({
             <X className="h-3 w-3" /> failed
           </span>
         )}
-        <button
-          type="button"
-          onClick={onToggleFocus}
-          title={focused ? "Shrink" : "Focus"}
-          aria-label={focused ? "Shrink pane" : "Focus pane"}
-          className="inline-flex h-5 w-5 items-center justify-center rounded text-ink-500 transition-colors hover:bg-ink-900/[0.06] hover:text-ink-900 dark:text-ink-400 dark:hover:bg-ink-50/[0.06] dark:hover:text-ink-50"
-        >
-          {focused ? (
-            <Minimize2 className="h-3 w-3" />
-          ) : (
+        {!focused && (
+          <button
+            type="button"
+            onClick={onToggleFocus}
+            title="Focus"
+            aria-label="Focus pane"
+            className="inline-flex h-5 w-5 items-center justify-center rounded text-ink-500 transition-colors hover:bg-ink-900/[0.06] hover:text-ink-900 dark:text-ink-400 dark:hover:bg-ink-50/[0.06] dark:hover:text-ink-50"
+          >
             <Maximize2 className="h-3 w-3" />
-          )}
-        </button>
+          </button>
+        )}
         <button
           type="button"
           onClick={open}

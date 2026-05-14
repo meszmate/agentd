@@ -160,7 +160,21 @@ async function main() {
     version: VERSION,
   });
 
-  const webHtml = existsSync(WEB_INDEX) ? readFileSync(WEB_INDEX, "utf8") : null;
+  /**
+   * Re-read index.html on every SPA-shell response so rebuilds of
+   * apps/web/dist take effect without a daemon restart. Previously
+   * this was captured once at startup, which meant `bun --filter
+   * @agentd/web build` produced new hashed asset filenames the
+   * daemon's cached HTML didn't reference, leaving the operator
+   * stuck on stale JS until they ctrl-c'd the daemon. readFileSync
+   * on a single ~2KB file per navigation is free compared to the
+   * network round-trip; hot rebuilds matter more than a microsecond
+   * of disk IO.
+   */
+  function loadWebHtml(): string | null {
+    if (!existsSync(WEB_INDEX)) return null;
+    return readFileSync(WEB_INDEX, "utf8");
+  }
 
   /**
    * Serve the built Vite app from apps/web/dist when present.
@@ -175,7 +189,6 @@ async function main() {
    *      hard-refreshing on /templates would 404.
    */
   function serveWeb(req: Request): Response | null {
-    if (!webHtml) return null;
     const url = new URL(req.url);
 
     // 2. API + WS reserved paths — let the Hono app / WS handler take them.
@@ -212,7 +225,9 @@ async function main() {
 
     // 3. SPA shell fallback — only for GET; let other verbs 404 through Hono.
     if (req.method !== "GET" && req.method !== "HEAD") return null;
-    return new Response(webHtml, {
+    const html = loadWebHtml();
+    if (!html) return null;
+    return new Response(html, {
       headers: {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-cache",
@@ -253,7 +268,7 @@ async function main() {
     }
   }
   console.log(
-    `web ui:    ${webHtml ? announceUrl + "/" : "(not built — run `bun --filter @agentd/web build`)"}`,
+    `web ui:    ${loadWebHtml() ? announceUrl + "/" : "(not built — run `bun --filter @agentd/web build`)"}`,
   );
   console.log(`db:        ${paths.db}`);
   console.log(`worktrees: ${paths.worktrees}`);
