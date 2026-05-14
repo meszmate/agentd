@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { LayoutGrid, X } from "lucide-react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import type { Task } from "@agentd/contracts";
 import {
   Count,
@@ -11,6 +12,7 @@ import {
   VRule,
 } from "@/components/ui/page-topbar";
 import { useTasks } from "@/queries";
+import { useRealtime } from "@/realtime";
 import { TaskPane } from "@/components/task-pane";
 import { cn } from "@/lib/utils";
 
@@ -20,25 +22,43 @@ const ACTIVE_STATUSES = new Set<Task["status"]>([
   "waiting_perm",
 ]);
 
+const FINISHED_STATUSES = new Set<Task["status"]>([
+  "done",
+  "failed",
+  "stopped",
+]);
+
 /**
- * Live dashboard of every currently-active task, rendered as a
- * fullscreen overlay (not a route — there's no `/grid` URL). Triggered
- * by the LayoutGrid icon next to the "LIVE" indicator in the sidebar.
- * Always shows everything that's running / waiting on a human — no
- * manual pinning, no filters. Walk up to the desk, hit the icon, see
- * every agent in flight at once without scrolling.
+ * Recent-finished window: how long after a task ends do we keep it on
+ * the grid? Long enough that the operator can see "this one just
+ * wrapped" on their next glance (so the celebrate flash on TaskPane
+ * doesn't fire into the void), short enough that the recent strip
+ * doesn't accumulate forever during a long session. 10 minutes feels
+ * about right — most operators will have eyeballed the grid at least
+ * once in that window, and tasks that finished hours ago belong on
+ * the main /tasks list anyway.
+ */
+const RECENT_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * Live dashboard of every currently-active task (and recently-finished
+ * ones, dimmed in a strip below). Rendered as a fullscreen overlay —
+ * not a route, no `/grid` URL. Triggered by the LayoutGrid icon in
+ * the sidebar.
  *
- * Layout: CSS grid with auto-fit columns. When the operator clicks the
- * Maximize2 icon on a pane it becomes "focused" — that pane spans 2
- * columns + 2 rows so it's roughly 4x the size of the surrounding
- * tiles. Other panes stay at tile density. Click the same pane's
- * Minimize2 to release focus and return to uniform tiles. A
- * `waiting_perm` task always renders with a pulsing amber ring so a
- * blocked agent is impossible to miss even at small density.
+ * Layout: motion-animated CSS grid with auto-fit columns. When the
+ * operator clicks Maximize on a pane it becomes "focused" — that pane
+ * spans 2x2 with the resize animated by motion's `layout` prop so the
+ * other tiles slide rather than snap. Recently-finished tasks
+ * accumulate in a dimmed strip below the live grid for ~10 minutes,
+ * so the operator sees the celebrate flash on their next glance even
+ * if they weren't watching the moment a task wrapped. `waiting_perm`
+ * tasks always sort to the front of the active grid AND get a pulsing
+ * amber halo (see TaskPane) so a blocked agent is impossible to miss.
  *
- * Read-only: the panes show transcript tail + stream + tool hint, but
- * to actually steer a task the operator clicks the pane and we
- * navigate to /tasks/:id (route change closes the overlay below).
+ * Read-only: panes show transcript tail + stream + tool hint, but to
+ * steer a task the operator clicks through to /tasks/:id (which
+ * closes the overlay below).
  *
  * Built on Radix Dialog so we get focus trap, scroll lock,
  * aria-modal, and the data-state hooks tailwindcss-animate consumes.
@@ -63,28 +83,66 @@ export function GridOverlay({
 }) {
   const tasksQ = useTasks();
   const tasks = tasksQ.data?.tasks ?? [];
+  const { lastStatusChange } = useRealtime();
 
-  const active = useMemo(() => {
-    return tasks
-      .filter((t) => ACTIVE_STATUSES.has(t.status) && !t.closedAt)
-      .sort((a, b) => {
-        // `waiting_perm` first (blocked, needs eyes), then by recency.
-        const pa = a.status === "waiting_perm" ? 0 : 1;
-        const pb = b.status === "waiting_perm" ? 0 : 1;
-        if (pa !== pb) return pa - pb;
-        return b.updatedAt - a.updatedAt;
-      });
-  }, [tasks]);
+  // Force a re-render every ~1s while open so the "recent window"
+  // boundary advances — without this, finished tasks would linger past
+  // their 10-minute fade unless some other event happened to retrigger
+  // React. Cheap because the only thing it gates is the memo below.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!open) return;
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [open]);
+
+  const { live, recent } = useMemo(() => {
+    const now = Date.now();
+    const liveTasks: Task[] = [];
+    const recentTasks: Task[] = [];
+    for (const t of tasks) {
+      if (t.closedAt) continue;
+      if (ACTIVE_STATUSES.has(t.status)) {
+        liveTasks.push(t);
+      } else if (FINISHED_STATUSES.has(t.status)) {
+        // Use the status-flip ts when we have one (more accurate —
+        // it's the moment the task actually transitioned) and fall
+        // back to updatedAt for tasks that finished before the page
+        // loaded (no flip event observed locally).
+        const finishedAt = lastStatusChange[t.id]?.ts ?? t.updatedAt;
+        if (now - finishedAt < RECENT_WINDOW_MS) {
+          recentTasks.push(t);
+        }
+      }
+    }
+    // Sort live: waiting_perm first (blocked, needs eyes), then by
+    // recency. Sort recent: most-recently-finished first.
+    liveTasks.sort((a, b) => {
+      const pa = a.status === "waiting_perm" ? 0 : 1;
+      const pb = b.status === "waiting_perm" ? 0 : 1;
+      if (pa !== pb) return pa - pb;
+      return b.updatedAt - a.updatedAt;
+    });
+    recentTasks.sort((a, b) => {
+      const fa = lastStatusChange[a.id]?.ts ?? a.updatedAt;
+      const fb = lastStatusChange[b.id]?.ts ?? b.updatedAt;
+      return fb - fa;
+    });
+    return { live: liveTasks, recent: recentTasks };
+    // tick is intentionally in deps — it drives the recent window
+    // sliding forward each second.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasks, lastStatusChange, tick]);
 
   const [focusedId, setFocusedId] = useState<string | null>(null);
 
   // If the focused task drops off the active list (turn finished /
   // closed / removed), release focus so the layout doesn't keep a
   // phantom slot reserved for a pane that no longer renders.
-  const activeIds = useMemo(() => new Set(active.map((t) => t.id)), [active]);
+  const liveIds = useMemo(() => new Set(live.map((t) => t.id)), [live]);
   useEffect(() => {
-    if (focusedId && !activeIds.has(focusedId)) setFocusedId(null);
-  }, [focusedId, activeIds]);
+    if (focusedId && !liveIds.has(focusedId)) setFocusedId(null);
+  }, [focusedId, liveIds]);
 
   // Reset focus each time the overlay opens — stale focus from a
   // previous session would expand the wrong pane on next open.
@@ -113,6 +171,8 @@ export function GridOverlay({
   const toggleFocus = (id: string) => {
     setFocusedId((cur) => (cur === id ? null : id));
   };
+
+  const totalShown = live.length + recent.length;
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(o) => !o && onClose()}>
@@ -167,10 +227,17 @@ export function GridOverlay({
             <span className="text-[13px] text-ink-900 dark:text-ink-50 font-medium">
               Grid
             </span>
-            <Count>{active.length}</Count>
-            <span className="font-mono text-[11px] tabular-nums text-ink-400 dark:text-ink-500">
-              live
-            </span>
+            {/* Two-part count: live (ember dot) + recent (muted dot),
+                each animated when the number changes so the eye picks
+                up "one more just landed" without staring. */}
+            <CountTicker count={live.length} tone="live" label="live" />
+            {recent.length > 0 && (
+              <CountTicker
+                count={recent.length}
+                tone="recent"
+                label="recent"
+              />
+            )}
             <Spacer />
             {focusedId && (
               <button
@@ -192,18 +259,39 @@ export function GridOverlay({
             </button>
           </PageTopbar>
 
-          <div className="flex-1 min-h-0 overflow-hidden p-3">
-            {tasksQ.isLoading && active.length === 0 ? (
-              <LoadingState />
-            ) : active.length === 0 ? (
-              <EmptyState />
-            ) : (
-              <GridLayout
-                tasks={active}
-                focusedId={focusedId}
-                onToggleFocus={toggleFocus}
-              />
-            )}
+          {/* Body — flex column so the live grid expands and the
+              recent strip docks to the bottom at a fixed height. The
+              LayoutGroup wraps both zones so a task moving from "live"
+              to "recent" animates between the two regions instead of
+              dis/re-appearing. */}
+          <div className="flex-1 min-h-0 flex flex-col overflow-hidden p-3 gap-3">
+            <LayoutGroup>
+              {tasksQ.isLoading && totalShown === 0 ? (
+                <LoadingState />
+              ) : totalShown === 0 ? (
+                <EmptyState />
+              ) : (
+                <>
+                  <div className="flex-1 min-h-0">
+                    {live.length === 0 ? (
+                      <IdleLiveZone hasRecent={recent.length > 0} />
+                    ) : (
+                      <GridLayout
+                        tasks={live}
+                        focusedId={focusedId}
+                        onToggleFocus={toggleFocus}
+                      />
+                    )}
+                  </div>
+                  {recent.length > 0 && (
+                    <RecentStrip
+                      tasks={recent}
+                      onToggleFocus={toggleFocus}
+                    />
+                  )}
+                </>
+              )}
+            </LayoutGroup>
           </div>
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
@@ -217,15 +305,11 @@ export function GridOverlay({
  * focused pane spans 2x2 so it's clearly the prominent one. When no
  * pane is focused every tile shares the same size.
  *
- * Pane count → target column count (at default viewport widths):
- *   ≤2  → 1 or 2 columns (tile fills width)
- *   3-4 → 2 columns
- *   5-9 → 3 columns
- *   10+ → 4 columns (auto-fit handles the rest)
- *
- * We use plain `repeat(auto-fit, minmax(…))` so the breakpoints come
- * from CSS, not JS — resizing the window or docking a sidebar pane
- * recomputes the grid without re-rendering React.
+ * Each tile is a `motion.div` with `layout` and `layoutId={task.id}` —
+ * resizes (focus/unfocus), reorders (waiting_perm jumping to the
+ * front), and migrations between zones (live → recent) all animate
+ * via FLIP rather than snapping. AnimatePresence handles enter/exit
+ * so new tasks fade up and finished ones slide out cleanly.
  */
 function GridLayout({
   tasks,
@@ -249,25 +333,195 @@ function GridLayout({
         gridAutoRows: "minmax(180px, 1fr)",
       }}
     >
-      {tasks.map((t) => {
-        const focused = focusedId === t.id;
-        return (
-          <div
-            key={t.id}
-            className={cn(
-              "min-h-0 min-w-0",
-              focused && "col-span-2 row-span-2",
-            )}
+      <AnimatePresence mode="popLayout" initial={false}>
+        {tasks.map((t) => {
+          const focused = focusedId === t.id;
+          return (
+            <motion.div
+              key={t.id}
+              layout
+              layoutId={t.id}
+              initial={{ opacity: 0, scale: 0.94, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.92, transition: { duration: 0.18 } }}
+              transition={{
+                layout: { type: "spring", stiffness: 320, damping: 32 },
+                opacity: { duration: 0.22 },
+                scale: { duration: 0.22 },
+                y: { duration: 0.22 },
+              }}
+              className={cn(
+                "min-h-0 min-w-0",
+                focused && "col-span-2 row-span-2",
+              )}
+            >
+              <TaskPane
+                task={t}
+                focused={focused}
+                onToggleFocus={() => onToggleFocus(t.id)}
+                density={focused ? "focused" : "tile"}
+              />
+            </motion.div>
+          );
+        })}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+/**
+ * Bottom strip of recently-finished tasks. Stays at a fixed height
+ * (one row, narrower minimum width) so it doesn't compete for visual
+ * weight with the live grid above. Each tile is the same TaskPane
+ * component — opacity dimming + smaller dimensions are the only
+ * differences, handled by TaskPane's own status-aware styling.
+ *
+ * Tiles here share `layoutId` with their corresponding live entry, so
+ * when a task transitions running → done it animates DOWN from the
+ * live grid into this strip instead of disappearing and re-appearing.
+ */
+function RecentStrip({
+  tasks,
+  onToggleFocus,
+}: {
+  tasks: Task[];
+  onToggleFocus: (id: string) => void;
+}) {
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25, ease: "easeOut" }}
+      className="shrink-0"
+    >
+      <div className="flex items-center gap-2 px-1 pb-1.5">
+        <span className="font-mono text-[9.5px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+          recent
+        </span>
+        <span className="h-px flex-1 bg-gradient-to-r from-ink-900/10 via-ink-900/5 to-transparent dark:from-ink-50/10 dark:via-ink-50/5" />
+        <span className="font-mono text-[9.5px] tabular-nums text-ink-400 dark:text-ink-500">
+          {tasks.length}
+        </span>
+      </div>
+      <div
+        className="grid gap-3 h-[150px]"
+        style={{
+          gridTemplateColumns: `repeat(auto-fit, minmax(220px, 1fr))`,
+        }}
+      >
+        <AnimatePresence mode="popLayout" initial={false}>
+          {tasks.slice(0, 6).map((t) => (
+            <motion.div
+              key={t.id}
+              layout
+              layoutId={t.id}
+              initial={{ opacity: 0, scale: 0.94, y: -6 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{
+                opacity: 0,
+                scale: 0.92,
+                transition: { duration: 0.18 },
+              }}
+              transition={{
+                layout: { type: "spring", stiffness: 320, damping: 32 },
+                opacity: { duration: 0.22 },
+              }}
+              className="min-h-0 min-w-0"
+            >
+              <TaskPane
+                task={t}
+                focused={false}
+                onToggleFocus={() => onToggleFocus(t.id)}
+                density="tile"
+              />
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+    </motion.div>
+  );
+}
+
+/**
+ * Animated count chip. Number swap is animated (slide up + fade) so a
+ * jump from 3 → 4 lives is perceivable without explicit attention.
+ * Tone differentiates "live" (ember, animated dot) from "recent"
+ * (muted, static dot).
+ */
+function CountTicker({
+  count,
+  tone,
+  label,
+}: {
+  count: number;
+  tone: "live" | "recent";
+  label: string;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 font-mono text-[11px] tabular-nums",
+        tone === "live"
+          ? "text-ink-900 dark:text-ink-50"
+          : "text-ink-500 dark:text-ink-400",
+      )}
+    >
+      <span
+        className={cn(
+          "inline-block h-1.5 w-1.5 rounded-full",
+          tone === "live"
+            ? "bg-ember-500 animate-blink"
+            : "bg-emerald-500/60",
+        )}
+      />
+      <Count>
+        <AnimatePresence mode="popLayout" initial={false}>
+          <motion.span
+            key={count}
+            initial={{ y: -8, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 8, opacity: 0 }}
+            transition={{ duration: 0.18, ease: "easeOut" }}
+            className="inline-block"
           >
-            <TaskPane
-              task={t}
-              focused={focused}
-              onToggleFocus={() => onToggleFocus(t.id)}
-              density={focused ? "focused" : "tile"}
-            />
-          </div>
-        );
-      })}
+            {count}
+          </motion.span>
+        </AnimatePresence>
+      </Count>
+      <span
+        className={cn(
+          "font-mono text-[10px] uppercase tracking-[0.06em]",
+          tone === "live"
+            ? "text-ink-400 dark:text-ink-500"
+            : "text-ink-400 dark:text-ink-500",
+        )}
+      >
+        {label}
+      </span>
+    </span>
+  );
+}
+
+/** Top zone when there are no live tasks but recent ones exist — keeps
+ *  the layout balanced and tells the operator "nothing's running, but
+ *  here's what just finished" rather than dropping them into a blank
+ *  half-screen. */
+function IdleLiveZone({ hasRecent }: { hasRecent: boolean }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 px-6">
+      <div className="relative flex h-3 w-3 items-center justify-center">
+        <span className="absolute inset-0 rounded-full bg-emerald-500/30 animate-pulse-ring" />
+        <span className="relative h-1.5 w-1.5 rounded-full bg-emerald-500" />
+      </div>
+      <div className="text-[13px] text-ink-700 dark:text-ink-200 font-medium">
+        All clear
+      </div>
+      <p className="max-w-sm text-center text-[12px] text-ink-500 dark:text-ink-400">
+        {hasRecent
+          ? "No live tasks. The strip below shows what just wrapped."
+          : "No live tasks. Anything you start will appear here."}
+      </p>
     </div>
   );
 }
