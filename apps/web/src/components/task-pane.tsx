@@ -14,6 +14,7 @@ import { useTaskRt } from "@/store";
 import { useRealtime } from "@/realtime";
 import { cn, formatTokens } from "@/lib/utils";
 import { StatusDot } from "@/components/ui/status-dot";
+import { parseToolCall, TOOL_ICONS } from "@/components/tool-line";
 
 /**
  * Read-only live view of a single task for the grid overlay.
@@ -36,12 +37,22 @@ export function TaskPane({
   focused,
   onToggleFocus,
   density,
+  verbose = false,
 }: {
   task: Task;
   focused: boolean;
   onToggleFocus: () => void;
   /** "tile" = small/medium dashboard tile; "focused" = expanded pane. */
   density: "tile" | "focused";
+  /**
+   * When true, include agent tool calls in the transcript tail —
+   * Bash commands, file edits with +N/-M counts, Reads, etc. —
+   * rendered as a single icon + summary line each so a tile can
+   * still show "what is this agent doing right now" without
+   * exploding the height. Off by default; flipped by the grid's
+   * verbose toggle (persisted as `gridVerbose` pref).
+   */
+  verbose?: boolean;
 }) {
   const navigate = useNavigate();
   const taskQ = useTask(task.id);
@@ -72,12 +83,13 @@ export function TaskPane({
   // Build the visible transcript tail. Tiles see only the last few
   // entries — there's no room for more and the goal is "what's it
   // doing right now," not full history. Focused panes get a deeper
-  // slice but still no tool-call rendering (kept text-only on purpose
-  // so the pane stays readable at a quick glance).
+  // slice. When `verbose` is on, tool calls + results are included
+  // so the operator can watch what the agent is actually DOING
+  // (Bash, Edit, Read) rather than just what it's saying.
   const tail = useMemo(() => {
-    const tailSize = density === "focused" ? 16 : 5;
-    return collectTail(messages, tailSize);
-  }, [messages, density]);
+    const tailSize = density === "focused" ? 20 : verbose ? 8 : 5;
+    return collectTail(messages, tailSize, verbose);
+  }, [messages, density, verbose]);
 
   // Auto-scroll the transcript to the bottom whenever new content lands.
   // Always sticky — these panes are passive viewers, the operator isn't
@@ -266,37 +278,38 @@ export function TaskPane({
           </div>
         ) : (
           <ol className="space-y-1.5">
-            {tail.map((m) => (
-              <li key={m.id} className="flex gap-1.5 min-w-0">
-                <RoleGlyph role={m.role} streaming={false} />
-                <span
-                  className={cn(
-                    "flex-1 min-w-0 text-ink-700 dark:text-ink-200",
-                    density === "tile" && "line-clamp-3",
-                    m.role === "system" &&
-                      "text-ink-400 dark:text-ink-500 italic",
-                  )}
-                >
-                  {compactText(m.content)}
-                </span>
-              </li>
-            ))}
+            {tail.map((m) => {
+              if (m.role === "tool") {
+                return (
+                  <li key={m.id}>
+                    <ToolRow message={m} />
+                  </li>
+                );
+              }
+              return (
+                <li key={m.id} className="flex gap-1.5 min-w-0">
+                  <RoleGlyph role={m.role} streaming={false} />
+                  <AgentText
+                    text={m.content}
+                    role={m.role}
+                    verbose={verbose}
+                    density={density}
+                  />
+                </li>
+              );
+            })}
             {streamText && (
               <li className="flex gap-1.5 min-w-0">
                 {/* Streaming glyph breathes so the eye reads "actively
                     generating" without watching the tokens themselves. */}
                 <RoleGlyph role="agent" streaming />
-                <span
-                  className={cn(
-                    "flex-1 min-w-0 text-ink-700 dark:text-ink-200",
-                    density === "tile" && "line-clamp-4",
-                  )}
-                >
-                  {compactText(streamText)}
-                  {/* Sleeker caret — character-stepped blink rather than
-                      the heavier opacity fade. Reads as "typing". */}
-                  <span className="ml-0.5 inline-block h-3 w-1 align-text-bottom bg-ember-500/80 animate-caret-blink" />
-                </span>
+                <AgentText
+                  text={streamText}
+                  role="agent"
+                  verbose={verbose}
+                  density={density}
+                  streaming
+                />
               </li>
             )}
           </ol>
@@ -330,6 +343,214 @@ const ROLE_GLYPH: Record<Message["role"], string> = {
   system: "sys",
 };
 
+/**
+ * Render an agent / user / system message body for the pane. In
+ * compact mode (the default) code fences collapse to a `「code」`
+ * placeholder and whitespace is squeezed — fine for "what's the
+ * agent saying right now" glances. In verbose mode we instead
+ * preserve code blocks as monospace strips (separated from the
+ * surrounding prose by a thin left border) and keep whitespace as
+ * the agent emitted it. That's the version the user actually wants
+ * when they're watching an agent write code — they can see the
+ * code, not a placeholder.
+ */
+function AgentText({
+  text,
+  role,
+  verbose,
+  density,
+  streaming = false,
+}: {
+  text: string;
+  role: Message["role"];
+  verbose: boolean;
+  density: "tile" | "focused";
+  streaming?: boolean;
+}) {
+  const clampClass =
+    density === "tile"
+      ? streaming
+        ? verbose
+          ? "max-h-32 overflow-hidden"
+          : "line-clamp-4"
+        : verbose
+          ? "max-h-24 overflow-hidden"
+          : "line-clamp-3"
+      : streaming
+        ? "max-h-64 overflow-hidden"
+        : undefined;
+
+  const caret = streaming ? (
+    <span className="ml-0.5 inline-block h-3 w-1 align-text-bottom bg-ember-500/80 animate-caret-blink" />
+  ) : null;
+
+  if (!verbose) {
+    return (
+      <span
+        className={cn(
+          "flex-1 min-w-0 text-ink-700 dark:text-ink-200",
+          clampClass,
+          role === "system" && "text-ink-400 dark:text-ink-500 italic",
+        )}
+      >
+        {compactText(text)}
+        {caret}
+      </span>
+    );
+  }
+
+  // Verbose path — split into prose segments and code blocks. Code
+  // gets its own block, prose runs inline. Inline backticks stay as
+  // a subtle mono span (no separate block treatment) so a sentence
+  // mentioning `useEffect` doesn't fragment into three blocks.
+  const segments = splitCodeFences(text);
+  return (
+    <span
+      className={cn(
+        "flex-1 min-w-0 text-ink-700 dark:text-ink-200",
+        clampClass,
+        role === "system" && "text-ink-400 dark:text-ink-500 italic",
+      )}
+    >
+      {segments.map((seg, i) =>
+        seg.kind === "code" ? (
+          <pre
+            key={i}
+            className="my-1 max-h-40 overflow-hidden whitespace-pre rounded-sm border-l-2 border-ember-500/40 bg-ink-900/[0.04] px-2 py-1 font-mono text-[10.5px] leading-snug text-ink-800 dark:bg-ink-50/[0.04] dark:text-ink-100"
+          >
+            <code>{seg.text}</code>
+          </pre>
+        ) : (
+          <span key={i} className="whitespace-pre-wrap">
+            {renderInlineMono(seg.text)}
+          </span>
+        ),
+      )}
+      {caret}
+    </span>
+  );
+}
+
+/**
+ * Split a markdown-ish string into prose / fenced-code segments.
+ * Fences are ``` blocks; the optional language right after the
+ * opening fence is dropped (we don't have a highlighter in the
+ * pane). Unbalanced fences (still-streaming code blocks) treat
+ * everything after the last `\`\`\`` as code so partial output
+ * still renders as code as it streams, not as plain text.
+ */
+function splitCodeFences(
+  text: string,
+): Array<{ kind: "code" | "prose"; text: string }> {
+  const out: Array<{ kind: "code" | "prose"; text: string }> = [];
+  const re = /```[^\n]*\n?/g;
+  let lastIdx = 0;
+  let inCode = false;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    const before = text.slice(lastIdx, m.index);
+    if (before.length > 0) {
+      out.push({ kind: inCode ? "code" : "prose", text: before });
+    }
+    inCode = !inCode;
+    lastIdx = re.lastIndex;
+  }
+  const trailing = text.slice(lastIdx);
+  if (trailing.length > 0) {
+    out.push({ kind: inCode ? "code" : "prose", text: trailing });
+  }
+  // Trim trailing whitespace on the last segment so a flapping
+  // caret doesn't sit on a blank line beneath the content.
+  if (out.length > 0) {
+    const last = out[out.length - 1]!;
+    out[out.length - 1] = { ...last, text: last.text.replace(/\s+$/, "") };
+  }
+  return out;
+}
+
+/** Wrap inline backticks (`foo`) as subtle mono spans, leave the rest
+ *  as plain text. Lightweight — no markdown parser, just the
+ *  one inline pattern that actually matters here. */
+function renderInlineMono(text: string): React.ReactNode[] {
+  const out: React.ReactNode[] = [];
+  const re = /`([^`\n]+)`/g;
+  let lastIdx = 0;
+  let key = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    if (m.index > lastIdx) out.push(text.slice(lastIdx, m.index));
+    out.push(
+      <code
+        key={`c-${key++}`}
+        className="rounded-sm bg-ink-900/[0.06] px-0.5 font-mono text-[10.5px] text-ink-800 dark:bg-ink-50/[0.06] dark:text-ink-100"
+      >
+        {m[1]}
+      </code>,
+    );
+    lastIdx = re.lastIndex;
+  }
+  if (lastIdx < text.length) out.push(text.slice(lastIdx));
+  return out;
+}
+
+/**
+ * Compact tool row for the verbose grid pane. Renders both
+ * `[call <Tool>] {…}` (call rows: → arrow, ember tool name, summary)
+ * and `[result <Tool> ok|err] <body>` (result rows: ← arrow, status
+ * dot, first line of output). Dense by design — a tile is 12 lines
+ * tall, every row counts. We don't render the full body / diff
+ * here; the operator clicks through to /tasks/:id for that.
+ */
+function ToolRow({ message }: { message: Message }) {
+  // Result rows render differently — they show output preview + ok/err
+  // status, no parseable args. Branch up front so the call path
+  // doesn't have to handle the no-args case.
+  const result = parseToolResult(message.content);
+  if (result) {
+    return (
+      <div className="flex items-center gap-1.5 min-w-0 text-ink-500 dark:text-ink-400">
+        <span className="font-mono text-[10px] mt-[1px] text-ink-400 dark:text-ink-500 shrink-0 w-3">
+          ←
+        </span>
+        <span
+          className={cn(
+            "shrink-0 inline-block h-1.5 w-1.5 rounded-full",
+            result.ok
+              ? "bg-emerald-500/70"
+              : "bg-red-500",
+          )}
+        />
+        <span className="flex-1 min-w-0 font-mono text-[10.5px] text-ink-500 dark:text-ink-400 truncate italic">
+          {firstLine(result.output) || (result.ok ? "ok" : "failed")}
+        </span>
+      </div>
+    );
+  }
+
+  const parsed = parseToolCall(message.content);
+  const Icon = TOOL_ICONS[parsed.kind] ?? TOOL_ICONS.other;
+  return (
+    <div className="flex items-center gap-1.5 min-w-0 text-ink-600 dark:text-ink-300">
+      <span className="font-mono text-[10px] mt-[1px] text-ember-700/70 dark:text-ember-300/70 shrink-0 w-3">
+        →
+      </span>
+      <Icon className="h-3 w-3 shrink-0 text-ink-500 dark:text-ink-400" />
+      <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.06em] text-ember-700 dark:text-ember-300">
+        {parsed.name}
+      </span>
+      <span className="flex-1 min-w-0 font-mono text-[11px] text-ink-700 dark:text-ink-200 truncate">
+        {parsed.summary}
+      </span>
+    </div>
+  );
+}
+
+function firstLine(s: string): string {
+  const i = s.indexOf("\n");
+  const line = i < 0 ? s : s.slice(0, i);
+  return line.length > 120 ? line.slice(0, 117) + "…" : line;
+}
+
 function RoleGlyph({
   role,
   streaming,
@@ -356,22 +577,38 @@ function RoleGlyph({
 }
 
 /**
- * Drop tool-call noise and pre-pruned system meta rows; the pane shows
- * conversational signal only. Keeps the tail size from filling up with
- * `[call Bash]` / `[result Bash ok]` entries that would otherwise crowd
- * out the last actual agent reply.
+ * Pick the last `n` "interesting" rows to show in a pane. System
+ * bookkeeping (ask/answer/exit/status/usage markers) is always
+ * filtered. Tool calls/results are filtered in compact mode and kept
+ * in verbose mode — both the call AND the result, so the operator
+ * sees what the agent invoked + the bit of output it got back. Two
+ * lines per tool isn't free, but it's how every other agent UI
+ * (claude-code's terminal, Cursor's inspector) shows it and it
+ * matches the operator's mental model.
  */
-function collectTail(messages: Message[], n: number): Message[] {
+function collectTail(
+  messages: Message[],
+  n: number,
+  verbose: boolean,
+): Message[] {
   const filtered = messages.filter((m) => {
-    if (m.role === "tool") return false;
     if (m.role === "system") {
-      // hide synthetic ask/answer/exit markers — they're chat noise here
       const c = m.content;
       if (/^\[(ask|answer|exit|status|usage)/i.test(c)) return false;
     }
+    if (m.role === "tool") return verbose;
     return m.content.trim().length > 0;
   });
   return filtered.slice(-n);
+}
+
+/** `[result <Tool> ok|err] <body>` → structured parts. */
+function parseToolResult(
+  content: string,
+): { tool: string; ok: boolean; output: string } | null {
+  const m = content.match(/^\[result ([^\s\]]+)\s+(ok|err)\]\s*([\s\S]*)$/);
+  if (!m) return null;
+  return { tool: m[1]!, ok: m[2] === "ok", output: (m[3] ?? "").trim() };
 }
 
 /**

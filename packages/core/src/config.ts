@@ -405,6 +405,16 @@ export const UserPrefs = z.object({
   taskWorkspaceOpen: z.boolean().default(true),
   /** Pinned repo paths shown at the top of the repo picker. */
   repoPickerPins: z.array(z.string()).default([]),
+  /**
+   * Grid overlay verbosity. When true, the live grid panes render
+   * agent tool calls inline (Bash commands, file edits, Reads, etc.)
+   * so the operator can watch what the agent is actually doing
+   * without opening the full task page. When false, panes stay
+   * compact: agent messages + live stream only. Off by default
+   * because dense tool-call rendering across 12 tiles can become
+   * busy fast.
+   */
+  gridVerbose: z.boolean().default(false),
 });
 export type UserPrefs = z.infer<typeof UserPrefs>;
 export const DEFAULT_USER_PREFS: UserPrefs = UserPrefs.parse({});

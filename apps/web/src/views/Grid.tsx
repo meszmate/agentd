@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { LayoutGrid, X } from "lucide-react";
+import { Eye, EyeOff, LayoutGrid, X } from "lucide-react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import type { Task } from "@agentd/contracts";
@@ -11,7 +11,7 @@ import {
   Spacer,
   VRule,
 } from "@/components/ui/page-topbar";
-import { useTasks } from "@/queries";
+import { usePatchPrefs, usePrefs, useTasks } from "@/queries";
 import { useRealtime } from "@/realtime";
 import { TaskPane } from "@/components/task-pane";
 import { cn } from "@/lib/utils";
@@ -84,6 +84,20 @@ export function GridOverlay({
   const tasksQ = useTasks();
   const tasks = tasksQ.data?.tasks ?? [];
   const { lastStatusChange } = useRealtime();
+
+  // Verbose mode: panes render the agent's tool calls inline (Bash
+  // commands, file edits, Reads) instead of the compact agent-text-
+  // only view. Persisted as a cross-device pref so the operator's
+  // choice rides their account, not the device. Default off — dense
+  // tool spam across 12 tiles overwhelms quickly, so most operators
+  // will flip it on situationally (e.g. when watching a coding agent
+  // edit files) and back off for general dashboard glances.
+  const prefsQ = usePrefs();
+  const verbose = prefsQ.data?.prefs.gridVerbose ?? false;
+  const patchPrefs = usePatchPrefs();
+  const toggleVerbose = () => {
+    patchPrefs.mutate({ gridVerbose: !verbose });
+  };
 
   // Force a re-render every ~1s while open so the "recent window"
   // boundary advances — without this, finished tasks would linger past
@@ -248,6 +262,34 @@ export function GridOverlay({
                 unfocus
               </button>
             )}
+            {/* Verbose toggle — flips the cross-device `gridVerbose`
+                pref so panes start including tool calls (Bash, Edit,
+                Read) inline. Optimistically reflects the click while
+                the PATCH is in flight so it feels instant. */}
+            <button
+              type="button"
+              onClick={toggleVerbose}
+              aria-label={verbose ? "Hide tool calls" : "Show tool calls"}
+              aria-pressed={verbose}
+              title={
+                verbose
+                  ? "Verbose: showing tool calls (click to hide)"
+                  : "Compact: agent text only (click to show tool calls)"
+              }
+              className={cn(
+                "inline-flex items-center gap-1 h-6 px-1.5 rounded-md font-mono text-[10px] uppercase tracking-[0.06em] border transition-colors",
+                verbose
+                  ? "border-ember-500/30 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+                  : "border-ink-900/10 text-ink-500 hover:text-ink-900 hover:bg-ink-900/[0.04] dark:border-ink-50/10 dark:text-ink-400 dark:hover:text-ink-50 dark:hover:bg-ink-50/[0.04]",
+              )}
+            >
+              {verbose ? (
+                <Eye className="h-3 w-3" />
+              ) : (
+                <EyeOff className="h-3 w-3" />
+              )}
+              verbose
+            </button>
             <button
               type="button"
               onClick={onClose}
@@ -280,6 +322,7 @@ export function GridOverlay({
                         tasks={live}
                         focusedId={focusedId}
                         onToggleFocus={toggleFocus}
+                        verbose={verbose}
                       />
                     )}
                   </div>
@@ -287,6 +330,7 @@ export function GridOverlay({
                     <RecentStrip
                       tasks={recent}
                       onToggleFocus={toggleFocus}
+                      verbose={verbose}
                     />
                   )}
                 </>
@@ -315,10 +359,12 @@ function GridLayout({
   tasks,
   focusedId,
   onToggleFocus,
+  verbose,
 }: {
   tasks: Task[];
   focusedId: string | null;
   onToggleFocus: (id: string) => void;
+  verbose: boolean;
 }) {
   // Smaller minimum when we're packing a lot of tiles so they don't all
   // wrap into one column at common laptop widths. Above 6 tiles we drop
@@ -360,6 +406,7 @@ function GridLayout({
                 focused={focused}
                 onToggleFocus={() => onToggleFocus(t.id)}
                 density={focused ? "focused" : "tile"}
+                verbose={verbose}
               />
             </motion.div>
           );
@@ -383,9 +430,11 @@ function GridLayout({
 function RecentStrip({
   tasks,
   onToggleFocus,
+  verbose,
 }: {
   tasks: Task[];
   onToggleFocus: (id: string) => void;
+  verbose: boolean;
 }) {
   return (
     <motion.div
@@ -434,6 +483,7 @@ function RecentStrip({
                 focused={false}
                 onToggleFocus={() => onToggleFocus(t.id)}
                 density="tile"
+                verbose={verbose}
               />
             </motion.div>
           ))}

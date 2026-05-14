@@ -18,7 +18,13 @@ import {
 } from "@/components/ui/page-topbar";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoRow, ToggleRow } from "@/components/ui/info-row";
-import { useModels, usePatchSettings, useSettings } from "@/queries";
+import {
+  useModels,
+  usePatchPrefs,
+  usePatchSettings,
+  usePrefs,
+  useSettings,
+} from "@/queries";
 import type { AgentdModelRegistry } from "@agentd/client";
 import { useApp } from "@/AppContext";
 import {
@@ -40,6 +46,7 @@ const SECTIONS: RailItem[] = [
   { id: "thinking", glyph: "✦", label: "Thinking defaults" },
   { id: "ai-helpers", glyph: "✶", label: "AI helpers" },
   { id: "commits", glyph: "◆", label: "Commits & PRs" },
+  { id: "grid", glyph: "⌗", label: "Grid" },
   { id: "browser", glyph: "▢", label: "Browser" },
 ];
 
@@ -597,6 +604,16 @@ export function Settings() {
             </InfoRow>
           </div>
 
+          {/* Grid */}
+          <div id="section-grid">
+            <SectionHeader
+              label="Grid"
+              hint="live dashboard preferences"
+              sticky
+            />
+            <GridPrefsRow />
+          </div>
+
           {/* Browser */}
           <div id="section-browser">
             <SectionHeader
@@ -643,6 +660,33 @@ export function Settings() {
       </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Cross-device grid preferences. Auto-saves on toggle (the daemon
+ * round-trip happens via PATCH /api/prefs) — there's no "save" step
+ * here even though the surrounding form has one, because prefs are
+ * a different config block than the dirty/save-bar `cfg` block. The
+ * verbose toggle is also exposed inline on the grid topbar; both
+ * surfaces drive the same pref so flipping in one place updates the
+ * other on its next render.
+ */
+function GridPrefsRow() {
+  const prefsQ = usePrefs();
+  const patchPrefs = usePatchPrefs();
+  const verbose = prefsQ.data?.prefs.gridVerbose ?? false;
+  return (
+    <ToggleRow
+      label="Show tool calls in grid panes"
+      hint={
+        verbose
+          ? "Verbose: panes show Bash · Edit · Read calls and result snippets inline."
+          : "Compact: panes show agent text only. Click to see what the agent is actually doing."
+      }
+      value={verbose}
+      onChange={(v) => patchPrefs.mutate({ gridVerbose: v })}
+    />
   );
 }
 
