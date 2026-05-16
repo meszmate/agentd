@@ -71,15 +71,30 @@ jobs:
       # We don't have the agent CLIs (claude, codex) on CI, so we can't actually
       # run a task end-to-end. We can verify the daemon boots, serves /health,
       # mints a pairing token, and exchanges it for a session.
+      #
+      # AGENTD_NO_AUTOBUILD=1 tells the daemon to skip the on-the-fly
+      # `bun --filter @agentd/web build` it normally runs when apps/web/dist
+      # is missing. That build takes >10s and pushed the daemon past the
+      # readiness window, so curl /health hit ECONNREFUSED (exit 7). The
+      # smoke test doesn't exercise the UI, so building it is wasted work.
       - name: Boot daemon and exercise pair → health → tasks
+        env:
+          AGENTD_NO_AUTOBUILD: "1"
         run: |
           bun apps/daemon/src/index.ts --root "$RUNNER_TEMP/agentd-ci" > "$RUNNER_TEMP/daemon.log" 2>&1 &
           DPID=$!
-          # wait up to 10s for the daemon to be ready
-          for i in {1..20}; do
-            if curl -sf http://127.0.0.1:3773/health > /dev/null; then break; fi
+          # wait up to 30s for the daemon to be ready
+          ready=0
+          for i in {1..60}; do
+            if curl -sf http://127.0.0.1:3773/health > /dev/null; then ready=1; break; fi
             sleep 0.5
           done
+          if [ "$ready" != "1" ]; then
+            echo "daemon did not become ready in time"
+            cat "$RUNNER_TEMP/daemon.log"
+            kill "$DPID" || true
+            exit 1
+          fi
           curl -sf http://127.0.0.1:3773/health
           TOKEN=$(grep -oE 'token:  [A-Za-z0-9_-]+' "$RUNNER_TEMP/daemon.log" | awk '{print $2}' | head -1)
           if [ -z "$TOKEN" ]; then
