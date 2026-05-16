@@ -98,6 +98,7 @@ export interface AgentdUserPrefs {
   taskWorkspaceOpen: boolean;
   repoPickerPins: string[];
   gridVerbose: boolean;
+  gridLayout: "tiles" | "focused";
 }
 
 export interface AgentdLogEntry {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Eye, EyeOff, LayoutGrid, X } from "lucide-react";
+import { Eye, EyeOff, LayoutGrid, Maximize2, X } from "lucide-react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import type { Task } from "@agentd/contracts";
@@ -30,16 +30,28 @@ const FINISHED_STATUSES = new Set<Task["status"]>([
 ]);
 
 /**
- * Recent-finished window: how long after a task ends do we keep it on
- * the grid? Long enough that the operator can see "this one just
- * wrapped" on their next glance (so the celebrate flash on TaskPane
- * doesn't fire into the void), short enough that the recent strip
- * doesn't accumulate forever during a long session. 10 minutes feels
- * about right — most operators will have eyeballed the grid at least
- * once in that window, and tasks that finished hours ago belong on
- * the main /tasks list anyway.
+ * Recent-finished window for FOCUSED layout (rail + big pane). Tasks
+ * that ended more than this ago drop off the rail; the operator can
+ * still reach them from /tasks. Keeps the rail from accumulating
+ * everything that ever ran during a long session.
+ *
+ * TILES layout uses a different rule (see `recentlyFinished` /
+ * `MAX_FINISHED_TILES` in the layout component) — there we keep the
+ * most recent few finished tasks regardless of age so the operator
+ * can scan "ready / done / failed" alongside the live ones the way
+ * a real-world dashboard would. Operators explicitly asked for this.
  */
 const RECENT_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * How many recently-finished tasks the tiles layout keeps visible
+ * after they wrap. Bigger than the focused-mode rail because the
+ * tiles dashboard is the "see everything" surface — operators want
+ * a strip of done / failed tiles right next to the live ones so they
+ * can spot a finished result without paging away from the grid. Past
+ * this many, the oldest fall off.
+ */
+const MAX_FINISHED_TILES = 8;
 
 /**
  * Live dashboard of every currently-active task (and recently-finished
@@ -95,9 +107,19 @@ export function GridOverlay({
   // edit files) and back off for general dashboard glances.
   const prefsQ = usePrefs();
   const verbose = prefsQ.data?.prefs.gridVerbose ?? false;
+  // Layout mode — "tiles" is the multi-pane dashboard (all tasks at
+  // once, no rail, stable creation-order). "focused" is the rail +
+  // single-task experience. Persisted so the operator's preferred
+  // dashboard shape rides their account.
+  const layout: "tiles" | "focused" =
+    prefsQ.data?.prefs.gridLayout ?? "tiles";
   const patchPrefs = usePatchPrefs();
   const toggleVerbose = () => {
     patchPrefs.mutate({ gridVerbose: !verbose });
+  };
+  const setLayout = (next: "tiles" | "focused") => {
+    if (next === layout) return;
+    patchPrefs.mutate({ gridLayout: next });
   };
 
   // Force a re-render every ~1s while open so the "recent window"
@@ -111,10 +133,11 @@ export function GridOverlay({
     return () => clearInterval(t);
   }, [open]);
 
-  const { live, recent } = useMemo(() => {
+  const { live, recent, recentTiles } = useMemo(() => {
     const now = Date.now();
     const liveTasks: Task[] = [];
     const recentTasks: Task[] = [];
+    const recentTileTasks: Task[] = [];
     for (const t of tasks) {
       if (t.closedAt) continue;
       if (ACTIVE_STATUSES.has(t.status)) {
@@ -125,32 +148,50 @@ export function GridOverlay({
         // back to updatedAt for tasks that finished before the page
         // loaded (no flip event observed locally).
         const finishedAt = lastStatusChange[t.id]?.ts ?? t.updatedAt;
+        // Focused-mode rail: only the last 10 minutes (the rail is a
+        // narrow strip and doesn't have room for everything that ever
+        // wrapped during a long session).
         if (now - finishedAt < RECENT_WINDOW_MS) {
           recentTasks.push(t);
         }
+        // Tiles mode: keep recently-finished tiles around no matter
+        // when they wrapped, so the operator sees ready/done/failed
+        // alongside live ones on the dashboard. Capped by count below
+        // so a 100-task day doesn't paint a wall of green tiles.
+        recentTileTasks.push(t);
       }
     }
-    // Sort live: waiting_perm first (blocked, needs eyes), then by
-    // CREATION time (stable). We deliberately do NOT sort by
-    // updatedAt — every agent token bumps updatedAt and the grid
-    // would re-shuffle on every WS event, which is disorienting and
-    // makes tracking a specific tile by position impossible. Stable
-    // creation-order means a tile's position only changes when its
-    // status crosses the waiting_perm boundary (something that
-    // genuinely needs the operator's attention), not every time it
-    // exhales a token.
-    liveTasks.sort((a, b) => {
-      const pa = a.status === "waiting_perm" ? 0 : 1;
-      const pb = b.status === "waiting_perm" ? 0 : 1;
-      if (pa !== pb) return pa - pb;
-      return a.createdAt - b.createdAt;
-    });
+    // Sort live STRICTLY by creation time. We deliberately do NOT
+    // sort by updatedAt (every agent token would re-shuffle the
+    // grid) and we deliberately do NOT promote waiting_perm to the
+    // top — operators explicitly want tile positions to NEVER jump,
+    // so they can train their muscle memory on "task X always lives
+    // in the upper-left." Attention on blocked tasks is conveyed
+    // visually instead: amber border + pulsing halo + "approve"
+    // badge on the pane itself (see TaskPane.needsApproval). The
+    // operator can see a blocked task from anywhere on the grid
+    // without it shouldering its way to the front and displacing
+    // everything else.
+    liveTasks.sort((a, b) => a.createdAt - b.createdAt);
     recentTasks.sort((a, b) => {
       const fa = lastStatusChange[a.id]?.ts ?? a.updatedAt;
       const fb = lastStatusChange[b.id]?.ts ?? b.updatedAt;
       return fb - fa;
     });
-    return { live: liveTasks, recent: recentTasks };
+    // Tiles-mode finished list: newest-finished first, then capped.
+    // The cap goes by finish time (recent ones win) but the OUTPUT
+    // is then re-sorted by createdAt asc so the strip itself
+    // doesn't shuffle when a new task wraps. That gives the
+    // operator both "recent ones make it onto the dashboard" AND
+    // "tile positions don't move."
+    recentTileTasks.sort((a, b) => {
+      const fa = lastStatusChange[a.id]?.ts ?? a.updatedAt;
+      const fb = lastStatusChange[b.id]?.ts ?? b.updatedAt;
+      return fb - fa;
+    });
+    const capped = recentTileTasks.slice(0, MAX_FINISHED_TILES);
+    capped.sort((a, b) => a.createdAt - b.createdAt);
+    return { live: liveTasks, recent: recentTasks, recentTiles: capped };
     // tick is intentionally in deps — it drives the recent window
     // sliding forward each second.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -170,6 +211,18 @@ export function GridOverlay({
     () => new Set(focusable.map((t) => t.id)),
     [focusable],
   );
+
+  // Tasks rendered in TILES layout. Live ones come first (stable
+  // creation-order from the memo above) and the recently-finished
+  // tiles trail behind, also creation-ordered so tile positions
+  // don't shuffle when a new finish lands. This is what the operator
+  // sees on the dashboard — running, asking, ready/done — all
+  // visible at once.
+  const tilesList = useMemo(
+    () => [...live, ...recentTiles],
+    [live, recentTiles],
+  );
+  const tilesCount = tilesList.length;
 
   // The overlay opens *into* a focused task — there's no separate
   // tile-grid dashboard step. Pick whichever task wants the
@@ -285,7 +338,48 @@ export function GridOverlay({
               />
             )}
             <Spacer />
-            {focusedId && (
+            {/* Layout toggle — tiles dashboard vs focused single-pane.
+                Persisted as the `gridLayout` pref so the operator's
+                preferred shape rides their account. Renders as a
+                segmented control: two small icon-labelled buttons,
+                the active one filled. */}
+            <div
+              role="group"
+              aria-label="Layout"
+              className="inline-flex items-center rounded-md border border-ink-900/10 dark:border-ink-50/10 overflow-hidden h-6"
+            >
+              <button
+                type="button"
+                onClick={() => setLayout("tiles")}
+                aria-pressed={layout === "tiles"}
+                title="Tiles: see every open task at once"
+                className={cn(
+                  "inline-flex items-center gap-1 h-full px-1.5 font-mono text-[10px] uppercase tracking-[0.06em] transition-colors",
+                  layout === "tiles"
+                    ? "bg-ember-500/15 text-ember-700 dark:text-ember-300"
+                    : "text-ink-500 hover:text-ink-900 hover:bg-ink-900/[0.04] dark:text-ink-400 dark:hover:text-ink-50 dark:hover:bg-ink-50/[0.04]",
+                )}
+              >
+                <LayoutGrid className="h-3 w-3" />
+                tiles
+              </button>
+              <button
+                type="button"
+                onClick={() => setLayout("focused")}
+                aria-pressed={layout === "focused"}
+                title="Focused: rail + single big pane"
+                className={cn(
+                  "inline-flex items-center gap-1 h-full px-1.5 font-mono text-[10px] uppercase tracking-[0.06em] border-l border-ink-900/10 dark:border-ink-50/10 transition-colors",
+                  layout === "focused"
+                    ? "bg-ember-500/15 text-ember-700 dark:text-ember-300"
+                    : "text-ink-500 hover:text-ink-900 hover:bg-ink-900/[0.04] dark:text-ink-400 dark:hover:text-ink-50 dark:hover:bg-ink-50/[0.04]",
+                )}
+              >
+                <Maximize2 className="h-3 w-3" />
+                focus
+              </button>
+            </div>
+            {layout === "focused" && focusedId && (
               <button
                 type="button"
                 onClick={() => setFocusedId(null)}
@@ -333,20 +427,25 @@ export function GridOverlay({
             </button>
           </PageTopbar>
 
-          {/* Body — always renders FocusedLayout when there's a
-              focusable task. The overlay opens directly into one
-              task (the most-attention-seeking one); the rail on
-              the left is the dashboard / hop list. No separate
-              tile-grid view — operators wanted "I'm IN the task"
-              by default, not "I'm surveying tiles."
+          {/* Body — two layouts, selected by the `gridLayout` pref.
+              TILES is the dashboard (every open task as a stable
+              tile, no rail). FOCUSED is the rail + one big pane —
+              the in-task experience for steering a single task from
+              inside the overlay.
 
-              LayoutGroup wraps the rail so tasks shifting position
-              (waiting_perm jumping to the top, live → recent)
-              animate between rows via FLIP rather than snapping. */}
+              LayoutGroup wraps both so tasks crossing layouts (live →
+              recent strip) animate via FLIP rather than snapping. */}
           <div className="flex-1 min-h-0 flex flex-col overflow-hidden p-3">
             <LayoutGroup>
-              {tasksQ.isLoading && totalShown === 0 ? (
+              {tasksQ.isLoading &&
+              (layout === "tiles" ? tilesCount === 0 : totalShown === 0) ? (
                 <LoadingState />
+              ) : layout === "tiles" ? (
+                tilesCount === 0 ? (
+                  <EmptyState />
+                ) : (
+                  <TilesLayout tasks={tilesList} verbose={verbose} />
+                )
               ) : totalShown === 0 || !focusedId ? (
                 <EmptyState />
               ) : (
@@ -366,8 +465,78 @@ export function GridOverlay({
 }
 
 /**
- * The only layout the overlay renders — the operator is always
- * inside one task. The rail on the left lists every focusable task
+ * TILES layout — every open task rendered as a compact TaskPane in a
+ * CSS grid, no rail, no focused pane. The dashboard surface: an
+ * operator can scan running / waiting / done all in one view without
+ * picking a "primary" task. Each tile is a real TaskPane density="tile"
+ * so it shows live transcript + tool calls (when verbose) + inline
+ * reply on waiting tiles. Clicking a tile opens the full task page.
+ *
+ * Stable positions. Tiles are creation-order from the parent memo —
+ * we don't sort here. AnimatePresence + motion's `layout` are kept
+ * so add/remove animates (a new task fades in, a closed one fades
+ * out) but tiles that stay in the list don't move when their status
+ * changes. That's the whole point of this view.
+ *
+ * Grid sizing: `auto-fill` with a 320px min, so a wide screen packs
+ * 4-6 columns and a narrow one drops to 1-2 without explicit
+ * breakpoints. minmax(320, 1fr) keeps each column readable but lets
+ * tiles fill all the width. Row height is auto so each tile is the
+ * same height (capped at ~340px so the transcript tail doesn't
+ * stretch a single tile into the next screen).
+ */
+function TilesLayout({
+  tasks,
+  verbose,
+}: {
+  tasks: Task[];
+  verbose: boolean;
+}) {
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+      <div
+        className="grid gap-3 auto-rows-[minmax(240px,340px)]"
+        style={{
+          gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
+        }}
+      >
+        <AnimatePresence mode="popLayout" initial={false}>
+          {tasks.map((t) => (
+            <motion.div
+              key={t.id}
+              layout
+              layoutId={t.id}
+              initial={{ opacity: 0, scale: 0.97 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{
+                opacity: 0,
+                scale: 0.97,
+                transition: { duration: 0.15 },
+              }}
+              transition={{
+                layout: { type: "spring", stiffness: 320, damping: 32 },
+                opacity: { duration: 0.18 },
+              }}
+              className="min-h-0"
+            >
+              <TaskPane
+                task={t}
+                focused={false}
+                onToggleFocus={() => {}}
+                density="tile"
+                verbose={verbose}
+              />
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * FOCUSED layout — rail on the left + one big focused pane. The
+ * operator is always inside one task. The rail on the left lists every focusable task
  * (live + recently-finished, so finished tasks remain inspectable)
  * for one-click hopping; the big focused pane on the right is a
  * split: TaskTimeline (chat with thinking pulse + composer) on

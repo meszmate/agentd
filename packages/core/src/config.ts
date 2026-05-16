@@ -415,6 +415,15 @@ export const UserPrefs = z.object({
    * busy fast.
    */
   gridVerbose: z.boolean().default(false),
+  /**
+   * Grid overlay layout. "tiles" shows every open task as a compact
+   * live pane in a CSS grid (no rail, stable creation-order). "focused"
+   * shows a rail on the left plus one big focused pane on the right —
+   * the in-task experience. Default tiles because operators consistently
+   * want "see everything at once" as the dashboard, and click through
+   * (or switch the toggle) when they want to drive a specific task.
+   */
+  gridLayout: z.enum(["tiles", "focused"]).default("tiles"),
 });
 export type UserPrefs = z.infer<typeof UserPrefs>;
 export const DEFAULT_USER_PREFS: UserPrefs = UserPrefs.parse({});

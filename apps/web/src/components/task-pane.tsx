@@ -5,13 +5,14 @@ import {
   AlertCircle,
   ArrowUpRight,
   Check,
+  CornerDownLeft,
   Maximize2,
   X,
 } from "lucide-react";
 import { agentContextWindow, type Message, type Task } from "@agentd/contracts";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { useApp } from "@/AppContext";
-import { qk, useModels, useTask } from "@/queries";
+import { qk, useModels, useSendInput, useTask } from "@/queries";
 import { useTaskRt } from "@/store";
 import { useRealtime } from "@/realtime";
 import { cn, formatTokens } from "@/lib/utils";
@@ -340,6 +341,20 @@ export function TaskPane({
             )}
           </div>
 
+          {/* Inline reply — only when the agent is actively asking
+              the operator something. waiting_input (agentd-ask
+              question) or waiting_perm (permission prompt) get a
+              compact one-line composer right above the footer so
+              the operator can answer without leaving the dashboard.
+              Routes through sendInput (the same channel TaskTimeline
+              uses for steers/answers) — for an open agentd-ask the
+              daemon's input handling pairs the reply with the open
+              askId; for permission prompts it lands on the agent's
+              stdin which is what claude/codex are blocked on. */}
+          {(needsApproval || task.status === "waiting_input") && (
+            <InlineReply task={task} />
+          )}
+
           {/* Footer — live hint + token meter. Finished tiles swap
               the hint for a duration ("12m · done") so the operator
               can see at a glance how long this one took, which is
@@ -358,6 +373,102 @@ export function TaskPane({
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Compact one-line composer surfaced on tile-mode panes when the agent
+ * is waiting on the operator (waiting_input — a question — or
+ * waiting_perm — a permission ask). The full TaskTimeline composer
+ * has plan/queue/model/permission affordances; the tile equivalent is
+ * deliberately one input + send because the dashboard's value is
+ * "answer fast and keep going" rather than "configure the next turn."
+ *
+ * Routes through sendInput. The daemon's input handler does the
+ * right thing per task state: open agentd-ask → recorded as answer
+ * for that askId, permission prompt → written to the agent's stdin.
+ * Either way the agent unblocks and the tile's status flips back to
+ * running without the operator switching panes.
+ *
+ * Click events stop propagation so the operator clicking into the
+ * input doesn't bubble up to the tile header's "open task" handler.
+ */
+function InlineReply({ task }: { task: Task }) {
+  const [text, setText] = useState("");
+  const send = useSendInput(task.id);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const submit = async () => {
+    const trimmed = text.trim();
+    if (!trimmed || send.isPending) return;
+    setText("");
+    try {
+      await send.mutateAsync(trimmed);
+    } catch {
+      // Restore the text so the operator can retry — the daemon may
+      // have rejected because the task transitioned mid-flight.
+      setText(trimmed);
+    }
+  };
+
+  const needsApproval = task.status === "waiting_perm";
+
+  return (
+    <div
+      onClick={(e) => e.stopPropagation()}
+      className={cn(
+        "flex h-7 items-center gap-1.5 border-t px-2 shrink-0",
+        needsApproval
+          ? "border-amber-500/30 bg-amber-500/[0.06]"
+          : "border-ember-500/20 bg-ember-500/[0.04]",
+      )}
+    >
+      <span
+        className={cn(
+          "shrink-0 font-mono text-[9px] uppercase tracking-[0.08em]",
+          needsApproval
+            ? "text-amber-700 dark:text-amber-300"
+            : "text-ember-700 dark:text-ember-300",
+        )}
+        title={
+          needsApproval
+            ? "agent is asking permission — type yes / no / a custom reply"
+            : "agent is waiting on an answer — type a reply"
+        }
+      >
+        reply
+      </span>
+      <input
+        ref={inputRef}
+        type="text"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            void submit();
+          }
+        }}
+        placeholder={needsApproval ? "yes / no / …" : "type a reply…"}
+        disabled={send.isPending}
+        className="flex-1 min-w-0 bg-transparent border-0 outline-none font-mono text-[11px] text-ink-900 placeholder:text-ink-400 dark:text-ink-50 dark:placeholder:text-ink-500 disabled:opacity-50"
+      />
+      <button
+        type="button"
+        onClick={() => void submit()}
+        disabled={!text.trim() || send.isPending}
+        aria-label="Send reply"
+        title="Send (Enter)"
+        className={cn(
+          "shrink-0 inline-flex items-center justify-center h-5 w-5 rounded transition-colors disabled:opacity-30",
+          needsApproval
+            ? "text-amber-700 hover:bg-amber-500/15 dark:text-amber-300"
+            : "text-ember-700 hover:bg-ember-500/15 dark:text-ember-300",
+        )}
+      >
+        <CornerDownLeft className="h-3 w-3" />
+      </button>
     </div>
   );
 }
@@ -677,20 +788,144 @@ function ToolRow({ message }: { message: Message }) {
 
   const parsed = parseToolCall(message.content);
   const Icon = TOOL_ICONS[parsed.kind] ?? TOOL_ICONS.other;
+  const editPeek = editPreviewLines(parsed);
   return (
-    <div className="flex items-center gap-1.5 min-w-0 text-ink-600 dark:text-ink-300">
-      <span className="font-mono text-[10px] mt-[1px] text-ember-700/70 dark:text-ember-300/70 shrink-0 w-3">
-        →
-      </span>
-      <Icon className="h-3 w-3 shrink-0 text-ink-500 dark:text-ink-400" />
-      <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.06em] text-ember-700 dark:text-ember-300">
-        {parsed.name}
-      </span>
-      <span className="flex-1 min-w-0 font-mono text-[11px] text-ink-700 dark:text-ink-200 truncate">
-        {parsed.summary}
-      </span>
+    <div className="flex flex-col gap-0.5 min-w-0 text-ink-600 dark:text-ink-300">
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className="font-mono text-[10px] mt-[1px] text-ember-700/70 dark:text-ember-300/70 shrink-0 w-3">
+          →
+        </span>
+        <Icon className="h-3 w-3 shrink-0 text-ink-500 dark:text-ink-400" />
+        <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.06em] text-ember-700 dark:text-ember-300">
+          {parsed.name}
+        </span>
+        <span className="flex-1 min-w-0 font-mono text-[11px] text-ink-700 dark:text-ink-200 truncate">
+          {parsed.summary}
+        </span>
+        {(parsed.linesAdded || parsed.linesRemoved) && (
+          <span className="shrink-0 inline-flex items-center gap-0.5 font-mono text-[9.5px] tabular-nums">
+            {parsed.linesAdded ? (
+              <span className="text-emerald-700 dark:text-emerald-300">
+                +{parsed.linesAdded}
+              </span>
+            ) : null}
+            {parsed.linesRemoved ? (
+              <span className="text-red-700 dark:text-red-300">
+                -{parsed.linesRemoved}
+              </span>
+            ) : null}
+          </span>
+        )}
+      </div>
+      {/* Inline edit peek — shows the actual code the agent wrote /
+          changed, capped at a few lines, +/− marked. Lets the
+          operator see WHAT was written on a dashboard tile without
+          opening the task. Only renders for Edit / Write / MultiEdit
+          tools and only when verbose mode is on (i.e. the operator
+          opted into tool-call density). */}
+      {editPeek && (
+        <pre className="ml-7 my-0.5 max-h-24 overflow-hidden whitespace-pre rounded-sm border-l-2 border-ember-500/30 bg-ink-900/[0.03] px-1.5 py-0.5 font-mono text-[10px] leading-tight dark:bg-ink-50/[0.03]">
+          {editPeek.map((ln, i) => (
+            <div
+              key={i}
+              className={cn(
+                "truncate",
+                ln.mark === "+"
+                  ? "text-emerald-700 dark:text-emerald-300"
+                  : ln.mark === "-"
+                    ? "text-red-700 dark:text-red-300"
+                    : "text-ink-700 dark:text-ink-200",
+              )}
+            >
+              <span className="text-ink-400 dark:text-ink-500 select-none mr-1">
+                {ln.mark ?? " "}
+              </span>
+              {ln.text || " "}
+            </div>
+          ))}
+          {editPeek.truncated && (
+            <div className="text-ink-400 dark:text-ink-500 italic">…</div>
+          )}
+        </pre>
+      )}
     </div>
   );
+}
+
+/**
+ * Build a compact inline preview of what an Edit / Write / MultiEdit
+ * call actually changed. Returns up to MAX_PEEK_LINES of `{mark, text}`
+ * where mark is "+" (added), "-" (removed), or null (context). Used
+ * by the tile ToolRow so the operator can see the agent's edits
+ * without leaving the grid.
+ *
+ * Heuristics:
+ *  - Codex `editPreview.kind === "unified"` → already-shaped file
+ *    diff; flatten its hunks' first lines into our small format.
+ *  - Claude `kind === "edit"` → render `-` lines from oldString then
+ *    `+` lines from newString (the two halves of the swap).
+ *  - Claude `kind === "write"` → render the first lines of the new
+ *    content, all marked `+` (the whole file is new).
+ *
+ * Returns null for non-edit tools so the caller can branch cleanly.
+ */
+const MAX_PEEK_LINES = 4;
+const MAX_PEEK_LINE_LENGTH = 100;
+function editPreviewLines(
+  parsed: ReturnType<typeof parseToolCall>,
+): { mark: "+" | "-" | null; text: string }[] & { truncated?: boolean } | null {
+  const ep = parsed.editPreview;
+  if (!ep) return null;
+  const lines: { mark: "+" | "-" | null; text: string }[] = [];
+  let total = 0;
+  const push = (mark: "+" | "-" | null, raw: string) => {
+    total++;
+    if (lines.length >= MAX_PEEK_LINES) return;
+    const text =
+      raw.length > MAX_PEEK_LINE_LENGTH
+        ? raw.slice(0, MAX_PEEK_LINE_LENGTH - 1) + "…"
+        : raw;
+    lines.push({ mark, text });
+  };
+  if (ep.kind === "write") {
+    for (const ln of ep.content.split("\n")) {
+      push("+", ln);
+      if (total > MAX_PEEK_LINES) break;
+    }
+  } else if (ep.kind === "edit") {
+    if (ep.oldString) {
+      for (const ln of ep.oldString.split("\n")) {
+        push("-", ln);
+        if (total > MAX_PEEK_LINES) break;
+      }
+    }
+    if (lines.length < MAX_PEEK_LINES && ep.newString) {
+      for (const ln of ep.newString.split("\n")) {
+        push("+", ln);
+        if (total > MAX_PEEK_LINES) break;
+      }
+    }
+  } else if (ep.kind === "unified") {
+    // Codex path — already a structured file diff. Walk hunks and
+    // pick representative lines (additions + removals) up to the cap.
+    for (const hunk of ep.file.hunks ?? []) {
+      for (const ln of hunk.lines ?? []) {
+        if (ln.kind === "add") push("+", ln.content);
+        else if (ln.kind === "del") push("-", ln.content);
+        else push(null, ln.content);
+        if (total > MAX_PEEK_LINES) break;
+      }
+      if (total > MAX_PEEK_LINES) break;
+    }
+  } else {
+    return null;
+  }
+  if (lines.length === 0) return null;
+  const out = lines as { mark: "+" | "-" | null; text: string }[] & {
+    truncated?: boolean;
+  };
+  out.truncated = total > MAX_PEEK_LINES;
+  return out;
 }
 
 function firstLine(s: string): string {
