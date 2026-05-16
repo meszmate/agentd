@@ -212,16 +212,24 @@ export function GridOverlay({
     [focusable],
   );
 
-  // Tasks rendered in TILES layout. Live ones come first (stable
-  // creation-order from the memo above) and the recently-finished
-  // tiles trail behind, also creation-ordered so tile positions
-  // don't shuffle when a new finish lands. This is what the operator
-  // sees on the dashboard — running, asking, ready/done — all
-  // visible at once.
-  const tilesList = useMemo(
-    () => [...live, ...recentTiles],
-    [live, recentTiles],
-  );
+  // Tasks rendered in TILES layout. Live + recently-finished, merged
+  // into ONE list sorted strictly by createdAt asc. This is the
+  // critical anti-jumping invariant: a task's grid position depends
+  // ONLY on when it was created, never on its status. When a task
+  // flips from running → done, it stays in the exact same tile slot
+  // (just changes its visual treatment via TaskPane's status-aware
+  // styling). Operators consistently asked for this — they want to
+  // train muscle memory on "task X always lives in the upper-left"
+  // and have it actually be true. If we kept live and recent as
+  // separate concatenated groups, a status flip would move the task
+  // from the "live" cluster to the "recent" cluster, which IS a
+  // jump — even though each group is internally stable. One sort,
+  // no clusters.
+  const tilesList = useMemo(() => {
+    const merged = [...live, ...recentTiles];
+    merged.sort((a, b) => a.createdAt - b.createdAt);
+    return merged;
+  }, [live, recentTiles]);
   const tilesCount = tilesList.length;
 
   // The overlay opens *into* a focused task — there's no separate
@@ -444,7 +452,14 @@ export function GridOverlay({
                 tilesCount === 0 ? (
                   <EmptyState />
                 ) : (
-                  <TilesLayout tasks={tilesList} verbose={verbose} />
+                  <TilesLayout
+                    tasks={tilesList}
+                    verbose={verbose}
+                    onFocusTask={(id) => {
+                      setFocusedId(id);
+                      setLayout("focused");
+                    }}
+                  />
                 )
               ) : totalShown === 0 || !focusedId ? (
                 <EmptyState />
@@ -488,9 +503,14 @@ export function GridOverlay({
 function TilesLayout({
   tasks,
   verbose,
+  onFocusTask,
 }: {
   tasks: Task[];
   verbose: boolean;
+  /** Switch the overlay to focused layout on this task. Wired to the
+   *  maximize button on each tile so "see all" → "drive one" is one
+   *  click without leaving the overlay. */
+  onFocusTask: (id: string) => void;
 }) {
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pr-1">
@@ -500,35 +520,29 @@ function TilesLayout({
           gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
         }}
       >
-        <AnimatePresence mode="popLayout" initial={false}>
-          {tasks.map((t) => (
-            <motion.div
-              key={t.id}
-              layout
-              layoutId={t.id}
-              initial={{ opacity: 0, scale: 0.97 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{
-                opacity: 0,
-                scale: 0.97,
-                transition: { duration: 0.15 },
-              }}
-              transition={{
-                layout: { type: "spring", stiffness: 320, damping: 32 },
-                opacity: { duration: 0.18 },
-              }}
-              className="min-h-0"
-            >
-              <TaskPane
-                task={t}
-                focused={false}
-                onToggleFocus={() => {}}
-                density="tile"
-                verbose={verbose}
-              />
-            </motion.div>
-          ))}
-        </AnimatePresence>
+        {/* No motion `layout`/`layoutId` here on purpose. The sort
+            invariant above guarantees positions never change once a
+            tile is in the list, so there's nothing to FLIP. Motion's
+            layout machinery on every tile + every re-render (which
+            happens every ~1s via the tick) was a real source of
+            visual jitter — tiles were animating to "the same
+            position", which still triggers a transform → reflow. A
+            plain key={t.id} keeps React's reconciler happy without
+            running motion's measurement step on every frame. New
+            tiles just appear at the end of the list; closed tiles
+            disappear cleanly. That's what operators actually want
+            from a dashboard. */}
+        {tasks.map((t) => (
+          <div key={t.id} className="min-h-0">
+            <TaskPane
+              task={t}
+              focused={false}
+              onToggleFocus={() => onFocusTask(t.id)}
+              density="tile"
+              verbose={verbose}
+            />
+          </div>
+        ))}
       </div>
     </div>
   );
