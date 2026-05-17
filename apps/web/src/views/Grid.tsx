@@ -480,43 +480,34 @@ export function GridOverlay({
 }
 
 /**
- * TILES layout — every open task rendered as a compact TaskPane in a
- * CSS grid, no rail, no focused pane. The dashboard surface: an
- * operator can scan running / waiting / done all in one view without
- * picking a "primary" task. Each tile is a real TaskPane density="tile"
- * so it shows live transcript + tool calls (when verbose) + inline
- * reply on waiting tiles. Clicking a tile opens the full task page.
+ * TILES layout — three stacked sections by status. The dashboard
+ * groups live work (running), input-needed work (waiting_*), and
+ * done/idle/failed (recent), each in its own grid sized to the
+ * section's role:
  *
- * Stable positions. Tiles are creation-order from the parent memo —
- * we don't sort here. AnimatePresence + motion's `layout` are kept
- * so add/remove animates (a new task fades in, a closed one fades
- * out) but tiles that stay in the list don't move when their status
- * changes. That's the whole point of this view.
+ *   running  → BIG tiles, fills the rest of the vertical space.
+ *              2 cols when there's room, so each running tile is
+ *              huge — the operator can read the streaming reply and
+ *              the file edits without squinting.
+ *   waiting  → MEDIUM-wide tiles in a single row, so the question
+ *              text is easy to read at a glance.
+ *   recent   → SMALL tiles in a compact strip at the bottom, up to
+ *              4 across. Done / failed are reference material, not
+ *              the focus.
  *
- * Grid sizing: `auto-fill` with a 320px min, so a wide screen packs
- * 4-6 columns and a narrow one drops to 1-2 without explicit
- * breakpoints. minmax(320, 1fr) keeps each column readable but lets
- * tiles fill all the width. Row height is auto so each tile is the
- * same height (capped at ~340px so the transcript tail doesn't
- * stretch a single tile into the next screen).
- */
-/**
- * Bento-style grid that fills the available canvas. Column count
- * scales with task count so 2 tasks don't sit as small tiles in the
- * upper-left while 75% of the screen is wasted — they expand to fill
- * the row. Row heights are `1fr` so vertical space is also fully
- * consumed.
+ * Section grids each use 100% width with column counts tuned to
+ * task counts in that section, so there are NO empty cells in the
+ * trailing row of any section. With 3 running tasks, the running
+ * grid is 3 cols. With 5 done tasks, the recent grid is 4-5 cols
+ * with a single trailing 1x1 tile. No bento span gymnastics, no
+ * `grid-auto-flow: dense` packing, no awkward gaps.
  *
- * Each tile gets a STABLE bento span (derived from its index in the
- * createdAt-sorted list) so some tiles are wider/taller than others —
- * the dashboard reads as designed rather than as a uniform grid of
- * identical boxes. The span pattern is deterministic given the tile's
- * position, so a tile's size never changes once placed; only NEW
- * tiles entering the list pick up a span at append time.
- *
- * `grid-auto-flow: dense` packs the variable-span tiles into gaps
- * tightly. Since spans are determined by index and the sort is
- * stable, the dense packing is itself stable — no shuffling.
+ * Yes, this means a task moves between sections when its status
+ * flips (running → done jumps from top to bottom). That's
+ * intentional and exactly what "running tasks are bigger" maps
+ * onto: the position in the dashboard reflects the task's
+ * current importance. Within a section, tasks are stably ordered
+ * by createdAt so tiles in the same status don't shuffle.
  */
 function TilesLayout({
   tasks,
@@ -530,106 +521,199 @@ function TilesLayout({
    *  click without leaving the overlay. */
   onFocusTask: (id: string) => void;
 }) {
-  const cols = pickColumnCount(tasks.length);
+  const grouped = useMemo(() => {
+    const running: Task[] = [];
+    const waiting: Task[] = [];
+    const others: Task[] = [];
+    for (const t of tasks) {
+      if (t.status === "running") {
+        running.push(t);
+      } else if (
+        t.status === "waiting_input" ||
+        t.status === "waiting_perm"
+      ) {
+        waiting.push(t);
+      } else {
+        others.push(t);
+      }
+    }
+    return { running, waiting, others };
+  }, [tasks]);
+
+  // A task waiting on the operator is more urgent than a task quietly
+  // running, so the waiting section sits ABOVE running visually. The
+  // running section then claims the remaining vertical space (flex-1)
+  // because it's the biggest and most content-rich. Recent ones sit
+  // at the bottom as reference material.
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto pr-1">
-      <div
-        className="grid gap-2 h-full"
-        style={{
-          gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-          gridAutoFlow: "dense",
-          // Set rows to 1fr so vertical space fills evenly. Capped at
-          // a sensible minimum so a wall of tiny tasks doesn't shrink
-          // rows below readability.
-          gridAutoRows: `minmax(220px, 1fr)`,
-          minHeight: "100%",
-        }}
-      >
-        {/* No motion machinery. Stable createdAt sort means tile
-            positions don't shuffle; the only layout changes happen
-            when a task's status flips (running → done shrinks its
-            span) and that's the bento behavior operators want:
-            active work claims more of the canvas. */}
-        {tasks.map((t) => {
-          const span = bentoSpan(t.status, cols);
-          return (
-            <div
-              key={t.id}
-              className="min-h-0 min-w-0 transition-[grid-column,grid-row] duration-200 ease-out"
-              style={{
-                gridColumn: `span ${span.col} / span ${span.col}`,
-                gridRow: `span ${span.row} / span ${span.row}`,
-              }}
-            >
-              <TaskPane
-                task={t}
-                focused={false}
-                onToggleFocus={() => onFocusTask(t.id)}
-                density="tile"
-                verbose={verbose}
-              />
-            </div>
-          );
-        })}
-      </div>
+    <div className="flex-1 min-h-0 flex flex-col gap-3 overflow-y-auto pr-1">
+      {grouped.waiting.length > 0 && (
+        <BentoSection
+          label="needs you"
+          tone="amber"
+          tasks={grouped.waiting}
+          verbose={verbose}
+          onFocusTask={onFocusTask}
+          variant="wide"
+        />
+      )}
+      {grouped.running.length > 0 && (
+        <BentoSection
+          label="running"
+          tone="ember"
+          tasks={grouped.running}
+          verbose={verbose}
+          onFocusTask={onFocusTask}
+          variant="hero"
+        />
+      )}
+      {grouped.others.length > 0 && (
+        <BentoSection
+          label="recent"
+          tone="muted"
+          tasks={grouped.others}
+          verbose={verbose}
+          onFocusTask={onFocusTask}
+          variant="compact"
+        />
+      )}
     </div>
   );
 }
 
 /**
- * Map a task count to a column count that fills the screen well at
- * common viewport widths. Tuned for bento: enough columns that a
- * running task's 2x2 hero has room to sit next to smaller done tiles
- * packing into the remaining cells.
+ * One status-grouped section of the tiles dashboard. Each section is
+ * its own CSS grid with column count picked to consume the section's
+ * width exactly — task count maps to a column count so the trailing
+ * row never has empty cells.
  *
- *  1    → 1 col   (one running task fills the screen)
- *  2    → 2 cols
- *  3    → 3 cols
- *  4-6  → 3 cols  (3 cols lets a 2x2 hero leave a column for 1x1s)
- *  7+   → 4 cols  (denser, but still readable)
+ *   variant="hero"    big tiles, fills remaining vertical space
+ *                     (flex-1). Up to 2 cols.
+ *   variant="wide"    medium tiles in a single row; cols = task
+ *                     count so they spread to fill width. Capped at
+ *                     3 so each waiting tile is readable.
+ *   variant="compact" small tiles in 1-3 rows; up to 4 cols.
  *
- * Capped at 4 so tile content (streaming reply + transcript + code
- * panel) stays at a real readable width. Past 4 columns each tile
- * would be too narrow for the code panel to be useful.
+ * Section labels are tiny mono kicker text — operators get the "what
+ * am I looking at" cue without the section header eating real estate.
  */
-function pickColumnCount(n: number): number {
-  if (n <= 1) return 1;
-  if (n === 2) return 2;
-  if (n <= 6) return 3;
-  return 4;
+function BentoSection({
+  label,
+  tone,
+  tasks,
+  verbose,
+  onFocusTask,
+  variant,
+}: {
+  label: string;
+  tone: "ember" | "amber" | "muted";
+  tasks: Task[];
+  verbose: boolean;
+  onFocusTask: (id: string) => void;
+  variant: "hero" | "wide" | "compact";
+}) {
+  const cols = pickSectionCols(tasks.length, variant);
+  const rows = Math.max(1, Math.ceil(tasks.length / cols));
+
+  // Hero section is `flex-1 min-h-0` so it stretches to fill leftover
+  // height. Each row inside hero is 1fr so the tile gets as tall as
+  // possible — the streaming reply + code panel + transcript stack
+  // actually has room to breathe. Wide / compact sections size to
+  // content (no flex), with a sensible min-height.
+  const rowSizing =
+    variant === "hero"
+      ? "minmax(280px, 1fr)"
+      : variant === "wide"
+        ? "minmax(180px, auto)"
+        : "minmax(160px, auto)";
+
+  const toneCls =
+    tone === "ember"
+      ? "text-ember-700 dark:text-ember-300"
+      : tone === "amber"
+        ? "text-amber-700 dark:text-amber-300"
+        : "text-ink-400 dark:text-ink-500";
+
+  return (
+    <section
+      className={cn(
+        "flex flex-col gap-1 shrink-0",
+        // Only the hero section claims remaining height; wide /
+        // compact size to their own content so the hero gets all
+        // the leftover space. min-h-0 lets the inner grid scroll
+        // if a wall of running tiles overruns the available height.
+        variant === "hero" && "flex-1 min-h-0",
+      )}
+    >
+      <div className="flex items-center gap-2 px-1 shrink-0">
+        <span
+          className={cn(
+            "inline-flex items-center gap-1 font-mono text-[9.5px] uppercase tracking-[0.14em] shrink-0",
+            toneCls,
+          )}
+        >
+          <span
+            className={cn(
+              "inline-block h-1.5 w-1.5 rounded-full",
+              tone === "ember"
+                ? "bg-ember-500 animate-blink"
+                : tone === "amber"
+                  ? "bg-amber-500 animate-pulse"
+                  : "bg-emerald-500/50",
+            )}
+          />
+          {label}
+        </span>
+        <span className="font-mono text-[9.5px] tabular-nums text-ink-400 dark:text-ink-500">
+          {tasks.length}
+        </span>
+        <span className="h-px flex-1 bg-gradient-to-r from-ink-900/[0.08] via-ink-900/[0.04] to-transparent dark:from-ink-50/10 dark:via-ink-50/[0.04]" />
+      </div>
+      <div
+        className={cn(
+          "grid gap-2 min-h-0 min-w-0",
+          variant === "hero" && "flex-1",
+        )}
+        style={{
+          gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+          gridTemplateRows: `repeat(${rows}, ${rowSizing})`,
+        }}
+      >
+        {tasks.map((t) => (
+          <div key={t.id} className="min-h-0 min-w-0">
+            <TaskPane
+              task={t}
+              focused={false}
+              onToggleFocus={() => onFocusTask(t.id)}
+              density="tile"
+              verbose={verbose}
+            />
+          </div>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 /**
- * Bento span by TASK STATUS. The dashboard's job is to surface what
- * matters now: active work claims a big quadrant, waiting work gets
- * a wide cell so the operator can read the question, idle / done /
- * failed tasks stay 1x1 so they don't shoulder out the live ones.
+ * Column count picker per section variant. Returns a count that
+ * exactly divides the task count when possible, so there's no
+ * empty trailing cell. Beyond the caps we let the last row carry
+ * a single tile (acceptable — better than tiny columns).
  *
- * Yes — this means a tile resizes when its status flips. That IS
- * the bento behavior the operator asked for ("running tasks are
- * bigger"). The CSS transition on the wrapping div smooths the
- * span change so it reads as a deliberate growth rather than a
- * jump cut. grid-auto-flow: dense in the parent re-packs the
- * smaller tiles into freed gaps without re-ordering them.
- *
- *   running          → 2x2 hero (full bento quadrant)
- *   waiting_input    → 2x1 wide (operator needs to read the ask)
- *   waiting_perm     → 2x1 wide
- *   anything else    → 1x1     (idle, pending, done, failed, stopped)
- *
- * When cols < 2 we can't honor the spans, so everything collapses
- * to 1x1 — the grid would clip them anyway.
+ *  hero    → up to 2 cols (big readable tiles)
+ *  wide    → up to 3 cols (wide-but-not-tiny single-row waiting tiles)
+ *  compact → up to 4 cols (small dense done tiles)
  */
-function bentoSpan(
-  status: Task["status"],
-  cols: number,
-): { col: number; row: number } {
-  if (cols < 2) return { col: 1, row: 1 };
-  if (status === "running") return { col: 2, row: 2 };
-  if (status === "waiting_input" || status === "waiting_perm") {
-    return { col: 2, row: 1 };
-  }
-  return { col: 1, row: 1 };
+function pickSectionCols(
+  n: number,
+  variant: "hero" | "wide" | "compact",
+): number {
+  const cap = variant === "hero" ? 2 : variant === "wide" ? 3 : 4;
+  if (n <= 0) return 1;
+  // Snap to the cap when we have enough tiles; otherwise use the
+  // task count itself so the row spreads exactly to fill width.
+  return Math.min(n, cap);
 }
 
 /**
