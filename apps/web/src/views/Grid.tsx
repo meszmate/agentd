@@ -480,34 +480,28 @@ export function GridOverlay({
 }
 
 /**
- * TILES layout — three stacked sections by status. The dashboard
- * groups live work (running), input-needed work (waiting_*), and
- * done/idle/failed (recent), each in its own grid sized to the
- * section's role:
+ * TILES layout — a real bento grid. One unified CSS grid where each
+ * tile gets explicit placement (gridColumn / gridRow start + span)
+ * from a hand-designed template chosen by task count. Templates 1-9
+ * are tiled by hand so every cell of the grid is consumed exactly,
+ * with the hero slot (a 2x2 quadrant) reserved for the most-important
+ * task and surrounding slots filled by smaller tiles. For 10+ tasks
+ * we generate a layout programmatically (hero + uniform 1x1 tail).
  *
- *   running  → BIG tiles, fills the rest of the vertical space.
- *              2 cols when there's room, so each running tile is
- *              huge — the operator can read the streaming reply and
- *              the file edits without squinting.
- *   waiting  → MEDIUM-wide tiles in a single row, so the question
- *              text is easy to read at a glance.
- *   recent   → SMALL tiles in a compact strip at the bottom, up to
- *              4 across. Done / failed are reference material, not
- *              the focus.
+ * Tasks are mapped to slots in PRIORITY order: running > waiting >
+ * others, then createdAt asc within each priority class. This is what
+ * the operator actually meant by "running tasks are bigger" — the
+ * hero is whichever task is currently most important, not whichever
+ * was created first. Status changes do move a task between slots
+ * (running → done shrinks it out of the hero), but slot positions
+ * themselves are fixed by the template, and within each priority
+ * class the createdAt sort keeps things from shuffling.
  *
- * Section grids each use 100% width with column counts tuned to
- * task counts in that section, so there are NO empty cells in the
- * trailing row of any section. With 3 running tasks, the running
- * grid is 3 cols. With 5 done tasks, the recent grid is 4-5 cols
- * with a single trailing 1x1 tile. No bento span gymnastics, no
- * `grid-auto-flow: dense` packing, no awkward gaps.
- *
- * Yes, this means a task moves between sections when its status
- * flips (running → done jumps from top to bottom). That's
- * intentional and exactly what "running tasks are bigger" maps
- * onto: the position in the dashboard reflects the task's
- * current importance. Within a section, tasks are stably ordered
- * by createdAt so tiles in the same status don't shuffle.
+ * The grid uses `gridTemplateColumns/Rows: 1fr` so every cell shares
+ * the available canvas evenly — no `auto` rows / minmax(220px, auto)
+ * trickery that left empty bands. With explicit placement, every
+ * cell is consumed and the rows stretch to fill the overlay height
+ * exactly. That's "fill the whole space."
  */
 function TilesLayout({
   tasks,
@@ -521,199 +515,264 @@ function TilesLayout({
    *  click without leaving the overlay. */
   onFocusTask: (id: string) => void;
 }) {
-  const grouped = useMemo(() => {
-    const running: Task[] = [];
-    const waiting: Task[] = [];
-    const others: Task[] = [];
-    for (const t of tasks) {
-      if (t.status === "running") {
-        running.push(t);
-      } else if (
-        t.status === "waiting_input" ||
-        t.status === "waiting_perm"
-      ) {
-        waiting.push(t);
-      } else {
-        others.push(t);
-      }
-    }
-    return { running, waiting, others };
+  // Sort by priority — running tasks first, then waiting, then the
+  // rest. createdAt asc within each class for stable ordering.
+  const ordered = useMemo(() => {
+    const pri = (t: Task): number => {
+      if (t.status === "running") return 0;
+      if (t.status === "waiting_perm" || t.status === "waiting_input") return 1;
+      return 2;
+    };
+    const sorted = [...tasks];
+    sorted.sort((a, b) => {
+      const pa = pri(a);
+      const pb = pri(b);
+      if (pa !== pb) return pa - pb;
+      return a.createdAt - b.createdAt;
+    });
+    return sorted;
   }, [tasks]);
 
-  // A task waiting on the operator is more urgent than a task quietly
-  // running, so the waiting section sits ABOVE running visually. The
-  // running section then claims the remaining vertical space (flex-1)
-  // because it's the biggest and most content-rich. Recent ones sit
-  // at the bottom as reference material.
+  const layout = useMemo(() => bentoLayout(ordered.length), [ordered.length]);
+
   return (
-    <div className="flex-1 min-h-0 flex flex-col gap-3 overflow-y-auto pr-1">
-      {grouped.waiting.length > 0 && (
-        <BentoSection
-          label="needs you"
-          tone="amber"
-          tasks={grouped.waiting}
-          verbose={verbose}
-          onFocusTask={onFocusTask}
-          variant="wide"
-        />
-      )}
-      {grouped.running.length > 0 && (
-        <BentoSection
-          label="running"
-          tone="ember"
-          tasks={grouped.running}
-          verbose={verbose}
-          onFocusTask={onFocusTask}
-          variant="hero"
-        />
-      )}
-      {grouped.others.length > 0 && (
-        <BentoSection
-          label="recent"
-          tone="muted"
-          tasks={grouped.others}
-          verbose={verbose}
-          onFocusTask={onFocusTask}
-          variant="compact"
-        />
-      )}
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+      <div
+        className="grid gap-2 h-full"
+        style={{
+          gridTemplateColumns: `repeat(${layout.cols}, minmax(0, 1fr))`,
+          gridTemplateRows: `repeat(${layout.rows}, minmax(0, 1fr))`,
+          minHeight: "100%",
+        }}
+      >
+        {ordered.map((t, i) => {
+          const slot = layout.slots[i];
+          if (!slot) return null;
+          return (
+            <div
+              key={t.id}
+              className="min-h-0 min-w-0 transition-[grid-area] duration-200 ease-out"
+              style={{
+                gridColumn: `${slot.col} / span ${slot.colSpan}`,
+                gridRow: `${slot.row} / span ${slot.rowSpan}`,
+              }}
+            >
+              <TaskPane
+                task={t}
+                focused={false}
+                onToggleFocus={() => onFocusTask(t.id)}
+                density="tile"
+                verbose={verbose}
+              />
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-/**
- * One status-grouped section of the tiles dashboard. Each section is
- * its own CSS grid with column count picked to consume the section's
- * width exactly — task count maps to a column count so the trailing
- * row never has empty cells.
- *
- *   variant="hero"    big tiles, fills remaining vertical space
- *                     (flex-1). Up to 2 cols.
- *   variant="wide"    medium tiles in a single row; cols = task
- *                     count so they spread to fill width. Capped at
- *                     3 so each waiting tile is readable.
- *   variant="compact" small tiles in 1-3 rows; up to 4 cols.
- *
- * Section labels are tiny mono kicker text — operators get the "what
- * am I looking at" cue without the section header eating real estate.
- */
-function BentoSection({
-  label,
-  tone,
-  tasks,
-  verbose,
-  onFocusTask,
-  variant,
-}: {
-  label: string;
-  tone: "ember" | "amber" | "muted";
-  tasks: Task[];
-  verbose: boolean;
-  onFocusTask: (id: string) => void;
-  variant: "hero" | "wide" | "compact";
-}) {
-  const cols = pickSectionCols(tasks.length, variant);
-  const rows = Math.max(1, Math.ceil(tasks.length / cols));
+type BentoSlot = {
+  col: number;
+  row: number;
+  colSpan: number;
+  rowSpan: number;
+};
 
-  // Hero section is `flex-1 min-h-0` so it stretches to fill leftover
-  // height. Each row inside hero is 1fr so the tile gets as tall as
-  // possible — the streaming reply + code panel + transcript stack
-  // actually has room to breathe. Wide / compact sections size to
-  // content (no flex), with a sensible min-height.
-  const rowSizing =
-    variant === "hero"
-      ? "minmax(280px, 1fr)"
-      : variant === "wide"
-        ? "minmax(180px, auto)"
-        : "minmax(160px, auto)";
-
-  const toneCls =
-    tone === "ember"
-      ? "text-ember-700 dark:text-ember-300"
-      : tone === "amber"
-        ? "text-amber-700 dark:text-amber-300"
-        : "text-ink-400 dark:text-ink-500";
-
-  return (
-    <section
-      className={cn(
-        "flex flex-col gap-1 shrink-0",
-        // Only the hero section claims remaining height; wide /
-        // compact size to their own content so the hero gets all
-        // the leftover space. min-h-0 lets the inner grid scroll
-        // if a wall of running tiles overruns the available height.
-        variant === "hero" && "flex-1 min-h-0",
-      )}
-    >
-      <div className="flex items-center gap-2 px-1 shrink-0">
-        <span
-          className={cn(
-            "inline-flex items-center gap-1 font-mono text-[9.5px] uppercase tracking-[0.14em] shrink-0",
-            toneCls,
-          )}
-        >
-          <span
-            className={cn(
-              "inline-block h-1.5 w-1.5 rounded-full",
-              tone === "ember"
-                ? "bg-ember-500 animate-blink"
-                : tone === "amber"
-                  ? "bg-amber-500 animate-pulse"
-                  : "bg-emerald-500/50",
-            )}
-          />
-          {label}
-        </span>
-        <span className="font-mono text-[9.5px] tabular-nums text-ink-400 dark:text-ink-500">
-          {tasks.length}
-        </span>
-        <span className="h-px flex-1 bg-gradient-to-r from-ink-900/[0.08] via-ink-900/[0.04] to-transparent dark:from-ink-50/10 dark:via-ink-50/[0.04]" />
-      </div>
-      <div
-        className={cn(
-          "grid gap-2 min-h-0 min-w-0",
-          variant === "hero" && "flex-1",
-        )}
-        style={{
-          gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-          gridTemplateRows: `repeat(${rows}, ${rowSizing})`,
-        }}
-      >
-        {tasks.map((t) => (
-          <div key={t.id} className="min-h-0 min-w-0">
-            <TaskPane
-              task={t}
-              focused={false}
-              onToggleFocus={() => onFocusTask(t.id)}
-              density="tile"
-              verbose={verbose}
-            />
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
+type BentoTemplate = {
+  cols: number;
+  rows: number;
+  slots: BentoSlot[];
+};
 
 /**
- * Column count picker per section variant. Returns a count that
- * exactly divides the task count when possible, so there's no
- * empty trailing cell. Beyond the caps we let the last row carry
- * a single tile (acceptable — better than tiny columns).
- *
- *  hero    → up to 2 cols (big readable tiles)
- *  wide    → up to 3 cols (wide-but-not-tiny single-row waiting tiles)
- *  compact → up to 4 cols (small dense done tiles)
+ * Pick the right bento template for a given tile count. Templates
+ * 1-9 are hand-tiled — every cell of the grid is consumed. For 10+
+ * we generate a 4-col grid with a 2x2 hero at the top-left and 1x1
+ * tiles filling the remaining cells; when the last row would be
+ * short, the trailing tile spans wide to consume the remainder so
+ * there's still no empty cell.
  */
-function pickSectionCols(
-  n: number,
-  variant: "hero" | "wide" | "compact",
-): number {
-  const cap = variant === "hero" ? 2 : variant === "wide" ? 3 : 4;
-  if (n <= 0) return 1;
-  // Snap to the cap when we have enough tiles; otherwise use the
-  // task count itself so the row spreads exactly to fill width.
-  return Math.min(n, cap);
+function bentoLayout(n: number): BentoTemplate {
+  if (n <= 0) return { cols: 1, rows: 1, slots: [] };
+
+  // Hand-tiled templates 1-9. Each one is verified to tile its
+  // (cols × rows) rectangle exactly: sum(colSpan × rowSpan) === cols × rows.
+  if (n === 1) {
+    return {
+      cols: 1,
+      rows: 1,
+      slots: [{ col: 1, row: 1, colSpan: 1, rowSpan: 1 }],
+    };
+  }
+  if (n === 2) {
+    return {
+      cols: 2,
+      rows: 1,
+      slots: [
+        { col: 1, row: 1, colSpan: 1, rowSpan: 1 },
+        { col: 2, row: 1, colSpan: 1, rowSpan: 1 },
+      ],
+    };
+  }
+  if (n === 3) {
+    // Hero (2x2) on the left, two stacked tiles on the right.
+    return {
+      cols: 3,
+      rows: 2,
+      slots: [
+        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
+        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
+        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
+      ],
+    };
+  }
+  if (n === 4) {
+    // Hero (2x2) + 2 small (1x1) + 1 wide (2x1). 8 cells in a 4×2.
+    return {
+      cols: 4,
+      rows: 2,
+      slots: [
+        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
+        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
+        { col: 4, row: 1, colSpan: 1, rowSpan: 1 },
+        { col: 3, row: 2, colSpan: 2, rowSpan: 1 },
+      ],
+    };
+  }
+  if (n === 5) {
+    // Hero + 2 small (right column) + 1 wide (bottom-left) + 1 small.
+    // 9 cells in a 3×3.
+    return {
+      cols: 3,
+      rows: 3,
+      slots: [
+        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
+        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
+        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
+        { col: 1, row: 3, colSpan: 2, rowSpan: 1 },
+        { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
+      ],
+    };
+  }
+  if (n === 6) {
+    // Hero + 2 small (right) + 3 small (bottom). 9 cells in a 3×3.
+    return {
+      cols: 3,
+      rows: 3,
+      slots: [
+        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
+        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
+        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
+        { col: 1, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 2, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
+      ],
+    };
+  }
+  if (n === 7) {
+    // Hero + 4 small + 2 wide (bottom). 12 cells in a 4×3.
+    return {
+      cols: 4,
+      rows: 3,
+      slots: [
+        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
+        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
+        { col: 4, row: 1, colSpan: 1, rowSpan: 1 },
+        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
+        { col: 4, row: 2, colSpan: 1, rowSpan: 1 },
+        { col: 1, row: 3, colSpan: 2, rowSpan: 1 },
+        { col: 3, row: 3, colSpan: 2, rowSpan: 1 },
+      ],
+    };
+  }
+  if (n === 8) {
+    // Hero + 4 small (right) + 2 small (bottom-left) + 1 wide.
+    // 12 cells in a 4×3.
+    return {
+      cols: 4,
+      rows: 3,
+      slots: [
+        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
+        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
+        { col: 4, row: 1, colSpan: 1, rowSpan: 1 },
+        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
+        { col: 4, row: 2, colSpan: 1, rowSpan: 1 },
+        { col: 1, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 2, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 3, row: 3, colSpan: 2, rowSpan: 1 },
+      ],
+    };
+  }
+  if (n === 9) {
+    // Hero + 8 small (right column + bottom row). 12 cells in a 4×3.
+    return {
+      cols: 4,
+      rows: 3,
+      slots: [
+        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
+        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
+        { col: 4, row: 1, colSpan: 1, rowSpan: 1 },
+        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
+        { col: 4, row: 2, colSpan: 1, rowSpan: 1 },
+        { col: 1, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 2, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 4, row: 3, colSpan: 1, rowSpan: 1 },
+      ],
+    };
+  }
+
+  // n >= 10 — generate a 4-col layout with a 2x2 hero in the
+  // top-left and 1x1 tiles filling the remainder in row-major order.
+  // If the LAST row would be short, extend the final tile to span
+  // the trailing empty cells so the grid is still fully consumed.
+  const cols = 4;
+  const slots: BentoSlot[] = [];
+  // Hero
+  slots.push({ col: 1, row: 1, colSpan: 2, rowSpan: 2 });
+  // Remaining small tiles fill cells in row-major scan, skipping
+  // those occupied by the hero (cols 1-2 of rows 1-2).
+  const remaining = n - 1;
+  // Cells we need = 4 (hero) + remaining. Round up to a full row.
+  const cells = 4 + remaining;
+  const rows = Math.ceil(cells / cols);
+  const filledByHero = new Set<string>();
+  for (let r = 1; r <= 2; r++) {
+    for (let c = 1; c <= 2; c++) {
+      filledByHero.add(`${c},${r}`);
+    }
+  }
+  const freeCells: Array<{ col: number; row: number }> = [];
+  for (let r = 1; r <= rows; r++) {
+    for (let c = 1; c <= cols; c++) {
+      if (filledByHero.has(`${c},${r}`)) continue;
+      freeCells.push({ col: c, row: r });
+    }
+  }
+  for (let i = 0; i < remaining; i++) {
+    const cell = freeCells[i];
+    if (!cell) break;
+    slots.push({
+      col: cell.col,
+      row: cell.row,
+      colSpan: 1,
+      rowSpan: 1,
+    });
+  }
+  // If trailing cells are unconsumed (cells > 4 + remaining), expand
+  // the last tile to absorb them along its row.
+  const consumed = 4 + remaining;
+  const totalCells = cols * rows;
+  const trailingEmpty = totalCells - consumed;
+  if (trailingEmpty > 0 && slots.length > 1) {
+    const last = slots[slots.length - 1]!;
+    // Trailing empties live to the right of the last tile in its row.
+    const maxExtend = cols - (last.col + last.colSpan - 1);
+    const extend = Math.min(trailingEmpty, maxExtend);
+    last.colSpan += extend;
+  }
+  return { cols, rows, slots };
 }
 
 /**
