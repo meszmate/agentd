@@ -17,6 +17,7 @@ import { useTaskRt } from "@/store";
 import { useRealtime } from "@/realtime";
 import { cn, formatTokens } from "@/lib/utils";
 import { StatusDot } from "@/components/ui/status-dot";
+import { CodeBlock, langFromPath } from "@/components/code-block";
 import { parseToolCall, TOOL_ICONS } from "@/components/tool-line";
 import { TaskTimeline } from "@/views/TaskTimeline";
 import { TaskWorkspace } from "@/views/TaskWorkspace";
@@ -98,6 +99,63 @@ export function TaskPane({
     const tailSize = verbose ? 8 : 5;
     return collectTail(messages, tailSize, verbose);
   }, [messages, density, verbose]);
+
+  // Most-recent Edit / Write / MultiEdit on this task — surfaced as a
+  // big syntax-highlighted code panel pinned at the bottom of the
+  // tile so the operator can see what the agent is actually writing
+  // to disk without leaving the dashboard. Updates live: each new
+  // edit message flips the panel to the latest one. We scan from the
+  // tail forward so the lookup is cheap even on long tasks.
+  const latestEdit = useMemo(() => {
+    if (density === "focused") return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]!;
+      if (m.role !== "tool") continue;
+      if (!m.content.startsWith("[call ")) continue;
+      const parsed = parseToolCall(m.content);
+      if (!parsed.editPreview) continue;
+      const ep = parsed.editPreview;
+      // Pick a sensible code body to render per edit kind. For Write
+      // it's the full new content; for Edit it's the new_string (what
+      // landed); for unified codex diffs we flatten the hunks. The
+      // CodeBlock has its own height cap so over-large content scrolls
+      // inside the block — no need to truncate here.
+      if (ep.kind === "write") {
+        return {
+          code: ep.content,
+          path: ep.path,
+          language: langFromPath(ep.path),
+          diffMarks: null,
+        } as const;
+      }
+      if (ep.kind === "edit") {
+        return {
+          code: ep.newString || ep.oldString || "",
+          path: ep.path,
+          language: langFromPath(ep.path),
+          diffMarks: null,
+        } as const;
+      }
+      if (ep.kind === "unified") {
+        const f = ep.file;
+        const lines: string[] = [];
+        const marks: Array<"+" | "-" | " "> = [];
+        for (const h of f.hunks ?? []) {
+          for (const ln of h.lines ?? []) {
+            lines.push(ln.content);
+            marks.push(ln.kind === "add" ? "+" : ln.kind === "del" ? "-" : " ");
+          }
+        }
+        return {
+          code: lines.join("\n"),
+          path: f.displayPath,
+          language: langFromPath(f.displayPath),
+          diffMarks: marks,
+        } as const;
+      }
+    }
+    return null;
+  }, [messages, density]);
 
   // Auto-scroll the tile transcript on new content, but only when
   // already near the bottom — the operator may have scrolled up to
@@ -291,53 +349,91 @@ export function TaskPane({
         </div>
       ) : (
         <>
-          {/* Transcript tail */}
-          <div
-            ref={scrollRef}
-            className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2 text-[11.5px] leading-snug"
-          >
-            {tail.length === 0 && !streamText ? (
-              <div className="flex h-full items-center justify-center text-[11px] text-ink-400 dark:text-ink-500">
-                {isRunning ? "waking up…" : "no messages yet"}
+          {/* Live stream strip — pinned at the top of the body when
+              the agent is actively emitting text. Distinct from the
+              transcript below so the operator's eye lands on what's
+              happening RIGHT NOW first, with a breathing caret to
+              signal "actively generating." Falls away to nothing
+              when no stream is active. */}
+          {streamText && (
+            <div className="shrink-0 border-b border-ink-900/[0.06] dark:border-ink-50/[0.06] px-2.5 py-1.5 bg-ember-500/[0.04]">
+              <div className="flex items-start gap-1.5 min-w-0 max-h-20 overflow-hidden">
+                <RoleGlyph role="agent" streaming />
+                <AgentText
+                  text={streamText}
+                  role="agent"
+                  verbose={verbose}
+                  density={density}
+                  streaming
+                />
               </div>
-            ) : (
-              <ol className="space-y-1.5">
-                {tail.map((m) => {
-                  if (m.role === "tool") {
+            </div>
+          )}
+
+          {/* Transcript tail + code panel. Two stacked regions: the
+              transcript scrolls (so it can show recent message history
+              even on a small tile) and the code panel is pinned at
+              the bottom showing the most recent file edit at a real
+              readable size. When there's no recent edit, the
+              transcript expands to fill the body. */}
+          <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+            <div
+              ref={scrollRef}
+              className={cn(
+                "min-h-0 overflow-y-auto px-2.5 py-2 text-[11.5px] leading-snug",
+                latestEdit ? "shrink basis-0" : "flex-1",
+              )}
+            >
+              {tail.length === 0 && !streamText ? (
+                <div className="flex h-full items-center justify-center text-[11px] text-ink-400 dark:text-ink-500">
+                  {isRunning ? "waking up…" : "no messages yet"}
+                </div>
+              ) : (
+                <ol className="space-y-1.5">
+                  {tail.map((m) => {
+                    if (m.role === "tool") {
+                      return (
+                        <li key={m.id}>
+                          <ToolRow message={m} />
+                        </li>
+                      );
+                    }
                     return (
-                      <li key={m.id}>
-                        <ToolRow message={m} />
+                      <li key={m.id} className="flex gap-1.5 min-w-0">
+                        <RoleGlyph role={m.role} streaming={false} />
+                        <AgentText
+                          text={m.content}
+                          role={m.role}
+                          verbose={verbose}
+                          density={density}
+                        />
                       </li>
                     );
-                  }
-                  return (
-                    <li key={m.id} className="flex gap-1.5 min-w-0">
-                      <RoleGlyph role={m.role} streaming={false} />
-                      <AgentText
-                        text={m.content}
-                        role={m.role}
-                        verbose={verbose}
-                        density={density}
-                      />
-                    </li>
-                  );
-                })}
-                {streamText && (
-                  <li className="flex gap-1.5 min-w-0">
-                    {/* Streaming glyph breathes so the eye reads
-                        "actively generating" without watching the
-                        tokens themselves. */}
-                    <RoleGlyph role="agent" streaming />
-                    <AgentText
-                      text={streamText}
-                      role="agent"
-                      verbose={verbose}
-                      density={density}
-                      streaming
-                    />
-                  </li>
-                )}
-              </ol>
+                  })}
+                </ol>
+              )}
+            </div>
+
+            {/* Live code panel — most recent Edit/Write/MultiEdit
+                rendered as a real CodeBlock with syntax highlighting,
+                pinned at the bottom of the tile so it's always
+                visible while running. This is the "see the code the
+                agent writes" surface — operators explicitly want to
+                watch file changes land without opening the task. The
+                CodeBlock caps its own height with an internal
+                scroll, so the panel never grows past ~12rem and the
+                transcript above retains its share of the tile. */}
+            {latestEdit && (
+              <div className="shrink-0 border-t border-ink-900/[0.08] dark:border-ink-50/[0.08] px-1.5 py-1 bg-ink-900/[0.02] dark:bg-ink-50/[0.02]">
+                <CodeBlock
+                  code={latestEdit.code}
+                  language={latestEdit.language}
+                  filename={latestEdit.path}
+                  showLineNumbers={false}
+                  maxHeight="11rem"
+                  diffMarks={latestEdit.diffMarks ?? undefined}
+                />
+              </div>
             )}
           </div>
 

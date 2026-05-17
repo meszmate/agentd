@@ -500,6 +500,24 @@ export function GridOverlay({
  * same height (capped at ~340px so the transcript tail doesn't
  * stretch a single tile into the next screen).
  */
+/**
+ * Bento-style grid that fills the available canvas. Column count
+ * scales with task count so 2 tasks don't sit as small tiles in the
+ * upper-left while 75% of the screen is wasted — they expand to fill
+ * the row. Row heights are `1fr` so vertical space is also fully
+ * consumed.
+ *
+ * Each tile gets a STABLE bento span (derived from its index in the
+ * createdAt-sorted list) so some tiles are wider/taller than others —
+ * the dashboard reads as designed rather than as a uniform grid of
+ * identical boxes. The span pattern is deterministic given the tile's
+ * position, so a tile's size never changes once placed; only NEW
+ * tiles entering the list pick up a span at append time.
+ *
+ * `grid-auto-flow: dense` packs the variable-span tiles into gaps
+ * tightly. Since spans are determined by index and the sort is
+ * stable, the dense packing is itself stable — no shuffling.
+ */
 function TilesLayout({
   tasks,
   verbose,
@@ -512,40 +530,110 @@ function TilesLayout({
    *  click without leaving the overlay. */
   onFocusTask: (id: string) => void;
 }) {
+  const cols = pickColumnCount(tasks.length);
+  const rows = Math.max(1, Math.ceil(tasks.length / cols));
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       <div
-        className="grid gap-3 auto-rows-[minmax(240px,340px)]"
+        className="grid gap-2 h-full"
         style={{
-          gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
+          gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+          gridAutoFlow: "dense",
+          // Set rows to 1fr each so vertical space fills evenly. We
+          // compute rows from the actual tile count + bento spans so
+          // big tiles get the height they need without making the
+          // others tiny. Capped at a sensible minimum so a wall of
+          // tiny tasks doesn't shrink rows below readability.
+          gridAutoRows: `minmax(220px, 1fr)`,
+          // Cap the overall grid height so it doesn't spill past the
+          // overlay. The outer container handles overflow scrolling
+          // when there are too many tasks for one screen.
+          minHeight: "100%",
         }}
       >
-        {/* No motion `layout`/`layoutId` here on purpose. The sort
-            invariant above guarantees positions never change once a
-            tile is in the list, so there's nothing to FLIP. Motion's
-            layout machinery on every tile + every re-render (which
-            happens every ~1s via the tick) was a real source of
-            visual jitter — tiles were animating to "the same
-            position", which still triggers a transform → reflow. A
-            plain key={t.id} keeps React's reconciler happy without
-            running motion's measurement step on every frame. New
-            tiles just appear at the end of the list; closed tiles
-            disappear cleanly. That's what operators actually want
-            from a dashboard. */}
-        {tasks.map((t) => (
-          <div key={t.id} className="min-h-0">
-            <TaskPane
-              task={t}
-              focused={false}
-              onToggleFocus={() => onFocusTask(t.id)}
-              density="tile"
-              verbose={verbose}
-            />
-          </div>
-        ))}
+        {/* No motion machinery. Stable spans + stable createdAt sort
+            mean tile positions never change once placed; nothing to
+            animate. */}
+        {tasks.map((t, i) => {
+          const span = bentoSpan(i, tasks.length, cols);
+          return (
+            <div
+              key={t.id}
+              className="min-h-0 min-w-0"
+              style={{
+                gridColumn: `span ${span.col} / span ${span.col}`,
+                gridRow: `span ${span.row} / span ${span.row}`,
+              }}
+            >
+              <TaskPane
+                task={t}
+                focused={false}
+                onToggleFocus={() => onFocusTask(t.id)}
+                density="tile"
+                verbose={verbose}
+              />
+            </div>
+          );
+        })}
       </div>
     </div>
   );
+}
+
+/**
+ * Map a task count to a column count that fills the screen well at
+ * common viewport widths.
+ *
+ *  1   → 1 col   (full width)
+ *  2   → 2 cols  (split)
+ *  3   → 3 cols  (each tile takes a third)
+ *  4   → 2 cols  (2x2 reads better than 4x1)
+ *  5-6 → 3 cols
+ *  7-8 → 4 cols
+ *  9+  → 4 cols (scroll for more rows)
+ *
+ * Capping at 4 keeps tiles wide enough for the code+stream payload
+ * to be readable; past 4 columns the tile content compresses to the
+ * point where it stops being useful.
+ */
+function pickColumnCount(n: number): number {
+  if (n <= 1) return 1;
+  if (n === 2) return 2;
+  if (n === 3) return 3;
+  if (n === 4) return 2;
+  if (n <= 6) return 3;
+  return 4;
+}
+
+/**
+ * Deterministic bento spans by tile index. We want the grid to read
+ * as designed: some tiles bigger, some smaller, packing tightly via
+ * `grid-auto-flow: dense`. The pattern is keyed on index so a tile's
+ * span is set at append time and never changes.
+ *
+ * The featured tile (index 0) gets 2x2 when there's room (cols >= 3
+ * and enough tasks to actually fill the bigger slot). Otherwise
+ * tiles span 1x1. Future iterations can add more patterns; the
+ * invariant is "deterministic, position-stable, packs cleanly."
+ */
+function bentoSpan(
+  index: number,
+  total: number,
+  cols: number,
+): { col: number; row: number } {
+  // Featured first tile when there's enough room. We only enlarge if
+  // there are enough OTHER tiles to absorb the row — otherwise a 2x2
+  // hero next to one 1x1 tile leaves an empty cell, which is the
+  // opposite of "fill the space."
+  if (index === 0 && cols >= 3 && total >= 5) {
+    return { col: 2, row: 2 };
+  }
+  // Wide accent every 7th tile after the hero — gives the grid
+  // visual rhythm at high density without breaking stability.
+  if (cols >= 3 && index > 0 && index % 7 === 6) {
+    return { col: 2, row: 1 };
+  }
+  return { col: 1, row: 1 };
 }
 
 /**
