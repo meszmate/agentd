@@ -531,7 +531,6 @@ function TilesLayout({
   onFocusTask: (id: string) => void;
 }) {
   const cols = pickColumnCount(tasks.length);
-  const rows = Math.max(1, Math.ceil(tasks.length / cols));
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       <div
@@ -539,27 +538,24 @@ function TilesLayout({
         style={{
           gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
           gridAutoFlow: "dense",
-          // Set rows to 1fr each so vertical space fills evenly. We
-          // compute rows from the actual tile count + bento spans so
-          // big tiles get the height they need without making the
-          // others tiny. Capped at a sensible minimum so a wall of
-          // tiny tasks doesn't shrink rows below readability.
+          // Set rows to 1fr so vertical space fills evenly. Capped at
+          // a sensible minimum so a wall of tiny tasks doesn't shrink
+          // rows below readability.
           gridAutoRows: `minmax(220px, 1fr)`,
-          // Cap the overall grid height so it doesn't spill past the
-          // overlay. The outer container handles overflow scrolling
-          // when there are too many tasks for one screen.
           minHeight: "100%",
         }}
       >
-        {/* No motion machinery. Stable spans + stable createdAt sort
-            mean tile positions never change once placed; nothing to
-            animate. */}
-        {tasks.map((t, i) => {
-          const span = bentoSpan(i, tasks.length, cols);
+        {/* No motion machinery. Stable createdAt sort means tile
+            positions don't shuffle; the only layout changes happen
+            when a task's status flips (running → done shrinks its
+            span) and that's the bento behavior operators want:
+            active work claims more of the canvas. */}
+        {tasks.map((t) => {
+          const span = bentoSpan(t.status, cols);
           return (
             <div
               key={t.id}
-              className="min-h-0 min-w-0"
+              className="min-h-0 min-w-0 transition-[grid-column,grid-row] duration-200 ease-out"
               style={{
                 gridColumn: `span ${span.col} / span ${span.col}`,
                 gridRow: `span ${span.row} / span ${span.row}`,
@@ -582,55 +578,55 @@ function TilesLayout({
 
 /**
  * Map a task count to a column count that fills the screen well at
- * common viewport widths.
+ * common viewport widths. Tuned for bento: enough columns that a
+ * running task's 2x2 hero has room to sit next to smaller done tiles
+ * packing into the remaining cells.
  *
- *  1   → 1 col   (full width)
- *  2   → 2 cols  (split)
- *  3   → 3 cols  (each tile takes a third)
- *  4   → 2 cols  (2x2 reads better than 4x1)
- *  5-6 → 3 cols
- *  7-8 → 4 cols
- *  9+  → 4 cols (scroll for more rows)
+ *  1    → 1 col   (one running task fills the screen)
+ *  2    → 2 cols
+ *  3    → 3 cols
+ *  4-6  → 3 cols  (3 cols lets a 2x2 hero leave a column for 1x1s)
+ *  7+   → 4 cols  (denser, but still readable)
  *
- * Capping at 4 keeps tiles wide enough for the code+stream payload
- * to be readable; past 4 columns the tile content compresses to the
- * point where it stops being useful.
+ * Capped at 4 so tile content (streaming reply + transcript + code
+ * panel) stays at a real readable width. Past 4 columns each tile
+ * would be too narrow for the code panel to be useful.
  */
 function pickColumnCount(n: number): number {
   if (n <= 1) return 1;
   if (n === 2) return 2;
-  if (n === 3) return 3;
-  if (n === 4) return 2;
   if (n <= 6) return 3;
   return 4;
 }
 
 /**
- * Deterministic bento spans by tile index. We want the grid to read
- * as designed: some tiles bigger, some smaller, packing tightly via
- * `grid-auto-flow: dense`. The pattern is keyed on index so a tile's
- * span is set at append time and never changes.
+ * Bento span by TASK STATUS. The dashboard's job is to surface what
+ * matters now: active work claims a big quadrant, waiting work gets
+ * a wide cell so the operator can read the question, idle / done /
+ * failed tasks stay 1x1 so they don't shoulder out the live ones.
  *
- * The featured tile (index 0) gets 2x2 when there's room (cols >= 3
- * and enough tasks to actually fill the bigger slot). Otherwise
- * tiles span 1x1. Future iterations can add more patterns; the
- * invariant is "deterministic, position-stable, packs cleanly."
+ * Yes — this means a tile resizes when its status flips. That IS
+ * the bento behavior the operator asked for ("running tasks are
+ * bigger"). The CSS transition on the wrapping div smooths the
+ * span change so it reads as a deliberate growth rather than a
+ * jump cut. grid-auto-flow: dense in the parent re-packs the
+ * smaller tiles into freed gaps without re-ordering them.
+ *
+ *   running          → 2x2 hero (full bento quadrant)
+ *   waiting_input    → 2x1 wide (operator needs to read the ask)
+ *   waiting_perm     → 2x1 wide
+ *   anything else    → 1x1     (idle, pending, done, failed, stopped)
+ *
+ * When cols < 2 we can't honor the spans, so everything collapses
+ * to 1x1 — the grid would clip them anyway.
  */
 function bentoSpan(
-  index: number,
-  total: number,
+  status: Task["status"],
   cols: number,
 ): { col: number; row: number } {
-  // Featured first tile when there's enough room. We only enlarge if
-  // there are enough OTHER tiles to absorb the row — otherwise a 2x2
-  // hero next to one 1x1 tile leaves an empty cell, which is the
-  // opposite of "fill the space."
-  if (index === 0 && cols >= 3 && total >= 5) {
-    return { col: 2, row: 2 };
-  }
-  // Wide accent every 7th tile after the hero — gives the grid
-  // visual rhythm at high density without breaking stability.
-  if (cols >= 3 && index > 0 && index % 7 === 6) {
+  if (cols < 2) return { col: 1, row: 1 };
+  if (status === "running") return { col: 2, row: 2 };
+  if (status === "waiting_input" || status === "waiting_perm") {
     return { col: 2, row: 1 };
   }
   return { col: 1, row: 1 };
