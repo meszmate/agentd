@@ -52,13 +52,10 @@ export function TaskPane({
   focused: boolean;
   onToggleFocus: () => void;
   /**
-   *  "tile"    = full dashboard tile (transcript + code panel + composer).
+   *  "tile"    = rich dashboard tile (transcript + code panel + composer).
    *  "focused" = expanded pane (timeline + workspace tabs).
-   *  "stack"   = compact one-row strip for the master/stack layout's
-   *              stack column. Just status + title + live activity
-   *              preview, no transcript/code/composer. Click to focus.
    */
-  density: "tile" | "focused" | "stack";
+  density: "tile" | "focused";
   /**
    * When true, include agent tool calls in the transcript tail —
    * Bash commands, file edits with +N/-M counts, Reads, etc. —
@@ -202,83 +199,6 @@ export function TaskPane({
     const ms = Math.max(0, end - start);
     return formatDuration(ms);
   }, [isFinished, task.createdAt, task.updatedAt]);
-
-  // Stack density — compact one-row strip for the stack column of
-  // the master/stack layout. No header chrome, no transcript, no
-  // composer: just status dot + title + a live activity preview.
-  // The whole strip is clickable (parent grid handles the click) so
-  // hovering shows it's selectable. Animates the activity preview
-  // when the agent emits tokens so the strip still pulses with life.
-  if (density === "stack") {
-    const previewText =
-      streamText?.slice(-120) ||
-      rt.lastToolHint ||
-      latest?.text ||
-      (isFinished ? statusLabel(task.status) : "waiting…");
-    return (
-      <div
-        title={task.title}
-        className={cn(
-          "group/stack relative flex h-full min-h-0 items-center gap-2 px-2 rounded-md border transition-colors cursor-pointer",
-          focused
-            ? "border-ember-500/40 bg-ember-500/[0.08]"
-            : needsApproval
-              ? "border-amber-500/40 bg-amber-500/[0.06] animate-alert-ring"
-              : isRunning
-                ? "border-ember-500/20 bg-paper-50 hover:bg-ember-500/[0.04] dark:bg-ink-800 dark:hover:bg-ember-500/[0.06]"
-                : isFinished
-                  ? "border-ink-900/[0.08] bg-paper-50/70 opacity-70 hover:opacity-100 hover:bg-ink-900/[0.03] dark:border-ink-50/[0.08] dark:bg-ink-800/70 dark:hover:bg-ink-50/[0.03]"
-                  : "border-ink-900/10 bg-paper-50 hover:bg-ink-900/[0.03] dark:border-ink-50/10 dark:bg-ink-800 dark:hover:bg-ink-50/[0.03]",
-          hot && !needsApproval && "ring-1 ring-ember-500/30",
-        )}
-      >
-        {/* Live activity sweep on running rows — thin gradient on
-            the top edge that scans left-to-right. Same idea as the
-            tile sweep, scaled down. */}
-        {isRunning && !needsApproval && (
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-x-0 top-0 h-px overflow-hidden rounded-t-md"
-          >
-            <div
-              className="h-full w-full animate-tile-sweep"
-              style={{
-                background:
-                  "linear-gradient(90deg, transparent 0%, rgba(220,38,38,0) 25%, rgba(220,38,38,0.6) 50%, rgba(220,38,38,0) 75%, transparent 100%)",
-                backgroundSize: "200% 100%",
-              }}
-            />
-          </div>
-        )}
-        <StatusDot status={task.status} size="sm" />
-        <span className="font-mono text-[9px] uppercase tracking-[0.1em] text-ink-400 dark:text-ink-500 shrink-0 hidden sm:inline">
-          {task.agent}
-        </span>
-        <div className="flex-1 min-w-0 flex flex-col leading-tight">
-          <span className="text-[11.5px] font-medium text-ink-900 dark:text-ink-50 truncate">
-            {task.title}
-          </span>
-          <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate">
-            {previewText}
-          </span>
-        </div>
-        {needsApproval && (
-          <span className="shrink-0 inline-flex items-center gap-0.5 font-mono text-[9px] uppercase tracking-[0.06em] text-amber-700 dark:text-amber-300 animate-pulse">
-            <AlertCircle className="h-2.5 w-2.5" />
-            ask
-          </span>
-        )}
-        {task.status === "waiting_input" && !needsApproval && (
-          <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.06em] text-amber-700 dark:text-amber-300">
-            ?
-          </span>
-        )}
-        {justFinished && task.status === "done" && (
-          <Check className="shrink-0 h-3 w-3 text-emerald-600 dark:text-emerald-400 animate-check-pop" />
-        )}
-      </div>
-    );
-  }
 
   return (
     <div
