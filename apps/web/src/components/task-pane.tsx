@@ -47,6 +47,7 @@ export function TaskPane({
   onToggleFocus,
   density,
   verbose = false,
+  compact = false,
 }: {
   task: Task;
   focused: boolean;
@@ -65,6 +66,15 @@ export function TaskPane({
    * verbose toggle (persisted as `gridVerbose` pref).
    */
   verbose?: boolean;
+  /**
+   * When the parent grid is squeezing many tiles into a small column,
+   * a tile gets `compact = true` — drops the agent/branch meta strip
+   * and hides the bottom code-edit preview so the transcript /
+   * tool-call area fills whatever vertical space remains. The
+   * operator promotes a tile to master if they want the full
+   * code-preview experience. Only meaningful for density="tile".
+   */
+  compact?: boolean;
 }) {
   const navigate = useNavigate();
   const taskQ = useTask(task.id);
@@ -329,15 +339,20 @@ export function TaskPane({
         </button>
       </div>
 
-      {/* Meta strip — agent · branch · model */}
-      <div className="flex h-6 items-center gap-2 border-b border-ink-900/[0.04] px-2.5 dark:border-ink-50/[0.04] shrink-0 overflow-hidden">
-        <span className="font-mono text-[9.5px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500 shrink-0">
-          {task.agent}
-        </span>
-        <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate min-w-0">
-          {task.branch}
-        </span>
-      </div>
+      {/* Meta strip — agent · branch · model. Dropped in compact
+          tiles so the transcript / tool-call area gets the height
+          back; the agent's identity is already visible from
+          surrounding context (status dot + title in the header). */}
+      {!compact && (
+        <div className="flex h-6 items-center gap-2 border-b border-ink-900/[0.04] px-2.5 dark:border-ink-50/[0.04] shrink-0 overflow-hidden">
+          <span className="font-mono text-[9.5px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500 shrink-0">
+            {task.agent}
+          </span>
+          <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate min-w-0">
+            {task.branch}
+          </span>
+        </div>
+      )}
 
       {focused ? (
         // Full task experience: same TaskTimeline that powers
@@ -383,7 +398,7 @@ export function TaskPane({
               ref={scrollRef}
               className={cn(
                 "min-h-0 overflow-y-auto px-2.5 py-2 text-[11.5px] leading-snug",
-                latestEdit ? "shrink basis-0" : "flex-1",
+                !compact && latestEdit ? "shrink basis-0" : "flex-1",
               )}
             >
               {tail.length === 0 && !streamText ? (
@@ -423,16 +438,18 @@ export function TaskPane({
                 agent writes" surface — operators explicitly want to
                 watch file changes land without opening the task. The
                 CodeBlock caps its own height with an internal
-                scroll, so the panel never grows past ~12rem and the
-                transcript above retains its share of the tile. */}
-            {latestEdit && (
+                scroll. Hidden entirely in compact tiles so the
+                transcript / tool-call area can fill the available
+                space — operators can promote a tile to master to see
+                the full code-preview experience. */}
+            {!compact && latestEdit && (
               <div className="shrink-0 border-t border-ink-900/[0.08] dark:border-ink-50/[0.08] px-1.5 py-1 bg-ink-900/[0.02] dark:bg-ink-50/[0.02]">
                 <CodeBlock
                   code={latestEdit.code}
                   language={latestEdit.language}
                   filename={latestEdit.path}
                   showLineNumbers={false}
-                  maxHeight="11rem"
+                  maxHeight="7rem"
                   diffMarks={latestEdit.diffMarks ?? undefined}
                 />
               </div>

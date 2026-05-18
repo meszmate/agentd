@@ -316,6 +316,26 @@ function MasterStack({
   const all = useMemo(() => [focused, ...others], [focused, others]);
   const focusedIdx = 0;
 
+  // Stack tiles adapt their height to how many are showing. Few tiles
+  // get tall, generous rooms (transcript, tool calls, code preview,
+  // composer all readable at once). Many tiles compress so the
+  // operator can scan 10+ live tasks without endless scrolling. Above
+  // the upper bound the stack column scrolls. Past a count threshold
+  // we also flip on `compact` per tile, which drops the meta strip
+  // and code-preview chrome so the transcript / tool-call area gets
+  // every spare pixel — the operator promotes a tile to master if
+  // they want the full experience.
+  const tileHeight = (() => {
+    const n = others.length;
+    if (n <= 1) return 420;
+    if (n <= 2) return 360;
+    if (n <= 3) return 300;
+    if (n <= 5) return 250;
+    if (n <= 7) return 210;
+    return 180;
+  })();
+  const compactTile = tileHeight < 260;
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -405,7 +425,8 @@ function MasterStack({
                     opacity: { duration: 0.18 },
                   }}
                   onClick={() => onFocus(t.id)}
-                  className="shrink-0 h-[340px] cursor-pointer"
+                  style={{ height: tileHeight }}
+                  className="shrink-0 cursor-pointer"
                 >
                   <TaskPane
                     task={t}
@@ -413,6 +434,7 @@ function MasterStack({
                     onToggleFocus={() => onFocus(t.id)}
                     density="tile"
                     verbose={verbose}
+                    compact={compactTile}
                   />
                 </motion.div>
               ))}
