@@ -549,9 +549,26 @@ function TilesLayout({
           const slot = layout.slots[i];
           if (!slot) return null;
           return (
-            <div
+            <motion.div
               key={t.id}
-              className="min-h-0 min-w-0 transition-[grid-area] duration-200 ease-out"
+              // Shared layout transition: when this tile expands into
+              // the focused pane (operator clicks anywhere on it),
+              // motion morphs from this tile's box to the focused
+              // pane's box using the layoutId match. LayoutGroup in
+              // GridOverlay's body wraps both TilesLayout and
+              // FocusedLayout so the source/destination of the
+              // transition is tracked across the layout switch.
+              layoutId={`tile-${t.id}`}
+              // `layout` lets the wrapper animate its position +
+              // size as templates shift (e.g. when a new task lands
+              // and changes the bento). Spring keeps the motion
+              // smooth without overshoot.
+              layout
+              transition={{
+                layout: { type: "spring", stiffness: 280, damping: 32 },
+              }}
+              onClick={() => onFocusTask(t.id)}
+              className="min-h-0 min-w-0 cursor-pointer group/tile"
               style={{
                 gridColumn: `${slot.col} / span ${slot.colSpan}`,
                 gridRow: `${slot.row} / span ${slot.rowSpan}`,
@@ -564,7 +581,7 @@ function TilesLayout({
                 density="tile"
                 verbose={verbose}
               />
-            </div>
+            </motion.div>
           );
         })}
       </div>
@@ -596,8 +613,10 @@ type BentoTemplate = {
 function bentoLayout(n: number): BentoTemplate {
   if (n <= 0) return { cols: 1, rows: 1, slots: [] };
 
-  // Hand-tiled templates 1-9. Each one is verified to tile its
-  // (cols × rows) rectangle exactly: sum(colSpan × rowSpan) === cols × rows.
+  // Hand-tiled templates 1-9 with varied shapes — not just 2x2 and
+  // 1x1, but 3x2 wide heroes, 1x3 tall stripes, 2x3 portraits, etc.
+  // Each one is verified to tile its (cols × rows) rectangle exactly:
+  // sum(colSpan × rowSpan) === cols × rows so no empty cells.
   if (n === 1) {
     return {
       cols: 1,
@@ -616,62 +635,78 @@ function bentoLayout(n: number): BentoTemplate {
     };
   }
   if (n === 3) {
-    // Hero (2x2) on the left, two stacked tiles on the right.
+    // 2x2 hero + 1x2 tall stripe. 6 cells in a 3×2.
     return {
       cols: 3,
       rows: 2,
       slots: [
         { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
-        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
-        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
+        { col: 3, row: 1, colSpan: 1, rowSpan: 2 },
       ],
     };
   }
   if (n === 4) {
-    // Hero (2x2) + 2 small (1x1) + 1 wide (2x1). 8 cells in a 4×2.
-    return {
-      cols: 4,
-      rows: 2,
-      slots: [
-        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
-        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
-        { col: 4, row: 1, colSpan: 1, rowSpan: 1 },
-        { col: 3, row: 2, colSpan: 2, rowSpan: 1 },
-      ],
-    };
-  }
-  if (n === 5) {
-    // Hero + 2 small (right column) + 1 wide (bottom-left) + 1 small.
-    // 9 cells in a 3×3.
+    // 3x2 WIDE hero + 3 small below. 9 cells in a 3×3.
     return {
       cols: 3,
       rows: 3,
       slots: [
-        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
-        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
-        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
-        { col: 1, row: 3, colSpan: 2, rowSpan: 1 },
+        { col: 1, row: 1, colSpan: 3, rowSpan: 2 },
+        { col: 1, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 2, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
+      ],
+    };
+  }
+  if (n === 5) {
+    // 3x2 wide hero + 1x3 tall stripe + 3 small below. 12 cells in 4×3.
+    return {
+      cols: 4,
+      rows: 3,
+      slots: [
+        { col: 1, row: 1, colSpan: 3, rowSpan: 2 },
+        { col: 4, row: 1, colSpan: 1, rowSpan: 3 },
+        { col: 1, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 2, row: 3, colSpan: 1, rowSpan: 1 },
         { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
       ],
     };
   }
   if (n === 6) {
-    // Hero + 2 small (right) + 3 small (bottom). 9 cells in a 3×3.
+    // 2x3 TALL hero + 2x1 wide + 4 small. 12 cells in 4×3.
     return {
-      cols: 3,
+      cols: 4,
       rows: 3,
       slots: [
-        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
-        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
+        { col: 1, row: 1, colSpan: 2, rowSpan: 3 },
+        { col: 3, row: 1, colSpan: 2, rowSpan: 1 },
         { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
-        { col: 1, row: 3, colSpan: 1, rowSpan: 1 },
-        { col: 2, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 4, row: 2, colSpan: 1, rowSpan: 1 },
         { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 4, row: 3, colSpan: 1, rowSpan: 1 },
       ],
     };
   }
   if (n === 7) {
-    // Hero + 4 small + 2 wide (bottom). 12 cells in a 4×3.
+    // 2x3 tall hero + 2x1 wide + 1x3 tall stripe (right edge) + 4 small.
+    // 15 cells in 5×3.
+    return {
+      cols: 5,
+      rows: 3,
+      slots: [
+        { col: 1, row: 1, colSpan: 2, rowSpan: 3 },
+        { col: 3, row: 1, colSpan: 2, rowSpan: 1 },
+        { col: 5, row: 1, colSpan: 1, rowSpan: 3 },
+        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
+        { col: 4, row: 2, colSpan: 1, rowSpan: 1 },
+        { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 4, row: 3, colSpan: 1, rowSpan: 1 },
+      ],
+    };
+  }
+  if (n === 8) {
+    // 2x2 hero + 4 small (right column) + 2x1 wide + 2 small (bottom).
+    // 12 cells in 4×3.
     return {
       cols: 4,
       rows: 3,
@@ -682,30 +717,13 @@ function bentoLayout(n: number): BentoTemplate {
         { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
         { col: 4, row: 2, colSpan: 1, rowSpan: 1 },
         { col: 1, row: 3, colSpan: 2, rowSpan: 1 },
-        { col: 3, row: 3, colSpan: 2, rowSpan: 1 },
-      ],
-    };
-  }
-  if (n === 8) {
-    // Hero + 4 small (right) + 2 small (bottom-left) + 1 wide.
-    // 12 cells in a 4×3.
-    return {
-      cols: 4,
-      rows: 3,
-      slots: [
-        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
-        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
-        { col: 4, row: 1, colSpan: 1, rowSpan: 1 },
-        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
-        { col: 4, row: 2, colSpan: 1, rowSpan: 1 },
-        { col: 1, row: 3, colSpan: 1, rowSpan: 1 },
-        { col: 2, row: 3, colSpan: 1, rowSpan: 1 },
-        { col: 3, row: 3, colSpan: 2, rowSpan: 1 },
+        { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
+        { col: 4, row: 3, colSpan: 1, rowSpan: 1 },
       ],
     };
   }
   if (n === 9) {
-    // Hero + 8 small (right column + bottom row). 12 cells in a 4×3.
+    // 2x2 hero + 8 small (right column + bottom row). 12 cells in 4×3.
     return {
       cols: 4,
       rows: 3,
@@ -876,14 +894,16 @@ function FocusedLayout({
           onFocus={onFocus}
         />
       )}
-      {/* Big focused pane — fills the remaining width. layoutId
-          preserved so reorderings (waiting_perm flips to the top,
-          status changes) animate the rail+pane together rather
-          than snapping. onToggleFocus is a no-op here because the
-          focus toggle button is hidden in always-focused mode. */}
+      {/* Big focused pane — fills the remaining width. The
+          `tile-${id}` layoutId matches the tile in TilesLayout so
+          motion animates the tile expanding into this pane when the
+          operator clicks. With LayoutGroup wrapping both layouts in
+          GridOverlay, motion sees the layoutId disappear from
+          TilesLayout and reappear here, and morphs between the two
+          bounding boxes. */}
       <motion.div
         layout
-        layoutId={focusedTask.id}
+        layoutId={`tile-${focusedTask.id}`}
         initial={false}
         transition={{
           layout: { type: "spring", stiffness: 280, damping: 30 },

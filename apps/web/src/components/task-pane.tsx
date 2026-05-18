@@ -6,7 +6,6 @@ import {
   ArrowUpRight,
   Check,
   CornerDownLeft,
-  Maximize2,
   X,
 } from "lucide-react";
 import { agentContextWindow, type Message, type Task } from "@agentd/contracts";
@@ -262,20 +261,24 @@ export function TaskPane({
         </div>
       )}
 
-      {/* Header */}
+      {/* Header — title doubles as a click target for the whole
+          tile (parent's onClick focuses), and we don't want a
+          button-inside-clickable-div nesting that splits the click
+          area into "title vs other". So title is just a span; the
+          parent click handler does the work. The arrow button
+          escapes to /tasks/:id with stopPropagation so it doesn't
+          bubble back to the focus action. */}
       <div className="flex h-8 items-center gap-2 border-b border-ink-900/[0.06] px-2.5 dark:border-ink-50/[0.06] shrink-0">
         <StatusDot status={task.status} size="sm" />
-        <button
-          type="button"
-          onClick={open}
-          title={`${task.title} · open task`}
-          className="flex-1 min-w-0 text-left text-[12px] font-medium text-ink-900 truncate hover:text-ember-600 dark:text-ink-50 dark:hover:text-ember-400"
+        <span
+          title={task.title}
+          className="flex-1 min-w-0 text-left text-[12px] font-medium text-ink-900 truncate group-hover/tile:text-ember-600 dark:text-ink-50 dark:group-hover/tile:text-ember-400"
         >
           {task.title}
-        </button>
+        </span>
         {needsApproval && (
           <span
-            title="permission requested — open task to approve"
+            title="permission requested"
             className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] font-medium uppercase tracking-[0.06em] bg-amber-500/15 text-amber-700 border border-amber-500/30 dark:text-amber-300 animate-pulse"
           >
             <AlertCircle className="h-3 w-3" /> approve
@@ -283,7 +286,7 @@ export function TaskPane({
         )}
         {task.status === "waiting_input" && (
           <span
-            title="agent asked a question — open task to answer"
+            title="agent asked a question"
             className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] font-medium uppercase tracking-[0.06em] bg-amber-500/10 text-amber-700 border border-amber-500/25 dark:text-amber-300"
           >
             ? answer
@@ -305,22 +308,18 @@ export function TaskPane({
             <X className="h-3 w-3" /> failed
           </span>
         )}
-        {!focused && (
-          <button
-            type="button"
-            onClick={onToggleFocus}
-            title="Focus"
-            aria-label="Focus pane"
-            className="inline-flex h-5 w-5 items-center justify-center rounded text-ink-500 transition-colors hover:bg-ink-900/[0.06] hover:text-ink-900 dark:text-ink-400 dark:hover:bg-ink-50/[0.06] dark:hover:text-ink-50"
-          >
-            <Maximize2 className="h-3 w-3" />
-          </button>
-        )}
         <button
           type="button"
-          onClick={open}
-          title="Open task"
-          aria-label="Open task"
+          onClick={(e) => {
+            // Stop propagation so the parent tile's onClick (which
+            // focuses this task inside the overlay) doesn't ALSO
+            // fire — this button is the escape hatch to navigate
+            // away from the overlay entirely.
+            e.stopPropagation();
+            open();
+          }}
+          title="Open task page"
+          aria-label="Open task page"
           className="inline-flex h-5 w-5 items-center justify-center rounded text-ink-500 transition-colors hover:bg-ink-900/[0.06] hover:text-ink-900 dark:text-ink-400 dark:hover:bg-ink-50/[0.06] dark:hover:text-ink-50"
         >
           <ArrowUpRight className="h-3 w-3" />
@@ -437,17 +436,21 @@ export function TaskPane({
             )}
           </div>
 
-          {/* Inline reply — only when the agent is actively asking
-              the operator something. waiting_input (agentd-ask
-              question) or waiting_perm (permission prompt) get a
-              compact one-line composer right above the footer so
-              the operator can answer without leaving the dashboard.
-              Routes through sendInput (the same channel TaskTimeline
-              uses for steers/answers) — for an open agentd-ask the
-              daemon's input handling pairs the reply with the open
-              askId; for permission prompts it lands on the agent's
-              stdin which is what claude/codex are blocked on. */}
-          {(needsApproval || task.status === "waiting_input") && (
+          {/* Inline composer — visible whenever the agent can accept
+              input, not just when it's blocked. Lets the operator
+              type to ANY tile (steer a running agent, answer a
+              question, approve a permission prompt) without focusing
+              it first. Hidden for terminal states (done / failed /
+              stopped) and never-started tasks (pending) where there's
+              no agent to receive the message.
+              Routes through sendInput — the daemon's input handler
+              does the right thing per state: queued steer for
+              running, recorded answer for waiting_input, stdin write
+              for waiting_perm. */}
+          {(task.status === "running" ||
+            task.status === "waiting_input" ||
+            task.status === "waiting_perm" ||
+            task.status === "idle") && (
             <InlineReply task={task} />
           )}
 
@@ -508,32 +511,72 @@ function InlineReply({ task }: { task: Task }) {
     }
   };
 
-  const needsApproval = task.status === "waiting_perm";
+  // Three styling modes:
+  //   "perm"    waiting_perm — full amber siren, "approve" copy.
+  //   "ask"     waiting_input — softer amber, "answer" copy.
+  //   "steer"   running / idle — subtle ember, "steer" copy. Lets
+  //             the operator queue a steer without focusing the tile.
+  const mode: "perm" | "ask" | "steer" =
+    task.status === "waiting_perm"
+      ? "perm"
+      : task.status === "waiting_input"
+        ? "ask"
+        : "steer";
+
+  const surface = {
+    perm: "border-amber-500/40 bg-amber-500/[0.08]",
+    ask: "border-amber-500/25 bg-amber-500/[0.05]",
+    steer: "border-ink-900/[0.06] bg-ink-900/[0.02] dark:border-ink-50/[0.06] dark:bg-ink-50/[0.02]",
+  }[mode];
+
+  const labelCls = {
+    perm: "text-amber-700 dark:text-amber-300",
+    ask: "text-amber-700 dark:text-amber-300",
+    steer: "text-ink-500 dark:text-ink-400",
+  }[mode];
+
+  const sendCls = {
+    perm: "text-amber-700 hover:bg-amber-500/15 dark:text-amber-300",
+    ask: "text-amber-700 hover:bg-amber-500/15 dark:text-amber-300",
+    steer:
+      "text-ember-700 hover:bg-ember-500/15 dark:text-ember-300",
+  }[mode];
+
+  const label = mode === "perm" ? "approve" : mode === "ask" ? "answer" : "steer";
+  const placeholder =
+    mode === "perm"
+      ? "yes / no / …"
+      : mode === "ask"
+        ? "type an answer…"
+        : "type to steer the agent…";
+  const title =
+    mode === "perm"
+      ? "agent is asking permission — type yes / no / a custom reply"
+      : mode === "ask"
+        ? "agent is waiting on an answer — type a reply"
+        : "send a steer or follow-up to the agent";
 
   return (
     <div
+      // Stop click bubbling so the operator clicking into the
+      // composer doesn't ALSO trigger the parent tile's focus-this-
+      // tile handler (which would steal keyboard focus from the
+      // input mid-type).
       onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
       className={cn(
         "flex h-7 items-center gap-1.5 border-t px-2 shrink-0",
-        needsApproval
-          ? "border-amber-500/30 bg-amber-500/[0.06]"
-          : "border-ember-500/20 bg-ember-500/[0.04]",
+        surface,
       )}
     >
       <span
         className={cn(
           "shrink-0 font-mono text-[9px] uppercase tracking-[0.08em]",
-          needsApproval
-            ? "text-amber-700 dark:text-amber-300"
-            : "text-ember-700 dark:text-ember-300",
+          labelCls,
         )}
-        title={
-          needsApproval
-            ? "agent is asking permission — type yes / no / a custom reply"
-            : "agent is waiting on an answer — type a reply"
-        }
+        title={title}
       >
-        reply
+        {label}
       </span>
       <input
         ref={inputRef}
@@ -546,7 +589,7 @@ function InlineReply({ task }: { task: Task }) {
             void submit();
           }
         }}
-        placeholder={needsApproval ? "yes / no / …" : "type a reply…"}
+        placeholder={placeholder}
         disabled={send.isPending}
         className="flex-1 min-w-0 bg-transparent border-0 outline-none font-mono text-[11px] text-ink-900 placeholder:text-ink-400 dark:text-ink-50 dark:placeholder:text-ink-500 disabled:opacity-50"
       />
@@ -554,13 +597,11 @@ function InlineReply({ task }: { task: Task }) {
         type="button"
         onClick={() => void submit()}
         disabled={!text.trim() || send.isPending}
-        aria-label="Send reply"
+        aria-label="Send"
         title="Send (Enter)"
         className={cn(
           "shrink-0 inline-flex items-center justify-center h-5 w-5 rounded transition-colors disabled:opacity-30",
-          needsApproval
-            ? "text-amber-700 hover:bg-amber-500/15 dark:text-amber-300"
-            : "text-ember-700 hover:bg-ember-500/15 dark:text-ember-300",
+          sendCls,
         )}
       >
         <CornerDownLeft className="h-3 w-3" />
