@@ -97,7 +97,6 @@ export interface AgentdUserPrefs {
   sidebarExpandedProjects: string[];
   taskWorkspaceOpen: boolean;
   repoPickerPins: string[];
-  gridVerbose: boolean;
 }
 
 export interface AgentdLogEntry {

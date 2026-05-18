@@ -14,7 +14,7 @@ import { useApp } from "@/AppContext";
 import { qk, useModels, useSendInput, useTask } from "@/queries";
 import { useTaskRt } from "@/store";
 import { useRealtime } from "@/realtime";
-import { cn, formatTokens } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { StatusDot } from "@/components/ui/status-dot";
 import { CodeBlock, langFromPath } from "@/components/code-block";
 import { parseToolCall, TOOL_ICONS } from "@/components/tool-line";
@@ -46,7 +46,6 @@ export function TaskPane({
   focused,
   onToggleFocus,
   density,
-  verbose = false,
   compact = false,
 }: {
   task: Task;
@@ -58,15 +57,6 @@ export function TaskPane({
    */
   density: "tile" | "focused";
   /**
-   * When true, include agent tool calls in the transcript tail —
-   * Bash commands, file edits with +N/-M counts, Reads, etc. —
-   * rendered as a single icon + summary line each so a tile can
-   * still show "what is this agent doing right now" without
-   * exploding the height. Off by default; flipped by the grid's
-   * verbose toggle (persisted as `gridVerbose` pref).
-   */
-  verbose?: boolean;
-  /**
    * When the parent grid is squeezing many tiles into a small column,
    * a tile gets `compact = true` — drops the agent/branch meta strip
    * and hides the bottom code-edit preview so the transcript /
@@ -76,12 +66,17 @@ export function TaskPane({
    */
   compact?: boolean;
 }) {
+  // Tile mode is ALWAYS verbose: tool calls show inline next to agent
+  // text so the operator can see what the agent is actually doing
+  // (the "watching it work" use case is the whole point of the grid).
+  // No toggle — the previous compact-only mode left tiles looking
+  // empty when an agent was tool-heavy but text-light.
+  const verbose = true;
   const navigate = useNavigate();
   const taskQ = useTask(task.id);
   const messages: Message[] = taskQ.data?.messages ?? [];
   const rt = useTaskRt(task.id);
-  const { latestByTask, pulses, lastStatusChange } = useRealtime();
-  const latest = latestByTask[task.id];
+  const { pulses, lastStatusChange } = useRealtime();
   const pulseTs = pulses[task.id] ?? 0;
   const hot = Date.now() - pulseTs < 1500;
 
@@ -104,12 +99,13 @@ export function TaskPane({
 
   // Build the visible transcript tail for TILE mode only — focused
   // panes hand rendering off to TaskTimeline, which walks the
-  // messages list itself. Tiles see the last few entries; tool calls
-  // come in via the verbose toggle so a quiet glance stays quiet.
+  // messages list itself. We pull a generous slice (tool calls are
+  // always included) and let the tile's scroll container handle
+  // overflow — too few would leave a tall tile looking sparse, too
+  // many is cheap because everything past the visible window scrolls.
   const tail = useMemo(() => {
     if (density === "focused") return [];
-    const tailSize = verbose ? 8 : 5;
-    return collectTail(messages, tailSize, verbose);
+    return collectTail(messages, 24, verbose);
   }, [messages, density, verbose]);
 
   // Most-recent Edit / Write / MultiEdit on this task — surfaced as a
@@ -195,20 +191,6 @@ export function TaskPane({
 
   const streamText =
     Object.values(rt.streams || {}).join("\n\n") || null;
-  const hint = rt.lastToolHint ?? latest?.text ?? null;
-
-  const totalTok =
-    (task.totalInputTokens ?? 0) + (task.totalOutputTokens ?? 0);
-
-  // Duration label for finished tiles ("12m · done"). Falls back to
-  // updated-at when createdAt is missing (shouldn't happen, but safe).
-  const durationLabel = useMemo(() => {
-    if (!isFinished) return null;
-    const start = task.createdAt ?? task.updatedAt;
-    const end = task.updatedAt;
-    const ms = Math.max(0, end - start);
-    return formatDuration(ms);
-  }, [isFinished, task.createdAt, task.updatedAt]);
 
   return (
     <div
@@ -280,12 +262,23 @@ export function TaskPane({
           area into "title vs other". So title is just a span; the
           parent click handler does the work. The arrow button
           escapes to /tasks/:id with stopPropagation so it doesn't
-          bubble back to the focus action. */}
-      <div className="flex h-8 items-center gap-2 border-b border-ink-900/[0.06] px-2.5 dark:border-ink-50/[0.06] shrink-0">
+          bubble back to the focus action. Tile mode runs slim
+          (h-6, smaller title) so the transcript / tool-call area
+          gets every spare pixel — focused mode keeps the taller
+          h-8 chrome since it has the room. */}
+      <div
+        className={cn(
+          "flex items-center gap-2 border-b border-ink-900/[0.06] px-2.5 dark:border-ink-50/[0.06] shrink-0",
+          density === "focused" ? "h-8" : "h-6",
+        )}
+      >
         <StatusDot status={task.status} size="sm" />
         <span
           title={task.title}
-          className="flex-1 min-w-0 text-left text-[12px] font-medium text-ink-900 truncate group-hover/tile:text-ember-600 dark:text-ink-50 dark:group-hover/tile:text-ember-400"
+          className={cn(
+            "flex-1 min-w-0 text-left font-medium text-ink-900 truncate group-hover/tile:text-ember-600 dark:text-ink-50 dark:group-hover/tile:text-ember-400",
+            density === "focused" ? "text-[12px]" : "text-[11px]",
+          )}
         >
           {task.title}
         </span>
@@ -396,10 +389,7 @@ export function TaskPane({
           <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
             <div
               ref={scrollRef}
-              className={cn(
-                "min-h-0 overflow-y-auto px-2.5 py-2 text-[11.5px] leading-snug",
-                !compact && latestEdit ? "shrink basis-0" : "flex-1",
-              )}
+              className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2 text-[11.5px] leading-snug"
             >
               {tail.length === 0 && !streamText ? (
                 <div className="flex h-full items-center justify-center text-[11px] text-ink-400 dark:text-ink-500">
@@ -473,23 +463,6 @@ export function TaskPane({
             task.status === "idle") && (
             <InlineReply task={task} />
           )}
-
-          {/* Footer — live hint + token meter. Finished tiles swap
-              the hint for a duration ("12m · done") so the operator
-              can see at a glance how long this one took, which is
-              more useful than a stale tool name once a task wraps. */}
-          <div className="flex h-6 items-center gap-2 border-t border-ink-900/[0.06] px-2.5 dark:border-ink-50/[0.06] shrink-0">
-            <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400 truncate min-w-0 flex-1">
-              {isRunning
-                ? hint ?? "…"
-                : isFinished && durationLabel
-                  ? `${durationLabel} · ${statusLabel(task.status)}`
-                  : statusLabel(task.status)}
-            </span>
-            <span className="font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500 shrink-0">
-              {formatTokens(totalTok)} tok
-            </span>
-          </div>
         </>
       )}
     </div>
@@ -1165,34 +1138,3 @@ function compactText(text: string): string {
     .trim();
 }
 
-function statusLabel(s: Task["status"]): string {
-  switch (s) {
-    case "done":
-      return "done";
-    case "failed":
-      return "failed";
-    case "stopped":
-      return "stopped";
-    case "idle":
-      return "ready";
-    case "pending":
-      return "pending";
-    case "running":
-      return "running";
-    case "waiting_input":
-      return "waiting for input";
-    case "waiting_perm":
-      return "needs approval";
-  }
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  const remM = m % 60;
-  return remM === 0 ? `${h}h` : `${h}h ${remM}m`;
-}

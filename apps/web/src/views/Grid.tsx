@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Eye, EyeOff, LayoutGrid, X } from "lucide-react";
+import { LayoutGrid, X } from "lucide-react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import type { Task } from "@agentd/contracts";
@@ -11,7 +11,7 @@ import {
   Spacer,
   VRule,
 } from "@/components/ui/page-topbar";
-import { usePatchPrefs, usePrefs, useTasks } from "@/queries";
+import { useTasks } from "@/queries";
 import { useRealtime } from "@/realtime";
 import { TaskPane } from "@/components/task-pane";
 import { cn } from "@/lib/utils";
@@ -77,16 +77,6 @@ export function GridOverlay({
   const tasksQ = useTasks();
   const tasks = tasksQ.data?.tasks ?? [];
   const { lastStatusChange } = useRealtime();
-
-  // Verbose mode: panes render the agent's tool calls inline (Bash
-  // commands, file edits, Reads) instead of the compact agent-text-
-  // only view. Persisted as a cross-device pref.
-  const prefsQ = usePrefs();
-  const verbose = prefsQ.data?.prefs.gridVerbose ?? false;
-  const patchPrefs = usePatchPrefs();
-  const toggleVerbose = () => {
-    patchPrefs.mutate({ gridVerbose: !verbose });
-  };
 
   // Force a re-render every ~1s while open so finished tiles can
   // sort by recency without waiting for some other event to retrigger
@@ -229,30 +219,6 @@ export function GridOverlay({
             <Spacer />
             <button
               type="button"
-              onClick={toggleVerbose}
-              aria-label={verbose ? "Hide tool calls" : "Show tool calls"}
-              aria-pressed={verbose}
-              title={
-                verbose
-                  ? "Verbose: showing tool calls (click to hide)"
-                  : "Compact: agent text only (click to show tool calls)"
-              }
-              className={cn(
-                "inline-flex items-center gap-1 h-6 px-1.5 rounded-md font-mono text-[10px] uppercase tracking-[0.06em] border transition-colors",
-                verbose
-                  ? "border-ember-500/30 bg-ember-500/10 text-ember-700 dark:text-ember-300"
-                  : "border-ink-900/10 text-ink-500 hover:text-ink-900 hover:bg-ink-900/[0.04] dark:border-ink-50/10 dark:text-ink-400 dark:hover:text-ink-50 dark:hover:bg-ink-50/[0.04]",
-              )}
-            >
-              {verbose ? (
-                <Eye className="h-3 w-3" />
-              ) : (
-                <EyeOff className="h-3 w-3" />
-              )}
-              verbose
-            </button>
-            <button
-              type="button"
               onClick={onClose}
               aria-label="Close grid"
               title="Close (Esc)"
@@ -272,7 +238,6 @@ export function GridOverlay({
                 focused={focused}
                 others={all.filter((t) => t.id !== focused.id)}
                 onFocus={setFocusedId}
-                verbose={verbose}
               />
             )}
           </div>
@@ -306,12 +271,10 @@ function MasterStack({
   focused,
   others,
   onFocus,
-  verbose,
 }: {
   focused: Task;
   others: Task[];
   onFocus: (id: string) => void;
-  verbose: boolean;
 }) {
   const all = useMemo(() => [focused, ...others], [focused, others]);
   const focusedIdx = 0;
@@ -405,7 +368,6 @@ function MasterStack({
             focused
             onToggleFocus={() => {}}
             density="focused"
-            verbose={verbose}
           />
         </motion.div>
 
@@ -433,7 +395,6 @@ function MasterStack({
                     focused={false}
                     onToggleFocus={() => onFocus(t.id)}
                     density="tile"
-                    verbose={verbose}
                     compact={compactTile}
                   />
                 </motion.div>
