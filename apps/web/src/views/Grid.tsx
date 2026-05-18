@@ -516,7 +516,8 @@ function TilesLayout({
   onFocusTask: (id: string) => void;
 }) {
   // Sort by priority — running tasks first, then waiting, then the
-  // rest. createdAt asc within each class for stable ordering.
+  // rest. createdAt asc within each class for stable ordering. The
+  // master tile is whichever task comes first in this list.
   const ordered = useMemo(() => {
     const pri = (t: Task): number => {
       if (t.status === "running") return 0;
@@ -533,265 +534,103 @@ function TilesLayout({
     return sorted;
   }, [tasks]);
 
-  const layout = useMemo(() => bentoLayout(ordered.length), [ordered.length]);
+  const master = ordered[0];
+  const stack = ordered.slice(1);
+
+  if (!master) return null;
+
+  // Single-task case: master fills the whole canvas, no stack column.
+  if (stack.length === 0) {
+    return (
+      <div className="flex-1 min-h-0 overflow-hidden">
+        <motion.div
+          layoutId={`tile-${master.id}`}
+          layout
+          transition={{
+            layout: { type: "spring", stiffness: 280, damping: 32 },
+          }}
+          onClick={() => onFocusTask(master.id)}
+          className="h-full min-h-0 min-w-0 cursor-pointer group/tile"
+        >
+          <TaskPane
+            task={master}
+            focused={false}
+            onToggleFocus={() => onFocusTask(master.id)}
+            density="tile"
+            verbose={verbose}
+          />
+        </motion.div>
+      </div>
+    );
+  }
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto pr-1">
-      <div
-        className="grid gap-2 h-full"
-        style={{
-          gridTemplateColumns: `repeat(${layout.cols}, minmax(0, 1fr))`,
-          gridTemplateRows: `repeat(${layout.rows}, minmax(0, 1fr))`,
-          minHeight: "100%",
+    <div
+      className="flex-1 min-h-0 grid gap-2 overflow-hidden"
+      style={{
+        // Hyprland's master layout: a fat master column on the left
+        // (~65% of width) and the stack column on the right (~35%).
+        // 1.85fr/1fr keeps a comfortable balance — wide enough that
+        // the master tile's transcript + code panel are readable,
+        // narrow enough that stack item titles don't truncate to
+        // garbage. Subgrid would be cleaner but isn't widely
+        // supported yet; explicit two-column grid does the job.
+        gridTemplateColumns: "minmax(0, 1.85fr) minmax(220px, 1fr)",
+      }}
+    >
+      {/* Master tile — fills the full column height, takes the same
+          motion layoutId so clicking it (or any stack row) animates
+          into the focused pane. */}
+      <motion.div
+        layoutId={`tile-${master.id}`}
+        layout
+        transition={{
+          layout: { type: "spring", stiffness: 280, damping: 32 },
         }}
+        onClick={() => onFocusTask(master.id)}
+        className="min-h-0 min-w-0 cursor-pointer group/tile"
       >
-        {ordered.map((t, i) => {
-          const slot = layout.slots[i];
-          if (!slot) return null;
-          return (
-            <motion.div
-              key={t.id}
-              // Shared layout transition: when this tile expands into
-              // the focused pane (operator clicks anywhere on it),
-              // motion morphs from this tile's box to the focused
-              // pane's box using the layoutId match. LayoutGroup in
-              // GridOverlay's body wraps both TilesLayout and
-              // FocusedLayout so the source/destination of the
-              // transition is tracked across the layout switch.
-              layoutId={`tile-${t.id}`}
-              // `layout` lets the wrapper animate its position +
-              // size as templates shift (e.g. when a new task lands
-              // and changes the bento). Spring keeps the motion
-              // smooth without overshoot.
-              layout
-              transition={{
-                layout: { type: "spring", stiffness: 280, damping: 32 },
-              }}
-              onClick={() => onFocusTask(t.id)}
-              className="min-h-0 min-w-0 cursor-pointer group/tile"
-              style={{
-                gridColumn: `${slot.col} / span ${slot.colSpan}`,
-                gridRow: `${slot.row} / span ${slot.rowSpan}`,
-              }}
-            >
-              <TaskPane
-                task={t}
-                focused={false}
-                onToggleFocus={() => onFocusTask(t.id)}
-                density="tile"
-                verbose={verbose}
-              />
-            </motion.div>
-          );
-        })}
+        <TaskPane
+          task={master}
+          focused={false}
+          onToggleFocus={() => onFocusTask(master.id)}
+          density="tile"
+          verbose={verbose}
+        />
+      </motion.div>
+
+      {/* Stack column — vertical column of compact rows, one per
+          remaining task. Scrolls when there are more rows than fit
+          the column height. Each row is a TaskPane density="stack"
+          which renders as a single line with status + title + live
+          activity. Click any row to focus that task (the master
+          doesn't swap — clicking flips overlay to focused mode). */}
+      <div className="min-h-0 min-w-0 flex flex-col gap-1 overflow-y-auto pr-0.5">
+        {stack.map((t) => (
+          <motion.div
+            key={t.id}
+            layoutId={`tile-${t.id}`}
+            layout
+            transition={{
+              layout: { type: "spring", stiffness: 280, damping: 32 },
+            }}
+            onClick={() => onFocusTask(t.id)}
+            className="shrink-0 h-12 cursor-pointer group/stack"
+          >
+            <TaskPane
+              task={t}
+              focused={false}
+              onToggleFocus={() => onFocusTask(t.id)}
+              density="stack"
+              verbose={verbose}
+            />
+          </motion.div>
+        ))}
       </div>
     </div>
   );
 }
 
-type BentoSlot = {
-  col: number;
-  row: number;
-  colSpan: number;
-  rowSpan: number;
-};
-
-type BentoTemplate = {
-  cols: number;
-  rows: number;
-  slots: BentoSlot[];
-};
-
-/**
- * Pick the right bento template for a given tile count. Templates
- * 1-9 are hand-tiled — every cell of the grid is consumed. For 10+
- * we generate a 4-col grid with a 2x2 hero at the top-left and 1x1
- * tiles filling the remaining cells; when the last row would be
- * short, the trailing tile spans wide to consume the remainder so
- * there's still no empty cell.
- */
-function bentoLayout(n: number): BentoTemplate {
-  if (n <= 0) return { cols: 1, rows: 1, slots: [] };
-
-  // Hand-tiled templates 1-9 with varied shapes — not just 2x2 and
-  // 1x1, but 3x2 wide heroes, 1x3 tall stripes, 2x3 portraits, etc.
-  // Each one is verified to tile its (cols × rows) rectangle exactly:
-  // sum(colSpan × rowSpan) === cols × rows so no empty cells.
-  if (n === 1) {
-    return {
-      cols: 1,
-      rows: 1,
-      slots: [{ col: 1, row: 1, colSpan: 1, rowSpan: 1 }],
-    };
-  }
-  if (n === 2) {
-    return {
-      cols: 2,
-      rows: 1,
-      slots: [
-        { col: 1, row: 1, colSpan: 1, rowSpan: 1 },
-        { col: 2, row: 1, colSpan: 1, rowSpan: 1 },
-      ],
-    };
-  }
-  if (n === 3) {
-    // 2x2 hero + 1x2 tall stripe. 6 cells in a 3×2.
-    return {
-      cols: 3,
-      rows: 2,
-      slots: [
-        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
-        { col: 3, row: 1, colSpan: 1, rowSpan: 2 },
-      ],
-    };
-  }
-  if (n === 4) {
-    // 3x2 WIDE hero + 3 small below. 9 cells in a 3×3.
-    return {
-      cols: 3,
-      rows: 3,
-      slots: [
-        { col: 1, row: 1, colSpan: 3, rowSpan: 2 },
-        { col: 1, row: 3, colSpan: 1, rowSpan: 1 },
-        { col: 2, row: 3, colSpan: 1, rowSpan: 1 },
-        { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
-      ],
-    };
-  }
-  if (n === 5) {
-    // 3x2 wide hero + 1x3 tall stripe + 3 small below. 12 cells in 4×3.
-    return {
-      cols: 4,
-      rows: 3,
-      slots: [
-        { col: 1, row: 1, colSpan: 3, rowSpan: 2 },
-        { col: 4, row: 1, colSpan: 1, rowSpan: 3 },
-        { col: 1, row: 3, colSpan: 1, rowSpan: 1 },
-        { col: 2, row: 3, colSpan: 1, rowSpan: 1 },
-        { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
-      ],
-    };
-  }
-  if (n === 6) {
-    // 2x3 TALL hero + 2x1 wide + 4 small. 12 cells in 4×3.
-    return {
-      cols: 4,
-      rows: 3,
-      slots: [
-        { col: 1, row: 1, colSpan: 2, rowSpan: 3 },
-        { col: 3, row: 1, colSpan: 2, rowSpan: 1 },
-        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
-        { col: 4, row: 2, colSpan: 1, rowSpan: 1 },
-        { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
-        { col: 4, row: 3, colSpan: 1, rowSpan: 1 },
-      ],
-    };
-  }
-  if (n === 7) {
-    // 2x3 tall hero + 2x1 wide + 1x3 tall stripe (right edge) + 4 small.
-    // 15 cells in 5×3.
-    return {
-      cols: 5,
-      rows: 3,
-      slots: [
-        { col: 1, row: 1, colSpan: 2, rowSpan: 3 },
-        { col: 3, row: 1, colSpan: 2, rowSpan: 1 },
-        { col: 5, row: 1, colSpan: 1, rowSpan: 3 },
-        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
-        { col: 4, row: 2, colSpan: 1, rowSpan: 1 },
-        { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
-        { col: 4, row: 3, colSpan: 1, rowSpan: 1 },
-      ],
-    };
-  }
-  if (n === 8) {
-    // 2x2 hero + 4 small (right column) + 2x1 wide + 2 small (bottom).
-    // 12 cells in 4×3.
-    return {
-      cols: 4,
-      rows: 3,
-      slots: [
-        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
-        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
-        { col: 4, row: 1, colSpan: 1, rowSpan: 1 },
-        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
-        { col: 4, row: 2, colSpan: 1, rowSpan: 1 },
-        { col: 1, row: 3, colSpan: 2, rowSpan: 1 },
-        { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
-        { col: 4, row: 3, colSpan: 1, rowSpan: 1 },
-      ],
-    };
-  }
-  if (n === 9) {
-    // 2x2 hero + 8 small (right column + bottom row). 12 cells in 4×3.
-    return {
-      cols: 4,
-      rows: 3,
-      slots: [
-        { col: 1, row: 1, colSpan: 2, rowSpan: 2 },
-        { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
-        { col: 4, row: 1, colSpan: 1, rowSpan: 1 },
-        { col: 3, row: 2, colSpan: 1, rowSpan: 1 },
-        { col: 4, row: 2, colSpan: 1, rowSpan: 1 },
-        { col: 1, row: 3, colSpan: 1, rowSpan: 1 },
-        { col: 2, row: 3, colSpan: 1, rowSpan: 1 },
-        { col: 3, row: 3, colSpan: 1, rowSpan: 1 },
-        { col: 4, row: 3, colSpan: 1, rowSpan: 1 },
-      ],
-    };
-  }
-
-  // n >= 10 — generate a 4-col layout with a 2x2 hero in the
-  // top-left and 1x1 tiles filling the remainder in row-major order.
-  // If the LAST row would be short, extend the final tile to span
-  // the trailing empty cells so the grid is still fully consumed.
-  const cols = 4;
-  const slots: BentoSlot[] = [];
-  // Hero
-  slots.push({ col: 1, row: 1, colSpan: 2, rowSpan: 2 });
-  // Remaining small tiles fill cells in row-major scan, skipping
-  // those occupied by the hero (cols 1-2 of rows 1-2).
-  const remaining = n - 1;
-  // Cells we need = 4 (hero) + remaining. Round up to a full row.
-  const cells = 4 + remaining;
-  const rows = Math.ceil(cells / cols);
-  const filledByHero = new Set<string>();
-  for (let r = 1; r <= 2; r++) {
-    for (let c = 1; c <= 2; c++) {
-      filledByHero.add(`${c},${r}`);
-    }
-  }
-  const freeCells: Array<{ col: number; row: number }> = [];
-  for (let r = 1; r <= rows; r++) {
-    for (let c = 1; c <= cols; c++) {
-      if (filledByHero.has(`${c},${r}`)) continue;
-      freeCells.push({ col: c, row: r });
-    }
-  }
-  for (let i = 0; i < remaining; i++) {
-    const cell = freeCells[i];
-    if (!cell) break;
-    slots.push({
-      col: cell.col,
-      row: cell.row,
-      colSpan: 1,
-      rowSpan: 1,
-    });
-  }
-  // If trailing cells are unconsumed (cells > 4 + remaining), expand
-  // the last tile to absorb them along its row.
-  const consumed = 4 + remaining;
-  const totalCells = cols * rows;
-  const trailingEmpty = totalCells - consumed;
-  if (trailingEmpty > 0 && slots.length > 1) {
-    const last = slots[slots.length - 1]!;
-    // Trailing empties live to the right of the last tile in its row.
-    const maxExtend = cols - (last.col + last.colSpan - 1);
-    const extend = Math.min(trailingEmpty, maxExtend);
-    last.colSpan += extend;
-  }
-  return { cols, rows, slots };
-}
 
 /**
  * FOCUSED layout — rail on the left + one big focused pane. The
