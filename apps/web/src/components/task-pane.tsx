@@ -165,16 +165,25 @@ export function TaskPane({
     return null;
   }, [messages, density]);
 
-  // Auto-scroll the tile transcript on new content, but only when
-  // already near the bottom — the operator may have scrolled up to
-  // read older context and shouldn't get yanked back on every token.
-  // Focused panes don't use this; TaskTimeline has its own
+  // Auto-scroll the tile transcript. On first mount (or when this
+  // tile first gets any content) we jump straight to the bottom so
+  // the operator sees the LATEST activity, not the oldest message
+  // that happens to fit at the top. After that, stick-to-bottom: if
+  // the operator is already near the bottom new tokens keep them
+  // pinned there; if they scrolled up to read history they stay
+  // anchored. Focused panes don't use this; TaskTimeline has its own
   // stick-to-bottom logic with a ResizeObserver + "↓ new" pill.
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const didInitialScroll = useRef(false);
   useEffect(() => {
     if (density === "focused") return;
     const el = scrollRef.current;
     if (!el) return;
+    if (!didInitialScroll.current && tail.length > 0) {
+      el.scrollTop = el.scrollHeight;
+      didInitialScroll.current = true;
+      return;
+    }
     const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (fromBottom < 48) {
       el.scrollTop = el.scrollHeight;
