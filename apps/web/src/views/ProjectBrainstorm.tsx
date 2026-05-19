@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import {
+  AlertTriangle,
   ArrowUpRight,
   Bookmark,
   BookmarkCheck,
@@ -16,6 +17,7 @@ import {
   Lightbulb,
   Plus,
   Repeat,
+  RotateCw,
   Shuffle,
   Loader2,
   MessageSquare,
@@ -154,6 +156,17 @@ export function ProjectBrainstorm() {
   /** Live tool calls from the in-flight rater so the suggestion can
    *  show "claude opus is reading the README…" instead of a spinner. */
   const [validateTools, setValidateTools] = useState<IdeationEvent[]>([]);
+  /**
+   * Persistent per-suggestion validate errors. Replaces the old toast:
+   * a transient bottom-right notification was easy to miss for a
+   * message that often includes diagnostic detail the operator needs
+   * to read (which scores the rater emitted, what went wrong). Keyed
+   * by suggestion id so each card surfaces its own failure inline,
+   * with retry + dismiss.
+   */
+  const [validateErrors, setValidateErrors] = useState<
+    Map<string, { agent: "claude" | "codex"; model: string; error: string }>
+  >(new Map());
   const [liveOptions, setLiveOptions] = useState<string[]>([]);
   /**
    * Tool calls the agent is firing during the brainstorm — Read,
@@ -536,6 +549,13 @@ export function ProjectBrainstorm() {
     setValidatingId(sid);
     setValidateLabel(`${agent}${model ? ` · ${model}` : ""}`);
     setValidateTools([]);
+    // Clear any stale error for this suggestion — we're re-running.
+    setValidateErrors((prev) => {
+      if (!prev.has(sid)) return prev;
+      const next = new Map(prev);
+      next.delete(sid);
+      return next;
+    });
     try {
       const r = await client.streamValidateSuggestion(
         sid,
@@ -550,18 +570,44 @@ export function ProjectBrainstorm() {
         },
       );
       if (r.ok === false) {
-        toast(r.error || "validation failed", true);
+        // Pin the error to the suggestion card instead of a transient
+        // bottom-right toast — the message often carries diagnostic
+        // detail (e.g. "rater returned 2 scores but 5 ideas were sent:
+        // 5 5") the operator needs time to read.
+        setValidateErrors((prev) => {
+          const next = new Map(prev);
+          next.set(sid, {
+            agent,
+            model,
+            error: r.error || "validation failed",
+          });
+          return next;
+        });
       } else {
         toast(`scored with ${agent}${model ? `:${model}` : ""}`);
         invalidateSuggestions();
       }
     } catch (e) {
-      toast((e as Error).message, true);
+      const msg = (e as Error).message ?? "validation failed";
+      setValidateErrors((prev) => {
+        const next = new Map(prev);
+        next.set(sid, { agent, model, error: msg });
+        return next;
+      });
     } finally {
       setValidatingId(null);
       setValidateLabel("");
       setValidateTools([]);
     }
+  };
+
+  const dismissValidateError = (sid: string) => {
+    setValidateErrors((prev) => {
+      if (!prev.has(sid)) return prev;
+      const next = new Map(prev);
+      next.delete(sid);
+      return next;
+    });
   };
 
   const isEmpty = sessions.length === 0 && !streaming;
@@ -635,6 +681,8 @@ export function ProjectBrainstorm() {
                     validating={validatingId}
                     validateLabel={validateLabel}
                     validateTools={validateTools}
+                    validateError={validateErrors.get(s.id) ?? null}
+                    onDismissValidateError={() => dismissValidateError(s.id)}
                     streaming={streaming}
                   />
                 ))}
@@ -891,6 +939,8 @@ function ChatTurn({
   validating,
   validateLabel,
   validateTools,
+  validateError,
+  onDismissValidateError,
   streaming,
   index,
 }: {
@@ -904,6 +954,12 @@ function ChatTurn({
   validating: string | null;
   validateLabel: string;
   validateTools: IdeationEvent[];
+  validateError: {
+    agent: "claude" | "codex";
+    model: string;
+    error: string;
+  } | null;
+  onDismissValidateError: () => void;
   streaming: boolean;
   index: number;
 }) {
@@ -931,6 +987,8 @@ function ChatTurn({
         validating={isValidating}
         validateLabel={isValidating ? validateLabel : ""}
         validateTools={isValidating ? validateTools : []}
+        validateError={isValidating ? null : validateError}
+        onDismissValidateError={onDismissValidateError}
       />
     </article>
   );
@@ -1018,6 +1076,72 @@ function PersistedActivity({
  * `<ToolLine>` rendering the workshop + brainstorm use, so the
  * dashboard reads the same way everywhere.
  */
+/**
+ * Inline error pinned to a suggestion when a rater run failed —
+ * replaces the old transient bottom-right toast. Sticks until the
+ * operator dismisses it or kicks off another validate; carries the
+ * rater identity and a retry button so the message stays actionable
+ * (and readable: errors like "rater returned 2 scores but 5 ideas
+ * were sent" are diagnostic detail, not just a fade-out blip).
+ */
+function ValidateErrorBanner({
+  agent,
+  model,
+  error,
+  onRetry,
+  onDismiss,
+}: {
+  agent: "claude" | "codex";
+  model: string;
+  error: string;
+  onRetry: () => void;
+  onDismiss: () => void;
+}) {
+  const label = `${agent}${model ? ` · ${model}` : ""}`;
+  return (
+    <div className="mb-2 -mx-1 px-2 py-1.5 rounded border border-rose-500/30 bg-rose-500/[0.06] dark:bg-rose-500/[0.08]">
+      <div className="flex items-start gap-1.5">
+        <AlertTriangle className="shrink-0 mt-0.5 h-3 w-3 text-rose-600 dark:text-rose-400" />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5 mb-0.5">
+            <span className="font-mono text-[10.5px] font-medium text-rose-700 dark:text-rose-300">
+              {label} failed
+            </span>
+          </div>
+          <p className="font-mono text-[11px] leading-snug text-ink-700 dark:text-ink-200 break-words">
+            {error}
+          </p>
+          <div className="mt-1 flex items-center gap-1">
+            <button
+              type="button"
+              onClick={onRetry}
+              className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] border border-rose-500/30 bg-rose-500/[0.06] text-rose-700 hover:bg-rose-500/[0.12] transition-colors dark:text-rose-300 dark:hover:bg-rose-500/[0.16]"
+            >
+              <RotateCw className="h-3 w-3" />
+              retry
+            </button>
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] uppercase tracking-[0.06em] text-ink-500 hover:text-ink-700 hover:bg-ink-900/[0.04] transition-colors dark:text-ink-400 dark:hover:text-ink-200 dark:hover:bg-ink-50/[0.04]"
+            >
+              dismiss
+            </button>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          title="Dismiss"
+          className="shrink-0 inline-flex items-center justify-center h-4 w-4 rounded text-ink-400 hover:text-ink-700 hover:bg-ink-900/[0.06] transition-colors dark:text-ink-500 dark:hover:text-ink-200 dark:hover:bg-ink-50/[0.06]"
+        >
+          <X className="h-3 w-3" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ValidatingFeed({
   label,
   tools,
@@ -1243,6 +1367,8 @@ function AgentCluster({
   validating,
   validateLabel,
   validateTools,
+  validateError,
+  onDismissValidateError,
 }: {
   suggestion: Suggestion;
   savedKeys: Map<string, string>;
@@ -1257,6 +1383,12 @@ function AgentCluster({
   validating: boolean;
   validateLabel: string;
   validateTools: IdeationEvent[];
+  validateError: {
+    agent: "claude" | "codex";
+    model: string;
+    error: string;
+  } | null;
+  onDismissValidateError: () => void;
 }) {
   // Structured `<ask-user>` clarifying question — preferred over the
   // legacy "?? " text fallback. Renders option buttons + free-form
@@ -1353,6 +1485,17 @@ function AgentCluster({
       {events.length > 0 && <PersistedActivity events={events} />}
       {validating && (
         <ValidatingFeed label={validateLabel} tools={validateTools} />
+      )}
+      {!validating && validateError && (
+        <ValidateErrorBanner
+          agent={validateError.agent}
+          model={validateError.model}
+          error={validateError.error}
+          onRetry={() =>
+            onValidate(suggestion.id, validateError.agent, validateError.model)
+          }
+          onDismiss={onDismissValidateError}
+        />
       )}
       <ol className="space-y-1.5">
         {sorted.map(({ raw: opt, index: i, parsed }) => {
