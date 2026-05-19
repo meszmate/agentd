@@ -18,6 +18,7 @@ import {
   appendMessage,
   appendMessageAt,
   autoCommit,
+  commitIdentityEnv,
   checkoutPrInWorktree,
   createTask,
   deleteTask,
@@ -1637,6 +1638,19 @@ export class TaskManager {
         task.agent === "codex" && resume && task.latestTurnInputTokens
           ? task.latestTurnInputTokens
           : undefined;
+      // Resolve a single deterministic git identity for this worktree
+      // and stamp it as GIT_AUTHOR_* / GIT_COMMITTER_* env vars on the
+      // runner subprocess. Without this, an operator with no
+      // ~/.gitconfig hits git's `user@hostname` fallback, every commit
+      // in the branch ships as e.g. `Matt <user@host.local>`, and
+      // GitHub's squash-merge tacks `Co-authored-by:` onto the merge
+      // commit because the PR author's identity doesn't match. Order:
+      // repo/global git config → most recent commit on the base branch
+      // → `agentd <agentd@local>` (see `resolveCommitIdentity`).
+      const identityEnv = await commitIdentityEnv(
+        task.worktreePath,
+        task.baseCommitSha || task.baseBranch || undefined,
+      );
       await runner.start({
         prompt,
         cwd: task.worktreePath,
@@ -1656,6 +1670,7 @@ export class TaskManager {
           // Prepend the daemon's bin dir so the agent always finds
           // `agentd-progress` on its PATH regardless of host install.
           PATH: `${this.paths.bin}:${process.env.PATH ?? ""}`,
+          ...identityEnv,
         },
       });
     } catch (err) {
@@ -2712,6 +2727,10 @@ export class TaskManager {
         cwd: task.worktreePath,
         title: subject,
         body,
+        // Same identity resolution the runner env uses — keeps every
+        // commit on the task branch under one author so GitHub's
+        // squash-merge doesn't add a Co-authored-by trailer.
+        baseRef: task.baseCommitSha || task.baseBranch || undefined,
       });
       if (result.committed) {
         appendMessage(

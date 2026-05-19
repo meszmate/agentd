@@ -658,10 +658,126 @@ export async function hasChanges(cwd: string): Promise<boolean> {
   return r.stdout.trim().length > 0;
 }
 
+export interface CommitIdentity {
+  name: string;
+  email: string;
+}
+
+/**
+ * Looks for an explicit `user.name` + `user.email` in the local repo
+ * config or any inherited (global / system) git config. Returns null
+ * if either side is missing OR if git fell back to its automatic
+ * `user@hostname` heuristic (which is what causes operators on
+ * unconfigured machines to ship commits as `Matt
+ * <meszmate@Matts-MacBook-Air.local>` and pick up GitHub's
+ * `Co-authored-by:` trailer on squash-merge).
+ *
+ * The hostname-fallback detection: `git config --get user.email`
+ * returns non-zero exit AND empty stdout when no `user.email` is
+ * configured anywhere. Same for `user.name`. Once any source sets
+ * them, both return cleanly.
+ */
+async function readConfiguredIdentity(
+  cwd: string,
+): Promise<CommitIdentity | null> {
+  const [n, e] = await Promise.all([
+    run(["git", "config", "--get", "user.name"], cwd),
+    run(["git", "config", "--get", "user.email"], cwd),
+  ]);
+  const name = n.exitCode === 0 ? n.stdout.trim() : "";
+  const email = e.exitCode === 0 ? e.stdout.trim() : "";
+  if (!name || !email) return null;
+  return { name, email };
+}
+
+/**
+ * Pull the author identity off the most recent commit on `baseRef`.
+ * Used as a fallback when neither the repo nor the global git config
+ * have `user.name` / `user.email` set, so that commits the agent
+ * produces match what the operator's prior PRs already shipped as
+ * (typically rewritten by GitHub on squash-merge to the operator's
+ * GitHub identity). We deliberately skip any author whose email looks
+ * like a `user@hostname.local` system fallback — accepting that would
+ * just re-introduce the very identity we're trying to avoid.
+ */
+async function readBaseBranchAuthor(
+  cwd: string,
+  baseRef: string,
+): Promise<CommitIdentity | null> {
+  if (!baseRef) return null;
+  const r = await run(
+    ["git", "log", "-1", "--format=%an%n%ae", baseRef],
+    cwd,
+  );
+  if (r.exitCode !== 0) return null;
+  const [name = "", email = ""] = r.stdout.split("\n").map((s) => s.trim());
+  if (!name || !email) return null;
+  if (/\.local$/i.test(email)) return null;
+  return { name, email };
+}
+
+/**
+ * Resolve the identity to stamp on commits the agent (or the daemon
+ * safety-net) makes inside `cwd`. The order is:
+ *
+ *   1. `user.name` + `user.email` from any git config layer that
+ *      actually sets them (repo, global, system).
+ *   2. The last commit author on `baseRef` if it doesn't look like
+ *      a `user@hostname.local` system fallback.
+ *   3. A deterministic fallback (`agentd <agentd@local>`).
+ *
+ * Always returns a usable identity. Callers pass this to `autoCommit`
+ * and stamp it as `GIT_AUTHOR_*` / `GIT_COMMITTER_*` on the runner
+ * subprocess so every commit on the task branch — agent-produced or
+ * daemon-produced — shares one author. That avoids the squash-merge
+ * `Co-authored-by:` trailer GitHub adds when commits in the PR don't
+ * match the PR author's identity.
+ */
+export async function resolveCommitIdentity(
+  cwd: string,
+  baseRef?: string,
+): Promise<CommitIdentity> {
+  const fromConfig = await readConfiguredIdentity(cwd);
+  if (fromConfig) return fromConfig;
+  if (baseRef) {
+    const fromBase = await readBaseBranchAuthor(cwd, baseRef);
+    if (fromBase) return fromBase;
+  }
+  return { name: "agentd", email: "agentd@local" };
+}
+
+/**
+ * Same as `resolveCommitIdentity` but returns the four env vars git
+ * honors when spawning a process — `GIT_{AUTHOR,COMMITTER}_{NAME,EMAIL}`.
+ * Use this when handing env to a runner so its in-process `git commit`
+ * invocations stamp the resolved identity instead of git's fallback.
+ */
+export async function commitIdentityEnv(
+  cwd: string,
+  baseRef?: string,
+): Promise<Record<string, string>> {
+  const id = await resolveCommitIdentity(cwd, baseRef);
+  return {
+    GIT_AUTHOR_NAME: id.name,
+    GIT_AUTHOR_EMAIL: id.email,
+    GIT_COMMITTER_NAME: id.name,
+    GIT_COMMITTER_EMAIL: id.email,
+  };
+}
+
 export interface AutoCommitInput {
   cwd: string;
   title: string;
   body?: string;
+  /**
+   * Optional explicit identity. When omitted, `autoCommit` resolves
+   * one itself via `resolveCommitIdentity(cwd)`. Callers that already
+   * resolved it (e.g. so the same identity is reused as runner env)
+   * pass it in to skip the extra git invocations.
+   */
+  identity?: CommitIdentity;
+  /** Optional ref to consult when falling back to a base-branch author. */
+  baseRef?: string;
 }
 
 export interface AutoCommitResult {
@@ -676,7 +792,28 @@ export async function autoCommit(input: AutoCommitInput): Promise<AutoCommitResu
   if (add.exitCode !== 0) {
     throw new Error(`git add failed: ${add.stderr || add.stdout}`);
   }
-  const args = ["git", "commit", "--no-verify", "-m", input.title];
+  const id =
+    input.identity ?? (await resolveCommitIdentity(input.cwd, input.baseRef));
+  // `-c user.name=... -c user.email=...` overrides the worktree's
+  // config for this one invocation (so it doesn't rely on an inherited
+  // env var), and `--author` makes the resolved identity explicit
+  // even when git would have picked a different default. Together
+  // they guarantee the committed author + committer both match `id`
+  // regardless of what's (or isn't) in `~/.gitconfig`.
+  const author = `${id.name} <${id.email}>`;
+  const args = [
+    "git",
+    "-c",
+    `user.name=${id.name}`,
+    "-c",
+    `user.email=${id.email}`,
+    "commit",
+    "--author",
+    author,
+    "--no-verify",
+    "-m",
+    input.title,
+  ];
   if (input.body && input.body.trim().length > 0) {
     args.push("-m", input.body);
   }
