@@ -179,11 +179,15 @@ async function main() {
     const url = new URL(req.url);
 
     // 2. API + WS reserved paths — let the Hono app / WS handler take them.
+    //    `/pair` is intentionally NOT in this list: GET /pair?token=… is the
+    //    URL printed by the daemon at startup (and encoded in the QR code)
+    //    for operators to land on the SPA's Login screen with the token
+    //    prefilled. POST /pair (the token-exchange API) still falls through
+    //    to Hono because serveWeb only serves the SPA shell on GET/HEAD.
     if (
       url.pathname.startsWith("/api") ||
       url.pathname.startsWith("/ws") ||
       url.pathname.startsWith("/pty/") ||
-      url.pathname === "/pair" ||
       url.pathname === "/health"
     ) {
       return null;
