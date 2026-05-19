@@ -678,19 +678,20 @@ function WorkspaceRows({
   });
 
   const branchOptions = useMemo(() => {
+    const localSet = new Set(branchesQ.data?.local ?? []);
     const seen = new Set<string>();
     const out: { value: string; label: string }[] = [];
     for (const b of branchesQ.data?.local ?? []) {
       if (!seen.has(b)) {
         seen.add(b);
-        out.push({ value: b, label: b });
+        out.push({ value: b, label: `${b} · local` });
       }
     }
     for (const r of branchesQ.data?.remote ?? []) {
-      if (r.ref && !seen.has(r.ref)) {
-        seen.add(r.ref);
-        out.push({ value: r.ref, label: r.ref });
-      }
+      if (!r.ref || seen.has(r.ref)) continue;
+      seen.add(r.ref);
+      const tag = localSet.has(r.ref) ? "local" : `remote · ${r.remote || "origin"}`;
+      out.push({ value: r.ref, label: `${r.ref} · ${tag}` });
     }
     return out;
   }, [branchesQ.data]);

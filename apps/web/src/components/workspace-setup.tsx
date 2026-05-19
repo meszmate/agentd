@@ -111,20 +111,24 @@ export function WorkspaceSetup({
 
   const localBranches = realQ.data?.local ?? [];
   const remoteBranches = realQ.data?.remote ?? [];
-  const allBranches = useMemo(() => {
+  const allBranches = useMemo<BranchOption[]>(() => {
+    const localSet = new Set(localBranches);
     const seen = new Set<string>();
-    const out: string[] = [];
+    const out: BranchOption[] = [];
     for (const b of localBranches) {
       if (!seen.has(b)) {
         seen.add(b);
-        out.push(b);
+        out.push({ name: b, scope: "local" });
       }
     }
     for (const r of remoteBranches) {
-      if (r.ref && !seen.has(r.ref)) {
-        seen.add(r.ref);
-        out.push(r.ref);
-      }
+      if (!r.ref || seen.has(r.ref)) continue;
+      seen.add(r.ref);
+      out.push({
+        name: r.ref,
+        scope: localSet.has(r.ref) ? "local" : "remote",
+        remote: r.remote || undefined,
+      });
     }
     return out;
   }, [localBranches, remoteBranches]);
@@ -403,6 +407,12 @@ function NewBranchInput({
   );
 }
 
+export interface BranchOption {
+  name: string;
+  scope: "local" | "remote";
+  remote?: string;
+}
+
 function BranchPicker({
   value,
   onChange,
@@ -412,12 +422,11 @@ function BranchPicker({
 }: {
   value: string;
   onChange: (b: string) => void;
-  options: string[];
+  options: BranchOption[];
   loading: boolean;
   currentBranch: string | null;
 }) {
   const [open, setOpen] = useState(false);
-  // Type-to-filter inside the dropdown.
   const [filter, setFilter] = useState("");
   useEffect(() => {
     if (!open) setFilter("");
@@ -426,8 +435,14 @@ function BranchPicker({
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return options;
-    return options.filter((o) => o.toLowerCase().includes(q));
+    return options.filter((o) => o.name.toLowerCase().includes(q));
   }, [options, filter]);
+
+  const grouped = useMemo(() => {
+    const local = filtered.filter((o) => o.scope === "local");
+    const remote = filtered.filter((o) => o.scope === "remote");
+    return { local, remote };
+  }, [filtered]);
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -444,7 +459,7 @@ function BranchPicker({
           <ChevronDown className="h-3 w-3 opacity-60 shrink-0" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-[280px] p-0">
+      <DropdownMenuContent align="start" className="w-[300px] p-0">
         <div className="border-b border-ink-900/[0.06] px-2 py-1 dark:border-ink-50/[0.06]">
           <Input
             autoFocus
@@ -460,28 +475,73 @@ function BranchPicker({
               {loading ? "loading…" : "no branches match"}
             </div>
           ) : (
-            filtered.map((b) => (
-              <DropdownMenuItem key={b} onClick={() => onChange(b)}>
-                <GitBranch className="h-3 w-3 text-ink-400 dark:text-ink-500" />
-                <span className="font-mono text-[11px] flex-1 truncate">
-                  {b}
-                </span>
-                {b === currentBranch && (
-                  <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
-                    current
-                  </span>
-                )}
-                {b === value && (
-                  <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
-                    ✓
-                  </span>
-                )}
-              </DropdownMenuItem>
-            ))
+            <>
+              {grouped.local.length > 0 && (
+                <BranchGroup
+                  label="local"
+                  items={grouped.local}
+                  value={value}
+                  currentBranch={currentBranch}
+                  onPick={onChange}
+                />
+              )}
+              {grouped.remote.length > 0 && (
+                <BranchGroup
+                  label="remote"
+                  items={grouped.remote}
+                  value={value}
+                  currentBranch={currentBranch}
+                  onPick={onChange}
+                />
+              )}
+            </>
           )}
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+function BranchGroup({
+  label,
+  items,
+  value,
+  currentBranch,
+  onPick,
+}: {
+  label: string;
+  items: BranchOption[];
+  value: string;
+  currentBranch: string | null;
+  onPick: (name: string) => void;
+}) {
+  return (
+    <>
+      <div className="px-3 pt-1.5 pb-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+        {label}
+      </div>
+      {items.map((b) => (
+        <DropdownMenuItem key={`${b.scope}:${b.name}`} onClick={() => onPick(b.name)}>
+          <GitBranch className="h-3 w-3 text-ink-400 dark:text-ink-500" />
+          <span className="font-mono text-[11px] flex-1 truncate">{b.name}</span>
+          {b.scope === "remote" && b.remote && (
+            <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+              {b.remote}
+            </span>
+          )}
+          {b.name === currentBranch && (
+            <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
+              current
+            </span>
+          )}
+          {b.name === value && (
+            <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
+              ✓
+            </span>
+          )}
+        </DropdownMenuItem>
+      ))}
+    </>
   );
 }
 
