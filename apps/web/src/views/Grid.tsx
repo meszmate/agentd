@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Eraser, LayoutGrid, X } from "lucide-react";
+import { Eraser, LayoutGrid, Plus, RotateCcw, X } from "lucide-react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   AnimatePresence,
   LayoutGroup,
@@ -135,30 +140,39 @@ export function GridOverlay({
   // recent strip; now it stays where it was). Manual drag is the only
   // thing that reshuffles after insertion.
   const [tileOrder, setTileOrder] = useState<string[]>([]);
+  // Tasks the operator explicitly dismissed (per-tile X or Clear
+  // done). These are skipped by the reconcile effect so the auto-add
+  // doesn't undo a manual remove. NEW tasks (never previously seen)
+  // bypass this set, so spawning a fresh task always shows up.
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
   const seededRef = useRef(false);
   useEffect(() => {
     if (seededRef.current) return;
     if (!prefsQ.data) return;
-    const persisted = prefsQ.data.prefs.gridOrder ?? [];
+    const persistedOrder = prefsQ.data.prefs.gridOrder ?? [];
+    const persistedDismissed = prefsQ.data.prefs.gridDismissed ?? [];
     // Keep only ids that still exist in the eligible set so we don't
     // resurrect ghosts. Tasks not in the persisted order will be
     // appended by the reconcile effect below.
-    const seeded = persisted.filter((id) => eligibleById.has(id));
+    const seeded = persistedOrder.filter((id) => eligibleById.has(id));
     setTileOrder(seeded);
+    setDismissedIds(new Set(persistedDismissed));
     seededRef.current = true;
   }, [prefsQ.data, eligibleById]);
 
-  // Reconcile the order against the live eligible set. Adds new tasks
-  // (sorted by status priority so a waiting_perm shows up at the top,
-  // a finished one at the bottom of the new arrivals) and prunes ids
-  // that no longer exist. Existing ids keep their slot.
+  // Reconcile the order against the live eligible set. Adds eligible
+  // tasks that are NEW (not in tileOrder, not in dismissedIds), sorted
+  // by status priority. Prunes ids that no longer exist. Existing ids
+  // keep their slot.
   useEffect(() => {
     if (!seededRef.current) return;
     setTileOrder((prev) => {
       const known = new Set(prev);
       const additions: Task[] = [];
       for (const [id, task] of eligibleById) {
-        if (!known.has(id)) additions.push(task);
+        if (known.has(id)) continue;
+        if (dismissedIds.has(id)) continue;
+        additions.push(task);
       }
       additions.sort((a, b) => {
         const p = statusPriority(a.status) - statusPriority(b.status);
@@ -176,21 +190,29 @@ export function GridOverlay({
       }
       return next;
     });
-  }, [eligibleById]);
+  }, [eligibleById, dismissedIds]);
 
   // Debounced persistence. Drags fire many onReorder events; we only
-  // want to PATCH /api/prefs once the operator settles. Persists the
-  // current tileOrder, not a snapshot, so the latest state always
-  // wins.
+  // want to PATCH /api/prefs once the operator settles. The patch
+  // accepts a partial body so we can send only the keys that changed.
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const persistOrder = useCallback(
-    (next: string[]) => {
+  const persistPending = useRef<{
+    gridOrder?: string[];
+    gridDismissed?: string[];
+  }>({});
+  const flushPersist = useCallback(() => {
+    const patch = persistPending.current;
+    persistPending.current = {};
+    if (Object.keys(patch).length === 0) return;
+    patchPrefs.mutate(patch);
+  }, [patchPrefs]);
+  const persistPrefs = useCallback(
+    (patch: { gridOrder?: string[]; gridDismissed?: string[] }) => {
+      persistPending.current = { ...persistPending.current, ...patch };
       if (persistTimer.current) clearTimeout(persistTimer.current);
-      persistTimer.current = setTimeout(() => {
-        patchPrefs.mutate({ gridOrder: next });
-      }, 400);
+      persistTimer.current = setTimeout(flushPersist, 400);
     },
-    [patchPrefs],
+    [flushPersist],
   );
   useEffect(() => {
     return () => {
@@ -221,17 +243,104 @@ export function GridOverlay({
     [orderedTasks],
   );
 
-  const clearFinished = useCallback(() => {
-    setTileOrder((prev) => {
-      const next = prev.filter((id) => {
-        const t = eligibleById.get(id);
-        if (!t) return false;
-        return !FINISHED_STATUSES.has(t.status);
+  // Tasks eligible to be added but NOT currently shown. Powers the
+  // "+ Add task" picker. Includes the dismissed-but-still-eligible
+  // tasks so the operator can bring them back, plus any eligible
+  // task that's somehow out of sync (rare — usually the reconcile has
+  // caught it). Sorted by status priority then recency so the picker
+  // surfaces urgent stuff first.
+  const addableTasks = useMemo(() => {
+    const inGrid = new Set(tileOrder);
+    const out: Task[] = [];
+    for (const [id, task] of eligibleById) {
+      if (inGrid.has(id)) continue;
+      out.push(task);
+    }
+    out.sort((a, b) => {
+      const p = statusPriority(a.status) - statusPriority(b.status);
+      return p !== 0 ? p : b.updatedAt - a.updatedAt;
+    });
+    return out;
+  }, [eligibleById, tileOrder]);
+
+  // Per-tile dismiss — drop from tileOrder AND remember the
+  // dismissal so reconcile doesn't auto-re-add it on the next tick.
+  // The "Add task" picker is how it comes back.
+  const dismissTile = useCallback(
+    (id: string) => {
+      setTileOrder((prev) => {
+        const next = prev.filter((x) => x !== id);
+        persistPrefs({ gridOrder: next });
+        return next;
       });
-      patchPrefs.mutate({ gridOrder: next });
+      setDismissedIds((prev) => {
+        if (prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.add(id);
+        persistPrefs({ gridDismissed: [...next] });
+        return next;
+      });
+    },
+    [persistPrefs],
+  );
+
+  // Re-add a previously-dismissed (or never-yet-seen) task. Lands at
+  // the top of the stack so it's visible immediately. Removes from
+  // dismissedIds so future status changes don't gate it.
+  const addTile = useCallback(
+    (id: string) => {
+      if (!eligibleById.has(id)) return;
+      setTileOrder((prev) => {
+        if (prev.includes(id)) return prev;
+        // Insert at index 1 so the focused master stays put — the new
+        // tile slots in as the FIRST stack tile.
+        const next = prev.length === 0 ? [id] : [prev[0]!, id, ...prev.slice(1)];
+        persistPrefs({ gridOrder: next });
+        return next;
+      });
+      setDismissedIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        persistPrefs({ gridDismissed: [...next] });
+        return next;
+      });
+    },
+    [eligibleById, persistPrefs],
+  );
+
+  const clearFinished = useCallback(() => {
+    // Capture the finished ids first; we need them for both the order
+    // prune and the dismissed-set update so reconcile doesn't bring
+    // them back.
+    const finishedIds: string[] = [];
+    for (const id of tileOrder) {
+      const t = eligibleById.get(id);
+      if (t && FINISHED_STATUSES.has(t.status)) finishedIds.push(id);
+    }
+    if (finishedIds.length === 0) return;
+    setTileOrder((prev) => {
+      const skip = new Set(finishedIds);
+      const next = prev.filter((id) => !skip.has(id));
+      persistPrefs({ gridOrder: next });
       return next;
     });
-  }, [eligibleById, patchPrefs]);
+    setDismissedIds((prev) => {
+      const next = new Set(prev);
+      for (const id of finishedIds) next.add(id);
+      persistPrefs({ gridDismissed: [...next] });
+      return next;
+    });
+  }, [tileOrder, eligibleById, persistPrefs]);
+
+  // "Show all" — wipe the dismissed set so previously-hidden tasks
+  // auto-re-add on the next reconcile tick. Surfaced as a reset
+  // affordance in the add-task picker footer when there's anything
+  // hidden.
+  const resetDismissed = useCallback(() => {
+    setDismissedIds(new Set());
+    persistPrefs({ gridDismissed: [] });
+  }, [persistPrefs]);
 
   const all = orderedTasks;
 
@@ -328,6 +437,12 @@ export function GridOverlay({
               />
             )}
             <Spacer />
+            <AddTaskPicker
+              addable={addableTasks}
+              dismissedCount={dismissedIds.size}
+              onAdd={addTile}
+              onResetDismissed={resetDismissed}
+            />
             {finishedCount > 0 && (
               <button
                 type="button"
@@ -361,6 +476,7 @@ export function GridOverlay({
                 focused={focused}
                 others={all.filter((t) => t.id !== focused.id)}
                 onFocus={setFocusedId}
+                onDismiss={dismissTile}
                 onReorder={(nextOthers) => {
                   // Reorder.Group hands back the ids in the new order
                   // for the stack column. Keep the focused id where it
@@ -368,7 +484,7 @@ export function GridOverlay({
                   // tileOrder so persistence captures it.
                   setTileOrder(() => {
                     const next = [focused.id, ...nextOthers.map((t) => t.id)];
-                    persistOrder(next);
+                    persistPrefs({ gridOrder: next });
                     return next;
                   });
                 }}
@@ -410,11 +526,13 @@ function MasterStack({
   others,
   onFocus,
   onReorder,
+  onDismiss,
 }: {
   focused: Task;
   others: Task[];
   onFocus: (id: string) => void;
   onReorder: (next: Task[]) => void;
+  onDismiss: (id: string) => void;
 }) {
   const all = useMemo(() => [focused, ...others], [focused, others]);
   const focusedIdx = 0;
@@ -513,6 +631,7 @@ function MasterStack({
                 key={t.id}
                 task={t}
                 onFocus={() => onFocus(t.id)}
+                onDismiss={() => onDismiss(t.id)}
                 compact={compactTile}
                 weight={statusWeight(t.status)}
                 tileCount={others.length}
@@ -541,12 +660,14 @@ function MasterStack({
 function StackTile({
   task,
   onFocus,
+  onDismiss,
   compact,
   weight,
   tileCount,
 }: {
   task: Task;
   onFocus: () => void;
+  onDismiss: () => void;
   compact: boolean;
   weight: number;
   tileCount: number;
@@ -598,21 +719,38 @@ function StackTile({
         density="tile"
         compact={compact}
       />
-      {/* Drag handle — small grip pinned top-right. Stops click
-          propagation so grabbing the handle doesn't promote the tile,
-          and pointer-down hands off to motion's drag controls. */}
-      <div
-        onPointerDown={(e) => {
-          e.stopPropagation();
-          controls.start(e);
-        }}
-        onClick={(e) => e.stopPropagation()}
-        role="button"
-        aria-label="Drag to reorder"
-        title="Drag to reorder"
-        className="absolute top-1.5 right-1.5 z-20 grid place-items-center size-5 rounded text-ink-400/70 hover:text-ink-900 dark:text-ink-500/70 dark:hover:text-ink-50 hover:bg-ink-900/[0.06] dark:hover:bg-ink-50/[0.06] cursor-grab active:cursor-grabbing"
-      >
-        <DragGrip />
+      {/* Tile chrome — drag handle and remove button pinned top-right.
+          Both stop click propagation so they don't promote the tile.
+          Drag pointer-down hands off to motion's drag controls.
+          Remove button calls onDismiss to drop this tile from the grid
+          (the operator can re-add it from the topbar picker). */}
+      <div className="absolute top-1.5 right-1.5 z-20 flex items-center gap-0.5">
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDismiss();
+          }}
+          aria-label="Remove from grid"
+          title="Remove from grid"
+          className="grid place-items-center size-5 rounded text-ink-400/70 hover:text-rose-600 dark:text-ink-500/70 dark:hover:text-rose-400 hover:bg-ink-900/[0.06] dark:hover:bg-ink-50/[0.06]"
+        >
+          <X className="h-3 w-3" />
+        </button>
+        <div
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            controls.start(e);
+          }}
+          onClick={(e) => e.stopPropagation()}
+          role="button"
+          aria-label="Drag to reorder"
+          title="Drag to reorder"
+          className="grid place-items-center size-5 rounded text-ink-400/70 hover:text-ink-900 dark:text-ink-500/70 dark:hover:text-ink-50 hover:bg-ink-900/[0.06] dark:hover:bg-ink-50/[0.06] cursor-grab active:cursor-grabbing"
+        >
+          <DragGrip />
+        </div>
       </div>
     </Reorder.Item>
   );
@@ -628,6 +766,137 @@ function DragGrip() {
       <circle cx="8" cy="6" r="1" />
       <circle cx="8" cy="9" r="1" />
     </svg>
+  );
+}
+
+/**
+ * Topbar "+ Add" picker. Lists every eligible-but-not-currently-shown
+ * task — running ones the operator removed, finished ones cleared
+ * away, brand-new ones the reconcile hasn't picked up yet — and lets
+ * them slot any one back into the grid. Sorted by status priority so
+ * a waiting_perm in the dismissed pile is impossible to miss.
+ *
+ * When the dismissed set is non-empty the footer surfaces a
+ * "Show dismissed" reset that wipes it, so future status changes
+ * auto-re-add. The button is hidden entirely when there's nothing to
+ * add — no point in a trigger that opens an empty list.
+ */
+function AddTaskPicker({
+  addable,
+  dismissedCount,
+  onAdd,
+  onResetDismissed,
+}: {
+  addable: Task[];
+  dismissedCount: number;
+  onAdd: (id: string) => void;
+  onResetDismissed: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (addable.length === 0 && dismissedCount === 0) return null;
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="Add task to grid"
+          title="Add task to grid"
+          className="inline-flex items-center gap-1 rounded-md px-2 h-6 text-[11px] text-ink-500 hover:text-ink-900 dark:text-ink-400 dark:hover:text-ink-50 hover:bg-ink-900/[0.06] dark:hover:bg-ink-50/[0.06] transition-colors"
+        >
+          <Plus className="h-3 w-3" />
+          <span>Add task</span>
+          {addable.length > 0 && (
+            <span className="font-mono tabular-nums text-[10px] text-ink-400 dark:text-ink-500">
+              {addable.length}
+            </span>
+          )}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-80 p-0">
+        <div className="max-h-[min(60vh,28rem)] flex flex-col">
+          <div className="px-3 py-2 border-b border-ink-900/10 dark:border-ink-50/10 flex items-center justify-between">
+            <span className="text-[11px] font-mono uppercase tracking-[0.06em] text-ink-500 dark:text-ink-400">
+              Add to grid
+            </span>
+            <span className="text-[10px] text-ink-400 dark:text-ink-500">
+              {addable.length} available
+            </span>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto py-1">
+            {addable.length === 0 ? (
+              <div className="px-3 py-6 text-center text-[12px] text-ink-500 dark:text-ink-400">
+                Nothing to add. Every eligible task is already on the grid.
+              </div>
+            ) : (
+              addable.map((t) => (
+                <AddPickerRow
+                  key={t.id}
+                  task={t}
+                  onPick={() => {
+                    onAdd(t.id);
+                    setOpen(false);
+                  }}
+                />
+              ))
+            )}
+          </div>
+          {dismissedCount > 0 && (
+            <div className="px-2 py-1.5 border-t border-ink-900/10 dark:border-ink-50/10">
+              <button
+                type="button"
+                onClick={() => {
+                  onResetDismissed();
+                  setOpen(false);
+                }}
+                className="w-full inline-flex items-center justify-center gap-1.5 rounded-md px-2 h-7 text-[11px] text-ink-500 hover:text-ink-900 dark:text-ink-400 dark:hover:text-ink-50 hover:bg-ink-900/[0.06] dark:hover:bg-ink-50/[0.06] transition-colors"
+              >
+                <RotateCcw className="h-3 w-3" />
+                Show all {dismissedCount} hidden
+              </button>
+            </div>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function AddPickerRow({ task, onPick }: { task: Task; onPick: () => void }) {
+  const dotClass =
+    task.status === "waiting_perm"
+      ? "bg-rose-500"
+      : task.status === "waiting_input"
+      ? "bg-amber-500"
+      : task.status === "running"
+      ? "bg-ember-500 animate-blink"
+      : task.status === "done"
+      ? "bg-emerald-500/70"
+      : task.status === "failed"
+      ? "bg-rose-500/60"
+      : "bg-ink-400/50";
+  const statusLabel =
+    task.status === "waiting_perm"
+      ? "needs approval"
+      : task.status === "waiting_input"
+      ? "needs reply"
+      : task.status;
+  return (
+    <button
+      type="button"
+      onClick={onPick}
+      className="w-full px-3 py-2 flex items-center gap-2 text-left hover:bg-ink-900/[0.04] dark:hover:bg-ink-50/[0.04] transition-colors"
+    >
+      <span className={cn("inline-block h-2 w-2 rounded-full shrink-0", dotClass)} />
+      <span className="flex-1 min-w-0">
+        <span className="block truncate text-[12px] text-ink-900 dark:text-ink-50">
+          {task.title || task.id.slice(0, 8)}
+        </span>
+        <span className="block truncate text-[10px] text-ink-500 dark:text-ink-400 font-mono uppercase tracking-[0.04em]">
+          {statusLabel}
+        </span>
+      </span>
+      <Plus className="h-3 w-3 text-ink-400 shrink-0" />
+    </button>
   );
 }
 

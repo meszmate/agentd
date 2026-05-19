@@ -414,6 +414,14 @@ export const UserPrefs = z.object({
    * task lands back in its pinned slot.
    */
   gridOrder: z.array(z.string()).default([]),
+  /**
+   * Task ids the operator explicitly removed from the live grid (per-
+   * tile X or Clear-done). Reconcile skips these so they don't pop
+   * back in via auto-add. The "Add task" picker re-adds + removes
+   * from this list. NEW tasks (never in gridOrder) bypass this check,
+   * so a fresh spawn always appears in the grid.
+   */
+  gridDismissed: z.array(z.string()).default([]),
 });
 export type UserPrefs = z.infer<typeof UserPrefs>;
 export const DEFAULT_USER_PREFS: UserPrefs = UserPrefs.parse({});

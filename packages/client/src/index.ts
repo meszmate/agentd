@@ -98,6 +98,7 @@ export interface AgentdUserPrefs {
   taskWorkspaceOpen: boolean;
   repoPickerPins: string[];
   gridOrder: string[];
+  gridDismissed: string[];
 }
 
 export interface AgentdLogEntry {
