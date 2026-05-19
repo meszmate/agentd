@@ -405,6 +405,15 @@ export const UserPrefs = z.object({
   taskWorkspaceOpen: z.boolean().default(true),
   /** Pinned repo paths shown at the top of the repo picker. */
   repoPickerPins: z.array(z.string()).default([]),
+  /**
+   * Operator-arranged order of tiles in the live grid overlay. Stored
+   * as a sequence of task ids — manual drag pins land here and survive
+   * reload/devices. Tasks not in this list fall in by status priority
+   * after the pinned ones. Stale ids (closed/deleted tasks) are
+   * filtered client-side; we don't garbage-collect here so a reopened
+   * task lands back in its pinned slot.
+   */
+  gridOrder: z.array(z.string()).default([]),
 });
 export type UserPrefs = z.infer<typeof UserPrefs>;
 export const DEFAULT_USER_PREFS: UserPrefs = UserPrefs.parse({});
