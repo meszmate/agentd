@@ -658,6 +658,52 @@ export async function hasChanges(cwd: string): Promise<boolean> {
   return r.stdout.trim().length > 0;
 }
 
+/**
+ * Trailer-shaped lines we strip from every commit message agentd
+ * produces (or rewrites after the fact). Operator's complaint: no
+ * `Co-authored-by:`, no defaults, nothing of that form — ever. This
+ * regex is applied per-line, case-insensitively, after surrounding
+ * whitespace is trimmed. The list covers the trailers commit helpers
+ * (Claude Code, Codex, GitHub's squash-merge, various IDEs) actually
+ * sneak in. New entries: keep them under one short name + colon.
+ */
+const COMMIT_TRAILER_RE =
+  /^(?:co-authored-by|co-authored\s+by|coauthored-by|signed-off-by|generated-by|generated\s+with|generated\s+by|reviewed-by|helped-by|assisted-by|acked-by|tested-by|reported-by|suggested-by|cc)\s*:/i;
+
+/**
+ * Hard-strip any trailer lines (and the AI-attribution lines that
+ * usually sit beside them) from a commit message. Removes:
+ *   - any line that looks like `<Trailer-Name>: ...` per the regex above
+ *   - `🤖 Generated with [Claude Code](...)` and similar credit lines
+ *   - leftover trailing blank lines
+ *
+ * Idempotent. Used by `autoCommit` on the inputs and by
+ * `scrubCommitTrailers` on existing commits' messages.
+ */
+export function stripCommitTrailers(message: string): string {
+  if (!message) return "";
+  const lines = message.replace(/\r\n/g, "\n").split("\n");
+  const kept: string[] = [];
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      kept.push(raw);
+      continue;
+    }
+    if (COMMIT_TRAILER_RE.test(trimmed)) continue;
+    // Strip the Claude Code attribution credit line and similar
+    // "🤖 Generated with ..." badges some IDEs and CLI defaults
+    // tack onto commit messages right before the trailers block.
+    if (/^🤖\s*generated with/i.test(trimmed)) continue;
+    if (/^generated with \[?claude code/i.test(trimmed)) continue;
+    kept.push(raw);
+  }
+  while (kept.length > 0 && kept[kept.length - 1]!.trim() === "") {
+    kept.pop();
+  }
+  return kept.join("\n");
+}
+
 export interface CommitIdentity {
   name: string;
   email: string;
@@ -794,6 +840,13 @@ export async function autoCommit(input: AutoCommitInput): Promise<AutoCommitResu
   }
   const id =
     input.identity ?? (await resolveCommitIdentity(input.cwd, input.baseRef));
+  // Scrub trailer-shaped lines (Co-authored-by, Signed-off-by, …) out
+  // of the title/body BEFORE git sees them. Title rarely contains
+  // them, but the body is often a free-form copy of the user's last
+  // message and operators sometimes paste reviewer trailers in.
+  const cleanTitle = stripCommitTrailers(input.title).split("\n")[0]!.trim() ||
+    input.title.trim();
+  const cleanBody = input.body ? stripCommitTrailers(input.body) : "";
   // `-c user.name=... -c user.email=...` overrides the worktree's
   // config for this one invocation (so it doesn't rely on an inherited
   // env var), and `--author` makes the resolved identity explicit
@@ -812,10 +865,10 @@ export async function autoCommit(input: AutoCommitInput): Promise<AutoCommitResu
     author,
     "--no-verify",
     "-m",
-    input.title,
+    cleanTitle,
   ];
-  if (input.body && input.body.trim().length > 0) {
-    args.push("-m", input.body);
+  if (cleanBody.trim().length > 0) {
+    args.push("-m", cleanBody);
   }
   const commit = await run(args, input.cwd);
   if (commit.exitCode !== 0) {
@@ -825,8 +878,180 @@ export async function autoCommit(input: AutoCommitInput): Promise<AutoCommitResu
   return {
     committed: true,
     sha: sha.stdout.trim(),
-    message: input.title,
+    message: cleanTitle,
   };
+}
+
+/**
+ * Walk `<baseRef>..HEAD` and rewrite any commit whose message still
+ * contains a trailer the operator has banned (Co-authored-by,
+ * Signed-off-by, "Generated with Claude Code", …). Runs after every
+ * agent turn so trailers the model wrote despite the system prompt
+ * never reach `git push`.
+ *
+ * Implementation: walk the range oldest→newest, rebuild each commit
+ * with `git commit-tree` using the cleaned message but the original
+ * tree, author, committer, dates, and (rewritten) parents. Then move
+ * the branch ref to the new tip and reset the worktree's HEAD. The
+ * original SHAs are gone — which is fine since this runs BEFORE any
+ * push.
+ *
+ * Returns the number of commits that had trailers removed. Zero when
+ * the range was already clean or empty. `-1` on any unrecoverable
+ * git failure (caller logs but doesn't blow up the turn). Merge
+ * commits in the range are left untouched so we don't break their
+ * second parent.
+ */
+export async function scrubCommitTrailers(
+  cwd: string,
+  baseRef: string | null | undefined,
+): Promise<number> {
+  if (!baseRef) return 0;
+  const verify = await run(["git", "rev-parse", "--verify", baseRef], cwd);
+  if (verify.exitCode !== 0) return 0;
+  const baseSha = verify.stdout.trim();
+  // Topological, oldest first so each commit's rewritten parent is
+  // already known by the time we get to its child. NUL separators
+  // around the message dodge newlines inside commit bodies.
+  const log = await run(
+    [
+      "git",
+      "log",
+      "--reverse",
+      "--topo-order",
+      "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B%x1e",
+      `${baseRef}..HEAD`,
+    ],
+    cwd,
+  );
+  if (log.exitCode !== 0) return -1;
+  type Entry = {
+    sha: string;
+    parents: string[];
+    authorName: string;
+    authorEmail: string;
+    authorDate: string;
+    committerName: string;
+    committerEmail: string;
+    committerDate: string;
+    message: string;
+  };
+  const entries: Entry[] = [];
+  for (const rec of log.stdout.split("\x1e")) {
+    const trimmed = rec.replace(/^\n/, "");
+    if (!trimmed.trim()) continue;
+    const parts = trimmed.split("\x00");
+    if (parts.length < 9) continue;
+    entries.push({
+      sha: parts[0]!.trim(),
+      parents: parts[1]!.trim().split(/\s+/).filter(Boolean),
+      authorName: parts[2]!,
+      authorEmail: parts[3]!,
+      authorDate: parts[4]!,
+      committerName: parts[5]!,
+      committerEmail: parts[6]!,
+      committerDate: parts[7]!,
+      message: parts[8]!,
+    });
+  }
+  if (entries.length === 0) return 0;
+  // Anything to do? If every message is already clean, bail out
+  // without touching the branch — keeps SHAs stable when there's
+  // nothing to scrub.
+  let dirtyCount = 0;
+  for (const e of entries) {
+    const cleaned = stripCommitTrailers(e.message);
+    if (cleaned.trim() !== e.message.trim()) dirtyCount += 1;
+  }
+  if (dirtyCount === 0) return 0;
+  // Refuse to rewrite anything if the range contains a merge —
+  // commit-tree would drop the second parent and silently
+  // un-merge the branch. The operator's PR will merge cleanly on
+  // GitHub's side, so this is a paranoia guard.
+  if (entries.some((e) => e.parents.length > 1)) return 0;
+  // Capture the current branch so we can move it to the new tip.
+  const headRef = await run(
+    ["git", "symbolic-ref", "--quiet", "HEAD"],
+    cwd,
+  );
+  const branchRef = headRef.exitCode === 0 ? headRef.stdout.trim() : "";
+  if (!branchRef) return -1;
+  // Rebuild each commit with `git commit-tree`. The original
+  // tree/parents/author/committer/dates all carry over via env vars
+  // and `-p` flags; only the message changes.
+  const rewritten = new Map<string, string>();
+  for (const e of entries) {
+    const tree = await run(
+      ["git", "rev-parse", `${e.sha}^{tree}`],
+      cwd,
+    );
+    if (tree.exitCode !== 0) return -1;
+    const parentArgs: string[] = [];
+    for (const p of e.parents) {
+      parentArgs.push("-p", rewritten.get(p) ?? p);
+    }
+    const cleaned = stripCommitTrailers(e.message).trim() || e.message.trim();
+    const env: Record<string, string> = {
+      ...process.env,
+      GIT_AUTHOR_NAME: e.authorName,
+      GIT_AUTHOR_EMAIL: e.authorEmail,
+      GIT_AUTHOR_DATE: e.authorDate,
+      GIT_COMMITTER_NAME: e.committerName,
+      GIT_COMMITTER_EMAIL: e.committerEmail,
+      GIT_COMMITTER_DATE: e.committerDate,
+    } as Record<string, string>;
+    const ct = await runWithStdin(
+      ["git", "commit-tree", tree.stdout.trim(), ...parentArgs],
+      cwd,
+      cleaned + "\n",
+      env,
+    );
+    if (ct.exitCode !== 0 || !ct.stdout.trim()) return -1;
+    rewritten.set(e.sha, ct.stdout.trim());
+  }
+  const newTip = rewritten.get(entries[entries.length - 1]!.sha)!;
+  // Move the branch ref atomically and reset the worktree's index
+  // to match so the next `git status` doesn't think every file is
+  // staged for deletion. We use `--soft` because the working tree
+  // already has the right files — only HEAD needs to advance.
+  const up = await run(
+    ["git", "update-ref", branchRef, newTip],
+    cwd,
+  );
+  if (up.exitCode !== 0) return -1;
+  const reset = await run(["git", "reset", "--soft", newTip], cwd);
+  if (reset.exitCode !== 0) return -1;
+  return dirtyCount;
+}
+
+async function runWithStdin(
+  cmd: string[],
+  cwd: string,
+  input: string,
+  env: Record<string, string>,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  let proc;
+  try {
+    proc = Bun.spawn({
+      cmd,
+      cwd,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env,
+    });
+  } catch (e) {
+    const msg = (e as Error).message || String(e);
+    return { stdout: "", stderr: `${cmd[0]}: ${msg}`, exitCode: 127 };
+  }
+  proc.stdin?.write(input);
+  proc.stdin?.end();
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const exitCode = await proc.exited;
+  return { stdout, stderr, exitCode };
 }
 
 export interface DiffResult {

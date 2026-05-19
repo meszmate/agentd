@@ -20,6 +20,7 @@ import {
   autoCommit,
   commitIdentityEnv,
   checkoutPrInWorktree,
+  scrubCommitTrailers,
   createTask,
   deleteTask,
   detectDefaultBranch,
@@ -1563,7 +1564,7 @@ export class TaskManager {
         // what the operator wants to NEVER see when this flag is on.
         "Auto-commit is ON. NEVER ask the operator if you should commit. NEVER write 'Want me to commit it?', 'Should I commit?', 'Ready to commit?', or any variant. Just commit. Stage everything and `git commit` whenever you reach a meaningful checkpoint — after a successful change, after fixing a bug, after a working feature step. Multiple small commits across a turn are fine; one big commit at the end is fine; either way, JUST COMMIT, don't ask. The operator turned this flag on because they want commits to flow without permission prompts.",
         "For `git commit -m` only: use a single conventional-commit subject line (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `style:`, `test:`, `perf:`, `ci:`, `build:`) under 70 characters, lowercase, imperative mood, with no scope unless one is obvious. This format applies to the commit message passed to git, nothing else. Do NOT use it as your chat reply, your final task summary, your `agentd-progress` line, your `agentd-share` line, or any other operator-facing text.",
-        "Do NOT add `Co-Authored-By`, `Generated with`, or any AI attribution to commit messages.",
+        "NEVER add a `Co-Authored-By:` trailer, a `Co-authored-by:` trailer, a `Signed-off-by:` trailer, a `Generated with [Claude Code]` credit line, a `🤖 Generated with` line, or ANY other trailer / attribution / co-author line to commit messages — not for Claude, not for the operator, not for anyone. The commit message is ONLY the conventional-commit subject (and optional body bullets). Nothing after that. This is a hard ban, no exceptions, no defaults. If your built-in commit template suggests one, drop it.",
       );
     } else {
       finishParts.push(
@@ -2732,6 +2733,33 @@ export class TaskManager {
         // squash-merge doesn't add a Co-authored-by trailer.
         baseRef: task.baseCommitSha || task.baseBranch || undefined,
       });
+      // Belt-and-braces: rewrite any commit on this branch whose
+      // message still carries a banned trailer (Co-authored-by,
+      // Signed-off-by, "Generated with Claude Code", …). Covers
+      // commits the AGENT made itself — which we couldn't intercept
+      // at write time — and lands before maybePush so no trailer
+      // ever reaches GitHub.
+      try {
+        const scrubbed = await scrubCommitTrailers(
+          task.worktreePath,
+          task.baseCommitSha || task.baseBranch || undefined,
+        );
+        if (scrubbed > 0) {
+          appendMessage(
+            this.db,
+            taskId,
+            "system",
+            `scrubbed trailers from ${scrubbed} commit${scrubbed === 1 ? "" : "s"}`,
+          );
+        }
+      } catch (e) {
+        appendMessage(
+          this.db,
+          taskId,
+          "system",
+          `trailer scrub failed: ${(e as Error).message}`,
+        );
+      }
       if (result.committed) {
         appendMessage(
           this.db,
