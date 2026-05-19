@@ -2040,15 +2040,17 @@ function buildValidateIdeasPrompt(brief: string, ideas: string[]): string {
     `  4. Skim 1-2 key source dirs only if you still need to understand the domain.`,
     `Don't score from the brief alone. If you skip this step your scores will be wrong and the operator will throw them out.`,
     "",
-    `Then for each numbered idea below, give a single integer 0-100 where:`,
+    `Then for each numbered idea below, give a single integer on a 0-100 scale (NOT 0-10, NOT 0-5) where:`,
     `  90+  ship-now obvious win`,
     `  70-89  strong, worth doing soon`,
     `  50-69  worth considering`,
-    `  <50  niche / risky / off-strategy`,
-    `Calibrate honestly. Spread the scores; don't bunch everything in 80-90.`,
+    `  30-49  niche / risky / off-strategy`,
+    `  <30   only if the idea is actively harmful, impossible, or off-brief`,
+    `Most reasonable ideas land in the 40-80 band — single-digit scores are almost never correct. If your top score is under 30, you've misread the scale; re-read this rubric before emitting.`,
+    `Calibrate honestly and spread the scores; don't bunch everything in 80-90 either.`,
     "",
     `Output format — STRICT:`,
-    `Your final reply MUST end with exactly one line that starts with the literal token "SCORES:" followed by ${ideas.length} space-separated integers in the same order as the ideas. Anything before that line is ignored. The SCORES line must be the LAST line of your reply.`,
+    `Your final reply MUST end with exactly one line that starts with the literal token "SCORES:" followed by EXACTLY ${ideas.length} space-separated integers (one per idea, same order). Each integer is 0-100. No fewer, no more, no decimals, no other separators. Anything before that line is ignored. The SCORES line must be the LAST line of your reply.`,
     `Example for 3 ideas:`,
     `  SCORES: 82 64 41`,
     "",
@@ -2192,13 +2194,28 @@ function parseScores(
         : err ?? `rater returned no output`,
     };
   }
-  // Pad / trim to match the input length so the index alignment
-  // contract holds even when the helper returned the wrong count.
-  const scores: number[] = [];
-  for (let i = 0; i < expectedLen; i++) {
-    scores.push(parsed[i] ?? 0);
+  // Short response — the rater returned fewer scores than ideas. Don't
+  // silently pad with 0s: that hides a broken rater behind plausible-
+  // looking ratings ("5 3 0 0" instead of "couldn't score the last two").
+  // Surface as an error so the operator can re-run.
+  if (parsed.length < expectedLen) {
+    return {
+      scores: [],
+      source: "fallback-empty",
+      error: `rater returned ${parsed.length} score${parsed.length === 1 ? "" : "s"} but ${expectedLen} idea${expectedLen === 1 ? " was" : "s were"} sent: ${parsed.join(" ")}`,
+    };
   }
-  return { scores, source: "claude" };
+  const trimmed = parsed.slice(0, expectedLen);
+  // 0-10 scale slip: codex (and smaller claude variants) sometimes ignore
+  // the rubric and emit single-digit scores. When EVERY value is in 0-10
+  // on a 0-100 prompt, the model used the wrong scale — rescale by 10x.
+  // Guard against the legitimate "every idea is genuinely terrible" case
+  // by requiring at least 2 ideas (a single 0-10 score on one idea is
+  // ambiguous between bad-idea and wrong-scale).
+  const max = Math.max(...trimmed);
+  const scaled =
+    expectedLen >= 2 && max <= 10 ? trimmed.map((n) => n * 10) : trimmed;
+  return { scores: scaled, source: "claude" };
 }
 
 /* ── Plan-slice parsing ───────────────────────────────────────────── */
