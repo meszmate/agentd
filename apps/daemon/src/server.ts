@@ -1434,6 +1434,7 @@ export function buildServer(opts: BuildServerOptions) {
         cwd: task.worktreePath,
         title,
         body: bodyText,
+        baseRef: task.baseCommitSha || task.baseBranch,
       });
       return c.json(r);
     } catch (e) {
