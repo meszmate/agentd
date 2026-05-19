@@ -71,7 +71,13 @@ jobs:
       # We don't have the agent CLIs (claude, codex) on CI, so we can't actually
       # run a task end-to-end. We can verify the daemon boots, serves /health,
       # mints a pairing token, and exchanges it for a session.
+      # AGENTD_NO_AUTOBUILD=1 skips the inline `bun --filter @agentd/web build`
+      # the daemon would otherwise run on first boot — none of the endpoints
+      # this smoke hits need the web bundle, and the build blows past the 10s
+      # /health timeout below.
       - name: Boot daemon and exercise pair → health → tasks
+        env:
+          AGENTD_NO_AUTOBUILD: "1"
         run: |
           bun apps/daemon/src/index.ts --root "$RUNNER_TEMP/agentd-ci" > "$RUNNER_TEMP/daemon.log" 2>&1 &
           DPID=$!
