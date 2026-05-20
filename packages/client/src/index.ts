@@ -1343,6 +1343,22 @@ export class AgentdClient {
     });
   }
 
+  async deleteTaskRemoteBranch(
+    id: string,
+    opts: { remote?: string } = {},
+  ): Promise<
+    | { ok: true; branch: string; remote: string }
+    | { ok: false; error: string }
+  > {
+    return this.req(
+      `/api/tasks/${encodeURIComponent(id)}/delete-remote-branch`,
+      {
+        method: "POST",
+        body: JSON.stringify(opts),
+      },
+    );
+  }
+
   async setTaskThinkingLevel(
     id: string,
     thinkingLevel: ThinkingLevel,

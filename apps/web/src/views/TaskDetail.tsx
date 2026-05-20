@@ -16,6 +16,7 @@ import {
   PanelRight,
   PanelRightClose,
   RotateCcw,
+  Scissors,
   Sparkles,
   Square,
   ThumbsDown,
@@ -295,6 +296,33 @@ export function TaskDetail({ task }: { task: Task }) {
       onError((e as Error).message);
     }
   };
+  const onDeleteRemoteBranch = async () => {
+    if (!task.branch) {
+      toast("Task has no branch", true);
+      return;
+    }
+    if (
+      !confirm(
+        `Delete origin/${task.branch} from the remote? This runs \`git push origin --delete ${task.branch}\`. The local branch is untouched.`,
+      )
+    )
+      return;
+    try {
+      const r = await client.deleteTaskRemoteBranch(task.id);
+      if (r.ok) {
+        toast(`Removed ${r.remote}/${r.branch}`);
+        if (task.projectId) {
+          void qc.invalidateQueries({
+            queryKey: ["project", task.projectId, "branches"],
+          });
+        }
+      } else {
+        onError(r.error || "git push --delete failed");
+      }
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
   const onCheckMerged = async () => {
     try {
       const r = await client.checkPrState(task.id, true);
@@ -450,6 +478,14 @@ export function TaskDetail({ task }: { task: Task }) {
                     <ExternalLink /> Check PR merged → auto-close
                   </DropdownMenuItem>
                 )}
+              </>
+            )}
+            {task.branch && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={onDeleteRemoteBranch}>
+                  <Scissors /> Delete remote branch
+                </DropdownMenuItem>
               </>
             )}
             <DropdownMenuSeparator />
