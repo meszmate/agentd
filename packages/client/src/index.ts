@@ -2135,6 +2135,7 @@ export class AgentdClient {
 
   async listProjectBranches(
     idOrSlug: string,
+    opts: { fetch?: boolean } = {},
   ): Promise<{
     current: string | null;
     local: string[];
@@ -2147,8 +2148,9 @@ export class AgentdClient {
      */
     default: string;
   }> {
+    const qs = opts.fetch ? "?fetch=1" : "";
     return this.req(
-      `/api/projects/${encodeURIComponent(idOrSlug)}/branches`,
+      `/api/projects/${encodeURIComponent(idOrSlug)}/branches${qs}`,
     );
   }
 

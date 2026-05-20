@@ -4797,7 +4797,21 @@ export function buildServer(opts: BuildServerOptions) {
     const project =
       getProjectById(db, key) ?? getProjectBySlug(db, key);
     if (!project) return c.json({ error: "not found" }, 404);
+    const wantFetch = c.req.query("fetch") === "1";
     try {
+      if (wantFetch) {
+        // Best-effort `git fetch --prune` so freshly-pushed remote
+        // branches show up in the picker without the operator dropping
+        // to a terminal. Errors are non-fatal — we still want to return
+        // whatever refs are already cached.
+        const fp = Bun.spawn({
+          cmd: ["git", "fetch", "--prune", "origin"],
+          cwd: project.path,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        await fp.exited;
+      }
       const [branches, defaultBranch] = await Promise.all([
         listBranches(project.path),
         detectDefaultBranch(project.path),

@@ -1199,6 +1199,26 @@ export function useProjectBranches(idOrSlug: string | null | undefined) {
 }
 
 /**
+ * Triggers a server-side `git fetch --prune origin` and refreshes the
+ * branches cache. The branch picker's "fetch" button calls this so
+ * freshly-pushed remote branches show up without the operator dropping
+ * to a terminal.
+ */
+export function useRefreshProjectBranches(
+  idOrSlug: string | null | undefined,
+) {
+  const client = useClient();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => client.listProjectBranches(idOrSlug!, { fetch: true }),
+    onSuccess: (data) => {
+      if (!idOrSlug) return;
+      qc.setQueryData(["project", idOrSlug, "branches"] as const, data);
+    },
+  });
+}
+
+/**
  * Cross-device "last used" defaults for the spawn flow. Backed by the
  * daemon's config.json under `prefs`. Replaces the old agentd.last*
  * localStorage keys.
