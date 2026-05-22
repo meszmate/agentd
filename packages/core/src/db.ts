@@ -132,6 +132,20 @@ export const tasks = sqliteTable("tasks", {
   githubPrIsDraft: integer("github_pr_is_draft"),
   /** Live issue state ("OPEN" / "CLOSED"); same refresh triggers as PR state. */
   githubIssueState: text("github_issue_state"),
+  /**
+   * Adversarial reviewer verdict + report. Populated by the post-commit
+   * reviewer pass when `cfg.review.enabled` is on. The PR-open endpoint
+   * gates on `reviewVerdict !== "approved"` when `cfg.review.blockOnFail`
+   * is on. See `Task.reviewVerdict` in contracts.
+   */
+  reviewVerdict: text("review_verdict"),
+  reviewSummary: text("review_summary"),
+  reviewBlockingIssuesJson: text("review_blocking_issues_json"),
+  reviewSuggestionsJson: text("review_suggestions_json"),
+  reviewAgent: text("review_agent"),
+  reviewModel: text("review_model"),
+  reviewedAt: integer("reviewed_at"),
+  reviewSkip: integer("review_skip").notNull().default(0),
 });
 
 /**
@@ -759,6 +773,14 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE suggestions ADD COLUMN question_json TEXT",
   "ALTER TABLE tasks ADD COLUMN claude_session_id TEXT",
   "ALTER TABLE tasks ADD COLUMN base_commit_sha TEXT",
+  "ALTER TABLE tasks ADD COLUMN review_verdict TEXT",
+  "ALTER TABLE tasks ADD COLUMN review_summary TEXT",
+  "ALTER TABLE tasks ADD COLUMN review_blocking_issues_json TEXT",
+  "ALTER TABLE tasks ADD COLUMN review_suggestions_json TEXT",
+  "ALTER TABLE tasks ADD COLUMN review_agent TEXT",
+  "ALTER TABLE tasks ADD COLUMN review_model TEXT",
+  "ALTER TABLE tasks ADD COLUMN reviewed_at INTEGER",
+  "ALTER TABLE tasks ADD COLUMN review_skip INTEGER NOT NULL DEFAULT 0",
 ];
 
 function migrate(sqlite: Database): void {

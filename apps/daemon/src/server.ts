@@ -61,6 +61,7 @@ import {
 } from "./pty.ts";
 import {
   EventBus,
+  appendMessage,
   exchangePairingToken,
   issuePairingToken,
   listSessions,
@@ -122,6 +123,8 @@ import {
   setTaskAutoFlags,
   setTaskModel,
   setTaskMirrorTo,
+  setTaskReview,
+  setTaskReviewSkip,
   updateTodo,
   resolveSession,
   loadConfig,
@@ -1465,9 +1468,44 @@ export function buildServer(opts: BuildServerOptions) {
       title?: string;
       body?: string;
       draft?: boolean;
+      force?: boolean;
     };
     if (!body.title?.trim()) {
       return c.json({ error: "title required" }, 400);
+    }
+    // Adversarial-review gate. When the post-commit reviewer has flagged
+    // the diff as anything other than `approved`, refuse to open the PR
+    // unless the operator passed `force: true`. Surfaces a 409 with the
+    // verdict + notes so the web can render the "override and open"
+    // affordance against real data instead of a generic error.
+    const cfg = loadConfig(paths.root);
+    if (
+      cfg.review.enabled &&
+      cfg.review.blockOnFail &&
+      task.reviewVerdict &&
+      task.reviewVerdict !== "approved" &&
+      body.force !== true
+    ) {
+      return c.json(
+        {
+          error: "review_gate",
+          verdict: task.reviewVerdict,
+          summary: task.reviewSummary ?? null,
+          blockingIssues: task.reviewBlockingIssues ?? [],
+          suggestions: task.reviewSuggestions ?? [],
+          reviewAgent: task.reviewAgent ?? null,
+          reviewModel: task.reviewModel ?? null,
+        },
+        409,
+      );
+    }
+    if (body.force === true && task.reviewVerdict && task.reviewVerdict !== "approved") {
+      appendMessage(
+        db,
+        task.id,
+        "system",
+        `[review] operator override (verdict=${task.reviewVerdict}) — opening PR anyway`,
+      );
     }
     try {
       const r = await createPr({
@@ -1509,6 +1547,70 @@ export function buildServer(opts: BuildServerOptions) {
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
+  });
+
+  /**
+   * Re-run the adversarial reviewer against the current diff. Clears
+   * the prior verdict, flips the badge to `running`, and fires the
+   * reviewer asynchronously — every connected surface updates via the
+   * `task_changed` WS event without polling.
+   */
+  api.post("/tasks/:id/review/rerun", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const cfg = loadConfig(paths.root);
+    if (!cfg.review.enabled) {
+      return c.json({ error: "review is disabled in cfg.review" }, 400);
+    }
+    tasks.rerunReview(id);
+    return c.json({ ok: true });
+  });
+
+  /**
+   * Operator override — manually mark the verdict as approved with a
+   * note. Used when the reviewer is wrong and the operator wants to
+   * unblock the PR-gate without re-running anything.
+   */
+  api.post("/tasks/:id/review/override", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      note?: string;
+    };
+    const note = (body.note ?? "").trim();
+    if (!note) return c.json({ error: "note required" }, 400);
+    setTaskReview(
+      db,
+      id,
+      {
+        verdict: "approved",
+        summary: note.slice(0, 240),
+        blockingIssues: [],
+        suggestions: [],
+      },
+      { agent: null, model: "operator-override" },
+    );
+    appendMessage(db, id, "system", `[review] operator approved: ${note}`);
+    pubTaskChanged(id);
+    return c.json({ ok: true });
+  });
+
+  /**
+   * Toggle the per-task `reviewSkip` flag — bypasses the post-commit
+   * reviewer for trivial tasks (vendored chunks, doc fixes, etc.).
+   */
+  api.post("/tasks/:id/review/skip", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      skip?: boolean;
+    };
+    setTaskReviewSkip(db, id, body.skip !== false);
+    pubTaskChanged(id);
+    return c.json({ ok: true });
   });
 
   /**
@@ -3005,6 +3107,7 @@ export function buildServer(opts: BuildServerOptions) {
       aiHelpers: cfg.aiHelpers,
       defaultThinking: cfg.defaultThinking,
       defaultModel: cfg.defaultModel,
+      review: cfg.review,
     });
   });
 
@@ -3104,6 +3207,79 @@ export function buildServer(opts: BuildServerOptions) {
       next.defaultModel = cur;
       changed = true;
     }
+    if ("review" in body) {
+      const rv = body.review as Record<string, unknown> | null | undefined;
+      if (!rv || typeof rv !== "object") {
+        return c.json({ error: "review must be an object" }, 400);
+      }
+      const cur = { ...cfg.review };
+      if (rv.enabled !== undefined) {
+        if (typeof rv.enabled !== "boolean") {
+          return c.json({ error: "review.enabled must be boolean" }, 400);
+        }
+        cur.enabled = rv.enabled;
+      }
+      if (rv.blockOnFail !== undefined) {
+        if (typeof rv.blockOnFail !== "boolean") {
+          return c.json({ error: "review.blockOnFail must be boolean" }, 400);
+        }
+        cur.blockOnFail = rv.blockOnFail;
+      }
+      if (rv.agent !== undefined) {
+        if (rv.agent !== "claude" && rv.agent !== "codex") {
+          return c.json({ error: "review.agent must be claude|codex" }, 400);
+        }
+        cur.agent = rv.agent;
+      }
+      if (rv.model !== undefined) {
+        if (typeof rv.model !== "string") {
+          return c.json({ error: "review.model must be a string" }, 400);
+        }
+        cur.model = rv.model.trim();
+      }
+      if (rv.thinkingLevel !== undefined) {
+        const allowed = [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+        ] as const;
+        if (
+          typeof rv.thinkingLevel !== "string" ||
+          !allowed.includes(rv.thinkingLevel as (typeof allowed)[number])
+        ) {
+          return c.json(
+            { error: `review.thinkingLevel must be one of ${allowed.join("|")}` },
+            400,
+          );
+        }
+        cur.thinkingLevel = rv.thinkingLevel as (typeof allowed)[number];
+      }
+      if (rv.maxDiffBytes !== undefined) {
+        const n = Number(rv.maxDiffBytes);
+        if (!Number.isFinite(n) || n <= 0) {
+          return c.json(
+            { error: "review.maxDiffBytes must be a positive number" },
+            400,
+          );
+        }
+        cur.maxDiffBytes = Math.floor(n);
+      }
+      if (rv.timeoutMs !== undefined) {
+        const n = Number(rv.timeoutMs);
+        if (!Number.isFinite(n) || n <= 0) {
+          return c.json(
+            { error: "review.timeoutMs must be a positive number" },
+            400,
+          );
+        }
+        cur.timeoutMs = Math.floor(n);
+      }
+      next.review = cur;
+      changed = true;
+    }
     if (!changed) return c.json({ error: "no valid keys in patch" }, 400);
     saveConfig(paths.root, next);
     return c.json({
@@ -3116,6 +3292,7 @@ export function buildServer(opts: BuildServerOptions) {
         aiHelpers: next.aiHelpers,
         defaultThinking: next.defaultThinking,
         defaultModel: next.defaultModel,
+        review: next.review,
       },
     });
   });
