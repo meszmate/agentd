@@ -1545,6 +1545,48 @@ export function buildServer(opts: BuildServerOptions) {
   });
 
   /**
+   * Remove the task's branch from the remote (default `origin`). Operator
+   * triggers this after the PR is merged so we don't leave stale branches
+   * around the GitHub UI. Best-effort: a missing remote or already-deleted
+   * branch returns `{ ok: false, error }` so the UI can show the message
+   * without crashing. Never touches the local branch — that's a separate
+   * concern (the worktree may still be on it).
+   */
+  api.post("/tasks/:id/delete-remote-branch", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    if (!task.branch) {
+      return c.json({ error: "task has no branch" }, 400);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as {
+      remote?: string;
+    };
+    const remote = (body.remote || "origin").trim();
+    const branch = task.branch;
+    const cwd = task.repoPath;
+    if (!cwd) {
+      return c.json({ error: "task has no repoPath" }, 400);
+    }
+    const proc = Bun.spawn({
+      cmd: ["git", "push", remote, "--delete", branch],
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, err] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    await proc.exited;
+    if (proc.exitCode !== 0) {
+      const msg = (err || out).trim() || `exit ${proc.exitCode}`;
+      return c.json({ ok: false, error: msg }, 400);
+    }
+    return c.json({ ok: true, branch, remote });
+  });
+
+  /**
    * Update the task's reasoning effort. The currently running turn keeps
    * its level; the change takes effect on the next runner spawn (i.e. the
    * next user message or steer drain).
@@ -4797,7 +4839,21 @@ export function buildServer(opts: BuildServerOptions) {
     const project =
       getProjectById(db, key) ?? getProjectBySlug(db, key);
     if (!project) return c.json({ error: "not found" }, 404);
+    const wantFetch = c.req.query("fetch") === "1";
     try {
+      if (wantFetch) {
+        // Best-effort `git fetch --prune` so freshly-pushed remote
+        // branches show up in the picker without the operator dropping
+        // to a terminal. Errors are non-fatal — we still want to return
+        // whatever refs are already cached.
+        const fp = Bun.spawn({
+          cmd: ["git", "fetch", "--prune", "origin"],
+          cwd: project.path,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        await fp.exited;
+      }
       const [branches, defaultBranch] = await Promise.all([
         listBranches(project.path),
         detectDefaultBranch(project.path),
