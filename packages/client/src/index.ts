@@ -1600,11 +1600,55 @@ export class AgentdClient {
   async openPrForTask(
     id: string,
     req: { title: string; body?: string; draft?: boolean; force?: boolean },
-  ): Promise<{ url: string; output: string }> {
-    return this.req(`/api/tasks/${encodeURIComponent(id)}/pr`, {
+  ): Promise<
+    | { url: string; output: string }
+    | {
+        reviewGate: {
+          verdict: string;
+          summary: string | null;
+          blockingIssues: string[];
+          suggestions: string[];
+          reviewAgent: string | null;
+          reviewModel: string | null;
+        };
+      }
+  > {
+    const path = `/api/tasks/${encodeURIComponent(id)}/pr`;
+    const r = await fetch(this.server + path, {
       method: "POST",
+      headers: this.headers(),
       body: JSON.stringify(req),
     });
+    if (r.status === 409) {
+      const body = (await r.json().catch(() => null)) as
+        | {
+            error?: string;
+            verdict?: string;
+            summary?: string | null;
+            blockingIssues?: string[];
+            suggestions?: string[];
+            reviewAgent?: string | null;
+            reviewModel?: string | null;
+          }
+        | null;
+      if (body && body.error === "review_gate" && body.verdict) {
+        return {
+          reviewGate: {
+            verdict: body.verdict,
+            summary: body.summary ?? null,
+            blockingIssues: body.blockingIssues ?? [],
+            suggestions: body.suggestions ?? [],
+            reviewAgent: body.reviewAgent ?? null,
+            reviewModel: body.reviewModel ?? null,
+          },
+        };
+      }
+    }
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`POST ${path} → ${r.status}: ${text}`);
+    }
+    return (await r.json()) as { url: string; output: string };
   }
 
   /**

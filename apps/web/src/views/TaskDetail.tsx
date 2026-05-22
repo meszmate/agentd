@@ -79,6 +79,7 @@ import {
 import { TaskTimeline } from "@/views/TaskTimeline";
 import { TaskWorkspace } from "@/views/TaskWorkspace";
 import { ShipMenu } from "@/components/ship-menu";
+import { ReviewBadge } from "@/components/review-badge";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -356,6 +357,7 @@ export function TaskDetail({ task }: { task: Task }) {
             closed{task.closedReason ? ` · ${task.closedReason}` : ""}
           </span>
         )}
+        <ReviewBadge task={task} compact />
         <LiveBadge live={live} terminal={isTerminal} />
 
         <Spacer />
