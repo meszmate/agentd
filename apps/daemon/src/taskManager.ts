@@ -63,6 +63,7 @@ import {
   setTaskCodexThreadId,
   setTaskClaudeSessionId,
   setTaskPlanGroupId,
+  setTaskReview,
   updateTaskStatus,
   createWorktree,
   type AiHelperOptions,
@@ -2038,11 +2039,21 @@ export class TaskManager {
     // autoCommit is off. Earlier this was an early `return` for the
     // whole function, which silently blocked plan-slice chains for
     // any task with autoCommit disabled.
+    let committed = false;
     if (task.autoCommit !== false) {
-      const committed = await this.maybeAutoCommit(taskId, task);
+      committed = await this.maybeAutoCommit(taskId, task);
       if (committed && task.autoPush) {
         await this.maybePush(taskId, task);
       }
+    }
+    // Adversarial reviewer — separate agent reads the diff and emits
+    // a structured verdict. Fire-and-forget so the steer-drain, council
+    // judge, and slice-chain hooks below don't wait on the model. The
+    // gate in `POST /tasks/:id/pr` reads the persisted verdict at PR
+    // time, so the operator hitting Ship before review completes just
+    // gets a `verdict: "running"` 409 they can wait out or override.
+    if (committed) {
+      void this.maybeRunReview(taskId);
     }
     // Drain any messages the user queued mid-turn. Re-fetch the task so we
     // pick up any thinking-level change made while the previous turn ran.
@@ -2796,6 +2807,75 @@ export class TaskManager {
     } catch (e) {
       appendMessage(this.db, taskId, "system", `auto-push failed: ${(e as Error).message}`);
     }
+  }
+
+  /**
+   * Post-commit adversarial reviewer. Skipped silently when the feature
+   * is off in config, when the task has `reviewSkip`, or when the
+   * primary task didn't actually produce a commit this turn. On any
+   * failure we persist `verdict: "error"` and keep going — never throw
+   * out of the completion hook chain.
+   */
+  private async maybeRunReview(taskId: string): Promise<void> {
+    const cfg = loadConfig(this.paths.root);
+    if (!cfg.review.enabled) return;
+    const initial = getTask(this.db, taskId);
+    if (!initial || initial.reviewSkip) return;
+    // Flip to running so the badge + gate see the in-flight state. We
+    // don't have a final verdict yet, so blockingIssues stays empty;
+    // the PR endpoint reads this as "not approved" and gates accordingly.
+    setTaskReview(
+      this.db,
+      taskId,
+      {
+        verdict: "running",
+        summary: "adversarial reviewer is reading the diff",
+        blockingIssues: [],
+        suggestions: [],
+      },
+      { agent: cfg.review.agent, model: cfg.review.model || null },
+    );
+    appendMessage(
+      this.db,
+      taskId,
+      "system",
+      `[review] running ${cfg.review.agent}${cfg.review.model ? `:${cfg.review.model}` : ""} against the commit diff`,
+    );
+    const running = getTask(this.db, taskId);
+    if (running) this.bus.publishSystem({ kind: "task_changed", task: running });
+
+    const { runAdversarialReview } = await import("./reviewer.ts");
+    const fresh = getTask(this.db, taskId);
+    if (!fresh) return;
+    let result;
+    try {
+      result = await runAdversarialReview({ task: fresh, paths: this.paths });
+    } catch (e) {
+      result = {
+        report: {
+          verdict: "error" as const,
+          summary: `reviewer crashed: ${(e as Error).message}`,
+          blockingIssues: [],
+          suggestions: [],
+        },
+        agent: cfg.review.agent,
+        model: cfg.review.model || "",
+      };
+    }
+    setTaskReview(this.db, taskId, result.report, {
+      agent: result.agent,
+      model: result.model || null,
+    });
+    const verdict = result.report.verdict;
+    const summary = result.report.summary || "(no summary)";
+    appendMessage(
+      this.db,
+      taskId,
+      "system",
+      `[review] ${verdict} — ${summary}`,
+    );
+    const after = getTask(this.db, taskId);
+    if (after) this.bus.publishSystem({ kind: "task_changed", task: after });
   }
 
   /**

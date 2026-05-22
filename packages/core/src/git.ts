@@ -3609,6 +3609,67 @@ export async function runJudge(
   }
 }
 
+/**
+ * One-shot helper invocation that captures the agent's stdout. Used by
+ * the post-commit adversarial reviewer pass — we want a separate model
+ * to read the diff and emit a structured verdict, but we don't need
+ * the full AgentRunner lifecycle (no stream-json parsing, no resume,
+ * no tool-call mirroring).
+ *
+ * Enforces a wall-clock timeout so a stuck CLI never blocks the
+ * completion hook indefinitely. Returns the captured stdout (trimmed)
+ * plus a flag indicating whether the helper exited cleanly.
+ */
+export async function runHelperOneshot(args: {
+  helper: AiHelperOptions;
+  prompt: string;
+  cwd: string;
+  timeoutMs?: number;
+}): Promise<{
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  timedOut: boolean;
+}> {
+  const argv = buildAiHelperArgv(args.helper, args.prompt, args.cwd);
+  let timedOut = false;
+  try {
+    const proc = Bun.spawn({
+      cmd: argv,
+      cwd: args.cwd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+    const killTimer =
+      args.timeoutMs && args.timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            try {
+              proc.kill();
+            } catch {
+              // process already gone
+            }
+          }, args.timeoutMs)
+        : null;
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exitCode = await proc.exited;
+    if (killTimer) clearTimeout(killTimer);
+    return { stdout, stderr, exitCode, timedOut };
+  } catch (e) {
+    return {
+      stdout: "",
+      stderr: `${argv[0]}: ${(e as Error).message}`,
+      exitCode: 127,
+      timedOut: false,
+    };
+  }
+}
+
 /* ── Branch-name generator ─────────────────────────────────────────── */
 
 /**
