@@ -2810,6 +2810,16 @@ export class TaskManager {
   }
 
   /**
+   * Operator-triggered re-run of the adversarial reviewer. Same logic
+   * as `maybeRunReview` minus the `reviewSkip` short-circuit — the
+   * operator hit a button explicitly. Fire-and-forget; the WS bus
+   * fans verdict updates out.
+   */
+  rerunReview(taskId: string): void {
+    void this.runReviewInternal(taskId, true);
+  }
+
+  /**
    * Post-commit adversarial reviewer. Skipped silently when the feature
    * is off in config, when the task has `reviewSkip`, or when the
    * primary task didn't actually produce a commit this turn. On any
@@ -2817,10 +2827,18 @@ export class TaskManager {
    * out of the completion hook chain.
    */
   private async maybeRunReview(taskId: string): Promise<void> {
+    return this.runReviewInternal(taskId, false);
+  }
+
+  private async runReviewInternal(
+    taskId: string,
+    bypassSkip: boolean,
+  ): Promise<void> {
     const cfg = loadConfig(this.paths.root);
     if (!cfg.review.enabled) return;
     const initial = getTask(this.db, taskId);
-    if (!initial || initial.reviewSkip) return;
+    if (!initial) return;
+    if (!bypassSkip && initial.reviewSkip) return;
     // Flip to running so the badge + gate see the in-flight state. We
     // don't have a final verdict yet, so blockingIssues stays empty;
     // the PR endpoint reads this as "not approved" and gates accordingly.

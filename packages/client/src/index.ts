@@ -1599,11 +1599,38 @@ export class AgentdClient {
 
   async openPrForTask(
     id: string,
-    req: { title: string; body?: string; draft?: boolean },
+    req: { title: string; body?: string; draft?: boolean; force?: boolean },
   ): Promise<{ url: string; output: string }> {
     return this.req(`/api/tasks/${encodeURIComponent(id)}/pr`, {
       method: "POST",
       body: JSON.stringify(req),
+    });
+  }
+
+  /**
+   * Re-run the post-commit adversarial reviewer for a task. Returns
+   * immediately; verdict updates land via the WS bus.
+   */
+  async rerunReview(id: string): Promise<void> {
+    await this.req(`/api/tasks/${encodeURIComponent(id)}/review/rerun`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
+
+  /** Operator manually approves the verdict with a free-form note. */
+  async overrideReview(id: string, note: string): Promise<void> {
+    await this.req(`/api/tasks/${encodeURIComponent(id)}/review/override`, {
+      method: "POST",
+      body: JSON.stringify({ note }),
+    });
+  }
+
+  /** Toggle the per-task review-skip flag. */
+  async setReviewSkip(id: string, skip: boolean): Promise<void> {
+    await this.req(`/api/tasks/${encodeURIComponent(id)}/review/skip`, {
+      method: "POST",
+      body: JSON.stringify({ skip }),
     });
   }
 

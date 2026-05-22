@@ -61,6 +61,7 @@ import {
 } from "./pty.ts";
 import {
   EventBus,
+  appendMessage,
   exchangePairingToken,
   issuePairingToken,
   listSessions,
@@ -122,6 +123,8 @@ import {
   setTaskAutoFlags,
   setTaskModel,
   setTaskMirrorTo,
+  setTaskReview,
+  setTaskReviewSkip,
   updateTodo,
   resolveSession,
   loadConfig,
@@ -1465,9 +1468,44 @@ export function buildServer(opts: BuildServerOptions) {
       title?: string;
       body?: string;
       draft?: boolean;
+      force?: boolean;
     };
     if (!body.title?.trim()) {
       return c.json({ error: "title required" }, 400);
+    }
+    // Adversarial-review gate. When the post-commit reviewer has flagged
+    // the diff as anything other than `approved`, refuse to open the PR
+    // unless the operator passed `force: true`. Surfaces a 409 with the
+    // verdict + notes so the web can render the "override and open"
+    // affordance against real data instead of a generic error.
+    const cfg = loadConfig(paths.root);
+    if (
+      cfg.review.enabled &&
+      cfg.review.blockOnFail &&
+      task.reviewVerdict &&
+      task.reviewVerdict !== "approved" &&
+      body.force !== true
+    ) {
+      return c.json(
+        {
+          error: "review_gate",
+          verdict: task.reviewVerdict,
+          summary: task.reviewSummary ?? null,
+          blockingIssues: task.reviewBlockingIssues ?? [],
+          suggestions: task.reviewSuggestions ?? [],
+          reviewAgent: task.reviewAgent ?? null,
+          reviewModel: task.reviewModel ?? null,
+        },
+        409,
+      );
+    }
+    if (body.force === true && task.reviewVerdict && task.reviewVerdict !== "approved") {
+      appendMessage(
+        db,
+        task.id,
+        "system",
+        `[review] operator override (verdict=${task.reviewVerdict}) — opening PR anyway`,
+      );
     }
     try {
       const r = await createPr({
@@ -1509,6 +1547,70 @@ export function buildServer(opts: BuildServerOptions) {
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
+  });
+
+  /**
+   * Re-run the adversarial reviewer against the current diff. Clears
+   * the prior verdict, flips the badge to `running`, and fires the
+   * reviewer asynchronously — every connected surface updates via the
+   * `task_changed` WS event without polling.
+   */
+  api.post("/tasks/:id/review/rerun", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const cfg = loadConfig(paths.root);
+    if (!cfg.review.enabled) {
+      return c.json({ error: "review is disabled in cfg.review" }, 400);
+    }
+    tasks.rerunReview(id);
+    return c.json({ ok: true });
+  });
+
+  /**
+   * Operator override — manually mark the verdict as approved with a
+   * note. Used when the reviewer is wrong and the operator wants to
+   * unblock the PR-gate without re-running anything.
+   */
+  api.post("/tasks/:id/review/override", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      note?: string;
+    };
+    const note = (body.note ?? "").trim();
+    if (!note) return c.json({ error: "note required" }, 400);
+    setTaskReview(
+      db,
+      id,
+      {
+        verdict: "approved",
+        summary: note.slice(0, 240),
+        blockingIssues: [],
+        suggestions: [],
+      },
+      { agent: null, model: "operator-override" },
+    );
+    appendMessage(db, id, "system", `[review] operator approved: ${note}`);
+    pubTaskChanged(id);
+    return c.json({ ok: true });
+  });
+
+  /**
+   * Toggle the per-task `reviewSkip` flag — bypasses the post-commit
+   * reviewer for trivial tasks (vendored chunks, doc fixes, etc.).
+   */
+  api.post("/tasks/:id/review/skip", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      skip?: boolean;
+    };
+    setTaskReviewSkip(db, id, body.skip !== false);
+    pubTaskChanged(id);
+    return c.json({ ok: true });
   });
 
   /**
