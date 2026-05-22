@@ -503,6 +503,42 @@ export const AgentdConfig = z.object({
     })
     .default({ claude: "xhigh", codex: "high" }),
   /**
+   * Adversarial reviewer that runs after the primary agent commits.
+   * Off by default — when on, the daemon spawns a separate agent
+   * (different model from the primary by default) to critique the
+   * commit's diff before the operator can open a PR.
+   *
+   *   enabled        — turns the post-commit reviewer pass on
+   *   agent          — which CLI runs the review (claude or codex)
+   *   model          — empty inherits `defaultModel[agent]`
+   *   thinkingLevel  — reasoning effort for the reviewer
+   *   blockOnFail    — when on, /pr returns 409 unless verdict is
+   *                    `approved` (operator can pass `force: true`)
+   *   maxDiffBytes   — cap on the diff sent to the reviewer
+   *   timeoutMs      — hard wall-clock kill switch
+   */
+  review: z
+    .object({
+      enabled: z.boolean().default(false),
+      agent: z.enum(["claude", "codex"]).default("claude"),
+      model: z.string().default(""),
+      thinkingLevel: z
+        .enum(["minimal", "low", "medium", "high", "xhigh", "max"])
+        .default("high"),
+      blockOnFail: z.boolean().default(true),
+      maxDiffBytes: z.number().int().positive().default(200_000),
+      timeoutMs: z.number().int().positive().default(5 * 60_000),
+    })
+    .default({
+      enabled: false,
+      agent: "claude",
+      model: "",
+      thinkingLevel: "high",
+      blockOnFail: true,
+      maxDiffBytes: 200_000,
+      timeoutMs: 5 * 60_000,
+    }),
+  /**
    * Prompt presets the GitHub spawn flow uses. Operator-overridable
    * via `cfg.presets.github.{reviewPr,fixIssue}`; same `{placeholder}`
    * interpolation as commit/PR templates.
