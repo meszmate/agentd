@@ -1823,6 +1823,15 @@ export class AgentdClient {
     };
     defaultThinking: { claude: ThinkingLevel; codex: ThinkingLevel };
     defaultModel: { claude: string; codex: string };
+    review: {
+      enabled: boolean;
+      agent: "claude" | "codex";
+      model: string;
+      thinkingLevel: ThinkingLevel;
+      blockOnFail: boolean;
+      maxDiffBytes: number;
+      timeoutMs: number;
+    };
   }> {
     return this.req("/api/admin/settings");
   }
@@ -1839,6 +1848,15 @@ export class AgentdClient {
         codex: ThinkingLevel;
       }>;
       defaultModel: Partial<{ claude: string; codex: string }>;
+      review: Partial<{
+        enabled: boolean;
+        agent: "claude" | "codex";
+        model: string;
+        thinkingLevel: ThinkingLevel;
+        blockOnFail: boolean;
+        maxDiffBytes: number;
+        timeoutMs: number;
+      }>;
     }>,
   ): Promise<{ ok: boolean; settings: Record<string, unknown> }> {
     return this.req("/api/admin/settings", {

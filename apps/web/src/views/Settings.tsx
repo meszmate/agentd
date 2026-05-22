@@ -40,8 +40,19 @@ const SECTIONS: RailItem[] = [
   { id: "thinking", glyph: "✦", label: "Thinking defaults" },
   { id: "ai-helpers", glyph: "✶", label: "AI helpers" },
   { id: "commits", glyph: "◆", label: "Commits & PRs" },
+  { id: "review", glyph: "⌖", label: "Adversarial review" },
   { id: "browser", glyph: "▢", label: "Browser" },
 ];
+
+const REVIEW_DEFAULTS = {
+  enabled: false,
+  agent: "claude" as const,
+  model: "",
+  thinkingLevel: "high" as ThinkingLevel,
+  blockOnFail: true,
+  maxDiffBytes: 200_000,
+  timeoutMs: 5 * 60_000,
+};
 
 type ThinkingLevel =
   | "minimal"
@@ -90,6 +101,25 @@ export function Settings() {
   const [defaultCodex, setDefaultCodex] = useState<ThinkingLevel>("high");
   const [defaultClaudeModel, setDefaultClaudeModel] = useState("");
   const [defaultCodexModel, setDefaultCodexModel] = useState("");
+  const [reviewEnabled, setReviewEnabled] = useState(
+    REVIEW_DEFAULTS.enabled,
+  );
+  const [reviewBlockOnFail, setReviewBlockOnFail] = useState(
+    REVIEW_DEFAULTS.blockOnFail,
+  );
+  const [reviewAgent, setReviewAgent] = useState<"claude" | "codex">(
+    REVIEW_DEFAULTS.agent,
+  );
+  const [reviewModel, setReviewModel] = useState(REVIEW_DEFAULTS.model);
+  const [reviewThinking, setReviewThinking] = useState<ThinkingLevel>(
+    REVIEW_DEFAULTS.thinkingLevel,
+  );
+  const [reviewMaxDiffBytes, setReviewMaxDiffBytes] = useState<number>(
+    REVIEW_DEFAULTS.maxDiffBytes,
+  );
+  const [reviewTimeoutMs, setReviewTimeoutMs] = useState<number>(
+    REVIEW_DEFAULTS.timeoutMs,
+  );
   const [hydrated, setHydrated] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [active, setActive] = useState<string>("agent");
@@ -119,6 +149,18 @@ export function Settings() {
     );
     setDefaultClaudeModel(settingsQ.data.defaultModel?.claude ?? "");
     setDefaultCodexModel(settingsQ.data.defaultModel?.codex ?? "");
+    const rv = settingsQ.data.review;
+    if (rv) {
+      setReviewEnabled(rv.enabled ?? REVIEW_DEFAULTS.enabled);
+      setReviewBlockOnFail(rv.blockOnFail ?? REVIEW_DEFAULTS.blockOnFail);
+      setReviewAgent((rv.agent as "claude" | "codex") ?? REVIEW_DEFAULTS.agent);
+      setReviewModel(rv.model ?? REVIEW_DEFAULTS.model);
+      setReviewThinking(
+        (rv.thinkingLevel as ThinkingLevel) ?? REVIEW_DEFAULTS.thinkingLevel,
+      );
+      setReviewMaxDiffBytes(rv.maxDiffBytes ?? REVIEW_DEFAULTS.maxDiffBytes);
+      setReviewTimeoutMs(rv.timeoutMs ?? REVIEW_DEFAULTS.timeoutMs);
+    }
     setHydrated(true);
   }, [settingsQ.data, hydrated]);
 
@@ -136,7 +178,17 @@ export function Settings() {
       defaultClaude !== (d.defaultThinking?.claude ?? "xhigh") ||
       defaultCodex !== (d.defaultThinking?.codex ?? "high") ||
       defaultClaudeModel !== (d.defaultModel?.claude ?? "") ||
-      defaultCodexModel !== (d.defaultModel?.codex ?? "");
+      defaultCodexModel !== (d.defaultModel?.codex ?? "") ||
+      reviewEnabled !== (d.review?.enabled ?? REVIEW_DEFAULTS.enabled) ||
+      reviewBlockOnFail !==
+        (d.review?.blockOnFail ?? REVIEW_DEFAULTS.blockOnFail) ||
+      reviewAgent !== (d.review?.agent ?? REVIEW_DEFAULTS.agent) ||
+      reviewModel !== (d.review?.model ?? REVIEW_DEFAULTS.model) ||
+      reviewThinking !==
+        (d.review?.thinkingLevel ?? REVIEW_DEFAULTS.thinkingLevel) ||
+      reviewMaxDiffBytes !==
+        (d.review?.maxDiffBytes ?? REVIEW_DEFAULTS.maxDiffBytes) ||
+      reviewTimeoutMs !== (d.review?.timeoutMs ?? REVIEW_DEFAULTS.timeoutMs);
     setDirty(isDirty);
   }, [
     agentInstructions,
@@ -150,6 +202,13 @@ export function Settings() {
     defaultCodex,
     defaultClaudeModel,
     defaultCodexModel,
+    reviewEnabled,
+    reviewBlockOnFail,
+    reviewAgent,
+    reviewModel,
+    reviewThinking,
+    reviewMaxDiffBytes,
+    reviewTimeoutMs,
     hydrated,
     settingsQ.data,
   ]);
@@ -204,6 +263,15 @@ export function Settings() {
         defaultModel: {
           claude: defaultClaudeModel.trim(),
           codex: defaultCodexModel.trim(),
+        },
+        review: {
+          enabled: reviewEnabled,
+          agent: reviewAgent,
+          model: reviewModel.trim(),
+          thinkingLevel: reviewThinking,
+          blockOnFail: reviewBlockOnFail,
+          maxDiffBytes: reviewMaxDiffBytes,
+          timeoutMs: reviewTimeoutMs,
         },
       });
       setSavedFlash(true);
@@ -595,6 +663,132 @@ export function Settings() {
                 }
               />
             </InfoRow>
+          </div>
+
+          {/* Adversarial review */}
+          <div id="section-review">
+            <SectionHeader
+              label="Adversarial review"
+              hint="separate agent reads every commit before you can open a PR"
+              sticky
+            />
+            <ToggleRow
+              label="Enabled"
+              hint={
+                reviewEnabled
+                  ? "A second agent reviews each auto-commit and emits a verdict."
+                  : "Off — no reviewer runs after commits. PR open is unrestricted."
+              }
+              value={reviewEnabled}
+              onChange={setReviewEnabled}
+            />
+            <ToggleRow
+              label="Block PR on fail"
+              hint={
+                reviewBlockOnFail
+                  ? "POST /tasks/:id/pr returns 409 unless verdict is approved. Use Override and open PR to ship anyway."
+                  : "Verdict is advisory only — PR open is never blocked."
+              }
+              value={reviewBlockOnFail}
+              onChange={setReviewBlockOnFail}
+            />
+            <InfoRow
+              label="Reviewer agent"
+              hint="Picks a different agent than the primary so blind spots don't overlap."
+            >
+              <div className="flex flex-wrap gap-1.5">
+                {(["claude", "codex"] as const).map((a) => {
+                  const on = reviewAgent === a;
+                  return (
+                    <button
+                      key={a}
+                      type="button"
+                      onClick={() => setReviewAgent(a)}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border text-[11px] transition-colors",
+                        on
+                          ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+                          : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
+                      )}
+                    >
+                      <span className="font-mono">{a}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </InfoRow>
+            <InfoRow
+              label="Reviewer model"
+              hint={
+                <>
+                  Empty inherits{" "}
+                  <code className="font-mono text-[10px]">
+                    defaultModel.{reviewAgent}
+                  </code>
+                  . Use a different model than the primary for the most
+                  signal.
+                </>
+              }
+            >
+              <Input
+                value={reviewModel}
+                onChange={(e) => setReviewModel(e.target.value)}
+                placeholder={(() => {
+                  const list = modelsQ.data?.models[reviewAgent] ?? [];
+                  const def =
+                    list.find((m) => m.tier === "deepest") ?? list[0];
+                  return def ? `(inherit) e.g. ${def.id}` : "(inherit)";
+                })()}
+                className="font-mono w-72"
+              />
+            </InfoRow>
+            <InfoRow
+              label="Reviewer effort"
+              hint="Higher means slower / deeper critique."
+            >
+              <ThinkingPicker
+                value={reviewThinking}
+                onChange={setReviewThinking}
+                agent={reviewAgent}
+              />
+            </InfoRow>
+            <InfoRow
+              label="Max diff bytes"
+              hint="Cap on the diff handed to the reviewer. Larger diffs get truncated with a flag in the prompt."
+            >
+              <Input
+                value={String(reviewMaxDiffBytes)}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n) && n > 0) setReviewMaxDiffBytes(n);
+                }}
+                inputMode="numeric"
+                className="font-mono w-36"
+              />
+            </InfoRow>
+            <InfoRow
+              label="Timeout (ms)"
+              hint="Hard wall-clock kill switch. After this the reviewer is killed and the verdict lands as error."
+            >
+              <Input
+                value={String(reviewTimeoutMs)}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n) && n > 0) setReviewTimeoutMs(n);
+                }}
+                inputMode="numeric"
+                className="font-mono w-36"
+              />
+            </InfoRow>
+            {reviewAgent === settingsQ.data?.aiHelpers?.binary &&
+              reviewModel === (settingsQ.data?.defaultModel?.[reviewAgent] ?? "") &&
+              !reviewModel && (
+                <div className="px-5 py-2 text-[10px] text-amber-700 dark:text-amber-300">
+                  Reviewer model is identical to the primary's default — the
+                  value of adversarial review approaches zero. Pin a
+                  different model above.
+                </div>
+              )}
           </div>
 
           {/* Browser */}

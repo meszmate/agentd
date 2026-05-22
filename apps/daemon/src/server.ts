@@ -3065,6 +3065,7 @@ export function buildServer(opts: BuildServerOptions) {
       aiHelpers: cfg.aiHelpers,
       defaultThinking: cfg.defaultThinking,
       defaultModel: cfg.defaultModel,
+      review: cfg.review,
     });
   });
 
@@ -3164,6 +3165,79 @@ export function buildServer(opts: BuildServerOptions) {
       next.defaultModel = cur;
       changed = true;
     }
+    if ("review" in body) {
+      const rv = body.review as Record<string, unknown> | null | undefined;
+      if (!rv || typeof rv !== "object") {
+        return c.json({ error: "review must be an object" }, 400);
+      }
+      const cur = { ...cfg.review };
+      if (rv.enabled !== undefined) {
+        if (typeof rv.enabled !== "boolean") {
+          return c.json({ error: "review.enabled must be boolean" }, 400);
+        }
+        cur.enabled = rv.enabled;
+      }
+      if (rv.blockOnFail !== undefined) {
+        if (typeof rv.blockOnFail !== "boolean") {
+          return c.json({ error: "review.blockOnFail must be boolean" }, 400);
+        }
+        cur.blockOnFail = rv.blockOnFail;
+      }
+      if (rv.agent !== undefined) {
+        if (rv.agent !== "claude" && rv.agent !== "codex") {
+          return c.json({ error: "review.agent must be claude|codex" }, 400);
+        }
+        cur.agent = rv.agent;
+      }
+      if (rv.model !== undefined) {
+        if (typeof rv.model !== "string") {
+          return c.json({ error: "review.model must be a string" }, 400);
+        }
+        cur.model = rv.model.trim();
+      }
+      if (rv.thinkingLevel !== undefined) {
+        const allowed = [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+        ] as const;
+        if (
+          typeof rv.thinkingLevel !== "string" ||
+          !allowed.includes(rv.thinkingLevel as (typeof allowed)[number])
+        ) {
+          return c.json(
+            { error: `review.thinkingLevel must be one of ${allowed.join("|")}` },
+            400,
+          );
+        }
+        cur.thinkingLevel = rv.thinkingLevel as (typeof allowed)[number];
+      }
+      if (rv.maxDiffBytes !== undefined) {
+        const n = Number(rv.maxDiffBytes);
+        if (!Number.isFinite(n) || n <= 0) {
+          return c.json(
+            { error: "review.maxDiffBytes must be a positive number" },
+            400,
+          );
+        }
+        cur.maxDiffBytes = Math.floor(n);
+      }
+      if (rv.timeoutMs !== undefined) {
+        const n = Number(rv.timeoutMs);
+        if (!Number.isFinite(n) || n <= 0) {
+          return c.json(
+            { error: "review.timeoutMs must be a positive number" },
+            400,
+          );
+        }
+        cur.timeoutMs = Math.floor(n);
+      }
+      next.review = cur;
+      changed = true;
+    }
     if (!changed) return c.json({ error: "no valid keys in patch" }, 400);
     saveConfig(paths.root, next);
     return c.json({
@@ -3176,6 +3250,7 @@ export function buildServer(opts: BuildServerOptions) {
         aiHelpers: next.aiHelpers,
         defaultThinking: next.defaultThinking,
         defaultModel: next.defaultModel,
+        review: next.review,
       },
     });
   });
