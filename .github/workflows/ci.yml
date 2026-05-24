@@ -71,16 +71,26 @@ jobs:
       # We don't have the agent CLIs (claude, codex) on CI, so we can't actually
       # run a task end-to-end. We can verify the daemon boots, serves /health,
       # mints a pairing token, and exchanges it for a session.
+      # AGENTD_NO_AUTOBUILD=1 skips the on-boot Vite build of the web bundle —
+      # the smoke test only hits HTTP endpoints, so the UI is unused, and the
+      # build otherwise blocks Bun.serve from binding for ~20-30s.
       - name: Boot daemon and exercise pair → health → tasks
+        env:
+          AGENTD_NO_AUTOBUILD: "1"
         run: |
           bun apps/daemon/src/index.ts --root "$RUNNER_TEMP/agentd-ci" > "$RUNNER_TEMP/daemon.log" 2>&1 &
           DPID=$!
-          # wait up to 10s for the daemon to be ready
-          for i in {1..20}; do
+          # wait up to 30s for the daemon to be ready
+          for i in {1..60}; do
             if curl -sf http://127.0.0.1:3773/health > /dev/null; then break; fi
             sleep 0.5
           done
-          curl -sf http://127.0.0.1:3773/health
+          if ! curl -sf http://127.0.0.1:3773/health; then
+            echo "daemon never became healthy — dumping log:"
+            cat "$RUNNER_TEMP/daemon.log"
+            kill "$DPID" || true
+            exit 1
+          fi
           TOKEN=$(grep -oE 'token:  [A-Za-z0-9_-]+' "$RUNNER_TEMP/daemon.log" | awk '{print $2}' | head -1)
           if [ -z "$TOKEN" ]; then
             echo "no pairing token printed"

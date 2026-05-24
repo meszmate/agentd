@@ -1077,7 +1077,16 @@ export async function cmdPr(
   const body = pipe >= 0 ? trimmed.slice(pipe + 1).trim() : undefined;
   try {
     const r = await ctx.client.openPrForTask(id, { title, body });
-    await msg.reply(`PR opened: ${r.url}`);
+    if ("reviewGate" in r) {
+      const summary = r.reviewGate.summary
+        ? ` — ${r.reviewGate.summary}`
+        : "";
+      await msg.reply(
+        `PR blocked by reviewer (verdict=${r.reviewGate.verdict})${summary}. Run /pr again with !force to override.`,
+      );
+    } else {
+      await msg.reply(`PR opened: ${r.url}`);
+    }
   } catch (e) {
     await msg.reply((e as Error).message);
   }

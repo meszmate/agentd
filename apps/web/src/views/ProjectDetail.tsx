@@ -73,6 +73,7 @@ import {
   useProjectBranches,
   useProjectGitState,
   usePullProject,
+  useRefreshProjectBranches,
   useSkills,
   useTasks,
   useUpdateProject,
@@ -599,6 +600,9 @@ function ProjectComposer({
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("high");
   const [model, setModel] = useState<string>("");
   const [base, setBase] = useState("");
+  // When set, spawn the task on this existing branch (local or remote)
+  // instead of creating a new branch off `base`. "" = auto/new-branch.
+  const [existingBranch, setExistingBranch] = useState("");
   const [autoCommit, setAutoCommit] = useState(true);
   const [autoPush, setAutoPush] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -624,6 +628,7 @@ function ProjectComposer({
   // Pre-fill the base field with this project's actual default branch
   // (`main`/`master`/`trunk`/...) when the operator hasn't typed one.
   const branchesQ = useProjectBranches(project.id);
+  const refreshBranches = useRefreshProjectBranches(project.id);
   useEffect(() => {
     const detected = branchesQ.data?.default;
     if (!detected) return;
@@ -656,6 +661,7 @@ function ProjectComposer({
     try {
       // Empty = let the daemon detect the repo's default branch.
       const finalBase = base.trim();
+      const onExisting = existingBranch.trim();
       const res = await create.mutateAsync({
         agent,
         repoPath: project.path,
@@ -666,6 +672,9 @@ function ProjectComposer({
         permissionMode,
         thinkingLevel,
         ...(model.trim() ? { model: model.trim() } : {}),
+        ...(onExisting
+          ? { branchMode: "existing" as const, branchName: onExisting }
+          : {}),
       });
       void patchPrefs.mutateAsync({
         lastProjectId: project.id,
@@ -713,6 +722,16 @@ function ProjectComposer({
         rows={3}
         placeholder="Tell the agent what to do here…"
         className="border-0 rounded-none focus-visible:ring-0 resize-none bg-transparent text-[14px] leading-relaxed px-4 py-3 shadow-none"
+      />
+      <ProjectBranchRow
+        branches={branchesQ.data}
+        loading={branchesQ.isLoading}
+        refetching={refreshBranches.isPending}
+        onRefresh={() => refreshBranches.mutate()}
+        existingBranch={existingBranch}
+        setExistingBranch={setExistingBranch}
+        base={base}
+        setBase={setBase}
       />
       <div className="flex flex-wrap items-center gap-2 border-t border-ink-900/[0.06] bg-paper-100/40 px-3 py-2 dark:border-ink-50/[0.06] dark:bg-ink-900/30">
         <ToolbarPick
@@ -770,15 +789,6 @@ function ProjectComposer({
             setAutoPush(next.autoPush);
           }}
         />
-        <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
-          base
-        </span>
-        <input
-          value={base}
-          onChange={(e) => setBase(e.target.value)}
-          spellCheck={false}
-          className="font-mono text-[11px] bg-transparent border-0 outline-none focus:ring-0 text-ink-900 dark:text-ink-50 placeholder:text-ink-400 w-24"
-        />
         <Spacer />
         <Button
           size="sm"
@@ -794,6 +804,264 @@ function ProjectComposer({
         </Button>
       </div>
     </section>
+  );
+}
+
+/**
+ * Dedicated branch row that sits between the prompt and the run-options
+ * toolbar. Surfaces the branch picker prominently (operators kept missing
+ * it when it was buried as the 6th pill in the wrapping toolbar) and
+ * makes it crystal-clear what'll happen on spawn: either a fresh branch
+ * off `<base>`, or a worktree checked out onto an existing local/remote
+ * branch.
+ */
+function ProjectBranchRow({
+  branches,
+  loading,
+  refetching,
+  onRefresh,
+  existingBranch,
+  setExistingBranch,
+  base,
+  setBase,
+}: {
+  branches:
+    | {
+        current: string | null;
+        local: string[];
+        remote: { remote: string; ref: string }[];
+      }
+    | undefined;
+  loading: boolean;
+  refetching: boolean;
+  onRefresh: () => void;
+  existingBranch: string;
+  setExistingBranch: (v: string) => void;
+  base: string;
+  setBase: (v: string) => void;
+}) {
+  const isExisting = !!existingBranch;
+  const remoteHit = branches?.remote.find((r) => r.ref === existingBranch);
+  const localHit = branches?.local.includes(existingBranch);
+  const existingScope = isExisting
+    ? localHit
+      ? "local"
+      : remoteHit
+        ? `remote · ${remoteHit.remote || "origin"}`
+        : "branch"
+    : null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-t border-ink-900/[0.06] bg-paper-100/40 px-3 py-2 dark:border-ink-50/[0.06] dark:bg-ink-900/30">
+      <GitBranch className="h-3.5 w-3.5 text-ember-500 shrink-0" />
+      <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+        branch
+      </span>
+      <ProjectBranchPick
+        branches={branches}
+        loading={loading}
+        value={existingBranch}
+        onChange={setExistingBranch}
+        onRefresh={onRefresh}
+        refetching={refetching}
+      />
+      {isExisting ? (
+        <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400 italic">
+          → worktree checks out{" "}
+          <span className="text-ember-700 dark:text-ember-300 not-italic">
+            {existingBranch}
+          </span>{" "}
+          <span className="text-ink-400 dark:text-ink-500">({existingScope})</span>
+        </span>
+      ) : (
+        <>
+          <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+            off
+          </span>
+          <input
+            value={base}
+            onChange={(e) => setBase(e.target.value)}
+            placeholder={branches?.current ?? "main"}
+            spellCheck={false}
+            className="font-mono text-[11px] h-7 px-2 rounded-md border border-ink-900/10 bg-paper-50 text-ink-900 placeholder:text-ink-400 outline-none transition-colors hover:border-ink-900/25 focus:border-ember-500/40 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-50 w-32"
+          />
+          <span className="font-mono text-[10px] text-ink-500 dark:text-ink-400 italic">
+            → new branch in a fresh worktree
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Inline branch picker for the project composer toolbar. "auto" = create
+ * a new branch off the base (default). Picking an existing branch flips
+ * the task into `branchMode: "existing"` so the worktree lands on that
+ * branch — works for local AND remote-only branches (the daemon creates
+ * a tracking branch off `origin/<name>` when the local doesn't exist).
+ */
+function ProjectBranchPick({
+  branches,
+  loading,
+  value,
+  onChange,
+  onRefresh,
+  refetching,
+}: {
+  branches:
+    | {
+        current: string | null;
+        local: string[];
+        remote: { remote: string; ref: string }[];
+      }
+    | undefined;
+  loading: boolean;
+  value: string;
+  onChange: (v: string) => void;
+  onRefresh?: () => void;
+  refetching?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState("");
+  useEffect(() => {
+    if (!open) setFilter("");
+  }, [open]);
+
+  const local = branches?.local ?? [];
+  const remote = branches?.remote ?? [];
+  const localSet = useMemo(() => new Set(local), [local]);
+  const remoteOnly = useMemo(
+    () => remote.filter((r) => r.ref && !localSet.has(r.ref)),
+    [remote, localSet],
+  );
+  const remoteCount = remoteOnly.length;
+
+  const q = filter.trim().toLowerCase();
+  const localFiltered = q ? local.filter((b) => b.toLowerCase().includes(q)) : local;
+  const remoteFiltered = q
+    ? remoteOnly.filter((r) => r.ref.toLowerCase().includes(q))
+    : remoteOnly;
+
+  // Build a one-line summary for the trigger button so the affordance
+  // *itself* hints that picking is possible — "auto · 12 branches" beats
+  // "branch: auto" when the operator is wondering whether they can pick.
+  const triggerLabel = value
+    ? value
+    : remoteCount > 0
+      ? `auto · ${local.length} local · ${remoteCount} remote`
+      : local.length > 0
+        ? `auto · ${local.length} local`
+        : loading
+          ? "loading…"
+          : "auto · new branch";
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-ink-900/15 bg-paper-50 font-mono text-[11px] text-ink-700 hover:border-ember-500/40 hover:bg-paper-100 dark:border-ink-50/15 dark:bg-ink-800 dark:text-ink-200 dark:hover:bg-ink-700 transition-colors min-w-[200px] justify-between"
+          title="pick an existing branch (local or remote) or stay on auto"
+        >
+          <GitBranch className="h-3 w-3 text-ink-400 dark:text-ink-500 shrink-0" />
+          <span className="truncate flex-1 text-left">{triggerLabel}</span>
+          {loading && <Loader2 className="h-3 w-3 animate-spin shrink-0" />}
+          <ChevronDown className="h-3 w-3 opacity-60 shrink-0" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-[340px] p-0">
+        <div className="flex items-center gap-1 border-b border-ink-900/[0.06] px-2 py-1 dark:border-ink-50/[0.06]">
+          <input
+            autoFocus
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="filter branches…"
+            className="flex-1 h-6 px-1 bg-transparent border-0 outline-none font-mono text-[11px] placeholder:text-ink-400 dark:placeholder:text-ink-500"
+          />
+          {onRefresh && (
+            <button
+              type="button"
+              onClick={onRefresh}
+              disabled={refetching}
+              title="git fetch origin and reload the branch list"
+              className="inline-flex items-center gap-1 h-6 px-1.5 rounded font-mono text-[9px] uppercase tracking-[0.08em] text-ink-500 hover:text-ember-700 hover:bg-ember-500/10 dark:text-ink-400 dark:hover:text-ember-300 disabled:opacity-40 transition-colors"
+            >
+              {refetching ? (
+                <Loader2 className="h-2.5 w-2.5 animate-spin" />
+              ) : (
+                <ArrowDown className="h-2.5 w-2.5" />
+              )}
+              fetch
+            </button>
+          )}
+        </div>
+        <div className="max-h-72 overflow-y-auto py-1">
+          <DropdownMenuItem onClick={() => onChange("")}>
+            <Sparkles className="h-3 w-3 text-ink-400 dark:text-ink-500" />
+            <span className="font-mono text-[11px] flex-1">
+              auto · new branch off base
+            </span>
+            {!value && (
+              <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
+                ✓
+              </span>
+            )}
+          </DropdownMenuItem>
+          {localFiltered.length > 0 && (
+            <>
+              <div className="px-3 pt-1.5 pb-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+                local
+              </div>
+              {localFiltered.map((b) => (
+                <DropdownMenuItem key={`local:${b}`} onClick={() => onChange(b)}>
+                  <GitBranch className="h-3 w-3 text-ink-400 dark:text-ink-500" />
+                  <span className="font-mono text-[11px] flex-1 truncate">{b}</span>
+                  {b === branches?.current && (
+                    <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
+                      current
+                    </span>
+                  )}
+                  {b === value && (
+                    <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
+                      ✓
+                    </span>
+                  )}
+                </DropdownMenuItem>
+              ))}
+            </>
+          )}
+          {remoteFiltered.length > 0 && (
+            <>
+              <div className="px-3 pt-1.5 pb-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+                remote
+              </div>
+              {remoteFiltered.map((r) => (
+                <DropdownMenuItem
+                  key={`${r.remote}:${r.ref}`}
+                  onClick={() => onChange(r.ref)}
+                >
+                  <GitBranch className="h-3 w-3 text-ink-400 dark:text-ink-500" />
+                  <span className="font-mono text-[11px] flex-1 truncate">{r.ref}</span>
+                  <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-ink-400 dark:text-ink-500">
+                    {r.remote || "origin"}
+                  </span>
+                  {r.ref === value && (
+                    <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-ember-700 dark:text-ember-300">
+                      ✓
+                    </span>
+                  )}
+                </DropdownMenuItem>
+              ))}
+            </>
+          )}
+          {localFiltered.length === 0 && remoteFiltered.length === 0 && (
+            <div className="px-3 py-3 text-center text-[11px] text-ink-500 dark:text-ink-400">
+              {loading ? "loading…" : "no branches match"}
+            </div>
+          )}
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

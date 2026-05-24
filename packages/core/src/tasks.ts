@@ -1,8 +1,11 @@
 import { and, desc, eq, lt } from "drizzle-orm";
 import type {
+  AgentKind,
   Message,
   MirrorTarget,
   PermissionMode,
+  ReviewReport,
+  ReviewVerdict,
   Task,
   TaskStatus,
   ThinkingLevel,
@@ -131,7 +134,73 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     githubPrIsDraft:
       row.githubPrIsDraft == null ? undefined : row.githubPrIsDraft === 1,
     githubIssueState: row.githubIssueState ?? null,
+    reviewVerdict: (row.reviewVerdict as ReviewVerdict | null) ?? null,
+    reviewSummary: row.reviewSummary ?? null,
+    reviewBlockingIssues: parseStringArray(row.reviewBlockingIssuesJson),
+    reviewSuggestions: parseStringArray(row.reviewSuggestionsJson),
+    reviewAgent: (row.reviewAgent as AgentKind | null) ?? null,
+    reviewModel: row.reviewModel ?? null,
+    reviewedAt: row.reviewedAt ?? null,
+    reviewSkip: row.reviewSkip === 1,
   };
+}
+
+function parseStringArray(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) {
+      return arr.filter((s): s is string => typeof s === "string");
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+/**
+ * Persist a fresh review verdict against a task. Pass `null` for
+ * `report` to clear the review (e.g. before a re-run).
+ */
+export function setTaskReview(
+  db: Db,
+  id: string,
+  report: ReviewReport | null,
+  meta?: { agent?: AgentKind | null; model?: string | null },
+): Task | null {
+  const patch: Record<string, unknown> = { updatedAt: Date.now() };
+  if (report == null) {
+    patch.reviewVerdict = null;
+    patch.reviewSummary = null;
+    patch.reviewBlockingIssuesJson = null;
+    patch.reviewSuggestionsJson = null;
+    patch.reviewAgent = null;
+    patch.reviewModel = null;
+    patch.reviewedAt = null;
+  } else {
+    patch.reviewVerdict = report.verdict;
+    patch.reviewSummary = report.summary ?? null;
+    patch.reviewBlockingIssuesJson = JSON.stringify(report.blockingIssues ?? []);
+    patch.reviewSuggestionsJson = JSON.stringify(report.suggestions ?? []);
+    if (meta?.agent !== undefined) patch.reviewAgent = meta.agent;
+    if (meta?.model !== undefined) patch.reviewModel = meta.model;
+    patch.reviewedAt = Date.now();
+  }
+  db.update(tasks).set(patch).where(eq(tasks.id, id)).run();
+  return getTask(db, id);
+}
+
+/** Toggle the per-task review-skip flag (operator-only). */
+export function setTaskReviewSkip(
+  db: Db,
+  id: string,
+  skip: boolean,
+): Task | null {
+  db.update(tasks)
+    .set({ reviewSkip: skip ? 1 : 0, updatedAt: Date.now() })
+    .where(eq(tasks.id, id))
+    .run();
+  return getTask(db, id);
 }
 
 /** Persist the Discord thread spawned for this task. Cleared on archive. */

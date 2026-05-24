@@ -33,6 +33,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useApp, useClient } from "@/AppContext";
+import { ReviewBadge } from "@/components/review-badge";
 import { cn } from "@/lib/utils";
 
 const COMMIT_PREFIXES = [
@@ -525,7 +526,10 @@ function PrDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, task]);
 
-  const submit = async () => {
+  const reviewBlocked =
+    !!task.reviewVerdict && task.reviewVerdict !== "approved";
+
+  const submit = async (force: boolean = false) => {
     setPending("push");
     try {
       try {
@@ -541,7 +545,15 @@ function PrDialog({
         title,
         body,
         draft,
+        force,
       });
+      if ("reviewGate" in r) {
+        const note = r.reviewGate.summary
+          ? `Review verdict: ${r.reviewGate.verdict} — ${r.reviewGate.summary}`
+          : `Review verdict: ${r.reviewGate.verdict}`;
+        toast(note, true);
+        return;
+      }
       if (r.url) {
         toast(`Opened ${r.url}`);
         window.open(r.url, "_blank", "noopener");
@@ -689,11 +701,43 @@ function PrDialog({
           </p>
         </div>
 
+        {reviewBlocked && (
+          <div className="flex items-center justify-between gap-2 rounded border border-amber-500/40 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+            <div className="flex items-center gap-2">
+              <ReviewBadge task={task} />
+              <span>
+                {task.reviewVerdict === "running"
+                  ? "Reviewer is still reading the diff."
+                  : "Reviewer flagged this diff. Use Override to ship anyway."}
+              </span>
+            </div>
+          </div>
+        )}
         <DialogFooter>
           <Button variant="ghost" onClick={onClose} disabled={pending != null}>
             Cancel
           </Button>
-          <Button onClick={submit} disabled={!valid || pending != null}>
+          {reviewBlocked && task.reviewVerdict !== "running" && (
+            <Button
+              variant="outline"
+              onClick={() => {
+                if (
+                  window.confirm(
+                    `Reviewer verdict is "${task.reviewVerdict}". Open the PR anyway?`,
+                  )
+                ) {
+                  void submit(true);
+                }
+              }}
+              disabled={!valid || pending != null}
+            >
+              Override and open PR
+            </Button>
+          )}
+          <Button
+            onClick={() => void submit(false)}
+            disabled={!valid || pending != null || reviewBlocked}
+          >
             {pending != null ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (

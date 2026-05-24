@@ -23,24 +23,53 @@ export function TaskActivity({
   const entries = useMemo(() => buildActivityEntries(messages), [messages]);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const tailRef = useRef<HTMLDivElement | null>(null);
+  const innerRef = useRef<HTMLDivElement | null>(null);
   const followRef = useRef(true);
+  // True while we're programmatically scrolling so the scroll handler
+  // doesn't mistake "we just snapped to the bottom" for "operator
+  // scrolled" and accidentally turn follow mode off mid-snap.
+  const selfScrollRef = useRef(false);
 
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el) return;
+    const inner = innerRef.current;
+    if (!el || !inner) return;
+
+    const stickToBottom = () => {
+      selfScrollRef.current = true;
+      el.scrollTop = el.scrollHeight;
+      // Clear on the next frame — by then the scroll event we caused
+      // has already fired and been ignored.
+      requestAnimationFrame(() => {
+        selfScrollRef.current = false;
+      });
+    };
+
     const onScroll = () => {
+      if (selfScrollRef.current) return;
       const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
       followRef.current = distFromBottom < 80;
     };
     el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
-  }, []);
 
-  useEffect(() => {
-    if (!followRef.current) return;
-    tailRef.current?.scrollIntoView({ block: "end" });
-  }, [entries.length, entries[entries.length - 1]?.key]);
+    // The live feed grows in two ways: new entries (covered by
+    // `entries.length`), and existing entries getting taller after
+    // mount as their tool output streams in or `EditDiffPreview`
+    // lazy-fetches file context. A ResizeObserver on the inner
+    // content catches both, so follow mode actually keeps up.
+    const ro = new ResizeObserver(() => {
+      if (followRef.current) stickToBottom();
+    });
+    ro.observe(inner);
+
+    // Initial pin on mount — entries may already be present.
+    stickToBottom();
+
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      ro.disconnect();
+    };
+  }, []);
 
   if (entries.length === 0) {
     return (
@@ -63,7 +92,7 @@ export function TaskActivity({
       ref={scrollRef}
       className="h-full overflow-y-auto px-3 py-2 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded [&::-webkit-scrollbar-thumb]:bg-ink-900/15 dark:[&::-webkit-scrollbar-thumb]:bg-ink-50/15 [&::-webkit-scrollbar-track]:bg-transparent"
     >
-      <div className="space-y-1">
+      <div ref={innerRef} className="space-y-1">
         {entries.map((e) => (
           <ToolLine
             key={e.key}
@@ -74,7 +103,6 @@ export function TaskActivity({
             taskId={taskId}
           />
         ))}
-        <div ref={tailRef} />
       </div>
     </div>
   );

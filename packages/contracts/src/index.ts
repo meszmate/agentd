@@ -176,6 +176,45 @@ export const MirrorTarget = z.object({
 });
 export type MirrorTarget = z.infer<typeof MirrorTarget>;
 
+/**
+ * Outcome of the adversarial reviewer pass that runs after the primary
+ * agent commits.
+ *
+ *   pending          — review hasn't started yet (default)
+ *   running          — reviewer is mid-stream
+ *   approved         — reviewer signed off; PR open is unblocked
+ *   request_changes  — reviewer flagged non-blocking concerns
+ *   blocked          — reviewer found a hard-blocker; PR open is gated
+ *   error            — reviewer crashed / timed out / produced no
+ *                      parseable verdict. Treated as a block when
+ *                      `cfg.review.blockOnFail` is true.
+ */
+export const ReviewVerdict = z.enum([
+  "pending",
+  "running",
+  "approved",
+  "request_changes",
+  "blocked",
+  "error",
+]);
+export type ReviewVerdict = z.infer<typeof ReviewVerdict>;
+
+/**
+ * Structured verdict the adversarial reviewer must emit at the end of
+ * its run. The reviewer's system prompt requires this JSON block; the
+ * daemon parses + validates it and persists alongside the task.
+ */
+export const ReviewReport = z.object({
+  verdict: ReviewVerdict,
+  /** One-line summary suitable for the badge popover. */
+  summary: z.string().default(""),
+  /** Hard blockers that prevent shipping. Empty for `approved`. */
+  blockingIssues: z.array(z.string()).default([]),
+  /** Non-blocking nits the operator might want to fold in later. */
+  suggestions: z.array(z.string()).default([]),
+});
+export type ReviewReport = z.infer<typeof ReviewReport>;
+
 export const TaskStatus = z.enum([
   "pending",
   "running",
@@ -358,6 +397,24 @@ export const Task = z.object({
    * Refreshed on the same triggers as `githubPrState`.
    */
   githubIssueState: z.string().nullable().optional(),
+  /**
+   * Adversarial review state. Populated by the post-commit reviewer
+   * hook when `cfg.review.enabled` is on. The PR-open endpoint gates
+   * on `reviewVerdict !== "approved"` when `cfg.review.blockOnFail`
+   * is on; operators can override with `{ force: true }`.
+   */
+  reviewVerdict: ReviewVerdict.nullable().optional(),
+  reviewSummary: z.string().nullable().optional(),
+  reviewBlockingIssues: z.array(z.string()).optional(),
+  reviewSuggestions: z.array(z.string()).optional(),
+  reviewAgent: AgentKind.nullable().optional(),
+  reviewModel: z.string().nullable().optional(),
+  reviewedAt: z.number().nullable().optional(),
+  /**
+   * When true, the completion hook skips the reviewer for this task —
+   * trivial doc fixes, vendored chunks, etc. Operator-toggleable.
+   */
+  reviewSkip: z.boolean().optional(),
 });
 export type Task = z.infer<typeof Task>;
 

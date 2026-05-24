@@ -1345,6 +1345,22 @@ export class AgentdClient {
     });
   }
 
+  async deleteTaskRemoteBranch(
+    id: string,
+    opts: { remote?: string } = {},
+  ): Promise<
+    | { ok: true; branch: string; remote: string }
+    | { ok: false; error: string }
+  > {
+    return this.req(
+      `/api/tasks/${encodeURIComponent(id)}/delete-remote-branch`,
+      {
+        method: "POST",
+        body: JSON.stringify(opts),
+      },
+    );
+  }
+
   async setTaskThinkingLevel(
     id: string,
     thinkingLevel: ThinkingLevel,
@@ -1601,11 +1617,82 @@ export class AgentdClient {
 
   async openPrForTask(
     id: string,
-    req: { title: string; body?: string; draft?: boolean },
-  ): Promise<{ url: string; output: string }> {
-    return this.req(`/api/tasks/${encodeURIComponent(id)}/pr`, {
+    req: { title: string; body?: string; draft?: boolean; force?: boolean },
+  ): Promise<
+    | { url: string; output: string }
+    | {
+        reviewGate: {
+          verdict: string;
+          summary: string | null;
+          blockingIssues: string[];
+          suggestions: string[];
+          reviewAgent: string | null;
+          reviewModel: string | null;
+        };
+      }
+  > {
+    const path = `/api/tasks/${encodeURIComponent(id)}/pr`;
+    const r = await fetch(this.server + path, {
       method: "POST",
+      headers: this.headers(),
       body: JSON.stringify(req),
+    });
+    if (r.status === 409) {
+      const body = (await r.json().catch(() => null)) as
+        | {
+            error?: string;
+            verdict?: string;
+            summary?: string | null;
+            blockingIssues?: string[];
+            suggestions?: string[];
+            reviewAgent?: string | null;
+            reviewModel?: string | null;
+          }
+        | null;
+      if (body && body.error === "review_gate" && body.verdict) {
+        return {
+          reviewGate: {
+            verdict: body.verdict,
+            summary: body.summary ?? null,
+            blockingIssues: body.blockingIssues ?? [],
+            suggestions: body.suggestions ?? [],
+            reviewAgent: body.reviewAgent ?? null,
+            reviewModel: body.reviewModel ?? null,
+          },
+        };
+      }
+    }
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`POST ${path} → ${r.status}: ${text}`);
+    }
+    return (await r.json()) as { url: string; output: string };
+  }
+
+  /**
+   * Re-run the post-commit adversarial reviewer for a task. Returns
+   * immediately; verdict updates land via the WS bus.
+   */
+  async rerunReview(id: string): Promise<void> {
+    await this.req(`/api/tasks/${encodeURIComponent(id)}/review/rerun`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
+
+  /** Operator manually approves the verdict with a free-form note. */
+  async overrideReview(id: string, note: string): Promise<void> {
+    await this.req(`/api/tasks/${encodeURIComponent(id)}/review/override`, {
+      method: "POST",
+      body: JSON.stringify({ note }),
+    });
+  }
+
+  /** Toggle the per-task review-skip flag. */
+  async setReviewSkip(id: string, skip: boolean): Promise<void> {
+    await this.req(`/api/tasks/${encodeURIComponent(id)}/review/skip`, {
+      method: "POST",
+      body: JSON.stringify({ skip }),
     });
   }
 
@@ -1754,6 +1841,15 @@ export class AgentdClient {
     };
     defaultThinking: { claude: ThinkingLevel; codex: ThinkingLevel };
     defaultModel: { claude: string; codex: string };
+    review: {
+      enabled: boolean;
+      agent: "claude" | "codex";
+      model: string;
+      thinkingLevel: ThinkingLevel;
+      blockOnFail: boolean;
+      maxDiffBytes: number;
+      timeoutMs: number;
+    };
   }> {
     return this.req("/api/admin/settings");
   }
@@ -1770,6 +1866,15 @@ export class AgentdClient {
         codex: ThinkingLevel;
       }>;
       defaultModel: Partial<{ claude: string; codex: string }>;
+      review: Partial<{
+        enabled: boolean;
+        agent: "claude" | "codex";
+        model: string;
+        thinkingLevel: ThinkingLevel;
+        blockOnFail: boolean;
+        maxDiffBytes: number;
+        timeoutMs: number;
+      }>;
     }>,
   ): Promise<{ ok: boolean; settings: Record<string, unknown> }> {
     return this.req("/api/admin/settings", {
@@ -2137,6 +2242,7 @@ export class AgentdClient {
 
   async listProjectBranches(
     idOrSlug: string,
+    opts: { fetch?: boolean } = {},
   ): Promise<{
     current: string | null;
     local: string[];
@@ -2149,8 +2255,9 @@ export class AgentdClient {
      */
     default: string;
   }> {
+    const qs = opts.fetch ? "?fetch=1" : "";
     return this.req(
-      `/api/projects/${encodeURIComponent(idOrSlug)}/branches`,
+      `/api/projects/${encodeURIComponent(idOrSlug)}/branches${qs}`,
     );
   }
 

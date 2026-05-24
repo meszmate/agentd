@@ -244,7 +244,10 @@ function buildAiHelperArgv(
     // option '--config'". Modern codex still accepts `-c` as the
     // canonical short form.
     argv.push("-c", `model_reasoning_effort="${codexEffort}"`);
-    if (cwd) argv.push("--cd", cwd);
+    // No `--cd` flag: older codex builds reject it outright with
+    // "invalid option --cd" and the rater bubbles that up as a parse
+    // failure. Bun.spawn's `cwd` (set by the caller) already pins the
+    // process working directory, which is what `--cd` was meant to do.
     argv.push(prompt);
     return argv;
   }
@@ -655,10 +658,172 @@ export async function hasChanges(cwd: string): Promise<boolean> {
   return r.stdout.trim().length > 0;
 }
 
+/**
+ * Trailer-shaped lines we strip from every commit message agentd
+ * produces (or rewrites after the fact). Operator's complaint: no
+ * `Co-authored-by:`, no defaults, nothing of that form — ever. This
+ * regex is applied per-line, case-insensitively, after surrounding
+ * whitespace is trimmed. The list covers the trailers commit helpers
+ * (Claude Code, Codex, GitHub's squash-merge, various IDEs) actually
+ * sneak in. New entries: keep them under one short name + colon.
+ */
+const COMMIT_TRAILER_RE =
+  /^(?:co-authored-by|co-authored\s+by|coauthored-by|signed-off-by|generated-by|generated\s+with|generated\s+by|reviewed-by|helped-by|assisted-by|acked-by|tested-by|reported-by|suggested-by|cc)\s*:/i;
+
+/**
+ * Hard-strip any trailer lines (and the AI-attribution lines that
+ * usually sit beside them) from a commit message. Removes:
+ *   - any line that looks like `<Trailer-Name>: ...` per the regex above
+ *   - `🤖 Generated with [Claude Code](...)` and similar credit lines
+ *   - leftover trailing blank lines
+ *
+ * Idempotent. Used by `autoCommit` on the inputs and by
+ * `scrubCommitTrailers` on existing commits' messages.
+ */
+export function stripCommitTrailers(message: string): string {
+  if (!message) return "";
+  const lines = message.replace(/\r\n/g, "\n").split("\n");
+  const kept: string[] = [];
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      kept.push(raw);
+      continue;
+    }
+    if (COMMIT_TRAILER_RE.test(trimmed)) continue;
+    // Strip the Claude Code attribution credit line and similar
+    // "🤖 Generated with ..." badges some IDEs and CLI defaults
+    // tack onto commit messages right before the trailers block.
+    if (/^🤖\s*generated with/i.test(trimmed)) continue;
+    if (/^generated with \[?claude code/i.test(trimmed)) continue;
+    kept.push(raw);
+  }
+  while (kept.length > 0 && kept[kept.length - 1]!.trim() === "") {
+    kept.pop();
+  }
+  return kept.join("\n");
+}
+
+export interface CommitIdentity {
+  name: string;
+  email: string;
+}
+
+/**
+ * Looks for an explicit `user.name` + `user.email` in the local repo
+ * config or any inherited (global / system) git config. Returns null
+ * if either side is missing OR if git fell back to its automatic
+ * `user@hostname` heuristic (which is what causes operators on
+ * unconfigured machines to ship commits as `Matt
+ * <meszmate@Matts-MacBook-Air.local>` and pick up GitHub's
+ * `Co-authored-by:` trailer on squash-merge).
+ *
+ * The hostname-fallback detection: `git config --get user.email`
+ * returns non-zero exit AND empty stdout when no `user.email` is
+ * configured anywhere. Same for `user.name`. Once any source sets
+ * them, both return cleanly.
+ */
+async function readConfiguredIdentity(
+  cwd: string,
+): Promise<CommitIdentity | null> {
+  const [n, e] = await Promise.all([
+    run(["git", "config", "--get", "user.name"], cwd),
+    run(["git", "config", "--get", "user.email"], cwd),
+  ]);
+  const name = n.exitCode === 0 ? n.stdout.trim() : "";
+  const email = e.exitCode === 0 ? e.stdout.trim() : "";
+  if (!name || !email) return null;
+  return { name, email };
+}
+
+/**
+ * Pull the author identity off the most recent commit on `baseRef`.
+ * Used as a fallback when neither the repo nor the global git config
+ * have `user.name` / `user.email` set, so that commits the agent
+ * produces match what the operator's prior PRs already shipped as
+ * (typically rewritten by GitHub on squash-merge to the operator's
+ * GitHub identity). We deliberately skip any author whose email looks
+ * like a `user@hostname.local` system fallback — accepting that would
+ * just re-introduce the very identity we're trying to avoid.
+ */
+async function readBaseBranchAuthor(
+  cwd: string,
+  baseRef: string,
+): Promise<CommitIdentity | null> {
+  if (!baseRef) return null;
+  const r = await run(
+    ["git", "log", "-1", "--format=%an%n%ae", baseRef],
+    cwd,
+  );
+  if (r.exitCode !== 0) return null;
+  const [name = "", email = ""] = r.stdout.split("\n").map((s) => s.trim());
+  if (!name || !email) return null;
+  if (/\.local$/i.test(email)) return null;
+  return { name, email };
+}
+
+/**
+ * Resolve the identity to stamp on commits the agent (or the daemon
+ * safety-net) makes inside `cwd`. The order is:
+ *
+ *   1. `user.name` + `user.email` from any git config layer that
+ *      actually sets them (repo, global, system).
+ *   2. The last commit author on `baseRef` if it doesn't look like
+ *      a `user@hostname.local` system fallback.
+ *   3. A deterministic fallback (`agentd <agentd@local>`).
+ *
+ * Always returns a usable identity. Callers pass this to `autoCommit`
+ * and stamp it as `GIT_AUTHOR_*` / `GIT_COMMITTER_*` on the runner
+ * subprocess so every commit on the task branch — agent-produced or
+ * daemon-produced — shares one author. That avoids the squash-merge
+ * `Co-authored-by:` trailer GitHub adds when commits in the PR don't
+ * match the PR author's identity.
+ */
+export async function resolveCommitIdentity(
+  cwd: string,
+  baseRef?: string,
+): Promise<CommitIdentity> {
+  const fromConfig = await readConfiguredIdentity(cwd);
+  if (fromConfig) return fromConfig;
+  if (baseRef) {
+    const fromBase = await readBaseBranchAuthor(cwd, baseRef);
+    if (fromBase) return fromBase;
+  }
+  return { name: "agentd", email: "agentd@local" };
+}
+
+/**
+ * Same as `resolveCommitIdentity` but returns the four env vars git
+ * honors when spawning a process — `GIT_{AUTHOR,COMMITTER}_{NAME,EMAIL}`.
+ * Use this when handing env to a runner so its in-process `git commit`
+ * invocations stamp the resolved identity instead of git's fallback.
+ */
+export async function commitIdentityEnv(
+  cwd: string,
+  baseRef?: string,
+): Promise<Record<string, string>> {
+  const id = await resolveCommitIdentity(cwd, baseRef);
+  return {
+    GIT_AUTHOR_NAME: id.name,
+    GIT_AUTHOR_EMAIL: id.email,
+    GIT_COMMITTER_NAME: id.name,
+    GIT_COMMITTER_EMAIL: id.email,
+  };
+}
+
 export interface AutoCommitInput {
   cwd: string;
   title: string;
   body?: string;
+  /**
+   * Optional explicit identity. When omitted, `autoCommit` resolves
+   * one itself via `resolveCommitIdentity(cwd)`. Callers that already
+   * resolved it (e.g. so the same identity is reused as runner env)
+   * pass it in to skip the extra git invocations.
+   */
+  identity?: CommitIdentity;
+  /** Optional ref to consult when falling back to a base-branch author. */
+  baseRef?: string;
 }
 
 export interface AutoCommitResult {
@@ -673,9 +838,37 @@ export async function autoCommit(input: AutoCommitInput): Promise<AutoCommitResu
   if (add.exitCode !== 0) {
     throw new Error(`git add failed: ${add.stderr || add.stdout}`);
   }
-  const args = ["git", "commit", "--no-verify", "-m", input.title];
-  if (input.body && input.body.trim().length > 0) {
-    args.push("-m", input.body);
+  const id =
+    input.identity ?? (await resolveCommitIdentity(input.cwd, input.baseRef));
+  // Scrub trailer-shaped lines (Co-authored-by, Signed-off-by, …) out
+  // of the title/body BEFORE git sees them. Title rarely contains
+  // them, but the body is often a free-form copy of the user's last
+  // message and operators sometimes paste reviewer trailers in.
+  const cleanTitle = stripCommitTrailers(input.title).split("\n")[0]!.trim() ||
+    input.title.trim();
+  const cleanBody = input.body ? stripCommitTrailers(input.body) : "";
+  // `-c user.name=... -c user.email=...` overrides the worktree's
+  // config for this one invocation (so it doesn't rely on an inherited
+  // env var), and `--author` makes the resolved identity explicit
+  // even when git would have picked a different default. Together
+  // they guarantee the committed author + committer both match `id`
+  // regardless of what's (or isn't) in `~/.gitconfig`.
+  const author = `${id.name} <${id.email}>`;
+  const args = [
+    "git",
+    "-c",
+    `user.name=${id.name}`,
+    "-c",
+    `user.email=${id.email}`,
+    "commit",
+    "--author",
+    author,
+    "--no-verify",
+    "-m",
+    cleanTitle,
+  ];
+  if (cleanBody.trim().length > 0) {
+    args.push("-m", cleanBody);
   }
   const commit = await run(args, input.cwd);
   if (commit.exitCode !== 0) {
@@ -685,8 +878,180 @@ export async function autoCommit(input: AutoCommitInput): Promise<AutoCommitResu
   return {
     committed: true,
     sha: sha.stdout.trim(),
-    message: input.title,
+    message: cleanTitle,
   };
+}
+
+/**
+ * Walk `<baseRef>..HEAD` and rewrite any commit whose message still
+ * contains a trailer the operator has banned (Co-authored-by,
+ * Signed-off-by, "Generated with Claude Code", …). Runs after every
+ * agent turn so trailers the model wrote despite the system prompt
+ * never reach `git push`.
+ *
+ * Implementation: walk the range oldest→newest, rebuild each commit
+ * with `git commit-tree` using the cleaned message but the original
+ * tree, author, committer, dates, and (rewritten) parents. Then move
+ * the branch ref to the new tip and reset the worktree's HEAD. The
+ * original SHAs are gone — which is fine since this runs BEFORE any
+ * push.
+ *
+ * Returns the number of commits that had trailers removed. Zero when
+ * the range was already clean or empty. `-1` on any unrecoverable
+ * git failure (caller logs but doesn't blow up the turn). Merge
+ * commits in the range are left untouched so we don't break their
+ * second parent.
+ */
+export async function scrubCommitTrailers(
+  cwd: string,
+  baseRef: string | null | undefined,
+): Promise<number> {
+  if (!baseRef) return 0;
+  const verify = await run(["git", "rev-parse", "--verify", baseRef], cwd);
+  if (verify.exitCode !== 0) return 0;
+  const baseSha = verify.stdout.trim();
+  // Topological, oldest first so each commit's rewritten parent is
+  // already known by the time we get to its child. NUL separators
+  // around the message dodge newlines inside commit bodies.
+  const log = await run(
+    [
+      "git",
+      "log",
+      "--reverse",
+      "--topo-order",
+      "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B%x1e",
+      `${baseRef}..HEAD`,
+    ],
+    cwd,
+  );
+  if (log.exitCode !== 0) return -1;
+  type Entry = {
+    sha: string;
+    parents: string[];
+    authorName: string;
+    authorEmail: string;
+    authorDate: string;
+    committerName: string;
+    committerEmail: string;
+    committerDate: string;
+    message: string;
+  };
+  const entries: Entry[] = [];
+  for (const rec of log.stdout.split("\x1e")) {
+    const trimmed = rec.replace(/^\n/, "");
+    if (!trimmed.trim()) continue;
+    const parts = trimmed.split("\x00");
+    if (parts.length < 9) continue;
+    entries.push({
+      sha: parts[0]!.trim(),
+      parents: parts[1]!.trim().split(/\s+/).filter(Boolean),
+      authorName: parts[2]!,
+      authorEmail: parts[3]!,
+      authorDate: parts[4]!,
+      committerName: parts[5]!,
+      committerEmail: parts[6]!,
+      committerDate: parts[7]!,
+      message: parts[8]!,
+    });
+  }
+  if (entries.length === 0) return 0;
+  // Anything to do? If every message is already clean, bail out
+  // without touching the branch — keeps SHAs stable when there's
+  // nothing to scrub.
+  let dirtyCount = 0;
+  for (const e of entries) {
+    const cleaned = stripCommitTrailers(e.message);
+    if (cleaned.trim() !== e.message.trim()) dirtyCount += 1;
+  }
+  if (dirtyCount === 0) return 0;
+  // Refuse to rewrite anything if the range contains a merge —
+  // commit-tree would drop the second parent and silently
+  // un-merge the branch. The operator's PR will merge cleanly on
+  // GitHub's side, so this is a paranoia guard.
+  if (entries.some((e) => e.parents.length > 1)) return 0;
+  // Capture the current branch so we can move it to the new tip.
+  const headRef = await run(
+    ["git", "symbolic-ref", "--quiet", "HEAD"],
+    cwd,
+  );
+  const branchRef = headRef.exitCode === 0 ? headRef.stdout.trim() : "";
+  if (!branchRef) return -1;
+  // Rebuild each commit with `git commit-tree`. The original
+  // tree/parents/author/committer/dates all carry over via env vars
+  // and `-p` flags; only the message changes.
+  const rewritten = new Map<string, string>();
+  for (const e of entries) {
+    const tree = await run(
+      ["git", "rev-parse", `${e.sha}^{tree}`],
+      cwd,
+    );
+    if (tree.exitCode !== 0) return -1;
+    const parentArgs: string[] = [];
+    for (const p of e.parents) {
+      parentArgs.push("-p", rewritten.get(p) ?? p);
+    }
+    const cleaned = stripCommitTrailers(e.message).trim() || e.message.trim();
+    const env: Record<string, string> = {
+      ...process.env,
+      GIT_AUTHOR_NAME: e.authorName,
+      GIT_AUTHOR_EMAIL: e.authorEmail,
+      GIT_AUTHOR_DATE: e.authorDate,
+      GIT_COMMITTER_NAME: e.committerName,
+      GIT_COMMITTER_EMAIL: e.committerEmail,
+      GIT_COMMITTER_DATE: e.committerDate,
+    } as Record<string, string>;
+    const ct = await runWithStdin(
+      ["git", "commit-tree", tree.stdout.trim(), ...parentArgs],
+      cwd,
+      cleaned + "\n",
+      env,
+    );
+    if (ct.exitCode !== 0 || !ct.stdout.trim()) return -1;
+    rewritten.set(e.sha, ct.stdout.trim());
+  }
+  const newTip = rewritten.get(entries[entries.length - 1]!.sha)!;
+  // Move the branch ref atomically and reset the worktree's index
+  // to match so the next `git status` doesn't think every file is
+  // staged for deletion. We use `--soft` because the working tree
+  // already has the right files — only HEAD needs to advance.
+  const up = await run(
+    ["git", "update-ref", branchRef, newTip],
+    cwd,
+  );
+  if (up.exitCode !== 0) return -1;
+  const reset = await run(["git", "reset", "--soft", newTip], cwd);
+  if (reset.exitCode !== 0) return -1;
+  return dirtyCount;
+}
+
+async function runWithStdin(
+  cmd: string[],
+  cwd: string,
+  input: string,
+  env: Record<string, string>,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  let proc;
+  try {
+    proc = Bun.spawn({
+      cmd,
+      cwd,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env,
+    });
+  } catch (e) {
+    const msg = (e as Error).message || String(e);
+    return { stdout: "", stderr: `${cmd[0]}: ${msg}`, exitCode: 127 };
+  }
+  proc.stdin?.write(input);
+  proc.stdin?.end();
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const exitCode = await proc.exited;
+  return { stdout, stderr, exitCode };
 }
 
 export interface DiffResult {
@@ -1675,15 +2040,17 @@ function buildValidateIdeasPrompt(brief: string, ideas: string[]): string {
     `  4. Skim 1-2 key source dirs only if you still need to understand the domain.`,
     `Don't score from the brief alone. If you skip this step your scores will be wrong and the operator will throw them out.`,
     "",
-    `Then for each numbered idea below, give a single integer 0-100 where:`,
+    `Then for each numbered idea below, give a single integer on a 0-100 scale (NOT 0-10, NOT 0-5) where:`,
     `  90+  ship-now obvious win`,
     `  70-89  strong, worth doing soon`,
     `  50-69  worth considering`,
-    `  <50  niche / risky / off-strategy`,
-    `Calibrate honestly. Spread the scores; don't bunch everything in 80-90.`,
+    `  30-49  niche / risky / off-strategy`,
+    `  <30   only if the idea is actively harmful, impossible, or off-brief`,
+    `Most reasonable ideas land in the 40-80 band — single-digit scores are almost never correct. If your top score is under 30, you've misread the scale; re-read this rubric before emitting.`,
+    `Calibrate honestly and spread the scores; don't bunch everything in 80-90 either.`,
     "",
     `Output format — STRICT:`,
-    `Your final reply MUST end with exactly one line that starts with the literal token "SCORES:" followed by ${ideas.length} space-separated integers in the same order as the ideas. Anything before that line is ignored. The SCORES line must be the LAST line of your reply.`,
+    `Your final reply MUST end with exactly one line that starts with the literal token "SCORES:" followed by EXACTLY ${ideas.length} space-separated integers (one per idea, same order). Each integer is 0-100. No fewer, no more, no decimals, no other separators. Anything before that line is ignored. The SCORES line must be the LAST line of your reply.`,
     `Example for 3 ideas:`,
     `  SCORES: 82 64 41`,
     "",
@@ -1827,13 +2194,28 @@ function parseScores(
         : err ?? `rater returned no output`,
     };
   }
-  // Pad / trim to match the input length so the index alignment
-  // contract holds even when the helper returned the wrong count.
-  const scores: number[] = [];
-  for (let i = 0; i < expectedLen; i++) {
-    scores.push(parsed[i] ?? 0);
+  // Short response — the rater returned fewer scores than ideas. Don't
+  // silently pad with 0s: that hides a broken rater behind plausible-
+  // looking ratings ("5 3 0 0" instead of "couldn't score the last two").
+  // Surface as an error so the operator can re-run.
+  if (parsed.length < expectedLen) {
+    return {
+      scores: [],
+      source: "fallback-empty",
+      error: `rater returned ${parsed.length} score${parsed.length === 1 ? "" : "s"} but ${expectedLen} idea${expectedLen === 1 ? " was" : "s were"} sent: ${parsed.join(" ")}`,
+    };
   }
-  return { scores, source: "claude" };
+  const trimmed = parsed.slice(0, expectedLen);
+  // 0-10 scale slip: codex (and smaller claude variants) sometimes ignore
+  // the rubric and emit single-digit scores. When EVERY value is in 0-10
+  // on a 0-100 prompt, the model used the wrong scale — rescale by 10x.
+  // Guard against the legitimate "every idea is genuinely terrible" case
+  // by requiring at least 2 ideas (a single 0-10 score on one idea is
+  // ambiguous between bad-idea and wrong-scale).
+  const max = Math.max(...trimmed);
+  const scaled =
+    expectedLen >= 2 && max <= 10 ? trimmed.map((n) => n * 10) : trimmed;
+  return { scores: scaled, source: "claude" };
 }
 
 /* ── Plan-slice parsing ───────────────────────────────────────────── */
@@ -3223,6 +3605,67 @@ export async function runJudge(
       explanation: "judge unreachable; defaulted to first non-empty",
       source: "fallback",
       error: (e as Error).message,
+    };
+  }
+}
+
+/**
+ * One-shot helper invocation that captures the agent's stdout. Used by
+ * the post-commit adversarial reviewer pass — we want a separate model
+ * to read the diff and emit a structured verdict, but we don't need
+ * the full AgentRunner lifecycle (no stream-json parsing, no resume,
+ * no tool-call mirroring).
+ *
+ * Enforces a wall-clock timeout so a stuck CLI never blocks the
+ * completion hook indefinitely. Returns the captured stdout (trimmed)
+ * plus a flag indicating whether the helper exited cleanly.
+ */
+export async function runHelperOneshot(args: {
+  helper: AiHelperOptions;
+  prompt: string;
+  cwd: string;
+  timeoutMs?: number;
+}): Promise<{
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  timedOut: boolean;
+}> {
+  const argv = buildAiHelperArgv(args.helper, args.prompt, args.cwd);
+  let timedOut = false;
+  try {
+    const proc = Bun.spawn({
+      cmd: argv,
+      cwd: args.cwd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env as Record<string, string>,
+    });
+    const killTimer =
+      args.timeoutMs && args.timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            try {
+              proc.kill();
+            } catch {
+              // process already gone
+            }
+          }, args.timeoutMs)
+        : null;
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exitCode = await proc.exited;
+    if (killTimer) clearTimeout(killTimer);
+    return { stdout, stderr, exitCode, timedOut };
+  } catch (e) {
+    return {
+      stdout: "",
+      stderr: `${argv[0]}: ${(e as Error).message}`,
+      exitCode: 127,
+      timedOut: false,
     };
   }
 }

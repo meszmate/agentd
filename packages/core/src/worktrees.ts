@@ -448,9 +448,17 @@ export async function createWorktree(
   }
   const worktreePath = join(worktreeRoot, taskId);
   if (branchMode === "existing") {
-    // git worktree add accepts either the branch name (will check out) or
-    // -B for a force-create. For an existing branch, plain add is right.
-    const args = ["git", "worktree", "add", worktreePath, branchName];
+    // For a branch that exists locally, plain `git worktree add <path>
+    // <branch>` checks it out. For a branch that only exists as a remote
+    // tracking ref (operator picked a remote-only branch from the
+    // picker — typical when continuing teammate work), create a local
+    // tracking branch off `<remote>/<branchName>` so the worktree lands
+    // on a proper branch, not detached HEAD. Mirrors the in-place
+    // branch-handling above.
+    const exists = await localBranchExists(repoPath, branchName);
+    const args = exists
+      ? ["git", "worktree", "add", worktreePath, branchName]
+      : ["git", "worktree", "add", "-b", branchName, worktreePath, `${remote}/${branchName}`];
     const r = await run(args, repoPath);
     if (r.exitCode !== 0) {
       throw new Error(

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AgentdClient } from "@agentd/client";
 import { Clipboard, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -19,22 +19,44 @@ export function Login({ initialServer, onPair, onError }: Props) {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  async function pairWith(srv: string, tok: string) {
     setBusy(true);
     try {
-      const c = new AgentdClient(server, null);
+      const c = new AgentdClient(srv, null);
       const label =
         "web@" +
         (navigator.userAgent.match(/\((.*?)\)/)?.[1] ?? "browser");
-      const r = await c.pair({ pairingToken: token, deviceLabel: label });
-      onPair(server, r.sessionToken);
+      const r = await c.pair({ pairingToken: tok, deviceLabel: label });
+      onPair(srv, r.sessionToken);
     } catch (e) {
       onError(`pair: ${(e as Error).message}`);
     } finally {
       setBusy(false);
     }
   }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    await pairWith(server, token);
+  }
+
+  // Auto-fill (and auto-submit) the token when the operator opens the URL
+  // printed by the daemon at startup — `http://<host>/pair?token=…` or the
+  // matching QR code. One-shot, gated by a ref so a failed pair doesn't loop.
+  const autoTried = useRef(false);
+  useEffect(() => {
+    if (autoTried.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const urlToken = params.get("token");
+    if (!urlToken) return;
+    autoTried.current = true;
+    setToken(urlToken);
+    // Strip the token from the URL so it doesn't linger in history /
+    // bookmarks. It's single-use anyway, but tidier this way.
+    window.history.replaceState({}, "", window.location.pathname);
+    void pairWith(server, urlToken);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function pasteToken() {
     try {
