@@ -41,6 +41,7 @@ import {
   GithubPrActionRequest,
   GithubListQuery,
   type Task,
+  type Message,
   type WsServerEvent,
 } from "@agentd/contracts";
 import { isAbsolute, join, normalize, relative, resolve } from "node:path";
@@ -1305,14 +1306,17 @@ export function buildServer(opts: BuildServerOptions) {
       includeBullets?: boolean;
     };
     const cfg = loadConfig(paths.root);
-    const messages = listMessages(db, task.id, 1);
-    const taskPrompt = messages[0]?.role === "user" ? messages[0].content : "";
+    const allMessages = listMessages(db, task.id);
+    const taskPrompt =
+      allMessages.find((m) => m.role === "user")?.content ?? "";
+    const conversation = formatTaskConversationForPr(allMessages);
     const opts = {
       ...(body.hint ? { hint: body.hint } : {}),
       includeBullets: body.includeBullets !== false,
       baseRef: task.baseCommitSha || task.baseBranch,
       taskPrompt,
       taskTitle: task.title,
+      conversation,
       helper: helperForTask(task),
       ...(cfg.prInstructions
         ? { extraInstructions: cfg.prInstructions }
@@ -6392,6 +6396,49 @@ export function buildServer(opts: BuildServerOptions) {
       stopModelWatchers();
     },
   };
+}
+
+/**
+ * Format the task's persisted message history into a compact transcript
+ * the PR generator can read. Drops system breadcrumbs and aggressively
+ * condenses tool calls / results (the `[call <tool>] {...}` and
+ * `[result <tool> ok]` rows produced by the task manager) so the model
+ * sees a USER ↔ AGENT narrative rather than thousands of lines of
+ * tool-result noise. The total transcript is capped at ~30k chars by
+ * walking from newest → oldest and stopping once the budget is hit;
+ * this keeps long sessions from blowing the helper's input window.
+ */
+function formatTaskConversationForPr(messages: Message[]): string {
+  const BUDGET = 30_000;
+  const PER_MESSAGE_CAP = 4_000;
+  const condense = (m: Message): string | null => {
+    const text = m.content.trim();
+    if (!text) return null;
+    if (m.role === "system") return null;
+    if (m.role === "tool") {
+      // Keep just the action signal — "[call Edit] {file_path: ...}" or
+      // "[result Edit ok]" — and drop the payload after ~200 chars.
+      const head = text.slice(0, 200).replace(/\s+/g, " ");
+      return `[tool] ${head}`;
+    }
+    const clipped =
+      text.length > PER_MESSAGE_CAP
+        ? `${text.slice(0, PER_MESSAGE_CAP)}\n…(truncated)`
+        : text;
+    const tag = m.role === "user" ? "[user]" : "[agent]";
+    return `${tag}\n${clipped}`;
+  };
+  const lines: string[] = [];
+  let used = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const entry = condense(messages[i]!);
+    if (!entry) continue;
+    const cost = entry.length + 2;
+    if (used + cost > BUDGET) break;
+    lines.push(entry);
+    used += cost;
+  }
+  return lines.reverse().join("\n\n");
 }
 
 function resolveSafePath(root: string, requested: string): string | null {

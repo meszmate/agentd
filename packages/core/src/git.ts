@@ -1613,7 +1613,7 @@ export interface PrMessageResult {
 }
 
 function buildPrPrompt(
-  diff: string,
+  conversation: string,
   shape: PrMessageShape,
   extraInstructions?: string,
 ): string {
@@ -1624,8 +1624,9 @@ function buildPrPrompt(
       ? "Body: one short paragraph (no list)."
       : "Body: 2-5 short bullet points starting with `- `, focused on what changed and why. No 'Test plan', no AI attribution, no boilerplate.",
     "No closing summary, no headings, no code fences, no quotes around the subject.",
+    "Ground the title and body in what was actually discussed and done in the conversation below. Ignore work that was discussed but never carried out, and prefer the agent's final state over earlier intermediate steps.",
     shape.taskPrompt?.trim()
-      ? `Original task prompt (for context only — describe the diff, not the prompt):\n${shape.taskPrompt.trim()}`
+      ? `Original task prompt (for context):\n${shape.taskPrompt.trim()}`
       : "",
     shape.hint?.trim() ? `Operator hint: ${shape.hint.trim()}` : "",
     extraInstructions?.trim()
@@ -1634,7 +1635,7 @@ function buildPrPrompt(
   ]
     .filter(Boolean)
     .join("\n");
-  return `Generate a pull request subject + body for this diff.\n\n${rules}\n\n--- DIFF ---\n${diff}\n--- END DIFF ---`;
+  return `Generate a pull request subject + body for the work captured in the conversation below.\n\n${rules}\n\n--- CONVERSATION ---\n${conversation}\n--- END CONVERSATION ---`;
 }
 
 function splitPrOutput(raw: string): { title: string; body: string } {
@@ -1654,23 +1655,34 @@ const PR_FALLBACK_BODY = (taskPrompt?: string): string => {
   return "## What changed\n\n- AI helper unavailable, please edit this body before opening the PR\n";
 };
 
-/** Stream a PR subject + body. Yields chunks for the wire, returns the parsed result. */
+/**
+ * Stream a PR subject + body. Yields chunks for the wire, returns the
+ * parsed result. The model is grounded in the task's CONVERSATION
+ * (what the operator and agent actually said + did), not the diff —
+ * so the title and body reflect the intent and narrative of the work
+ * rather than every mechanical edit. Caller is responsible for
+ * formatting and trimming the conversation; this function passes it
+ * through verbatim.
+ */
 export async function* streamPrMessage(
   cwd: string,
   opts: {
     baseRef?: string;
     helper?: AiHelperOptions;
     extraInstructions?: string;
+    /** Formatted task conversation (user + agent turns). Required signal —
+     *  if empty, falls back to the task title. */
+    conversation?: string;
   } & PrMessageShape = {},
 ): AsyncGenerator<string, PrMessageResult, void> {
-  const { diff } = await readCombinedDiff(cwd, opts.baseRef);
-  if (!diff.trim()) {
+  const conversation = (opts.conversation ?? "").trim();
+  if (!conversation) {
     const fallback = `${opts.taskTitle ? `feat: ${slugifyTitle(opts.taskTitle)}` : "chore: update"}\n\n${PR_FALLBACK_BODY(opts.taskPrompt)}`;
     yield fallback;
     const split = splitPrOutput(fallback);
     return { ...split, source: "fallback-no-changes" };
   }
-  const prompt = buildPrPrompt(diff, opts, opts.extraInstructions);
+  const prompt = buildPrPrompt(conversation, opts, opts.extraInstructions);
   const result = yield* streamHelperText(cwd, prompt, opts.helper ?? {});
   if (result.source === "fallback-error") {
     const fallback = `${opts.taskTitle ? `feat: ${slugifyTitle(opts.taskTitle)}` : "chore: update"}\n\n${PR_FALLBACK_BODY(opts.taskPrompt)}`;
