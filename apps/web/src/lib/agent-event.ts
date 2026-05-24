@@ -36,9 +36,15 @@ export function shapeMessageFromEvent(
               string,
               unknown
             >;
-            if (event.parentToolUseId) rest._agentdParent = event.parentToolUseId;
-            if (event.toolUseId) rest._agentdToolId = event.toolUseId;
-            return rest;
+            // Match the daemon's persist shape — _agentdToolId at the
+            // FRONT so it survives the 32K slice below for large calls
+            // (big Edit/Write bodies). Losing it leaves the web's
+            // pairing on positional fallback, which mis-orders claude's
+            // parallel tool batches.
+            const out: Record<string, unknown> = {};
+            if (event.toolUseId) out._agentdToolId = event.toolUseId;
+            if (event.parentToolUseId) out._agentdParent = event.parentToolUseId;
+            return { ...out, ...rest };
           })()
         : event.args;
     return {

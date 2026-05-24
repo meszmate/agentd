@@ -770,6 +770,30 @@ function groupTaskMessages(messages: Message[]): TaskGroup[] {
     const pairs = pairToolEvents(buf);
     if (pairs.length > 0) {
       out.push({ kind: "tools", key: bufKey, firstTs: bufFirstTs, pairs });
+    } else {
+      // Orphan tool_results — happen when a non-tool row (system
+      // banner like "daemon restarted", a turn boundary, etc.)
+      // flushes the call out of the buffer before its matching
+      // result lands. Render them as one-off rows in their own
+      // group so the operator sees the output landed instead of
+      // it vanishing silently.
+      const orphanPairs = buf
+        .filter((b) => b.kind === "tool_result")
+        .map((b) => ({
+          name: b.name ?? "tool",
+          input: {} as unknown,
+          output: b.preview ?? null,
+          ok: b.ok !== false,
+          running: false,
+        }));
+      if (orphanPairs.length > 0) {
+        out.push({
+          kind: "tools",
+          key: bufKey,
+          firstTs: bufFirstTs,
+          pairs: orphanPairs,
+        });
+      }
     }
     buf = [];
     bufKey = "";
