@@ -189,7 +189,8 @@ function buildActivityEntries(messages: Message[]): ActivityEntry[] {
   }
 
   const out: ActivityEntry[] = [];
-  for (const c of calls) {
+  for (let i = 0; i < calls.length; i++) {
+    const c = calls[i]!;
     let matched: Result | null = null;
     if (c.toolUseId) {
       const r = results.find(
@@ -201,7 +202,13 @@ function buildActivityEntries(messages: Message[]): ActivityEntry[] {
       }
     }
     if (!matched) {
-      const r = results.find((x) => !x.consumed && !x.toolUseId);
+      // Positional fallback — take the next un-consumed result
+      // regardless of whether it carries a toolUseId. The earlier
+      // version only matched results WITHOUT an id, so a call whose
+      // _agentdToolId was lost (e.g. JSON truncation past 32K on a
+      // big Edit) would never pair against the modern id-bearing
+      // results emitted by the daemon, and its row spun forever.
+      const r = results.find((x) => !x.consumed);
       if (r) {
         r.consumed = true;
         matched = r;
@@ -214,7 +221,12 @@ function buildActivityEntries(messages: Message[]): ActivityEntry[] {
       input: c.input,
       output: matched?.output ?? null,
       ok: matched?.ok ?? true,
-      running: matched == null,
+      // Only the trailing un-matched call may still be in flight.
+      // Older un-paired calls are stale (the result was probably
+      // lost to a buffer flush, daemon restart, or truncation) and
+      // showing them as "running" forever was the spinner that
+      // never stops the user reported.
+      running: matched == null && i === calls.length - 1,
     });
   }
 

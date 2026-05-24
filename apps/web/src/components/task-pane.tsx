@@ -1124,13 +1124,21 @@ function collectTail(
   return filtered.slice(-n);
 }
 
-/** `[result <Tool> ok|err] <body>` → structured parts. */
+/** `[result <Tool> ok|err] <body>` → structured parts.
+ *  Accepts the swarm-aware shape `[result <Tool> ok|err p:<id> u:<id>]`
+ *  the daemon writes today. Without the optional meta segment in the
+ *  regex, every modern result row failed to parse here and fell
+ *  through to the `[call …]` path, where ToolLine's own fallback
+ *  rendered the raw text with name="tool" — the "tool[result Write
+ *  ok u:toolu_…]" rows operators were seeing in the grid tiles. */
 function parseToolResult(
   content: string,
 ): { tool: string; ok: boolean; output: string } | null {
-  const m = content.match(/^\[result ([^\s\]]+)\s+(ok|err)\]\s*([\s\S]*)$/);
+  const m = content.match(
+    /^\[result ([^\s\]]+) (ok|err)((?:\s+(?:[pu]):[A-Za-z0-9_-]+)*)\]\s*([\s\S]*)$/,
+  );
   if (!m) return null;
-  return { tool: m[1]!, ok: m[2] === "ok", output: (m[3] ?? "").trim() };
+  return { tool: m[1]!, ok: m[2] === "ok", output: (m[4] ?? "").trim() };
 }
 
 /**

@@ -1752,9 +1752,18 @@ export class TaskManager {
                 string,
                 unknown
               >;
-              if (event.parentToolUseId) rest._agentdParent = event.parentToolUseId;
-              if (event.toolUseId) rest._agentdToolId = event.toolUseId;
-              return rest;
+              // Inject swarm meta at the FRONT of the persisted args.
+              // JSON.stringify writes object keys in insertion order, so
+              // a leading _agentdToolId / _agentdParent survives the
+              // 32K slice below. Putting them at the tail used to lose
+              // them on any call whose args (e.g. a big Edit's
+              // old_string + new_string) overran the cap, leaving the
+              // web's call ↔ result pairing to fall back to positional
+              // matching that mis-pairs claude's parallel tool batches.
+              const out: Record<string, unknown> = {};
+              if (event.toolUseId) out._agentdToolId = event.toolUseId;
+              if (event.parentToolUseId) out._agentdParent = event.parentToolUseId;
+              return { ...out, ...rest };
             })()
           : event.args;
       appendMessage(
