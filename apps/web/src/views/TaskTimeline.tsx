@@ -62,6 +62,7 @@ export function TaskTimeline({
   turn,
   plan,
   compactedAt,
+  dense = false,
 }: {
   taskId: string;
   messages: Message[];
@@ -88,6 +89,15 @@ export function TaskTimeline({
    * have been summarized out of the agent's working memory.
    */
   compactedAt?: number | null;
+  /**
+   * Tight layout for embedding inside narrower containers (the grid
+   * overlay's focused pane). Drops the centered max-w-3xl prose
+   * column and shrinks horizontal/vertical padding so the timeline
+   * + composer fit comfortably alongside other panes instead of
+   * leaving wide empty gutters. Visual treatment of messages, tool
+   * cards, thinking indicator, etc. is unchanged.
+   */
+  dense?: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const { toast } = useApp();
@@ -289,7 +299,14 @@ export function TaskTimeline({
           </button>
         )}
         <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
-        <div ref={innerRef} className="mx-auto max-w-3xl px-6 py-6 lg:py-8">
+        <div
+          ref={innerRef}
+          className={
+            dense
+              ? "px-3 py-3"
+              : "mx-auto max-w-3xl px-6 py-6 lg:py-8"
+          }
+        >
           {messages.length === 0 ? (
             <div className="flex h-full items-center justify-center py-16">
               <div className="text-center text-sm text-ink-500 dark:text-ink-400">
@@ -408,6 +425,7 @@ export function TaskTimeline({
         onError={onError}
         plan={plan}
         openAskId={askState.openAskId}
+        dense={dense}
       />
     </div>
   );
@@ -430,6 +448,7 @@ const TaskComposer = memo(function TaskComposer({
   onError,
   plan,
   openAskId,
+  dense = false,
 }: {
   taskId: string;
   disabled: boolean;
@@ -441,6 +460,8 @@ const TaskComposer = memo(function TaskComposer({
    *  don't double-up the optimistic user row with the server-side
    *  `[answer · …]` system row. */
   openAskId?: string | null;
+  /** Tight layout for the grid overlay's focused pane — see TaskTimeline. */
+  dense?: boolean;
 }) {
   const [text, setText] = useState("");
   const send = useSendInput(taskId);
@@ -514,9 +535,12 @@ const TaskComposer = memo(function TaskComposer({
         e.preventDefault();
         void submit();
       }}
-      className="border-t border-ink-900/10 dark:border-ink-50/10 px-6 py-4"
+      className={cn(
+        "border-t border-ink-900/10 dark:border-ink-50/10",
+        dense ? "px-3 py-2" : "px-6 py-4",
+      )}
     >
-      <div className="mx-auto max-w-3xl">
+      <div className={dense ? "" : "mx-auto max-w-3xl"}>
         {plan && plan.length > 0 && <PlanStrip plan={plan} />}
         {queue.length > 0 && (
           <div className="mb-2.5 overflow-hidden rounded-md border border-ink-900/10 bg-paper-50/80 dark:border-ink-50/10 dark:bg-ink-900/40 animate-fade-in">

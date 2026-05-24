@@ -13,6 +13,7 @@ import { Toaster } from "sonner";
 import { AppProvider, useApp } from "@/AppContext";
 import { ThemeProvider, useTheme } from "@/components/theme-provider";
 import { ErrorBoundary } from "@/ErrorBoundary";
+import { setAppRouter } from "@/router-ref";
 import { AppShell } from "@/components/app-shell";
 import { Login } from "@/views/Login";
 import { useTaskCompletionNotifications } from "@/useNotifications";
@@ -220,6 +221,11 @@ const router = createBrowserRouter([
     ],
   },
 ]);
+
+// Share the router with non-React-Router code (realtime.tsx fires a
+// toast with an "Open task" action and needs to do SPA navigation
+// from outside any router-aware component).
+setAppRouter(router);
 
 const queryClient = new QueryClient({
   defaultOptions: {

@@ -632,7 +632,7 @@ export function pairToolEvents(
   return out;
 }
 
-type ToolKind =
+export type ToolKind =
   | "read"
   | "write"
   | "edit"
@@ -644,7 +644,10 @@ type ToolKind =
   | "todo"
   | "other";
 
-const ICONS: Record<ToolKind, React.ComponentType<{ className?: string }>> = {
+export const TOOL_ICONS: Record<
+  ToolKind,
+  React.ComponentType<{ className?: string }>
+> = {
   read: FileText,
   write: FileText,
   edit: Edit3,
@@ -657,7 +660,10 @@ const ICONS: Record<ToolKind, React.ComponentType<{ className?: string }>> = {
   other: Wrench,
 };
 
-interface ParsedTool {
+// Keep the original alias used throughout this file.
+const ICONS = TOOL_ICONS;
+
+export interface ParsedTool {
   name: string;
   kind: ToolKind;
   summary: string;
@@ -695,7 +701,7 @@ interface ParsedTool {
  * stringified TodoWrite arrays) gets stuffed into `detail` for the
  * collapsible disclosure — never inline.
  */
-function parseToolCall(content: string): ParsedTool {
+export function parseToolCall(content: string): ParsedTool {
   const m = content.match(/^\[call ([^\]]+)\]\s*([\s\S]*)$/);
   if (!m) {
     return { name: "tool", kind: "other", summary: content.slice(0, 120), detail: null };

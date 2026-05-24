@@ -18,7 +18,11 @@ import {
 } from "@/components/ui/page-topbar";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoRow, ToggleRow } from "@/components/ui/info-row";
-import { useModels, usePatchSettings, useSettings } from "@/queries";
+import {
+  useModels,
+  usePatchSettings,
+  useSettings,
+} from "@/queries";
 import type { AgentdModelRegistry } from "@agentd/client";
 import { useApp } from "@/AppContext";
 import {
@@ -40,6 +44,7 @@ const SECTIONS: RailItem[] = [
   { id: "thinking", glyph: "✦", label: "Thinking defaults" },
   { id: "ai-helpers", glyph: "✶", label: "AI helpers" },
   { id: "commits", glyph: "◆", label: "Commits & PRs" },
+  { id: "grid", glyph: "⌗", label: "Grid" },
   { id: "review", glyph: "⌖", label: "Adversarial review" },
   { id: "browser", glyph: "▢", label: "Browser" },
 ];

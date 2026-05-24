@@ -219,6 +219,59 @@ const config: Config = {
           "0%, 100%": { opacity: "1" },
           "50%": { opacity: "0.6" },
         },
+        // Grid-tile "alive" breathing — gentle scale + glow pulse on
+        // the λ agent glyph while a task is actively streaming. Slower
+        // than blink, more organic. Distinguishes "still cooking" from
+        // "frozen" at a glance across a wall of 12 tiles.
+        "breathe": {
+          "0%, 100%": { opacity: "0.85", transform: "scale(1)" },
+          "50%": { opacity: "1", transform: "scale(1.06)" },
+        },
+        // Sweep used as a thin gradient bar along the top edge of a
+        // running tile — the live indicator that beats the static
+        // status dot. Pairs with a subtle ember tint.
+        "tile-sweep": {
+          "0%": { backgroundPosition: "200% 50%" },
+          "100%": { backgroundPosition: "-200% 50%" },
+        },
+        // When a task transitions to `done`, the tile flashes a soft
+        // emerald glow before settling into the dimmed "recent" zone.
+        // Pure visual reward — operator sees their work finish.
+        "done-celebrate": {
+          "0%": {
+            boxShadow: "0 0 0 0 rgba(16, 185, 129, 0)",
+            borderColor: "rgba(16, 185, 129, 0)",
+          },
+          "30%": {
+            boxShadow: "0 0 0 6px rgba(16, 185, 129, 0.25)",
+            borderColor: "rgba(16, 185, 129, 0.6)",
+          },
+          "100%": {
+            boxShadow: "0 0 0 0 rgba(16, 185, 129, 0)",
+            borderColor: "rgba(16, 185, 129, 0)",
+          },
+        },
+        // Beefier ring for `waiting_perm` — pulses with a wider amber
+        // halo so blocked tasks pop visually even from across the
+        // room. Replaces the generic `animate-pulse-ring` for grid
+        // tiles where we want unmistakable urgency.
+        "alert-ring": {
+          "0%, 100%": {
+            boxShadow:
+              "0 0 0 0 rgba(245, 158, 11, 0.55), 0 0 0 0 rgba(245, 158, 11, 0)",
+          },
+          "50%": {
+            boxShadow:
+              "0 0 0 4px rgba(245, 158, 11, 0.25), 0 0 18px 4px rgba(245, 158, 11, 0.18)",
+          },
+        },
+        // Cursor for the live-stream tail — a thin caret that pulses
+        // with a slight x-shimmer so it reads as "actively typing"
+        // rather than the heavier `blink`.
+        "caret-blink": {
+          "0%, 60%": { opacity: "1" },
+          "61%, 100%": { opacity: "0.1" },
+        },
       },
       animation: {
         shimmer: "shimmer 2s linear infinite",
@@ -238,6 +291,11 @@ const config: Config = {
         "progress-sweep": "progress-sweep 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite",
         "running-bg": "running-bg 2.4s ease-in-out infinite",
         "dot-cycle": "dot-cycle 1.4s ease-in-out infinite",
+        breathe: "breathe 2.6s ease-in-out infinite",
+        "tile-sweep": "tile-sweep 3.8s linear infinite",
+        "done-celebrate": "done-celebrate 1.4s cubic-bezier(0.2, 0.7, 0.2, 1) both",
+        "alert-ring": "alert-ring 1.8s ease-in-out infinite",
+        "caret-blink": "caret-blink 0.9s steps(1, end) infinite",
       },
     },
   },

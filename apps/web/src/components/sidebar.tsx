@@ -10,6 +10,7 @@ import {
   GitPullRequest,
   Home,
   Inbox,
+  LayoutGrid,
   Plug,
   Plus,
   Search,
@@ -98,9 +99,11 @@ const SECTIONS: {
 export function Sidebar({
   onOpenPalette,
   onSpawn,
+  onOpenGrid,
 }: {
   onOpenPalette: () => void;
   onSpawn: () => void;
+  onOpenGrid: () => void;
 }) {
   const tasksQ = useTasks();
   const activeCount =
@@ -200,7 +203,7 @@ export function Sidebar({
       </nav>
 
       {/* Live panel */}
-      <LivePanel />
+      <LivePanel onOpenGrid={onOpenGrid} />
 
       {/* Footer */}
       <div className="border-t border-ink-900/10 px-4 py-2 dark:border-ink-50/10 shrink-0">
@@ -215,7 +218,7 @@ export function Sidebar({
   );
 }
 
-function LivePanel() {
+function LivePanel({ onOpenGrid }: { onOpenGrid: () => void }) {
   const { status, latest } = useRealtime();
   const tasksQ = useTasks();
   const schedulesQ = useSchedules();
@@ -223,6 +226,21 @@ function LivePanel() {
 
   const tasks = tasksQ.data?.tasks ?? [];
   const running = tasks.filter((t) => t.status === "running");
+  // Tasks the grid overlay actually renders. `running`, `waiting_input`,
+  // and `waiting_perm` are the in-flight statuses — idle / done / failed
+  // / stopped don't belong in the live grid. Counts feed the button
+  // badge so the operator can tell at a glance how many panes are live
+  // and whether any of them are blocked on a permission ask.
+  const gridCount = tasks.filter(
+    (t) =>
+      !t.closedAt &&
+      (t.status === "running" ||
+        t.status === "waiting_input" ||
+        t.status === "waiting_perm"),
+  ).length;
+  const needsApprovalCount = tasks.filter(
+    (t) => !t.closedAt && t.status === "waiting_perm",
+  ).length;
 
   const nextFire = (() => {
     const items = schedulesQ.data?.schedules ?? [];
@@ -269,6 +287,37 @@ function LivePanel() {
             ? "connecting…"
             : "reconnecting…"}
         </span>
+        {/* Grid overlay trigger — single icon, no separate route. Sits
+            right after the LIVE label so it reads as "live → look at
+            everything that's live right now". The pulse on the badge
+            tags the button itself when a task is blocked on a
+            permission ask, so a stuck agent is visible even when the
+            operator is parked on another page. */}
+        <button
+          type="button"
+          onClick={onOpenGrid}
+          aria-label="Open live grid"
+          title={
+            needsApprovalCount > 0
+              ? `Live grid · ${needsApprovalCount} need approval · ${gridCount} live`
+              : gridCount > 0
+              ? `Live grid · ${gridCount} live`
+              : "Live grid"
+          }
+          className="group/grid relative grid place-items-center size-5 rounded hover:bg-ink-900/[0.06] dark:hover:bg-ink-50/[0.06] text-ink-500 hover:text-ink-900 dark:text-ink-400 dark:hover:text-ink-50 transition-colors"
+        >
+          <LayoutGrid className="h-3 w-3" />
+          {gridCount > 0 && (
+            <span
+              className={cn(
+                "absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full",
+                needsApprovalCount > 0
+                  ? "bg-amber-500 animate-blink"
+                  : "bg-ember-500",
+              )}
+            />
+          )}
+        </button>
         <span className="ml-auto font-mono text-[10px] tabular-nums text-ink-400 dark:text-ink-500">
           {running.length} running
         </span>

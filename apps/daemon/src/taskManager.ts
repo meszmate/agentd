@@ -1381,7 +1381,10 @@ export class TaskManager {
     // prior claude session (which still has the pre-compaction
     // transcript intact). Dropping the id forces a fresh session and
     // the spawnRunner appends the captured summary to the system
-    // prompt so the agent still has continuity.
+    // prompt so the agent still has continuity. Auto-compaction
+    // (claude's mid-stream `compact_boundary`) is different — the
+    // session continues naturally with the summary inline, so
+    // handleAutoCompacted does NOT clear this.
     setTaskClaudeSessionId(this.db, taskId, null);
     const fresh = getTask(this.db, taskId);
     if (fresh) this.bus.publishSystem({ kind: "task_changed", task: fresh });
@@ -2118,9 +2121,10 @@ export class TaskManager {
    *
    * In either case we respawn the runner in resume mode with a short
    * "continue" nudge — codex via `codex exec resume <thread_id>`,
-   * claude via `--continue` (which picks up the most recent session
-   * for that cwd). Both preserve conversation context so the agent
-   * doesn't redo finished work.
+   * claude via `--resume <session_id>` (captured from the first
+   * `system/init` event), falling back to `--continue` only when no
+   * session id has been captured yet. Both preserve conversation
+   * context so the agent doesn't redo finished work.
    *
    * Capped by MAX_AUTO_RESUME_ATTEMPTS to bound the spiral if the
    * agent is genuinely stuck. The counter resets on a clean
@@ -2144,9 +2148,9 @@ export class TaskManager {
     if (fresh.status === "stopped" || fresh.status === "pending") return;
     // Codex needs a captured thread id — without it `codex exec
     // resume` has nothing to attach to and would silently restart
-    // from zero, losing the conversation context. Claude's
-    // `--continue` resolves the session from the cwd alone, so
-    // there's no equivalent gate for claude.
+    // from zero, losing the conversation context. Claude has a
+    // captured session id too (`claudeSessionId`) but falls back to
+    // `--continue` when missing, so no hard gate is needed here.
     if (fresh.agent === "codex" && !fresh.codexThreadId) return;
     const failed = fresh.status === "failed";
     if (!failed && !signals.compactedThisTurn) return;

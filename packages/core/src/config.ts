@@ -405,6 +405,23 @@ export const UserPrefs = z.object({
   taskWorkspaceOpen: z.boolean().default(true),
   /** Pinned repo paths shown at the top of the repo picker. */
   repoPickerPins: z.array(z.string()).default([]),
+  /**
+   * Operator-arranged order of tiles in the live grid overlay. Stored
+   * as a sequence of task ids — manual drag pins land here and survive
+   * reload/devices. Tasks not in this list fall in by status priority
+   * after the pinned ones. Stale ids (closed/deleted tasks) are
+   * filtered client-side; we don't garbage-collect here so a reopened
+   * task lands back in its pinned slot.
+   */
+  gridOrder: z.array(z.string()).default([]),
+  /**
+   * Task ids the operator explicitly removed from the live grid (per-
+   * tile X or Clear-done). Reconcile skips these so they don't pop
+   * back in via auto-add. The "Add task" picker re-adds + removes
+   * from this list. NEW tasks (never in gridOrder) bypass this check,
+   * so a fresh spawn always appears in the grid.
+   */
+  gridDismissed: z.array(z.string()).default([]),
 });
 export type UserPrefs = z.infer<typeof UserPrefs>;
 export const DEFAULT_USER_PREFS: UserPrefs = UserPrefs.parse({});

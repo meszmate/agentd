@@ -495,6 +495,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   auto_pr INTEGER NOT NULL DEFAULT 0,
   pr_url TEXT,
   codex_thread_id TEXT,
+  claude_session_id TEXT,
   total_input_tokens INTEGER NOT NULL DEFAULT 0,
   total_output_tokens INTEGER NOT NULL DEFAULT 0,
   total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
