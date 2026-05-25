@@ -1348,7 +1348,12 @@ export interface CommitMessageResult {
   error?: string;
 }
 
-const COMMIT_DIFF_LIMIT = 12000;
+// Generous diff budget — multi-feature branches and operator-driven
+// terminal-mode tasks (where the diff IS the only signal) routinely
+// blow past tens of KB. Modern helper models swallow 200 KB without
+// breaking a sweat, and an over-tight cap means the PR/commit summary
+// quietly misses whole features that landed later in the branch.
+const COMMIT_DIFF_LIMIT = 300_000;
 const COMMIT_FALLBACK = (hint: string) =>
   `chore: ${(hint || "update").slice(0, 60).replace(/\s+/g, " ").trim()}`;
 
@@ -1428,7 +1433,7 @@ function buildCommitPrompt(
       : "Do NOT include a scope.",
     "Subject line must be lowercase, in imperative mood, under 70 characters total.",
     shape.includeBody
-      ? "After the subject add a blank line, then 1-3 short bullet points explaining what changed. No test plan, no AI attribution."
+      ? "After the subject add a blank line, then 1-3 short bullet points describing what changed at a feature level. NOT a per-file changelog: don't list filenames, function names, or 'modified X / added Y' style entries. No test plan, no AI attribution."
       : "Subject line only, no body.",
     "Do NOT add any git trailers. No `Co-authored-by:`, no `Signed-off-by:`, no `Generated-by:`, no `Reviewed-by:`, no `Helped-by:`, nothing of that form. The commit message ends after the subject (and bullets, if any).",
     shape.hint?.trim() ? `Operator hint: ${shape.hint.trim()}` : "",
@@ -1614,17 +1619,24 @@ export interface PrMessageResult {
 
 function buildPrPrompt(
   conversation: string,
+  diff: string,
   shape: PrMessageShape,
   extraInstructions?: string,
 ): string {
+  const hasConversation = conversation.trim().length > 0;
+  const hasDiff = diff.trim().length > 0;
   const rules = [
     "Output ONLY two parts separated by a blank line: a single subject line, then a Markdown body.",
     "Subject: lowercase, conventional-commit style (`feat: ...`, `fix: ...`), under 70 characters, imperative mood.",
     shape.includeBullets === false
       ? "Body: one short paragraph (no list)."
-      : "Body: 2-5 short bullet points starting with `- `, focused on what changed and why. No 'Test plan', no AI attribution, no boilerplate.",
+      : "Body: 2-5 short bullet points starting with `- `, each describing a user-visible feature or behavior change. NOT a per-file changelog: don't list filenames, function names, line counts, or 'modified X / added Y' style entries. Group related edits under a single bullet that names the capability they add. No 'Test plan', no AI attribution, no boilerplate.",
     "No closing summary, no headings, no code fences, no quotes around the subject.",
-    "Ground the title and body in what was actually discussed and done in the conversation below. Ignore work that was discussed but never carried out, and prefer the agent's final state over earlier intermediate steps.",
+    hasConversation && hasDiff
+      ? "Ground the title and body in what was actually built. Treat the diff as the source of truth for what shipped, and use the conversation only for intent / framing — ignore work that was discussed but never made it into the diff."
+      : hasConversation
+        ? "Ground the title and body in what was actually discussed and done in the conversation below. Ignore work that was discussed but never carried out."
+        : "Ground the title and body in what the diff actually contains. Read the changes and infer the features they add or the bugs they fix; do not narrate individual hunks.",
     shape.taskPrompt?.trim()
       ? `Original task prompt (for context):\n${shape.taskPrompt.trim()}`
       : "",
@@ -1635,7 +1647,17 @@ function buildPrPrompt(
   ]
     .filter(Boolean)
     .join("\n");
-  return `Generate a pull request subject + body for the work captured in the conversation below.\n\n${rules}\n\n--- CONVERSATION ---\n${conversation}\n--- END CONVERSATION ---`;
+  const sections: string[] = [];
+  if (hasConversation) {
+    sections.push(`--- CONVERSATION ---\n${conversation}\n--- END CONVERSATION ---`);
+  }
+  if (hasDiff) {
+    sections.push(`--- DIFF ---\n${diff}\n--- END DIFF ---`);
+  }
+  const preamble = hasConversation
+    ? "Generate a pull request subject + body for the work captured below."
+    : "Generate a pull request subject + body that describes the diff below.";
+  return `${preamble}\n\n${rules}\n\n${sections.join("\n\n")}`;
 }
 
 function splitPrOutput(raw: string): { title: string; body: string } {
@@ -1657,12 +1679,14 @@ const PR_FALLBACK_BODY = (taskPrompt?: string): string => {
 
 /**
  * Stream a PR subject + body. Yields chunks for the wire, returns the
- * parsed result. The model is grounded in the task's CONVERSATION
- * (what the operator and agent actually said + did), not the diff —
- * so the title and body reflect the intent and narrative of the work
- * rather than every mechanical edit. Caller is responsible for
- * formatting and trimming the conversation; this function passes it
- * through verbatim.
+ * parsed result. The model is grounded in BOTH the task conversation
+ * (what the operator and agent actually said + did) AND the working
+ * diff — conversation gives intent / framing, diff is the source of
+ * truth for what actually landed. Terminal-mode tasks have no
+ * conversation, so the diff alone drives the summary. Caller passes
+ * the formatted conversation verbatim; the function reads the diff
+ * itself from the working tree (or the branch range when the tree is
+ * clean post auto-commit).
  */
 export async function* streamPrMessage(
   cwd: string,
@@ -1670,19 +1694,21 @@ export async function* streamPrMessage(
     baseRef?: string;
     helper?: AiHelperOptions;
     extraInstructions?: string;
-    /** Formatted task conversation (user + agent turns). Required signal —
-     *  if empty, falls back to the task title. */
+    /** Formatted task conversation (user + agent turns). Optional —
+     *  terminal-mode tasks have no chat to fall back on, and the diff
+     *  is enough on its own. */
     conversation?: string;
   } & PrMessageShape = {},
 ): AsyncGenerator<string, PrMessageResult, void> {
   const conversation = (opts.conversation ?? "").trim();
-  if (!conversation) {
+  const { diff } = await readCombinedDiff(cwd, opts.baseRef);
+  if (!conversation && !diff.trim()) {
     const fallback = `${opts.taskTitle ? `feat: ${slugifyTitle(opts.taskTitle)}` : "chore: update"}\n\n${PR_FALLBACK_BODY(opts.taskPrompt)}`;
     yield fallback;
     const split = splitPrOutput(fallback);
     return { ...split, source: "fallback-no-changes" };
   }
-  const prompt = buildPrPrompt(conversation, opts, opts.extraInstructions);
+  const prompt = buildPrPrompt(conversation, diff, opts, opts.extraInstructions);
   const result = yield* streamHelperText(cwd, prompt, opts.helper ?? {});
   if (result.source === "fallback-error") {
     const fallback = `${opts.taskTitle ? `feat: ${slugifyTitle(opts.taskTitle)}` : "chore: update"}\n\n${PR_FALLBACK_BODY(opts.taskPrompt)}`;
