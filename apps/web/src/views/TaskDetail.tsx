@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRealtime } from "@/realtime";
@@ -79,6 +79,11 @@ import {
 } from "@/lib/utils";
 import { TaskTimeline } from "@/views/TaskTimeline";
 import { TaskWorkspace } from "@/views/TaskWorkspace";
+// Terminal-mode tasks render the per-task tmux pane in place of the chat —
+// lazy-load it so the xterm.js bundle isn't pulled in for managed tasks.
+const TaskTerminalPane = lazy(() =>
+  import("@/views/Terminal").then((m) => ({ default: m.Terminal })),
+);
 import { ShipMenu } from "@/components/ship-menu";
 import { ReviewBadge } from "@/components/review-badge";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
@@ -580,8 +585,32 @@ export function TaskDetail({ task }: { task: Task }) {
             workspace panel would crowd out the chat. Mobile gets
             the chat full-width and an inline "Workspace" link the
             operator can tap to drill in (TaskWorkspace itself has
-            tabs for files/diff/log/etc). */}
-        {workspaceOpen && isWide ? (
+            tabs for files/diff/log/etc).
+            Terminal-mode tasks swap the chat for the per-task tmux
+            pane — operators drive the agent CLI directly, so there's
+            no chat to render. Workspace tabs (diff/files/context)
+            stay on the right as usual. */}
+        {task.mode === "terminal" ? (
+          workspaceOpen && isWide ? (
+            <PanelGroup direction="horizontal" className="h-full">
+              <Panel id={`tl-${task.id}`} defaultSize={52} minSize={32}>
+                <TerminalPaneWithFallback taskId={task.id} onError={onError} />
+              </Panel>
+              <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-ember-500/40 transition-colors dark:bg-ink-50/10" />
+              <Panel id={`ws-${task.id}`} defaultSize={48} minSize={28}>
+                <TaskWorkspace
+                  task={task}
+                  onError={onError}
+                  plan={plan}
+                  planUpdatedAt={planUpdatedAt}
+                  messages={messages}
+                />
+              </Panel>
+            </PanelGroup>
+          ) : (
+            <TerminalPaneWithFallback taskId={task.id} onError={onError} />
+          )
+        ) : workspaceOpen && isWide ? (
           <PanelGroup direction="horizontal" className="h-full">
             <Panel id={`tl-${task.id}`} defaultSize={52} minSize={32}>
               <TaskTimeline
@@ -635,6 +664,28 @@ export function TaskDetail({ task }: { task: Task }) {
         toast={toast}
       />
     </div>
+  );
+}
+
+function TerminalPaneWithFallback({
+  taskId,
+  onError,
+}: {
+  taskId: string;
+  onError: (m: string) => void;
+}) {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-full items-center justify-center bg-ink-900">
+          <div className="font-mono text-[11px] text-ink-500 dark:text-ink-400">
+            Loading terminal…
+          </div>
+        </div>
+      }
+    >
+      <TaskTerminalPane taskId={taskId} onError={onError} />
+    </Suspense>
   );
 }
 

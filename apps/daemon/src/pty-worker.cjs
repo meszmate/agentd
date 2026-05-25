@@ -33,6 +33,11 @@ const fs = require("fs");
 
 // Resolve node-pty from the daemon's installed deps. We accept either the
 // vendored copy under apps/daemon/node_modules or the workspace root.
+//
+// Bun's install drops the executable bit on prebuilt binaries, so node-pty's
+// spawn-helper lands as 0644 and posix_spawnp fails with "permission denied"
+// the moment any pty.spawn() runs. Chmod it back to 0755 before requiring
+// node-pty — cheap, idempotent, and node-pty caches the path on first load.
 function loadNodePty() {
   const tryPaths = [
     path.resolve(__dirname, "..", "node_modules", "node-pty"),
@@ -40,11 +45,30 @@ function loadNodePty() {
   ];
   for (const p of tryPaths) {
     try {
+      ensureSpawnHelperExecutable(p);
       return require(p);
     } catch {}
   }
   // Fallback to bare require — works when worker is run with NODE_PATH set.
   return require("node-pty");
+}
+
+function ensureSpawnHelperExecutable(ptyDir) {
+  const helper = path.join(
+    ptyDir,
+    "prebuilds",
+    `${process.platform}-${process.arch}`,
+    "spawn-helper",
+  );
+  try {
+    const stat = fs.statSync(helper);
+    if ((stat.mode & 0o111) === 0) {
+      fs.chmodSync(helper, 0o755);
+    }
+  } catch {
+    // helper not at this path (different platform / different layout) — let
+    // require() fail loudly if it actually matters.
+  }
 }
 
 function emit(obj) {
