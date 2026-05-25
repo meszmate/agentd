@@ -1844,6 +1844,7 @@ export class AgentdClient {
     };
     defaultThinking: { claude: ThinkingLevel; codex: ThinkingLevel };
     defaultModel: { claude: string; codex: string };
+    defaultTaskMode: "managed" | "terminal";
     review: {
       enabled: boolean;
       agent: "claude" | "codex";
@@ -1876,6 +1877,7 @@ export class AgentdClient {
         codex: ThinkingLevel;
       }>;
       defaultModel: Partial<{ claude: string; codex: string }>;
+      defaultTaskMode: "managed" | "terminal";
       review: Partial<{
         enabled: boolean;
         agent: "claude" | "codex";

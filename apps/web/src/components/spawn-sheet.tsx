@@ -13,6 +13,7 @@ import {
   usePatchPrefs,
   usePrefs,
   useProjectBranches,
+  useSettings,
   useSkills,
   useSpawnTasksMulti,
 } from "@/queries";
@@ -101,6 +102,7 @@ export function SpawnSheet({
   const { toast } = useApp();
   const prefsQ = usePrefs();
   const patchPrefs = usePatchPrefs();
+  const settingsQ = useSettings();
 
   const [projectId, setProjectId] = useState<string>("");
   const [repoPath, setRepoPath] = useState("");
@@ -131,6 +133,11 @@ export function SpawnSheet({
     if (hydrated) return;
     const p = prefsQ.data?.prefs;
     if (!p) return;
+    // settingsQ may load slightly later than prefs; that's fine — when
+    // the settings query lands the spawn form is still mounted and
+    // taskMode is still on its default. We only hydrate the drive
+    // mode from settings once. Operators rarely keep the spawn sheet
+    // open while changing the global default mid-flight.
     setProjectId(p.lastProjectId);
     setRepoPath(p.lastRepo);
     setBaseBranch(p.lastBase || "");
@@ -149,8 +156,12 @@ export function SpawnSheet({
       baseBranch: p.lastBase || "",
       pullLatest: p.pullLatest,
     });
+    const cfgMode = settingsQ.data?.defaultTaskMode;
+    if (cfgMode === "terminal" || cfgMode === "managed") {
+      setTaskMode(cfgMode);
+    }
     setHydrated(true);
-  }, [prefsQ.data, hydrated]);
+  }, [prefsQ.data, settingsQ.data, hydrated]);
 
   // Pre-fill the base field with the project's actual default branch
   // (`main`/`master`/`trunk`/...) once we know which project we're

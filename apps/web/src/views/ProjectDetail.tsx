@@ -74,6 +74,7 @@ import {
   useProjectGitState,
   usePullProject,
   useRefreshProjectBranches,
+  useSettings,
   useSkills,
   useTasks,
   useUpdateProject,
@@ -592,6 +593,7 @@ function ProjectComposer({
   const prefsQ = usePrefs();
   const patchPrefs = usePatchPrefs();
   const modelsQ = useModels();
+  const settingsQ = useSettings();
 
   const [prompt, setPrompt] = useState("");
   const [agent, setAgent] = useState<"claude" | "codex">("claude");
@@ -605,10 +607,14 @@ function ProjectComposer({
   const [existingBranch, setExistingBranch] = useState("");
   const [autoCommit, setAutoCommit] = useState(true);
   const [autoPush, setAutoPush] = useState(true);
+  // Drive mode. Hydrated from `cfg.defaultTaskMode` so operators who
+  // flipped the Settings-level default see it here too. The picker
+  // below lets them override per-task.
+  const [taskMode, setTaskMode] = useState<"managed" | "terminal">("managed");
   const [busy, setBusy] = useState(false);
   const [hydrated, setHydrated] = useState(false);
 
-  // One-shot hydration from server-side prefs.
+  // One-shot hydration from server-side prefs + settings.
   useEffect(() => {
     if (hydrated) return;
     const p = prefsQ.data?.prefs;
@@ -622,8 +628,12 @@ function ProjectComposer({
     setBase(p.lastBase || "");
     setAutoCommit(p.lastAutoCommit);
     setAutoPush(p.lastAutoPush);
+    const cfgMode = settingsQ.data?.defaultTaskMode;
+    if (cfgMode === "terminal" || cfgMode === "managed") {
+      setTaskMode(cfgMode);
+    }
     setHydrated(true);
-  }, [prefsQ.data, hydrated]);
+  }, [prefsQ.data, settingsQ.data, hydrated]);
 
   // Pre-fill the base field with this project's actual default branch
   // (`main`/`master`/`trunk`/...) when the operator hasn't typed one.
@@ -675,6 +685,7 @@ function ProjectComposer({
         ...(onExisting
           ? { branchMode: "existing" as const, branchName: onExisting }
           : {}),
+        ...(taskMode === "terminal" ? { mode: "terminal" as const } : {}),
       });
       void patchPrefs.mutateAsync({
         lastProjectId: project.id,
@@ -741,6 +752,14 @@ function ProjectComposer({
             { value: "codex", label: "codex" },
           ]}
           onSelect={(v) => setAgent(v as "claude" | "codex")}
+        />
+        <ToolbarPick
+          label={taskMode === "terminal" ? "drive:terminal" : "drive:managed"}
+          options={[
+            { value: "managed", label: "managed · streaming runner" },
+            { value: "terminal", label: "terminal · operator-driven" },
+          ]}
+          onSelect={(v) => setTaskMode(v as "managed" | "terminal")}
         />
         <ToolbarPick
           label={

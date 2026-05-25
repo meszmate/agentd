@@ -115,6 +115,13 @@ export function Settings() {
   const [defaultCodex, setDefaultCodex] = useState<ThinkingLevel>("high");
   const [defaultClaudeModel, setDefaultClaudeModel] = useState("");
   const [defaultCodexModel, setDefaultCodexModel] = useState("");
+  // Default value of the spawn form's "drive" picker. The setting lives
+  // on cfg (not prefs) so it's the authoritative default — operators
+  // who live in terminal mode flip this once and every spawn surface
+  // (main sheet, project tab, anywhere else that grows one) picks it
+  // up. Per-task overrides on the spawn form still win.
+  const [defaultTaskMode, setDefaultTaskMode] =
+    useState<"managed" | "terminal">("managed");
   const [reviewEnabled, setReviewEnabled] = useState(
     REVIEW_DEFAULTS.enabled,
   );
@@ -171,6 +178,9 @@ export function Settings() {
     );
     setDefaultClaudeModel(settingsQ.data.defaultModel?.claude ?? "");
     setDefaultCodexModel(settingsQ.data.defaultModel?.codex ?? "");
+    setDefaultTaskMode(
+      settingsQ.data.defaultTaskMode === "terminal" ? "terminal" : "managed",
+    );
     const rv = settingsQ.data.review;
     if (rv) {
       setReviewEnabled(rv.enabled ?? REVIEW_DEFAULTS.enabled);
@@ -205,6 +215,8 @@ export function Settings() {
       defaultCodex !== (d.defaultThinking?.codex ?? "high") ||
       defaultClaudeModel !== (d.defaultModel?.claude ?? "") ||
       defaultCodexModel !== (d.defaultModel?.codex ?? "") ||
+      defaultTaskMode !==
+        (d.defaultTaskMode === "terminal" ? "terminal" : "managed") ||
       reviewEnabled !== (d.review?.enabled ?? REVIEW_DEFAULTS.enabled) ||
       reviewBlockOnFail !==
         (d.review?.blockOnFail ?? REVIEW_DEFAULTS.blockOnFail) ||
@@ -232,6 +244,7 @@ export function Settings() {
     defaultCodex,
     defaultClaudeModel,
     defaultCodexModel,
+    defaultTaskMode,
     reviewEnabled,
     reviewBlockOnFail,
     reviewAgent,
@@ -313,6 +326,7 @@ export function Settings() {
           claude: defaultClaudeModel.trim(),
           codex: defaultCodexModel.trim(),
         },
+        defaultTaskMode,
         review: {
           enabled: reviewEnabled,
           agent: reviewAgent,
@@ -549,6 +563,47 @@ export function Settings() {
               header — set them there to try a different model for a single
               task without touching the global default.
             </p>
+            <InfoRow
+              label="Default drive mode"
+              hint={
+                defaultTaskMode === "terminal" ? (
+                  <>
+                    New tasks default to <code className="font-mono">terminal</code> —
+                    the daemon prepares the worktree and boots the agent CLI
+                    inside a per-task tmux pty for you to drive from the Term
+                    tab. No streaming runner, no Live/Log/Todos tabs.
+                  </>
+                ) : (
+                  <>
+                    New tasks default to <code className="font-mono">managed</code> —
+                    the daemon spawns the agent under the streaming runner
+                    and feeds events into the Live timeline. The spawn form's
+                    drive picker still wins per-task.
+                  </>
+                )
+              }
+            >
+              <div className="flex flex-wrap gap-1.5">
+                {(["managed", "terminal"] as const).map((m) => {
+                  const on = defaultTaskMode === m;
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setDefaultTaskMode(m)}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border text-[11px] transition-colors",
+                        on
+                          ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+                          : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
+                      )}
+                    >
+                      <span className="font-mono">{m}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </InfoRow>
           </div>
 
           {/* Thinking defaults */}

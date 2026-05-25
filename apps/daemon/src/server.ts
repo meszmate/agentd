@@ -3131,6 +3131,7 @@ export function buildServer(opts: BuildServerOptions) {
       aiHelpers: cfg.aiHelpers,
       defaultThinking: cfg.defaultThinking,
       defaultModel: cfg.defaultModel,
+      defaultTaskMode: cfg.defaultTaskMode,
       review: cfg.review,
     });
   });
@@ -3210,6 +3211,17 @@ export function buildServer(opts: BuildServerOptions) {
         cur.codex = dt.codex as (typeof allowedCodex)[number];
       }
       next.defaultThinking = cur;
+      changed = true;
+    }
+    if ("defaultTaskMode" in body) {
+      const v = body.defaultTaskMode;
+      if (v !== "managed" && v !== "terminal") {
+        return c.json(
+          { error: "defaultTaskMode must be managed|terminal" },
+          400,
+        );
+      }
+      next.defaultTaskMode = v;
       changed = true;
     }
     if ("defaultModel" in body) {
@@ -3316,6 +3328,7 @@ export function buildServer(opts: BuildServerOptions) {
         aiHelpers: next.aiHelpers,
         defaultThinking: next.defaultThinking,
         defaultModel: next.defaultModel,
+        defaultTaskMode: next.defaultTaskMode,
         review: next.review,
       },
     });
