@@ -684,7 +684,7 @@ function TerminalPaneWithFallback({
         </div>
       }
     >
-      <TaskTerminalPane taskId={taskId} onError={onError} />
+      <TaskTerminalPane taskId={taskId} onError={onError} bare />
     </Suspense>
   );
 }

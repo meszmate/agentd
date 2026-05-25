@@ -38,10 +38,11 @@ export function TaskWorkspace({
   // Terminal-mode tasks have no managed runner, so the Live / Log /
   // Todos tabs would all be empty timelines that confuse the operator.
   // The terminal itself lives in the left pane (replacing the chat),
-  // so the Term tab inside this workspace would just be a duplicate
-  // attach to the same tmux session — hide it. Workspace defaults to
-  // Diff, which is what operators most often want to glance at while
-  // driving the CLI on the left.
+  // but the Term tab stays available here too — tmux mirrors the same
+  // session so a second attach is fine, and operators sometimes want
+  // a second pane to glance at the agent while looking at the diff.
+  // Workspace defaults to Diff, which is what operators most often
+  // want to glance at while driving the CLI on the left.
   const isTerminal = task.mode === "terminal";
   const [tab, setTab] = useState<Tab>(isTerminal ? "diff" : "live");
 
@@ -104,13 +105,11 @@ export function TaskWorkspace({
                 Context
               </span>
             </TabsTrigger>
-            {!isTerminal && (
-              <TabsTrigger value="term" variant="stretch">
-                <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
-                  Term
-                </span>
-              </TabsTrigger>
-            )}
+            <TabsTrigger value="term" variant="stretch">
+              <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
+                Term
+              </span>
+            </TabsTrigger>
           </TabsList>
           <span className="ml-auto self-center font-mono text-[10px] text-ink-400 dark:text-ink-500 truncate max-w-[28ch] hidden md:inline">
             {task.worktreePath}
@@ -141,13 +140,11 @@ export function TaskWorkspace({
         <TabsContent value="context" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskContext task={task} />
         </TabsContent>
-        {!isTerminal && (
-          <TabsContent value="term" className="flex-1 min-h-0 mt-0 overflow-hidden">
-            <Suspense fallback={<TermLoading />}>
-              <Terminal taskId={task.id} onError={onError} />
-            </Suspense>
-          </TabsContent>
-        )}
+        <TabsContent value="term" className="flex-1 min-h-0 mt-0 overflow-hidden">
+          <Suspense fallback={<TermLoading />}>
+            <Terminal taskId={task.id} onError={onError} />
+          </Suspense>
+        </TabsContent>
       </Tabs>
     </div>
   );
