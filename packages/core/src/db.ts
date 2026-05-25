@@ -146,6 +146,14 @@ export const tasks = sqliteTable("tasks", {
   reviewModel: text("review_model"),
   reviewedAt: integer("reviewed_at"),
   reviewSkip: integer("review_skip").notNull().default(0),
+  /**
+   * Drive mode for this task. `managed` (default) runs the agent CLI
+   * under a stream-json runner and feeds events into the chat
+   * timeline. `terminal` skips the managed runner and instead boots
+   * the agent CLI inside a per-task tmux pty the operator drives
+   * from the Term tab. See `Task.mode` in contracts.
+   */
+  mode: text("mode").notNull().default("managed"),
 });
 
 /**
@@ -782,6 +790,7 @@ const COLUMN_ADDITIONS: string[] = [
   "ALTER TABLE tasks ADD COLUMN review_model TEXT",
   "ALTER TABLE tasks ADD COLUMN reviewed_at INTEGER",
   "ALTER TABLE tasks ADD COLUMN review_skip INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'managed'",
 ];
 
 function migrate(sqlite: Database): void {

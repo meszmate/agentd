@@ -7,6 +7,7 @@ import type {
   ReviewReport,
   ReviewVerdict,
   Task,
+  TaskMode,
   TaskStatus,
   ThinkingLevel,
   WorkspaceMode,
@@ -35,6 +36,12 @@ export interface CreateTaskInput {
   workspaceMode?: WorkspaceMode;
   thinkingLevel?: ThinkingLevel;
   model?: string;
+  /**
+   * Drive mode. `managed` (default) runs the agent under the stream-json
+   * runner. `terminal` skips the runner and boots the agent CLI inside
+   * the task's tmux pty for the operator to drive directly.
+   */
+  mode?: TaskMode;
   mirrorTo?: MirrorTarget | null;
   councilId?: string | null;
   /**
@@ -142,6 +149,7 @@ function rowToTask(row: typeof tasks.$inferSelect): Task {
     reviewModel: row.reviewModel ?? null,
     reviewedAt: row.reviewedAt ?? null,
     reviewSkip: row.reviewSkip === 1,
+    mode: (row.mode as TaskMode | undefined) ?? "managed",
   };
 }
 
@@ -330,6 +338,7 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
       githubPrIsDraft:
         input.githubPrIsDraft == null ? null : input.githubPrIsDraft ? 1 : 0,
       githubIssueState: input.githubIssueState ?? null,
+      mode: input.mode ?? "managed",
     })
     .run();
   return getTask(db, id)!;

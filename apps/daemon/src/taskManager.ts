@@ -20,6 +20,10 @@ import {
   autoCommit,
   commitIdentityEnv,
   checkoutPrInWorktree,
+  createTmuxSession,
+  killTmuxSession,
+  sendTmuxKeys,
+  tmuxSessionExists,
   scrubCommitTrailers,
   createTask,
   deleteTask,
@@ -110,6 +114,14 @@ export interface CreateTaskParams {
   pullLatest?: boolean;
   thinkingLevel?: ThinkingLevel;
   model?: string;
+  /**
+   * `managed` (default) runs the agent under the streaming runner.
+   * `terminal` skips the runner entirely: the daemon creates the
+   * worktree, prepares the per-task tmux pty, auto-runs the agent
+   * CLI inside it, and stays out of the way. The operator drives
+   * from the Term tab.
+   */
+  mode?: import("@agentd/contracts").TaskMode;
   /**
    * Plan-slice chain: when set, the task is created as `pending` and
    * spawnRunner is held until the parent transitions to `done`. The
@@ -464,18 +476,25 @@ export class TaskManager {
     }
   }
 
-  private helperForTask(params: {
-    agent: AgentKind;
-    model?: string | null;
-    thinkingLevel?: ThinkingLevel | null;
-  }): AiHelperOptions {
+  private helperForTask(
+    params: {
+      agent: AgentKind;
+      model?: string | null;
+      thinkingLevel?: ThinkingLevel | null;
+    },
+    feature?: "commit" | "pr" | "branch",
+  ): AiHelperOptions {
     const cfg = loadConfig(this.paths.root);
+    const ov = feature ? cfg.aiHelpers[feature] : undefined;
     const helper: AiHelperOptions = {
       agent: params.agent,
-      effort: params.thinkingLevel ?? cfg.aiHelpers.effort,
+      effort: ov?.effort ?? params.thinkingLevel ?? cfg.aiHelpers.effort,
     };
     const selectedModel =
-      params.model?.trim() || cfg.defaultModel?.[params.agent] || "";
+      (ov?.model !== undefined ? ov.model.trim() : "") ||
+      params.model?.trim() ||
+      cfg.defaultModel?.[params.agent] ||
+      "";
     if (selectedModel) {
       helper.model = selectedModel;
     }
@@ -801,11 +820,14 @@ export class TaskManager {
         branch = params.branchName.trim();
       } else {
         const ai = await generateBranchName(params.prompt, {
-          helper: this.helperForTask({
-            agent: params.agent,
-            model: params.model,
-            thinkingLevel: params.thinkingLevel,
-          }),
+          helper: this.helperForTask(
+            {
+              agent: params.agent,
+              model: params.model,
+              thinkingLevel: params.thinkingLevel,
+            },
+            "branch",
+          ),
         });
         branch = `${ai.prefix}/${ai.slug}`;
       }
@@ -893,6 +915,7 @@ export class TaskManager {
           return cfg.defaultThinking[params.agent];
         })(),
       model: params.model ?? "",
+      mode: params.mode ?? "managed",
       dependsOnTaskId: params.dependsOnTaskId ?? null,
       planGroupId: params.planGroupId ?? null,
       githubIssue: params.githubIssue ?? null,
@@ -900,6 +923,33 @@ export class TaskManager {
     });
     touchProject(this.db, project.id);
     appendMessage(this.db, task.id, "user", params.prompt);
+    if (task.mode === "terminal") {
+      // Terminal-mode tasks: no managed runner. The worktree is set up,
+      // the prompt is captured as the first user message for the operator
+      // (and any PR-body generator) to see, and the tmux session boots
+      // the agent CLI in the worktree. The operator drives from the
+      // Term tab; auto-commit and auto-push still fire when the operator
+      // marks the task done (same `maybeAutoCommit` path as managed).
+      try {
+        await this.startTerminalSession(task, params.prompt);
+      } catch (e) {
+        appendMessage(
+          this.db,
+          task.id,
+          "system",
+          `Terminal session bootstrap failed: ${(e as Error).message}. Open the Term tab and run \`${task.agent}\` yourself.`,
+        );
+      }
+      updateTaskStatus(this.db, task.id, "idle");
+      this.bus.publish({
+        taskId: task.id,
+        event: { kind: "status", status: "idle" },
+        ts: Date.now(),
+      });
+      const fresh = getTask(this.db, task.id) ?? task;
+      this.bus.publishSystem({ kind: "task_changed", task: fresh });
+      return fresh;
+    }
     if (params.dependsOnTaskId) {
       // Chained child — wait for parent to finish. The lifecycle hook
       // in runCompletionHooks fires spawnRunner once the parent reaches
@@ -965,11 +1015,14 @@ export class TaskManager {
         const ai = await (() => {
           const first = params.slices[0]!;
           return generateBranchName(params.titlePrefix || first.prompt, {
-            helper: this.helperForTask({
-              agent: first.agent ?? "claude",
-              model: first.model,
-              thinkingLevel: first.thinkingLevel,
-            }),
+            helper: this.helperForTask(
+              {
+                agent: first.agent ?? "claude",
+                model: first.model,
+                thinkingLevel: first.thinkingLevel,
+              },
+              "branch",
+            ),
           });
         })();
         branchName = `${ai.prefix}/${ai.slug}`;
@@ -1460,6 +1513,10 @@ export class TaskManager {
     const task = getTask(this.db, taskId);
     if (!task) return;
     await this.stop(taskId).catch(() => {});
+    // Best-effort: tear down the per-task tmux session so a re-created
+    // task with the same trailing id doesn't inherit stale scrollback.
+    // Same pattern the HTTP DELETE handler uses.
+    void killTmuxSession(`agentd-task-${taskId.slice(-8)}`).catch(() => {});
     if (!opts?.keepWorktree) {
       try {
         await removeWorktree(task.repoPath, task.worktreePath, { force: true });
@@ -1470,11 +1527,78 @@ export class TaskManager {
     deleteTask(this.db, taskId);
   }
 
+  /**
+   * Bootstrap the per-task tmux session for a `mode: "terminal"` task.
+   * The session name mirrors what the PTY layer attaches to
+   * (`agentd-task-<short-id>`), so when the operator opens the Term tab
+   * the WebSocket attach lands on the session we just created. The
+   * session boots in the worktree path with the agent CLI auto-typed
+   * at the first prompt, so the operator sees claude / codex starting
+   * up rather than a bare shell. tmux's `-A` semantics in pty-worker
+   * make reconnects (reloads, second device) cheap.
+   */
+  private async startTerminalSession(
+    task: Task,
+    prompt: string,
+  ): Promise<void> {
+    const sessionName = `agentd-task-${task.id.slice(-8)}`;
+    // If a session with this name already exists (rare — only happens
+    // when the operator re-creates a task that reused an id suffix),
+    // just send the boot command into it. Otherwise create fresh in
+    // the worktree.
+    const exists = await tmuxSessionExists(sessionName);
+    if (!exists) {
+      const created = await createTmuxSession(sessionName, task.worktreePath);
+      if (!created) {
+        throw new Error("tmux new-session failed (is tmux installed?)");
+      }
+    }
+    // Stamp the task id on the session env so agentd-progress /
+    // agentd-ask / agentd-instructions know which task they belong to
+    // when run from inside the operator's terminal.
+    await sendTmuxKeys(
+      sessionName,
+      `export AGENTD_TASK_ID=${task.id}`,
+      { enter: true },
+    );
+    // Auto-launch the agent CLI in the worktree. We don't try to
+    // pre-pipe the prompt — operators typically want to review it
+    // before sending, and claude's TUI doesn't read piped stdin well.
+    // The prompt is captured as the first user message above so the
+    // PR-body helper and the operator can both see it.
+    const cmd = task.agent === "codex" ? "codex" : "claude";
+    await sendTmuxKeys(sessionName, cmd, { enter: true });
+    // Surface the prompt verbatim in the session as a comment-ish
+    // line so the operator can copy-paste it into the running agent.
+    // The agent CLIs ignore stdin until their TUI is ready, so we
+    // don't try to type the prompt itself.
+    appendMessage(
+      this.db,
+      task.id,
+      "system",
+      `Terminal session booted in \`${task.worktreePath}\`. The ${cmd} CLI is starting in the Term tab — paste the prompt above when it's ready.`,
+    );
+    void prompt;
+  }
+
   private async spawnRunner(
     task: Task,
     prompt: string,
     resume: boolean,
   ): Promise<void> {
+    // Terminal-mode tasks have no managed runner — the operator drives
+    // the agent CLI inside the per-task tmux session directly. Resume
+    // hooks (auto-resume, completion fan-out, /compact spawn) all still
+    // dispatch here, so guarding once at the entry keeps every callsite
+    // safe instead of dotting `if (task.mode === "terminal")` across the
+    // file. The send / queue paths fall through harmlessly: queued lines
+    // never fire, which is correct because there's nothing to feed them
+    // into. Operators steer terminal tasks through the Term tab.
+    if (task.mode === "terminal") {
+      void prompt;
+      void resume;
+      return;
+    }
     const runner: AgentRunner =
       task.agent === "claude" ? new ClaudeRunner() : new CodexRunner();
     const unsubscribe = runner.on((event) => this.handleEvent(task.id, event));
@@ -2613,11 +2737,14 @@ export class TaskManager {
     const cfg = loadConfig(this.paths.root);
     const firstMember = params.members[0]!;
     const ai = await generateBranchName(params.prompt, {
-      helper: this.helperForTask({
-        agent: firstMember.agent,
-        model: firstMember.model,
-        thinkingLevel: firstMember.thinkingLevel,
-      }),
+      helper: this.helperForTask(
+        {
+          agent: firstMember.agent,
+          model: firstMember.model,
+          thinkingLevel: firstMember.thinkingLevel,
+        },
+        "branch",
+      ),
     });
     const baseSlug = ai.slug || "council";
 
@@ -2755,11 +2882,14 @@ export class TaskManager {
     const ai = await generateCommitMessage(task.worktreePath, {
       fallbackHint: task.title,
       baseRef: task.baseCommitSha || task.baseBranch,
-      helper: this.helperForTask({
-        agent: task.agent,
-        model: task.model,
-        thinkingLevel: task.thinkingLevel,
-      }),
+      helper: this.helperForTask(
+        {
+          agent: task.agent,
+          model: task.model,
+          thinkingLevel: task.thinkingLevel,
+        },
+        "commit",
+      ),
       ...(cfg.commitInstructions
         ? { extraInstructions: cfg.commitInstructions }
         : {}),

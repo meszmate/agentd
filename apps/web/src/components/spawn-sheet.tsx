@@ -114,6 +114,12 @@ export function SpawnSheet({
     useState<PermissionMode>("bypassPermissions");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("high");
   const [model, setModel] = useState<string>("");
+  // Drive mode. `managed` (default) runs the agent under the streaming
+  // runner; `terminal` skips the runner and boots the agent CLI inside
+  // the task's tmux pty for hands-on driving. Only meaningful for solo
+  // tasks — councils and phase batches stay managed (no point running
+  // a parallel suite interactively).
+  const [taskMode, setTaskMode] = useState<"managed" | "terminal">("managed");
   const [workspace, setWorkspace] = useState<WorkspaceSetupValue>(() =>
     defaultWorkspaceSetup(""),
   );
@@ -296,6 +302,7 @@ export function SpawnSheet({
           : {}),
         ...(workspace.pullLatest ? { pullLatest: true } : {}),
         ...(activeSkills.length ? { skills: activeSkills } : {}),
+        ...(taskMode === "terminal" ? { mode: "terminal" as const } : {}),
       });
       void patchPrefs.mutateAsync({
         lastRepo: repoPath.trim(),
@@ -474,6 +481,29 @@ export function SpawnSheet({
                   )}
                   {!phaseMode && !councilMode && (
                     <>
+                      <SettingRow label="drive">
+                        <ToolbarPick
+                          label={
+                            taskMode === "terminal"
+                              ? "terminal · operator-driven"
+                              : "managed · streaming runner"
+                          }
+                          options={[
+                            {
+                              value: "managed",
+                              label: "managed · streaming runner",
+                            },
+                            {
+                              value: "terminal",
+                              label: "terminal · operator-driven",
+                            },
+                          ]}
+                          align="end"
+                          onSelect={(v) =>
+                            setTaskMode(v as "managed" | "terminal")
+                          }
+                        />
+                      </SettingRow>
                       <SettingRow label="permissions">
                         <ToolbarPick
                           label={permissionLabel(permissionMode)}

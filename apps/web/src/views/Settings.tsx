@@ -102,6 +102,15 @@ export function Settings() {
   const [helperBinary, setHelperBinary] = useState("claude");
   const [helperModel, setHelperModel] = useState("");
   const [helperEffort, setHelperEffort] = useState<ThinkingLevel>("medium");
+  // Per-feature overrides. Empty string in the model field === "inherit
+  // the shared default above". A blank `effort` (null) means inherit
+  // too. The Settings save trims empty values back to undefined so
+  // older configs don't gain noise they didn't ask for.
+  const [helperCommitModel, setHelperCommitModel] = useState("");
+  const [helperCommitEffort, setHelperCommitEffort] =
+    useState<ThinkingLevel | "">("");
+  const [helperPrModel, setHelperPrModel] = useState("");
+  const [helperPrEffort, setHelperPrEffort] = useState<ThinkingLevel | "">("");
   const [defaultClaude, setDefaultClaude] = useState<ThinkingLevel>("xhigh");
   const [defaultCodex, setDefaultCodex] = useState<ThinkingLevel>("high");
   const [defaultClaudeModel, setDefaultClaudeModel] = useState("");
@@ -146,6 +155,14 @@ export function Settings() {
     setHelperEffort(
       (settingsQ.data.aiHelpers?.effort as ThinkingLevel) ?? "medium",
     );
+    setHelperCommitModel(settingsQ.data.aiHelpers?.commit?.model ?? "");
+    setHelperCommitEffort(
+      (settingsQ.data.aiHelpers?.commit?.effort as ThinkingLevel | undefined) ?? "",
+    );
+    setHelperPrModel(settingsQ.data.aiHelpers?.pr?.model ?? "");
+    setHelperPrEffort(
+      (settingsQ.data.aiHelpers?.pr?.effort as ThinkingLevel | undefined) ?? "",
+    );
     setDefaultClaude(
       (settingsQ.data.defaultThinking?.claude as ThinkingLevel) ?? "xhigh",
     );
@@ -180,6 +197,10 @@ export function Settings() {
       helperBinary !== (d.aiHelpers?.binary ?? "claude") ||
       helperModel !== (d.aiHelpers?.model ?? "") ||
       helperEffort !== (d.aiHelpers?.effort ?? "medium") ||
+      helperCommitModel !== (d.aiHelpers?.commit?.model ?? "") ||
+      helperCommitEffort !== ((d.aiHelpers?.commit?.effort as ThinkingLevel | undefined) ?? "") ||
+      helperPrModel !== (d.aiHelpers?.pr?.model ?? "") ||
+      helperPrEffort !== ((d.aiHelpers?.pr?.effort as ThinkingLevel | undefined) ?? "") ||
       defaultClaude !== (d.defaultThinking?.claude ?? "xhigh") ||
       defaultCodex !== (d.defaultThinking?.codex ?? "high") ||
       defaultClaudeModel !== (d.defaultModel?.claude ?? "") ||
@@ -203,6 +224,10 @@ export function Settings() {
     helperBinary,
     helperModel,
     helperEffort,
+    helperCommitModel,
+    helperCommitEffort,
+    helperPrModel,
+    helperPrEffort,
     defaultClaude,
     defaultCodex,
     defaultClaudeModel,
@@ -249,8 +274,25 @@ export function Settings() {
     return () => main?.removeEventListener("scroll", onScroll);
   }, []);
 
+  function buildOverride(
+    model: string,
+    effort: ThinkingLevel | "",
+  ): { model?: string; effort?: ThinkingLevel } | undefined {
+    const trimmed = model.trim();
+    // Skip the override entirely when both fields are empty so config.json
+    // doesn't grow `commit: {}` / `pr: {}` blobs for installs that never
+    // touched these.
+    if (!trimmed && !effort) return undefined;
+    const ov: { model?: string; effort?: ThinkingLevel } = {};
+    if (trimmed) ov.model = trimmed;
+    if (effort) ov.effort = effort;
+    return ov;
+  }
+
   async function save() {
     try {
+      const commitOv = buildOverride(helperCommitModel, helperCommitEffort);
+      const prOv = buildOverride(helperPrModel, helperPrEffort);
       await patch.mutateAsync({
         agentInstructions,
         commitInstructions,
@@ -260,6 +302,8 @@ export function Settings() {
           binary: helperBinary.trim(),
           model: helperModel.trim(),
           effort: helperEffort,
+          ...(commitOv ? { commit: commitOv } : {}),
+          ...(prOv ? { pr: prOv } : {}),
         },
         defaultThinking: {
           claude: defaultClaude,
@@ -617,6 +661,60 @@ export function Settings() {
             >
               <ThinkingPicker value={helperEffort} onChange={setHelperEffort} />
             </InfoRow>
+            <div className="px-5 pt-3 pb-1 text-[10px] uppercase tracking-[0.12em] font-mono text-ink-400 dark:text-ink-500">
+              Per-helper overrides
+            </div>
+            <InfoRow
+              label="Commit · model"
+              hint={
+                <>
+                  Override the model for commit-message generation only. Blank
+                  inherits the shared default above.
+                </>
+              }
+            >
+              <Input
+                value={helperCommitModel}
+                onChange={(e) => setHelperCommitModel(e.target.value)}
+                placeholder="(inherit)"
+                className="font-mono w-72"
+              />
+            </InfoRow>
+            <InfoRow
+              label="Commit · effort"
+              hint="Defaults to inherit. Pick a tier to pin a different effort just for commit subjects."
+            >
+              <OptionalThinkingPicker
+                value={helperCommitEffort}
+                onChange={setHelperCommitEffort}
+              />
+            </InfoRow>
+            <InfoRow
+              label="PR · model"
+              hint={
+                <>
+                  Override the model for streaming PR title + body. Blank
+                  inherits the shared default above. PR bodies often benefit
+                  from a deeper model than commits.
+                </>
+              }
+            >
+              <Input
+                value={helperPrModel}
+                onChange={(e) => setHelperPrModel(e.target.value)}
+                placeholder="(inherit)"
+                className="font-mono w-72"
+              />
+            </InfoRow>
+            <InfoRow
+              label="PR · effort"
+              hint="Defaults to inherit. Pick a tier to pin a different effort just for PR generation."
+            >
+              <OptionalThinkingPicker
+                value={helperPrEffort}
+                onChange={setHelperPrEffort}
+              />
+            </InfoRow>
           </div>
 
           {/* Commits & PRs — free-form guidance the AI helper appends */}
@@ -932,6 +1030,57 @@ function ThinkingPicker({
     : (Object.keys(THINKING_LEVEL_META) as ThinkingLevel[]);
   return (
     <div className="flex flex-wrap gap-1.5">
+      {levels.map((v) => {
+        const meta = THINKING_LEVEL_META[v];
+        const on = value === v;
+        return (
+          <button
+            key={v}
+            type="button"
+            onClick={() => onChange(v)}
+            title={meta.hint}
+            className={cn(
+              "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border text-[11px] transition-colors",
+              on
+                ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+                : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
+            )}
+          >
+            <span className="font-mono">{meta.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Variant of ThinkingPicker that includes a leading "inherit" pill.
+ * Used for per-helper overrides where blank should mean "fall back to
+ * the shared default" instead of forcing the operator to pick a tier.
+ */
+function OptionalThinkingPicker({
+  value,
+  onChange,
+}: {
+  value: ThinkingLevel | "";
+  onChange: (next: ThinkingLevel | "") => void;
+}) {
+  const levels = Object.keys(THINKING_LEVEL_META) as ThinkingLevel[];
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      <button
+        type="button"
+        onClick={() => onChange("")}
+        className={cn(
+          "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border text-[11px] transition-colors",
+          value === ""
+            ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+            : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
+        )}
+      >
+        <span className="font-mono">inherit</span>
+      </button>
       {levels.map((v) => {
         const meta = THINKING_LEVEL_META[v];
         const on = value === v;

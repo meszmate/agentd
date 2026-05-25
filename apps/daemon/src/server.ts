@@ -258,14 +258,24 @@ export function buildServer(opts: BuildServerOptions) {
   function pubTaskRemoved(taskId: string): void {
     bus.publishSystem({ kind: "task_removed", taskId });
   }
-  function helperForTask(task: Task): AiHelperOptions {
+  function helperForTask(
+    task: Task,
+    feature?: "commit" | "pr" | "branch",
+  ): AiHelperOptions {
     const cfg = loadConfig(paths.root);
+    // Per-feature override (commit / pr / branch) wins over both the
+    // task's own model + effort and the shared aiHelpers defaults.
+    // Leave override fields undefined to inherit.
+    const ov = feature ? cfg.aiHelpers[feature] : undefined;
     const helper: AiHelperOptions = {
       agent: task.agent,
-      effort: task.thinkingLevel ?? cfg.aiHelpers.effort,
+      effort: ov?.effort ?? task.thinkingLevel ?? cfg.aiHelpers.effort,
     };
     const selectedModel =
-      task.model?.trim() || cfg.defaultModel?.[task.agent] || "";
+      (ov?.model !== undefined ? ov.model.trim() : "") ||
+      task.model?.trim() ||
+      cfg.defaultModel?.[task.agent] ||
+      "";
     if (selectedModel) helper.model = selectedModel;
     return helper;
   }
@@ -927,6 +937,7 @@ export function buildServer(opts: BuildServerOptions) {
           ? { thinkingLevel: parsed.data.thinkingLevel }
           : {}),
         ...(parsed.data.model ? { model: parsed.data.model } : {}),
+        ...(parsed.data.mode ? { mode: parsed.data.mode } : {}),
       });
       pubTaskChanged(task.id);
       void maybeSpawnTaskThread(task.id);
@@ -1213,7 +1224,7 @@ export function buildServer(opts: BuildServerOptions) {
       ...(body.hint ? { hint: body.hint } : {}),
       fallbackHint: task.title,
       baseRef: task.baseCommitSha || task.baseBranch,
-      helper: helperForTask(task),
+      helper: helperForTask(task, "commit"),
       ...(cfg.commitInstructions
         ? { extraInstructions: cfg.commitInstructions }
         : {}),
@@ -1239,7 +1250,7 @@ export function buildServer(opts: BuildServerOptions) {
       ...(body.hint ? { hint: body.hint } : {}),
       fallbackHint: task.title,
       baseRef: task.baseCommitSha || task.baseBranch,
-      helper: helperForTask(task),
+      helper: helperForTask(task, "commit"),
       ...(cfg.commitInstructions
         ? { extraInstructions: cfg.commitInstructions }
         : {}),
@@ -1317,7 +1328,7 @@ export function buildServer(opts: BuildServerOptions) {
       taskPrompt,
       taskTitle: task.title,
       conversation,
-      helper: helperForTask(task),
+      helper: helperForTask(task, "pr"),
       ...(cfg.prInstructions
         ? { extraInstructions: cfg.prInstructions }
         : {}),
@@ -1393,16 +1404,25 @@ export function buildServer(opts: BuildServerOptions) {
       body?.agent === "claude" || body?.agent === "codex"
         ? body.agent
         : null;
+    // Apply the per-feature `branch` override on top of whichever base
+    // the caller picked (explicit agent → effort/model from defaults;
+    // no agent → shared aiHelpers). Per-feature wins last.
+    const branchOv = cfg.aiHelpers.branch;
     const helper: AiHelperOptions = agent
       ? {
           agent,
-          effort: body?.thinkingLevel ?? cfg.aiHelpers.effort,
+          effort: branchOv?.effort ?? body?.thinkingLevel ?? cfg.aiHelpers.effort,
         }
-      : { ...cfg.aiHelpers };
+      : { ...cfg.aiHelpers, ...(branchOv?.effort ? { effort: branchOv.effort } : {}) };
     if (agent) {
       const selectedModel =
-        body?.model?.trim() || cfg.defaultModel?.[agent] || "";
+        (branchOv?.model !== undefined ? branchOv.model.trim() : "") ||
+        body?.model?.trim() ||
+        cfg.defaultModel?.[agent] ||
+        "";
       if (selectedModel) helper.model = selectedModel;
+    } else if (branchOv?.model !== undefined && branchOv.model.trim()) {
+      helper.model = branchOv.model.trim();
     } else if (body?.model?.trim()) {
       helper.model = body.model.trim();
     }
@@ -1426,7 +1446,7 @@ export function buildServer(opts: BuildServerOptions) {
       const ai = await generateCommitMessage(task.worktreePath, {
         fallbackHint: task.title,
         baseRef: task.baseCommitSha || task.baseBranch,
-        helper: helperForTask(task),
+        helper: helperForTask(task, "commit"),
         ...(cfg.commitInstructions
           ? { extraInstructions: cfg.commitInstructions }
           : {}),
