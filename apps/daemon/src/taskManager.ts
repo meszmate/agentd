@@ -510,6 +510,25 @@ export class TaskManager {
     return queue;
   }
 
+  private publishLiveStatus(taskId: string, status: Task["status"]): void {
+    const cur = getTask(this.db, taskId);
+    if (!cur || cur.status === status) return;
+    if (
+      cur.status === "pending" ||
+      cur.status === "done" ||
+      cur.status === "failed" ||
+      cur.status === "stopped"
+    ) {
+      return;
+    }
+    updateTaskStatus(this.db, taskId, status);
+    this.bus.publish({
+      taskId,
+      event: { kind: "status", status },
+      ts: Date.now(),
+    });
+  }
+
   /**
    * Remove a single queued line by its current index. Used by the
    * timeline's queue strip — the operator can drop something they
@@ -616,6 +635,7 @@ export class TaskManager {
       "system",
       `[ask · ${askId}] ${prompt}${optionsBlock}`,
     );
+    this.publishLiveStatus(taskId, "waiting_input");
     this.bus.publish({
       taskId,
       event: { kind: "ask", askId, prompt, options },
@@ -661,6 +681,7 @@ export class TaskManager {
       event: { kind: "answer", askId: oldestAskId, answer },
       ts: Date.now(),
     });
+    this.publishLiveStatus(taskId, "running");
     entry.resolve(answer);
     return true;
   }
@@ -691,9 +712,10 @@ export class TaskManager {
    */
   dismissAsk(taskId: string, askId: string): boolean {
     const entry = this.pendingAsks.get(askId);
+    let resolveLiveAsk: (() => void) | null = null;
     if (entry && entry.taskId === taskId) {
       this.pendingAsks.delete(askId);
-      entry.resolve("(dismissed)");
+      resolveLiveAsk = () => entry.resolve("(dismissed)");
     }
     appendMessage(this.db, taskId, "system", `[answer · ${askId}] (dismissed)`);
     this.bus.publish({
@@ -701,6 +723,10 @@ export class TaskManager {
       event: { kind: "answer", askId, answer: "(dismissed)" },
       ts: Date.now(),
     });
+    if (resolveLiveAsk) {
+      this.publishLiveStatus(taskId, "running");
+      resolveLiveAsk();
+    }
     return true;
   }
 
