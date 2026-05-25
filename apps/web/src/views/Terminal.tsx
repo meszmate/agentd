@@ -40,14 +40,18 @@ const NAME_RE = /^[a-zA-Z0-9_.\-: ]{1,64}$/;
 
 /**
  * Per-task shell — kept around for the existing Task workspace tab. Just a
- * thin XTermPane wrapper that opens /pty/:taskId.
+ * thin XTermPane wrapper that opens /pty/:taskId. Pass `bare` for the in-task
+ * primary pane (terminal-mode tasks) where the terminal IS the surface and
+ * any framing would feel like chrome.
  */
 export function Terminal({
   taskId,
   onError,
+  bare,
 }: {
   taskId: string;
   onError: (m: string) => void;
+  bare?: boolean;
 }) {
   const client = useClient();
   const connect = useCallback(() => client.attachTask(taskId), [client, taskId]);
@@ -56,6 +60,7 @@ export function Terminal({
       connect={connect}
       connectionKey={`task:${taskId}`}
       onError={onError}
+      bare={bare}
     />
   );
 }

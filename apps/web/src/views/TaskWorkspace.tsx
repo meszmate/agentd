@@ -35,7 +35,16 @@ export function TaskWorkspace({
   /** Persisted message stream — feeds the Live activity tab. */
   messages?: Message[];
 }) {
-  const [tab, setTab] = useState<Tab>("live");
+  // Terminal-mode tasks have no managed runner, so the Live / Log /
+  // Todos tabs would all be empty timelines that confuse the operator.
+  // The terminal itself lives in the left pane (replacing the chat),
+  // but the Term tab stays available here too — tmux mirrors the same
+  // session so a second attach is fine, and operators sometimes want
+  // a second pane to glance at the agent while looking at the diff.
+  // Workspace defaults to Diff, which is what operators most often
+  // want to glance at while driving the CLI on the left.
+  const isTerminal = task.mode === "terminal";
+  const [tab, setTab] = useState<Tab>(isTerminal ? "diff" : "live");
 
   const planCount = plan?.length ?? 0;
   const planActive = (plan ?? []).filter((p) => p.status === "in_progress").length;
@@ -50,41 +59,47 @@ export function TaskWorkspace({
       >
         <div className="flex h-9 items-stretch border-b border-ink-900/10 dark:border-ink-50/10 px-1 shrink-0 overflow-x-auto">
           <TabsList variant="stretch" className="h-9">
-            <TabsTrigger value="live" variant="stretch">
-              <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
-                Live
-              </span>
-            </TabsTrigger>
+            {!isTerminal && (
+              <TabsTrigger value="live" variant="stretch">
+                <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
+                  Live
+                </span>
+              </TabsTrigger>
+            )}
             <TabsTrigger value="diff" variant="stretch">
               <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
                 Diff
               </span>
             </TabsTrigger>
-            <TabsTrigger value="todos" variant="stretch">
-              <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
-                Todos
-              </span>
-              {planCount > 0 && (
-                <>
-                  <span className="ml-1.5 font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300">
-                    {planDone}/{planCount}
-                  </span>
-                  {planActive > 0 && (
-                    <span className="ml-1 h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink" />
-                  )}
-                </>
-              )}
-            </TabsTrigger>
+            {!isTerminal && (
+              <TabsTrigger value="todos" variant="stretch">
+                <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
+                  Todos
+                </span>
+                {planCount > 0 && (
+                  <>
+                    <span className="ml-1.5 font-mono text-[10px] tabular-nums text-ember-700 dark:text-ember-300">
+                      {planDone}/{planCount}
+                    </span>
+                    {planActive > 0 && (
+                      <span className="ml-1 h-1.5 w-1.5 rounded-full bg-ember-500 animate-blink" />
+                    )}
+                  </>
+                )}
+              </TabsTrigger>
+            )}
             <TabsTrigger value="files" variant="stretch">
               <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
                 Files
               </span>
             </TabsTrigger>
-            <TabsTrigger value="log" variant="stretch">
-              <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
-                Log
-              </span>
-            </TabsTrigger>
+            {!isTerminal && (
+              <TabsTrigger value="log" variant="stretch">
+                <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
+                  Log
+                </span>
+              </TabsTrigger>
+            )}
             <TabsTrigger value="context" variant="stretch">
               <span className="font-mono text-[10px] uppercase tracking-[0.12em]">
                 Context
@@ -101,21 +116,27 @@ export function TaskWorkspace({
           </span>
         </div>
 
-        <TabsContent value="live" className="flex-1 min-h-0 mt-0 overflow-hidden">
-          <TaskActivity taskId={task.id} messages={messages ?? []} />
-        </TabsContent>
-        <TabsContent value="todos" className="flex-1 min-h-0 mt-0 overflow-hidden">
-          <TodosPanel taskId={task.id} />
-        </TabsContent>
+        {!isTerminal && (
+          <TabsContent value="live" className="flex-1 min-h-0 mt-0 overflow-hidden">
+            <TaskActivity taskId={task.id} messages={messages ?? []} />
+          </TabsContent>
+        )}
+        {!isTerminal && (
+          <TabsContent value="todos" className="flex-1 min-h-0 mt-0 overflow-hidden">
+            <TodosPanel taskId={task.id} />
+          </TabsContent>
+        )}
         <TabsContent value="files" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskFiles taskId={task.id} onError={onError} />
         </TabsContent>
         <TabsContent value="diff" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskDiff taskId={task.id} />
         </TabsContent>
-        <TabsContent value="log" className="flex-1 min-h-0 mt-0 overflow-hidden">
-          <TaskLog taskId={task.id} onError={onError} />
-        </TabsContent>
+        {!isTerminal && (
+          <TabsContent value="log" className="flex-1 min-h-0 mt-0 overflow-hidden">
+            <TaskLog taskId={task.id} onError={onError} />
+          </TabsContent>
+        )}
         <TabsContent value="context" className="flex-1 min-h-0 mt-0 overflow-hidden">
           <TaskContext task={task} />
         </TabsContent>

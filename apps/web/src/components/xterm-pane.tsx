@@ -28,6 +28,12 @@ interface Props {
   onError?: (m: string) => void;
   /** Render extra status text under the empty state when no key is set. */
   emptyHint?: string;
+  /**
+   * Strip the small frame (padding + connection-status pill) so the terminal
+   * fills its container edge-to-edge. Used for the in-task primary pane where
+   * the terminal IS the surface — no chrome, just the running CLI.
+   */
+  bare?: boolean;
 }
 
 interface PtyServerMessage {
@@ -52,7 +58,7 @@ const BACKOFF_MS = [400, 800, 1500, 3000, 5000];
  * Reconnects automatically on transient drops. Surfaces a small status pill
  * at the top so users see what's happening instead of a stale terminal.
  */
-export function XTermPane({ connect, connectionKey, onError, emptyHint }: Props) {
+export function XTermPane({ connect, connectionKey, onError, emptyHint, bare }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const { resolved } = useTheme();
   const [conn, setConn] = useState<ConnState>("connecting");
@@ -219,8 +225,14 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint }: Props)
     );
   }
   return (
-    <div className="relative h-full w-full bg-ink-900 p-1.5">
-      {conn !== "live" && (
+    <div
+      className={
+        bare
+          ? "relative h-full w-full bg-ink-900"
+          : "relative h-full w-full bg-ink-900 p-1.5"
+      }
+    >
+      {!bare && conn !== "live" && (
         <div className="pointer-events-none absolute right-3 top-3 z-10 flex items-center gap-1.5 rounded-full border border-white/10 bg-black/60 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-white/80 backdrop-blur">
           <span
             className={

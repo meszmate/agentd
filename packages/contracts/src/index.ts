@@ -232,6 +232,20 @@ export const TaskStatus = z.enum([
 ]);
 export type TaskStatus = z.infer<typeof TaskStatus>;
 
+/**
+ * How the agent is driven for this task.
+ *   managed  — the daemon spawns the agent CLI in stream-json mode and
+ *              parses every event into the chat timeline. Default.
+ *   terminal — the daemon prepares a worktree + a per-task tmux pty,
+ *              auto-runs the agent CLI inside it, and stays out of the
+ *              way. The operator drives the agent through the Term tab.
+ *              There's no managed runner, no Live/Log/Todos tabs, no
+ *              chat steering — but auto-commit, auto-push, PR open
+ *              and the diff/files/context tabs all still work.
+ */
+export const TaskMode = z.enum(["managed", "terminal"]);
+export type TaskMode = z.infer<typeof TaskMode>;
+
 export const Task = z.object({
   id: z.string(),
   title: z.string(),
@@ -306,6 +320,12 @@ export const Task = z.object({
    * Set per task in the spawn UI or changed mid-task from the header chip.
    */
   model: z.string().optional(),
+  /**
+   * How the agent is driven. Default `managed`. See {@link TaskMode}.
+   * Terminal-mode tasks have no streaming runner, so the web UI hides
+   * the Live / Log / Todos tabs and defaults to the Term tab.
+   */
+  mode: TaskMode.optional(),
   /**
    * When set, the task mirrors events to a chat (Telegram or Discord) and
    * accepts replies as steered input. Toggle from the task header chip.
@@ -792,6 +812,12 @@ export const CreateTaskRequest = z.object({
   pullLatest: z.boolean().optional(),
   thinkingLevel: ThinkingLevel.optional(),
   model: z.string().optional(),
+  /**
+   * Optional. Pick `terminal` to skip the managed runner and instead
+   * boot the agent CLI inside a per-task tmux pty the operator drives
+   * from the Term tab. Defaults to `managed` when omitted.
+   */
+  mode: TaskMode.optional(),
 });
 export type CreateTaskRequest = z.infer<typeof CreateTaskRequest>;
 

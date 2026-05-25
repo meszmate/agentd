@@ -13,6 +13,7 @@ import {
   usePatchPrefs,
   usePrefs,
   useProjectBranches,
+  useSettings,
   useSkills,
   useSpawnTasksMulti,
 } from "@/queries";
@@ -101,6 +102,7 @@ export function SpawnSheet({
   const { toast } = useApp();
   const prefsQ = usePrefs();
   const patchPrefs = usePatchPrefs();
+  const settingsQ = useSettings();
 
   const [projectId, setProjectId] = useState<string>("");
   const [repoPath, setRepoPath] = useState("");
@@ -114,6 +116,12 @@ export function SpawnSheet({
     useState<PermissionMode>("bypassPermissions");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("high");
   const [model, setModel] = useState<string>("");
+  // Drive mode. `managed` (default) runs the agent under the streaming
+  // runner; `terminal` skips the runner and boots the agent CLI inside
+  // the task's tmux pty for hands-on driving. Only meaningful for solo
+  // tasks — councils and phase batches stay managed (no point running
+  // a parallel suite interactively).
+  const [taskMode, setTaskMode] = useState<"managed" | "terminal">("managed");
   const [workspace, setWorkspace] = useState<WorkspaceSetupValue>(() =>
     defaultWorkspaceSetup(""),
   );
@@ -125,6 +133,11 @@ export function SpawnSheet({
     if (hydrated) return;
     const p = prefsQ.data?.prefs;
     if (!p) return;
+    // settingsQ may load slightly later than prefs; that's fine — when
+    // the settings query lands the spawn form is still mounted and
+    // taskMode is still on its default. We only hydrate the drive
+    // mode from settings once. Operators rarely keep the spawn sheet
+    // open while changing the global default mid-flight.
     setProjectId(p.lastProjectId);
     setRepoPath(p.lastRepo);
     setBaseBranch(p.lastBase || "");
@@ -143,8 +156,12 @@ export function SpawnSheet({
       baseBranch: p.lastBase || "",
       pullLatest: p.pullLatest,
     });
+    const cfgMode = settingsQ.data?.defaultTaskMode;
+    if (cfgMode === "terminal" || cfgMode === "managed") {
+      setTaskMode(cfgMode);
+    }
     setHydrated(true);
-  }, [prefsQ.data, hydrated]);
+  }, [prefsQ.data, settingsQ.data, hydrated]);
 
   // Pre-fill the base field with the project's actual default branch
   // (`main`/`master`/`trunk`/...) once we know which project we're
@@ -296,6 +313,7 @@ export function SpawnSheet({
           : {}),
         ...(workspace.pullLatest ? { pullLatest: true } : {}),
         ...(activeSkills.length ? { skills: activeSkills } : {}),
+        ...(taskMode === "terminal" ? { mode: "terminal" as const } : {}),
       });
       void patchPrefs.mutateAsync({
         lastRepo: repoPath.trim(),
@@ -474,6 +492,29 @@ export function SpawnSheet({
                   )}
                   {!phaseMode && !councilMode && (
                     <>
+                      <SettingRow label="drive">
+                        <ToolbarPick
+                          label={
+                            taskMode === "terminal"
+                              ? "terminal · operator-driven"
+                              : "managed · streaming runner"
+                          }
+                          options={[
+                            {
+                              value: "managed",
+                              label: "managed · streaming runner",
+                            },
+                            {
+                              value: "terminal",
+                              label: "terminal · operator-driven",
+                            },
+                          ]}
+                          align="end"
+                          onSelect={(v) =>
+                            setTaskMode(v as "managed" | "terminal")
+                          }
+                        />
+                      </SettingRow>
                       <SettingRow label="permissions">
                         <ToolbarPick
                           label={permissionLabel(permissionMode)}

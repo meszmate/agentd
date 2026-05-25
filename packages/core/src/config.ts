@@ -351,6 +351,19 @@ export function resolveModelInRegistry(
  * helper calls are short and cheap, so a lighter / faster model is usually
  * the right default.
  */
+/**
+ * Per-feature override for the AI helper. Empty/undefined fields mean
+ * "inherit the shared aiHelpers default". Keeps the schema permissive
+ * so an older config.json without these keys keeps working unchanged.
+ */
+export const AiHelperOverride = z.object({
+  model: z.string().optional(),
+  effort: z
+    .enum(["low", "medium", "high", "max", "xhigh"])
+    .optional(),
+});
+export type AiHelperOverride = z.infer<typeof AiHelperOverride>;
+
 export const AiHelperConfig = z.object({
   /** CLI binary to invoke; defaults to whatever's first on $PATH. */
   binary: z.string().default("claude"),
@@ -362,10 +375,58 @@ export const AiHelperConfig = z.object({
    * meatier PR bodies if you want the bullets to read better.
    */
   effort: z.enum(["low", "medium", "high", "max", "xhigh"]).default("medium"),
+  /**
+   * Per-feature overrides. When set, the matching helper call uses these
+   * values instead of the shared `model` / `effort` above. Anything left
+   * undefined inherits. Use this when a feature wants a different model
+   * than the rest — e.g. a deeper model for PR bodies but a fast one for
+   * commit subjects.
+   */
+  commit: AiHelperOverride.optional(),
+  pr: AiHelperOverride.optional(),
+  branch: AiHelperOverride.optional(),
 });
 export type AiHelperConfig = z.infer<typeof AiHelperConfig>;
 
 export const DEFAULT_AI_HELPER: AiHelperConfig = AiHelperConfig.parse({});
+
+/**
+ * Subset of `AiHelperConfig` consumed by `buildAiHelperArgv` — agent,
+ * binary, model, effort. Per-feature overrides above merge on top of
+ * the shared defaults via `pickHelperFor`.
+ */
+export type ResolvedAiHelper = {
+  binary: string;
+  model: string;
+  effort: "low" | "medium" | "high" | "max" | "xhigh";
+};
+
+export type AiHelperFeature = "commit" | "pr" | "branch";
+
+/**
+ * Resolve the helper for a specific feature: start with the shared
+ * defaults (binary / model / effort), then layer the feature's
+ * overrides on top. Anything the override leaves undefined inherits.
+ * Returning a fresh object keeps callers' spreads predictable.
+ */
+export function pickHelperFor(
+  cfg: AiHelperConfig,
+  feature?: AiHelperFeature,
+): ResolvedAiHelper {
+  const base: ResolvedAiHelper = {
+    binary: cfg.binary,
+    model: cfg.model,
+    effort: cfg.effort,
+  };
+  if (!feature) return base;
+  const ov = cfg[feature];
+  if (!ov) return base;
+  return {
+    binary: base.binary,
+    model: ov.model !== undefined ? ov.model : base.model,
+    effort: ov.effort !== undefined ? ov.effort : base.effort,
+  };
+}
 
 /**
  * Per-operator "last picked" values for the spawn flow. Stored in
@@ -476,6 +537,14 @@ export const AgentdConfig = z.object({
       codex: z.string().default(""),
     })
     .default({ claude: "", codex: "" }),
+  /**
+   * Initial value of the "drive" picker in every spawn form. `managed`
+   * (default) launches the agent under the streaming runner; `terminal`
+   * boots the agent CLI inside a per-task tmux pty the operator drives
+   * from the Term tab. Operators who live in terminal-mode flip this
+   * once and forget about it.
+   */
+  defaultTaskMode: z.enum(["managed", "terminal"]).default("managed"),
   /**
    * "Last used" form values for the spawn flow. Server-side so they
    * sync across devices instead of getting trapped in browser

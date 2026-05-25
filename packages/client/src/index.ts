@@ -1838,9 +1838,13 @@ export class AgentdClient {
       binary: string;
       model: string;
       effort: ThinkingLevel;
+      commit?: { model?: string; effort?: ThinkingLevel };
+      pr?: { model?: string; effort?: ThinkingLevel };
+      branch?: { model?: string; effort?: ThinkingLevel };
     };
     defaultThinking: { claude: ThinkingLevel; codex: ThinkingLevel };
     defaultModel: { claude: string; codex: string };
+    defaultTaskMode: "managed" | "terminal";
     review: {
       enabled: boolean;
       agent: "claude" | "codex";
@@ -1860,12 +1864,20 @@ export class AgentdClient {
       commitInstructions: string;
       prInstructions: string;
       maxContextTokens: number;
-      aiHelpers: { binary: string; model: string; effort: ThinkingLevel };
+      aiHelpers: {
+        binary: string;
+        model: string;
+        effort: ThinkingLevel;
+        commit?: { model?: string; effort?: ThinkingLevel };
+        pr?: { model?: string; effort?: ThinkingLevel };
+        branch?: { model?: string; effort?: ThinkingLevel };
+      };
       defaultThinking: Partial<{
         claude: ThinkingLevel;
         codex: ThinkingLevel;
       }>;
       defaultModel: Partial<{ claude: string; codex: string }>;
+      defaultTaskMode: "managed" | "terminal";
       review: Partial<{
         enabled: boolean;
         agent: "claude" | "codex";

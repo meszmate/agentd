@@ -102,10 +102,26 @@ export function Settings() {
   const [helperBinary, setHelperBinary] = useState("claude");
   const [helperModel, setHelperModel] = useState("");
   const [helperEffort, setHelperEffort] = useState<ThinkingLevel>("medium");
+  // Per-feature overrides. Empty string in the model field === "inherit
+  // the shared default above". A blank `effort` (null) means inherit
+  // too. The Settings save trims empty values back to undefined so
+  // older configs don't gain noise they didn't ask for.
+  const [helperCommitModel, setHelperCommitModel] = useState("");
+  const [helperCommitEffort, setHelperCommitEffort] =
+    useState<ThinkingLevel | "">("");
+  const [helperPrModel, setHelperPrModel] = useState("");
+  const [helperPrEffort, setHelperPrEffort] = useState<ThinkingLevel | "">("");
   const [defaultClaude, setDefaultClaude] = useState<ThinkingLevel>("xhigh");
   const [defaultCodex, setDefaultCodex] = useState<ThinkingLevel>("high");
   const [defaultClaudeModel, setDefaultClaudeModel] = useState("");
   const [defaultCodexModel, setDefaultCodexModel] = useState("");
+  // Default value of the spawn form's "drive" picker. The setting lives
+  // on cfg (not prefs) so it's the authoritative default — operators
+  // who live in terminal mode flip this once and every spawn surface
+  // (main sheet, project tab, anywhere else that grows one) picks it
+  // up. Per-task overrides on the spawn form still win.
+  const [defaultTaskMode, setDefaultTaskMode] =
+    useState<"managed" | "terminal">("managed");
   const [reviewEnabled, setReviewEnabled] = useState(
     REVIEW_DEFAULTS.enabled,
   );
@@ -146,6 +162,14 @@ export function Settings() {
     setHelperEffort(
       (settingsQ.data.aiHelpers?.effort as ThinkingLevel) ?? "medium",
     );
+    setHelperCommitModel(settingsQ.data.aiHelpers?.commit?.model ?? "");
+    setHelperCommitEffort(
+      (settingsQ.data.aiHelpers?.commit?.effort as ThinkingLevel | undefined) ?? "",
+    );
+    setHelperPrModel(settingsQ.data.aiHelpers?.pr?.model ?? "");
+    setHelperPrEffort(
+      (settingsQ.data.aiHelpers?.pr?.effort as ThinkingLevel | undefined) ?? "",
+    );
     setDefaultClaude(
       (settingsQ.data.defaultThinking?.claude as ThinkingLevel) ?? "xhigh",
     );
@@ -154,6 +178,9 @@ export function Settings() {
     );
     setDefaultClaudeModel(settingsQ.data.defaultModel?.claude ?? "");
     setDefaultCodexModel(settingsQ.data.defaultModel?.codex ?? "");
+    setDefaultTaskMode(
+      settingsQ.data.defaultTaskMode === "terminal" ? "terminal" : "managed",
+    );
     const rv = settingsQ.data.review;
     if (rv) {
       setReviewEnabled(rv.enabled ?? REVIEW_DEFAULTS.enabled);
@@ -180,10 +207,16 @@ export function Settings() {
       helperBinary !== (d.aiHelpers?.binary ?? "claude") ||
       helperModel !== (d.aiHelpers?.model ?? "") ||
       helperEffort !== (d.aiHelpers?.effort ?? "medium") ||
+      helperCommitModel !== (d.aiHelpers?.commit?.model ?? "") ||
+      helperCommitEffort !== ((d.aiHelpers?.commit?.effort as ThinkingLevel | undefined) ?? "") ||
+      helperPrModel !== (d.aiHelpers?.pr?.model ?? "") ||
+      helperPrEffort !== ((d.aiHelpers?.pr?.effort as ThinkingLevel | undefined) ?? "") ||
       defaultClaude !== (d.defaultThinking?.claude ?? "xhigh") ||
       defaultCodex !== (d.defaultThinking?.codex ?? "high") ||
       defaultClaudeModel !== (d.defaultModel?.claude ?? "") ||
       defaultCodexModel !== (d.defaultModel?.codex ?? "") ||
+      defaultTaskMode !==
+        (d.defaultTaskMode === "terminal" ? "terminal" : "managed") ||
       reviewEnabled !== (d.review?.enabled ?? REVIEW_DEFAULTS.enabled) ||
       reviewBlockOnFail !==
         (d.review?.blockOnFail ?? REVIEW_DEFAULTS.blockOnFail) ||
@@ -203,10 +236,15 @@ export function Settings() {
     helperBinary,
     helperModel,
     helperEffort,
+    helperCommitModel,
+    helperCommitEffort,
+    helperPrModel,
+    helperPrEffort,
     defaultClaude,
     defaultCodex,
     defaultClaudeModel,
     defaultCodexModel,
+    defaultTaskMode,
     reviewEnabled,
     reviewBlockOnFail,
     reviewAgent,
@@ -249,8 +287,25 @@ export function Settings() {
     return () => main?.removeEventListener("scroll", onScroll);
   }, []);
 
+  function buildOverride(
+    model: string,
+    effort: ThinkingLevel | "",
+  ): { model?: string; effort?: ThinkingLevel } | undefined {
+    const trimmed = model.trim();
+    // Skip the override entirely when both fields are empty so config.json
+    // doesn't grow `commit: {}` / `pr: {}` blobs for installs that never
+    // touched these.
+    if (!trimmed && !effort) return undefined;
+    const ov: { model?: string; effort?: ThinkingLevel } = {};
+    if (trimmed) ov.model = trimmed;
+    if (effort) ov.effort = effort;
+    return ov;
+  }
+
   async function save() {
     try {
+      const commitOv = buildOverride(helperCommitModel, helperCommitEffort);
+      const prOv = buildOverride(helperPrModel, helperPrEffort);
       await patch.mutateAsync({
         agentInstructions,
         commitInstructions,
@@ -260,6 +315,8 @@ export function Settings() {
           binary: helperBinary.trim(),
           model: helperModel.trim(),
           effort: helperEffort,
+          ...(commitOv ? { commit: commitOv } : {}),
+          ...(prOv ? { pr: prOv } : {}),
         },
         defaultThinking: {
           claude: defaultClaude,
@@ -269,6 +326,7 @@ export function Settings() {
           claude: defaultClaudeModel.trim(),
           codex: defaultCodexModel.trim(),
         },
+        defaultTaskMode,
         review: {
           enabled: reviewEnabled,
           agent: reviewAgent,
@@ -505,6 +563,47 @@ export function Settings() {
               header — set them there to try a different model for a single
               task without touching the global default.
             </p>
+            <InfoRow
+              label="Default drive mode"
+              hint={
+                defaultTaskMode === "terminal" ? (
+                  <>
+                    New tasks default to <code className="font-mono">terminal</code> —
+                    the daemon prepares the worktree and boots the agent CLI
+                    inside a per-task tmux pty for you to drive from the Term
+                    tab. No streaming runner, no Live/Log/Todos tabs.
+                  </>
+                ) : (
+                  <>
+                    New tasks default to <code className="font-mono">managed</code> —
+                    the daemon spawns the agent under the streaming runner
+                    and feeds events into the Live timeline. The spawn form's
+                    drive picker still wins per-task.
+                  </>
+                )
+              }
+            >
+              <div className="flex flex-wrap gap-1.5">
+                {(["managed", "terminal"] as const).map((m) => {
+                  const on = defaultTaskMode === m;
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setDefaultTaskMode(m)}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border text-[11px] transition-colors",
+                        on
+                          ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+                          : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
+                      )}
+                    >
+                      <span className="font-mono">{m}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </InfoRow>
           </div>
 
           {/* Thinking defaults */}
@@ -616,6 +715,60 @@ export function Settings() {
               hint="higher → better wording, slower & more expensive"
             >
               <ThinkingPicker value={helperEffort} onChange={setHelperEffort} />
+            </InfoRow>
+            <div className="px-5 pt-3 pb-1 text-[10px] uppercase tracking-[0.12em] font-mono text-ink-400 dark:text-ink-500">
+              Per-helper overrides
+            </div>
+            <InfoRow
+              label="Commit · model"
+              hint={
+                <>
+                  Override the model for commit-message generation only. Blank
+                  inherits the shared default above.
+                </>
+              }
+            >
+              <Input
+                value={helperCommitModel}
+                onChange={(e) => setHelperCommitModel(e.target.value)}
+                placeholder="(inherit)"
+                className="font-mono w-72"
+              />
+            </InfoRow>
+            <InfoRow
+              label="Commit · effort"
+              hint="Defaults to inherit. Pick a tier to pin a different effort just for commit subjects."
+            >
+              <OptionalThinkingPicker
+                value={helperCommitEffort}
+                onChange={setHelperCommitEffort}
+              />
+            </InfoRow>
+            <InfoRow
+              label="PR · model"
+              hint={
+                <>
+                  Override the model for streaming PR title + body. Blank
+                  inherits the shared default above. PR bodies often benefit
+                  from a deeper model than commits.
+                </>
+              }
+            >
+              <Input
+                value={helperPrModel}
+                onChange={(e) => setHelperPrModel(e.target.value)}
+                placeholder="(inherit)"
+                className="font-mono w-72"
+              />
+            </InfoRow>
+            <InfoRow
+              label="PR · effort"
+              hint="Defaults to inherit. Pick a tier to pin a different effort just for PR generation."
+            >
+              <OptionalThinkingPicker
+                value={helperPrEffort}
+                onChange={setHelperPrEffort}
+              />
             </InfoRow>
           </div>
 
@@ -932,6 +1085,57 @@ function ThinkingPicker({
     : (Object.keys(THINKING_LEVEL_META) as ThinkingLevel[]);
   return (
     <div className="flex flex-wrap gap-1.5">
+      {levels.map((v) => {
+        const meta = THINKING_LEVEL_META[v];
+        const on = value === v;
+        return (
+          <button
+            key={v}
+            type="button"
+            onClick={() => onChange(v)}
+            title={meta.hint}
+            className={cn(
+              "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border text-[11px] transition-colors",
+              on
+                ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+                : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
+            )}
+          >
+            <span className="font-mono">{meta.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Variant of ThinkingPicker that includes a leading "inherit" pill.
+ * Used for per-helper overrides where blank should mean "fall back to
+ * the shared default" instead of forcing the operator to pick a tier.
+ */
+function OptionalThinkingPicker({
+  value,
+  onChange,
+}: {
+  value: ThinkingLevel | "";
+  onChange: (next: ThinkingLevel | "") => void;
+}) {
+  const levels = Object.keys(THINKING_LEVEL_META) as ThinkingLevel[];
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      <button
+        type="button"
+        onClick={() => onChange("")}
+        className={cn(
+          "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border text-[11px] transition-colors",
+          value === ""
+            ? "border-ember-500/40 bg-ember-500/10 text-ember-700 dark:text-ember-300"
+            : "border-ink-900/10 bg-paper-50 text-ink-500 hover:border-ink-900/25 hover:text-ink-900 dark:border-ink-50/10 dark:bg-ink-800 dark:text-ink-400 dark:hover:text-ink-50",
+        )}
+      >
+        <span className="font-mono">inherit</span>
+      </button>
       {levels.map((v) => {
         const meta = THINKING_LEVEL_META[v];
         const on = value === v;
