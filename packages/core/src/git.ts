@@ -1397,6 +1397,69 @@ async function readCombinedDiff(
   return { diff: "", source: "empty" };
 }
 
+/**
+ * Read just the working-tree changes (staged + unstaged) — without any
+ * branch-range fallback. The PR generator uses this separately from the
+ * commit log so it can show "what's already committed" and "what's still
+ * pending" as distinct sections, rather than mashing them together.
+ */
+async function readUncommittedDiff(
+  cwd: string,
+): Promise<{ diff: string; source: "uncommitted" | "empty" }> {
+  const [staged, working] = await Promise.all([
+    run(["git", "diff", "--staged", "--no-color"], cwd),
+    run(["git", "diff", "--no-color"], cwd),
+  ]);
+  const combined =
+    staged.stdout + (staged.stdout && working.stdout ? "\n" : "") + working.stdout;
+  if (combined.trim().length === 0) return { diff: "", source: "empty" };
+  return { diff: combined.slice(0, COMMIT_DIFF_LIMIT), source: "uncommitted" };
+}
+
+/**
+ * Read the commit log on this branch vs. its base — one entry per commit,
+ * each with the subject and (when present) the body. This is what the PR
+ * generator describes: commits already encode developer intent at the
+ * granularity of "one feature / one fix", so a multi-commit branch reads
+ * cleanly as a list of features rather than a wall of diff hunks.
+ *
+ * Returns an empty string when there are no commits ahead of baseRef
+ * (caller falls back to the uncommitted diff or the task prompt).
+ */
+async function readBranchCommitLog(
+  cwd: string,
+  baseRef?: string,
+): Promise<string> {
+  if (!baseRef) return "";
+  const ok = await run(["git", "rev-parse", "--verify", baseRef], cwd);
+  if (ok.exitCode !== 0) return "";
+  // %H short hash, %s subject, %b body — separated by NUL so commit
+  // bodies that contain blank lines stay attached to the right commit.
+  const r = await run(
+    [
+      "git",
+      "log",
+      `${baseRef}..HEAD`,
+      "--reverse",
+      "--no-merges",
+      "--format=%H%x00%s%x00%b%x1e",
+    ],
+    cwd,
+  );
+  if (r.exitCode !== 0 || !r.stdout.trim()) return "";
+  const entries = r.stdout
+    .split("\x1e")
+    .map((e) => e.trim())
+    .filter(Boolean)
+    .map((e) => {
+      const [hash, subject, body] = e.split("\x00");
+      const head = `${(hash ?? "").slice(0, 8)} ${subject ?? ""}`.trimEnd();
+      const tail = (body ?? "").trim();
+      return tail ? `${head}\n${tail}` : head;
+    });
+  return entries.join("\n\n");
+}
+
 /** Short `git diff --stat` summary used to enrich deterministic fallbacks. */
 async function readDiffStat(
   cwd: string,
@@ -1619,24 +1682,29 @@ export interface PrMessageResult {
 
 function buildPrPrompt(
   conversation: string,
-  diff: string,
+  commitLog: string,
+  uncommittedDiff: string,
   shape: PrMessageShape,
   extraInstructions?: string,
 ): string {
   const hasConversation = conversation.trim().length > 0;
-  const hasDiff = diff.trim().length > 0;
+  const hasCommits = commitLog.trim().length > 0;
+  const hasPending = uncommittedDiff.trim().length > 0;
   const rules = [
     "Output ONLY two parts separated by a blank line: a single subject line, then a Markdown body.",
     "Subject: lowercase, conventional-commit style (`feat: ...`, `fix: ...`), under 70 characters, imperative mood.",
     shape.includeBullets === false
       ? "Body: one short paragraph (no list)."
-      : "Body: 2-5 short bullet points starting with `- `, each describing a user-visible feature or behavior change. NOT a per-file changelog: don't list filenames, function names, line counts, or 'modified X / added Y' style entries. Group related edits under a single bullet that names the capability they add. No 'Test plan', no AI attribution, no boilerplate.",
+      : "Body: 2-5 short bullet points starting with `- `, each describing a user-visible feature or behavior change. NOT a per-file changelog: don't list filenames, function names, line counts, or 'modified X / added Y' style entries. Group related edits under a single bullet that names the capability they add. Treat each commit as one feature unit — collapse fixups / follow-ups into the bullet for the feature they belong to. No 'Test plan', no AI attribution, no boilerplate.",
     "No closing summary, no headings, no code fences, no quotes around the subject.",
-    hasConversation && hasDiff
-      ? "Ground the title and body in what was actually built. Treat the diff as the source of truth for what shipped, and use the conversation only for intent / framing — ignore work that was discussed but never made it into the diff."
+    hasCommits
+      ? "The COMMITS section below is the source of truth for what shipped on this branch. Read each commit subject + body and group them into feature bullets. Use the conversation (if any) only for framing / intent — ignore work that was discussed but never committed."
       : hasConversation
         ? "Ground the title and body in what was actually discussed and done in the conversation below. Ignore work that was discussed but never carried out."
-        : "Ground the title and body in what the diff actually contains. Read the changes and infer the features they add or the bugs they fix; do not narrate individual hunks.",
+        : "Ground the title and body in what the uncommitted diff contains. Read the changes and infer the features they add or the bugs they fix; do not narrate individual hunks.",
+    hasPending && hasCommits
+      ? "The UNCOMMITTED CHANGES section is work that hasn't been committed yet — include it in the summary alongside the committed work."
+      : "",
     shape.taskPrompt?.trim()
       ? `Original task prompt (for context):\n${shape.taskPrompt.trim()}`
       : "",
@@ -1651,12 +1719,17 @@ function buildPrPrompt(
   if (hasConversation) {
     sections.push(`--- CONVERSATION ---\n${conversation}\n--- END CONVERSATION ---`);
   }
-  if (hasDiff) {
-    sections.push(`--- DIFF ---\n${diff}\n--- END DIFF ---`);
+  if (hasCommits) {
+    sections.push(`--- COMMITS ---\n${commitLog}\n--- END COMMITS ---`);
   }
-  const preamble = hasConversation
-    ? "Generate a pull request subject + body for the work captured below."
-    : "Generate a pull request subject + body that describes the diff below.";
+  if (hasPending) {
+    sections.push(`--- UNCOMMITTED CHANGES ---\n${uncommittedDiff}\n--- END UNCOMMITTED CHANGES ---`);
+  }
+  const preamble = hasCommits
+    ? "Generate a pull request subject + body that summarizes the commits below."
+    : hasConversation
+      ? "Generate a pull request subject + body for the work captured below."
+      : "Generate a pull request subject + body that describes the diff below.";
   return `${preamble}\n\n${rules}\n\n${sections.join("\n\n")}`;
 }
 
@@ -1679,14 +1752,19 @@ const PR_FALLBACK_BODY = (taskPrompt?: string): string => {
 
 /**
  * Stream a PR subject + body. Yields chunks for the wire, returns the
- * parsed result. The model is grounded in BOTH the task conversation
- * (what the operator and agent actually said + did) AND the working
- * diff — conversation gives intent / framing, diff is the source of
- * truth for what actually landed. Terminal-mode tasks have no
- * conversation, so the diff alone drives the summary. Caller passes
- * the formatted conversation verbatim; the function reads the diff
- * itself from the working tree (or the branch range when the tree is
- * clean post auto-commit).
+ * parsed result. The model is grounded in the COMMIT LOG on this
+ * branch — each commit already encodes "one feature / one fix" at the
+ * granularity a reviewer cares about, so a multi-commit branch reads
+ * cleanly as a list of features rather than a wall of diff hunks. The
+ * task conversation (when present) is passed for framing / intent;
+ * any uncommitted changes are included as a final section so work
+ * that hasn't been committed yet still shows up. Terminal-mode tasks
+ * have no chat to fall back on — the commit log alone drives the
+ * summary, which is the right signal because the operator commits as
+ * they go from the terminal pane.
+ *
+ * Falls back to the uncommitted diff when the branch has no commits
+ * ahead of base (e.g. before the first auto-commit fires).
  */
 export async function* streamPrMessage(
   cwd: string,
@@ -1695,20 +1773,37 @@ export async function* streamPrMessage(
     helper?: AiHelperOptions;
     extraInstructions?: string;
     /** Formatted task conversation (user + agent turns). Optional —
-     *  terminal-mode tasks have no chat to fall back on, and the diff
-     *  is enough on its own. */
+     *  terminal-mode tasks have no chat to fall back on, and the
+     *  commit log is enough on its own. */
     conversation?: string;
   } & PrMessageShape = {},
 ): AsyncGenerator<string, PrMessageResult, void> {
   const conversation = (opts.conversation ?? "").trim();
-  const { diff } = await readCombinedDiff(cwd, opts.baseRef);
-  if (!conversation && !diff.trim()) {
+  const commitLog = await readBranchCommitLog(cwd, opts.baseRef);
+  // Only attach the working-tree diff when it actually has content —
+  // post auto-commit the tree is clean and the commit log is enough.
+  const { diff: uncommitted } = await readUncommittedDiff(cwd);
+  // Belt-and-braces: if the branch has no commits yet AND nothing
+  // is staged / unstaged, fall back to the full branch diff (handles
+  // weird cases like detached HEAD or a baseRef that no longer exists
+  // in this worktree).
+  const fallbackDiff =
+    !commitLog.trim() && !uncommitted.trim()
+      ? (await readCombinedDiff(cwd, opts.baseRef)).diff
+      : "";
+  if (!conversation && !commitLog.trim() && !uncommitted.trim() && !fallbackDiff.trim()) {
     const fallback = `${opts.taskTitle ? `feat: ${slugifyTitle(opts.taskTitle)}` : "chore: update"}\n\n${PR_FALLBACK_BODY(opts.taskPrompt)}`;
     yield fallback;
     const split = splitPrOutput(fallback);
     return { ...split, source: "fallback-no-changes" };
   }
-  const prompt = buildPrPrompt(conversation, diff, opts, opts.extraInstructions);
+  const prompt = buildPrPrompt(
+    conversation,
+    commitLog,
+    uncommitted.trim() ? uncommitted : fallbackDiff,
+    opts,
+    opts.extraInstructions,
+  );
   const result = yield* streamHelperText(cwd, prompt, opts.helper ?? {});
   if (result.source === "fallback-error") {
     const fallback = `${opts.taskTitle ? `feat: ${slugifyTitle(opts.taskTitle)}` : "chore: update"}\n\n${PR_FALLBACK_BODY(opts.taskPrompt)}`;
