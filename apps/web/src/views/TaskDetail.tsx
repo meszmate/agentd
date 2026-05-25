@@ -397,11 +397,21 @@ export function TaskDetail({ task }: { task: Task }) {
 
         {/* stats — `ContextUsage` shows current context size (decays
             after /compact); the `tok` chip next to it is the lifetime
-            total for billing context. */}
-        <ContextUsage totalTokens={contextTokens} window={contextWindow} />
+            total for billing context. Terminal-mode tasks don't go
+            through the managed runner, so we have no token / context
+            accounting to display — skip the donut and the tok/cost
+            chips entirely. The short id stays so operators can copy
+            it. */}
+        {!isTerminal && (
+          <ContextUsage totalTokens={contextTokens} window={contextWindow} />
+        )}
         <span className="hidden md:flex items-center gap-3 font-mono text-[11px] tabular-nums text-ink-400 dark:text-ink-500">
-          <span>{formatTokens(totalTokens)} tok</span>
-          <span>{formatCost(task.totalCostUsd)}</span>
+          {!isTerminal && (
+            <>
+              <span>{formatTokens(totalTokens)} tok</span>
+              <span>{formatCost(task.totalCostUsd)}</span>
+            </>
+          )}
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
