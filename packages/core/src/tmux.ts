@@ -193,6 +193,41 @@ export async function renameTmuxWindow(
 }
 
 /**
+ * Capture the visible (and scrollback) contents of a session's active
+ * pane as plain text. Used by the live-grid preview to surface what
+ * the agent is doing inside a terminal-mode task without each tile
+ * having to open its own xterm websocket (tmux's smallest-client
+ * resize behavior would collapse the master pane down to tile size).
+ *
+ * `-p`            dump to stdout
+ * `-J`            join wrapped lines so long output reads naturally
+ * `-S -<lines>`   start <lines> rows back into the scrollback so the
+ *                 preview shows recent history, not just the bottom
+ *                 ~30 lines of an idle prompt
+ *
+ * Returns null when the session doesn't exist (e.g. terminal task was
+ * killed) so callers can render an explicit "session gone" state
+ * rather than a stale snapshot.
+ */
+export async function captureTmuxPane(
+  name: string,
+  lines = 200,
+): Promise<string | null> {
+  const safe = Math.max(20, Math.min(2000, Math.floor(lines)));
+  const { exitCode, stdout } = await spawn([
+    "capture-pane",
+    "-t",
+    name,
+    "-p",
+    "-J",
+    "-S",
+    `-${safe}`,
+  ]);
+  if (exitCode !== 0) return null;
+  return stdout;
+}
+
+/**
  * Send a literal string into a session's active pane. `enter: true` appends
  * a Return so it executes as a command.
  */

@@ -39,6 +39,20 @@ const FINISHED_STATUSES = new Set<Task["status"]>([
 ]);
 
 /**
+ * Terminal-mode tasks don't ride the managed-runner status machine —
+ * they sit at `idle` for their entire lifetime while a tmux session
+ * keeps the agent CLI alive. The default grid filter (running /
+ * waiting_*) would hide them entirely, which defeats the "see every
+ * lane" purpose. Treat any terminal-mode task whose tmux session
+ * could plausibly be alive (i.e. not done/failed/stopped) as
+ * dashboard-eligible. The TerminalSnapshot inside the tile shows
+ * "gone" if the session has actually died.
+ */
+function isTerminalActive(task: Task): boolean {
+  return task.mode === "terminal" && !FINISHED_STATUSES.has(task.status);
+}
+
+/**
  * How a brand-new tile slots into the grid when no operator-pinned
  * position exists yet. Lower numbers go higher. Status transitions
  * NEVER reorder an existing tile — that's the whole point of sticky
@@ -47,11 +61,15 @@ const FINISHED_STATUSES = new Set<Task["status"]>([
  * disappeared. Manual drag is the only thing that moves tiles after
  * insertion. "Clear done" prunes finished tiles from the order.
  */
-function statusPriority(status: Task["status"]): number {
-  if (status === "waiting_perm") return 0;
-  if (status === "waiting_input") return 1;
-  if (status === "running") return 2;
-  if (status === "pending") return 3;
+function statusPriority(task: Task): number {
+  if (task.status === "waiting_perm") return 0;
+  if (task.status === "waiting_input") return 1;
+  if (task.status === "running") return 2;
+  // Terminal-mode tasks (TERM lanes) slot above pending — the operator
+  // is actively driving an agent CLI inside, so they're "live work"
+  // even though the underlying status is idle.
+  if (isTerminalActive(task)) return 2;
+  if (task.status === "pending") return 3;
   return 4;
 }
 
@@ -64,11 +82,15 @@ function statusPriority(status: Task["status"]): number {
  * tells the story. Master pane (the focused tile) ignores this; it
  * always gets the full left column.
  */
-function statusWeight(status: Task["status"]): number {
-  if (status === "waiting_perm") return 1.7;
-  if (status === "running") return 1.5;
-  if (status === "waiting_input") return 1.3;
-  if (status === "pending") return 1.0;
+function statusWeight(task: Task): number {
+  if (task.status === "waiting_perm") return 1.7;
+  if (task.status === "running") return 1.5;
+  if (task.status === "waiting_input") return 1.3;
+  // Terminal-mode tiles match running weight — they always carry a
+  // live tmux preview so they need real estate to be useful, not the
+  // compressed "finished" size the underlying `idle` status would give.
+  if (isTerminalActive(task)) return 1.4;
+  if (task.status === "pending") return 1.0;
   return 0.7;
 }
 
@@ -124,7 +146,15 @@ export function GridOverlay({
     const map = new Map<string, Task>();
     for (const t of tasks) {
       if (t.closedAt) continue;
-      if (ACTIVE_STATUSES.has(t.status) || FINISHED_STATUSES.has(t.status)) {
+      // Terminal-mode tasks earn a grid slot regardless of status —
+      // their `idle` is "operator is driving the agent CLI directly
+      // in tmux," which is exactly what the dashboard needs to show.
+      // See `isTerminalActive` for the gate.
+      if (
+        ACTIVE_STATUSES.has(t.status) ||
+        FINISHED_STATUSES.has(t.status) ||
+        isTerminalActive(t)
+      ) {
         map.set(t.id, t);
       }
     }
@@ -175,7 +205,7 @@ export function GridOverlay({
         additions.push(task);
       }
       additions.sort((a, b) => {
-        const p = statusPriority(a.status) - statusPriority(b.status);
+        const p = statusPriority(a) - statusPriority(b);
         return p !== 0 ? p : b.createdAt - a.createdAt;
       });
       const next: string[] = [];
@@ -235,7 +265,10 @@ export function GridOverlay({
   // Counts for the topbar — drive the live / done chips and the
   // Clear-done button visibility.
   const liveCount = useMemo(
-    () => orderedTasks.filter((t) => ACTIVE_STATUSES.has(t.status)).length,
+    () =>
+      orderedTasks.filter(
+        (t) => ACTIVE_STATUSES.has(t.status) || isTerminalActive(t),
+      ).length,
     [orderedTasks],
   );
   const finishedCount = useMemo(
@@ -257,7 +290,7 @@ export function GridOverlay({
       out.push(task);
     }
     out.sort((a, b) => {
-      const p = statusPriority(a.status) - statusPriority(b.status);
+      const p = statusPriority(a) - statusPriority(b);
       return p !== 0 ? p : b.updatedAt - a.updatedAt;
     });
     return out;
@@ -633,7 +666,7 @@ function MasterStack({
                 onFocus={() => onFocus(t.id)}
                 onDismiss={() => onDismiss(t.id)}
                 compact={compactTile}
-                weight={statusWeight(t.status)}
+                weight={statusWeight(t)}
                 tileCount={others.length}
               />
             ))}
@@ -862,8 +895,10 @@ function AddTaskPicker({
 }
 
 function AddPickerRow({ task, onPick }: { task: Task; onPick: () => void }) {
-  const dotClass =
-    task.status === "waiting_perm"
+  const term = isTerminalActive(task);
+  const dotClass = term
+    ? "bg-cyan-500 animate-blink"
+    : task.status === "waiting_perm"
       ? "bg-rose-500"
       : task.status === "waiting_input"
       ? "bg-amber-500"
@@ -874,12 +909,13 @@ function AddPickerRow({ task, onPick }: { task: Task; onPick: () => void }) {
       : task.status === "failed"
       ? "bg-rose-500/60"
       : "bg-ink-400/50";
-  const statusLabel =
-    task.status === "waiting_perm"
+  const statusLabel = term
+    ? "term · interactive tmux"
+    : task.status === "waiting_perm"
       ? "needs approval"
       : task.status === "waiting_input"
-      ? "needs reply"
-      : task.status;
+        ? "needs reply"
+        : task.status;
   return (
     <button
       type="button"

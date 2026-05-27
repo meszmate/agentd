@@ -2714,6 +2714,26 @@ export class AgentdClient {
     return new WebSocket(url.toString());
   }
 
+  /**
+   * Plain-text snapshot of a terminal-mode task's tmux pane. Returns
+   * the most recent N lines (default ~200). `exists: false` means the
+   * session was never bootstrapped or has been killed.
+   */
+  async captureTaskTerminal(
+    taskId: string,
+    lines?: number,
+  ): Promise<{
+    content: string;
+    sessionName: string;
+    exists: boolean;
+    capturedAt: number;
+  }> {
+    const qs = lines ? `?lines=${encodeURIComponent(String(lines))}` : "";
+    return this.req(
+      `/api/tasks/${encodeURIComponent(taskId)}/terminal-snapshot${qs}`,
+    );
+  }
+
   /** Open a WebSocket attached to a task's worktree shell. */
   attachTask(taskId: string): WebSocket {
     const url = new URL(this.server);

@@ -1163,6 +1163,25 @@ export class TaskManager {
     // auto-resume budget so a fresh spiral can run if needed.
     this.autoResumeAttempts.delete(taskId);
     this.contextOverflowed.delete(taskId);
+    // 0. Terminal-mode short-circuit: the managed-runner path doesn't
+    //    apply (there's no runner — the agent CLI lives inside tmux),
+    //    so route input straight to the per-task tmux session via
+    //    send-keys. That makes the InlineReply composer in the grid
+    //    tile actually do something for TERM lanes instead of
+    //    silently dropping the text. We still record the message so
+    //    the operator's history reflects what they sent.
+    if (task.mode === "terminal") {
+      const sessionName = `agentd-task-${task.id.slice(-8)}`;
+      const exists = await tmuxSessionExists(sessionName);
+      if (!exists) {
+        throw new Error(
+          "terminal session not running (re-open the task or hit Term to attach)",
+        );
+      }
+      appendMessage(this.db, taskId, "user", text);
+      await sendTmuxKeys(sessionName, text, { enter: true });
+      return;
+    }
     // 1. If the agent is blocked on an `agentd-ask`, this input is its
     //    answer. Resolve the pending Promise — the agent's curl call
     //    unblocks and the runner keeps going.
