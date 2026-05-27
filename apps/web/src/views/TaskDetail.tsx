@@ -391,7 +391,11 @@ export function TaskDetail({ task }: { task: Task }) {
           </span>
         )}
         <ReviewBadge task={task} compact />
-        <LiveBadge live={live} terminal={isTerminal} />
+        <LiveBadge
+          live={live}
+          terminal={isTerminal}
+          terminalMode={task.mode === "terminal"}
+        />
 
         <Spacer />
 
@@ -1331,7 +1335,30 @@ function SliceChip({ task }: { task: Task }) {
   );
 }
 
-function LiveBadge({ live, terminal }: { live: boolean; terminal: boolean }) {
+function LiveBadge({
+  live,
+  terminal,
+  terminalMode,
+}: {
+  live: boolean;
+  /** Task status is a final/closed state (done/failed/stopped). */
+  terminal: boolean;
+  /** Task is a terminal-mode task — drives an agent CLI inside tmux. */
+  terminalMode?: boolean;
+}) {
+  // Terminal-mode tasks aren't "live" or "closed" in the managed-runner
+  // sense — they live inside a persistent tmux session. Surface that
+  // with a distinct TERM marker so the operator can read the topbar
+  // state at a glance instead of getting a misleading "closed" when
+  // there's a perfectly alive agent CLI in the Term tab.
+  if (terminalMode && !terminal) {
+    return (
+      <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.08em] text-cyan-700 dark:text-cyan-300">
+        <span className="h-1.5 w-1.5 rounded-full bg-cyan-500 animate-blink" />
+        term
+      </span>
+    );
+  }
   if (terminal) {
     return (
       <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-400 dark:text-ink-500">

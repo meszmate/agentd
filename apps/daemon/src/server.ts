@@ -191,6 +191,7 @@ import {
   selectTmuxWindow,
   renameTmuxWindow,
   sendTmuxKeys,
+  captureTmuxPane,
   reorderTasks,
   ghStatus,
   ghRepo,
@@ -1104,6 +1105,45 @@ export function buildServer(opts: BuildServerOptions) {
     if (!task) return c.json({ error: "not found" }, 404);
     const files = await listFiles(task.worktreePath);
     return c.json({ files, worktreePath: task.worktreePath });
+  });
+
+  /**
+   * Plain-text snapshot of the task's per-task tmux pane. Used by the
+   * live grid to render a "what's the agent staring at right now"
+   * preview inside each terminal-mode tile without forcing every tile
+   * to hold its own xterm websocket open — tmux resizes all attached
+   * clients to the smallest one, so 6 tile-sized clients would shrink
+   * the master pane down to tile size and the operator's real
+   * interactive xterm in the master would become unusable. Polling
+   * this endpoint sidesteps that entirely.
+   *
+   * Optional `lines` query param: how many rows of scrollback to
+   * include (clamped server-side). Defaults to 200 — enough to fill
+   * a tile and a bit of recent history.
+   */
+  api.get("/tasks/:id/terminal-snapshot", async (c) => {
+    const id = c.req.param("id");
+    const task = tasks.get(id);
+    if (!task) return c.json({ error: "not found" }, 404);
+    const linesParam = c.req.query("lines");
+    const lines = linesParam ? parseInt(linesParam, 10) : 200;
+    const sessionName = `agentd-task-${task.id.slice(-8)}`;
+    const exists = await tmuxSessionExists(sessionName);
+    if (!exists) {
+      return c.json({
+        content: "",
+        sessionName,
+        exists: false,
+        capturedAt: Date.now(),
+      });
+    }
+    const content = await captureTmuxPane(sessionName, lines);
+    return c.json({
+      content: content ?? "",
+      sessionName,
+      exists: true,
+      capturedAt: Date.now(),
+    });
   });
 
   // Git status with per-file +/- counts. Drives the workspace file tree's

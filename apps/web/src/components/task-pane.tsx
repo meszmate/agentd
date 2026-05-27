@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -6,6 +6,7 @@ import {
   ArrowUpRight,
   Check,
   CornerDownLeft,
+  Terminal as TerminalIcon,
   X,
 } from "lucide-react";
 import { agentContextWindow, type Message, type Task } from "@agentd/contracts";
@@ -18,8 +19,18 @@ import { cn } from "@/lib/utils";
 import { StatusDot } from "@/components/ui/status-dot";
 import { CodeBlock, langFromPath } from "@/components/code-block";
 import { parseToolCall, TOOL_ICONS } from "@/components/tool-line";
+import { TerminalSnapshot } from "@/components/terminal-snapshot";
 import { TaskTimeline } from "@/views/TaskTimeline";
 import { TaskWorkspace } from "@/views/TaskWorkspace";
+
+// Live interactive xterm for the focused-master pane on terminal-mode
+// tasks. Lazy because xterm.js is a chunky dependency and managed
+// tasks never need it. Tile-density rendering uses TerminalSnapshot
+// (poll-based) instead — see the comment on TerminalSnapshot for why
+// tiles can't share xterm-attach (tmux smallest-client resize).
+const TaskTerminalPane = lazy(() =>
+  import("@/views/Terminal").then((m) => ({ default: m.Terminal })),
+);
 
 /**
  * Live view of a single task for the grid overlay. Two modes:
@@ -81,14 +92,22 @@ export function TaskPane({
   const hot = Date.now() - pulseTs < 1500;
 
   const needsApproval = task.status === "waiting_perm";
-  const isRunning =
-    task.status === "running" ||
-    task.status === "waiting_input" ||
-    task.status === "waiting_perm";
   const isFinished =
     task.status === "done" ||
     task.status === "failed" ||
     task.status === "stopped";
+  // Terminal-mode tasks are "live" by default — the tmux session is
+  // hosting an interactive agent CLI even though the managed-runner
+  // status sits at idle. Treat them as running for purposes of the
+  // top sweep / accent border / hot-pulse so they don't look frozen
+  // in the grid. The TerminalSnapshot's own alive-pulse provides
+  // the second layer of liveness signal.
+  const isTermLive = task.mode === "terminal" && !isFinished;
+  const isRunning =
+    task.status === "running" ||
+    task.status === "waiting_input" ||
+    task.status === "waiting_perm" ||
+    isTermLive;
 
   // Did THIS task just transition into its terminal state? Used to
   // play the celebrate flash once and then settle. We compare the
@@ -212,15 +231,22 @@ export function TaskPane({
         "group relative flex h-full min-h-0 flex-col overflow-hidden rounded-lg border bg-paper-50 transition-all duration-200 dark:bg-ink-800",
         // Default border — different per status so even at rest a
         // wall of tiles encodes which ones need eyes vs ambient.
+        // Terminal-mode tasks pick up a cyan accent (TERM lane) so
+        // they're visually distinguishable from managed lanes on
+        // first glance, without stealing the focused ember halo.
         focused
-          ? "border-ember-500/40 shadow-[0_12px_40px_-12px_rgba(220,38,38,0.25)]"
-          : task.status === "running"
-            ? "border-ember-500/20 shadow-sm"
-            : task.status === "done"
-              ? "border-emerald-500/15"
-              : task.status === "failed"
-                ? "border-red-500/30"
-                : "border-ink-900/10 dark:border-ink-50/10",
+          ? isTermLive
+            ? "border-cyan-500/40 shadow-[0_12px_40px_-12px_rgba(6,182,212,0.25)]"
+            : "border-ember-500/40 shadow-[0_12px_40px_-12px_rgba(220,38,38,0.25)]"
+          : isTermLive
+            ? "border-cyan-500/25 shadow-sm"
+            : task.status === "running"
+              ? "border-ember-500/20 shadow-sm"
+              : task.status === "done"
+                ? "border-emerald-500/15"
+                : task.status === "failed"
+                  ? "border-red-500/30"
+                  : "border-ink-900/10 dark:border-ink-50/10",
         // Hover lift — only when not focused (focused panes shouldn't
         // wobble). Slight upward translate + deeper shadow.
         hovered && !focused && "-translate-y-0.5 shadow-md",
@@ -257,8 +283,9 @@ export function TaskPane({
           <div
             className="h-full w-full animate-tile-sweep"
             style={{
-              background:
-                "linear-gradient(90deg, transparent 0%, rgba(220,38,38,0) 25%, rgba(220,38,38,0.6) 50%, rgba(220,38,38,0) 75%, transparent 100%)",
+              background: isTermLive
+                ? "linear-gradient(90deg, transparent 0%, rgba(6,182,212,0) 25%, rgba(6,182,212,0.6) 50%, rgba(6,182,212,0) 75%, transparent 100%)"
+                : "linear-gradient(90deg, transparent 0%, rgba(220,38,38,0) 25%, rgba(220,38,38,0.6) 50%, rgba(220,38,38,0) 75%, transparent 100%)",
               backgroundSize: "200% 100%",
             }}
           />
@@ -281,7 +308,7 @@ export function TaskPane({
           density === "focused" ? "h-8" : "h-6",
         )}
       >
-        <StatusDot status={task.status} size="sm" />
+        <StatusDot status={task.status} mode={task.mode} size="sm" />
         <span
           title={task.title}
           className={cn(
@@ -291,6 +318,14 @@ export function TaskPane({
         >
           {task.title}
         </span>
+        {isTermLive && (
+          <span
+            title="terminal-mode task — driven by the operator inside tmux"
+            className="inline-flex items-center gap-1 h-5 px-1.5 rounded font-mono text-[10px] font-medium uppercase tracking-[0.06em] bg-cyan-500/15 text-cyan-700 border border-cyan-500/30 dark:text-cyan-300"
+          >
+            <TerminalIcon className="h-3 w-3" /> term
+          </span>
+        )}
         {needsApproval && (
           <span
             title="permission requested"
@@ -356,7 +391,39 @@ export function TaskPane({
         </div>
       )}
 
-      {focused ? (
+      {/* Terminal-mode tasks short-circuit the whole managed-runner
+          rendering tree. They have no streams, no tool-call timeline,
+          no edit-preview surface — the operator is driving the agent
+          CLI directly inside tmux. We replace the body with:
+            - tile density:    live polled snapshot (TerminalSnapshot).
+                               Read-only because tmux's smallest-client
+                               resize would collapse the master pane.
+            - focused density: full interactive xterm + workspace
+                               (FocusedTerminalBody) — same split as
+                               TaskDetail's terminal-mode body. */}
+      {isTermLive ? (
+        focused ? (
+          <div className="flex-1 min-h-0">
+            <FocusedTerminalBody task={task} />
+          </div>
+        ) : (
+          <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+            <div className="flex-1 min-h-0">
+              <TerminalSnapshot taskId={task.id} density="tile" />
+            </div>
+            {/* The InlineReply still works in terminal mode — sendInput's
+                handler on terminal-mode tasks routes typed text into the
+                tmux session via send-keys (same path used by the global
+                Term page), so the operator can steer without promoting
+                the tile to master. Status check below already accepts
+                idle for the composer to render. */}
+            {(task.status === "running" ||
+              task.status === "waiting_input" ||
+              task.status === "waiting_perm" ||
+              task.status === "idle") && <InlineReply task={task} />}
+          </div>
+        )
+      ) : focused ? (
         // Full task experience: same TaskTimeline that powers
         // /tasks/:id, just with dense padding so it fits the pane.
         // Streams, thinking pulse, ask/answer, queue, plan strip,
@@ -727,6 +794,52 @@ function FocusedBody({ task }: { task: Task }) {
           task={task}
           onError={onError}
           plan={plan}
+          messages={messages}
+        />
+      </Panel>
+    </PanelGroup>
+  );
+}
+
+/**
+ * Focused-master body for terminal-mode tasks. Mirrors TaskDetail's
+ * split: full interactive xterm on the left (the lazy-loaded
+ * TaskTerminalPane attached to /pty/:taskId), workspace tabs
+ * (diff/files/context/etc) on the right. There's no chat to render —
+ * terminal-mode tasks don't have a managed runner — so we skip the
+ * TaskTimeline route entirely.
+ */
+function FocusedTerminalBody({ task }: { task: Task }) {
+  const { toast } = useApp();
+  const taskQ = useTask(task.id);
+  const messages: Message[] = taskQ.data?.messages ?? [];
+  const rt = useTaskRt(task.id);
+  const onError = useCallback((m: string) => toast(m, true), [toast]);
+  return (
+    <PanelGroup
+      direction="horizontal"
+      className="h-full"
+      autoSaveId={`grid-term-${task.id}`}
+    >
+      <Panel id={`term-${task.id}`} defaultSize={58} minSize={32}>
+        <Suspense
+          fallback={
+            <div className="flex h-full items-center justify-center bg-ink-900">
+              <div className="font-mono text-[11px] text-ink-500 dark:text-ink-400">
+                Loading terminal…
+              </div>
+            </div>
+          }
+        >
+          <TaskTerminalPane taskId={task.id} onError={onError} bare />
+        </Suspense>
+      </Panel>
+      <PanelResizeHandle className="w-px bg-ink-900/10 hover:bg-cyan-500/40 transition-colors dark:bg-ink-50/10" />
+      <Panel id={`ws-${task.id}`} defaultSize={42} minSize={24}>
+        <TaskWorkspace
+          task={task}
+          onError={onError}
+          plan={rt.plan}
           messages={messages}
         />
       </Panel>

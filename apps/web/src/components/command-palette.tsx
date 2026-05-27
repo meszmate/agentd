@@ -142,7 +142,7 @@ export function CommandPalette({
                   value={`task ${t.title} ${t.id}`}
                   onSelect={() => go(`/tasks/${t.id}`)}
                 >
-                  <StatusDot status={t.status} size="sm" />
+                  <StatusDot status={t.status} mode={t.mode} size="sm" />
                   <span className="truncate">{t.title}</span>
                   <CommandShortcut>{shortId(t.id)}</CommandShortcut>
                 </CommandItem>

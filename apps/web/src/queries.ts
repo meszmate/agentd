@@ -177,6 +177,30 @@ export function useTask(id: string | null | undefined) {
   });
 }
 
+/**
+ * Live preview of a terminal-mode task's tmux pane. Polled at a short
+ * interval so the grid tile shows what the agent is doing without
+ * each tile having to hold an xterm websocket open (tmux's
+ * smallest-client resize behavior would collapse the master pane).
+ * Disabled (and returns no data) until enabled — callers pass
+ * `enabled: false` for managed tasks.
+ */
+export function useTaskTerminalSnapshot(
+  id: string | null | undefined,
+  opts?: { enabled?: boolean; refetchInterval?: number },
+) {
+  const client = useClient();
+  const enabled = (opts?.enabled ?? true) && !!id;
+  return useQuery({
+    queryKey: ["task", id ?? "_none", "terminal-snapshot"] as const,
+    queryFn: () => client.captureTaskTerminal(id!),
+    enabled,
+    refetchInterval: enabled ? opts?.refetchInterval ?? 1500 : false,
+    refetchIntervalInBackground: false,
+    staleTime: 1000,
+  });
+}
+
 export function useFiles(id: string | null | undefined) {
   const client = useClient();
   return useQuery({
