@@ -840,6 +840,7 @@ export class TaskManager {
         workspaceMode,
         branchMode: branchMode === "shared" ? "new" : branchMode,
         pullLatest: params.pullLatest ?? false,
+        copyFiles: loadConfig(this.paths.root).worktreeCopyFiles,
       });
       worktreePath = result.worktreePath;
       // `result.branch` may have been auto-suffixed (`-2`, `-3`, …) when
@@ -1037,6 +1038,7 @@ export class TaskManager {
         branchMode: "shared",
         planGroupId,
         pullLatest: false,
+        copyFiles: loadConfig(this.paths.root).worktreeCopyFiles,
       });
       sharedWorktreePath = result.worktreePath;
       sharedBranch = result.branch;
@@ -2803,6 +2805,7 @@ export class TaskManager {
         workspaceMode: "worktree",
         branchMode: "new",
         pullLatest: false,
+        copyFiles: cfg.worktreeCopyFiles,
       });
       const memberTask: Task = createTask(this.db, {
         id: taskId,

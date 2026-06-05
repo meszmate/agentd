@@ -61,6 +61,28 @@ export const DEFAULT_COMMIT_INSTRUCTIONS = "";
 export const DEFAULT_PR_INSTRUCTIONS = "";
 
 /**
+ * Local-only files to copy from the operator's checkout into each fresh
+ * agent worktree. Git worktrees do not bring along ignored/untracked
+ * files, so without this the agent often lands without the env files
+ * needed to run the project. Keep this list explicit: copying every
+ * ignored file would drag build output, caches, and accidental secrets
+ * into task checkouts.
+ */
+export const DEFAULT_WORKTREE_COPY_FILES = [
+  ".env",
+  ".env.local",
+  ".env.development",
+  ".env.development.local",
+  ".env.test",
+  ".env.test.local",
+  ".envrc",
+  ".npmrc",
+  ".bunfig.toml",
+  ".gitignore",
+  ".git/info/exclude",
+];
+
+/**
  * Prompt templates the GitHub spawn flow assembles into a fresh task's
  * first user message. `{number}`, `{title}`, `{body}`, `{url}`, and
  * `{branch}` get substituted. Operators can override per install via
@@ -551,6 +573,14 @@ export const AgentdConfig = z.object({
    * localStorage.
    */
   prefs: UserPrefs.default(DEFAULT_USER_PREFS),
+  /**
+   * Relative file paths copied from the source checkout into every new
+   * worktree after `git worktree add`. Missing files are skipped; copied
+   * files are added to the task worktree's local git exclude so local env
+   * files do not become accidental commit candidates. Override with an
+   * explicit array in config.json to narrow or extend the allowlist.
+   */
+  worktreeCopyFiles: z.array(z.string()).default(DEFAULT_WORKTREE_COPY_FILES),
   /**
    * Token budget for the system-prompt suffix (agentInstructions + skill
    * bodies + repo doc). Skills get dropped (claude/codex first, then

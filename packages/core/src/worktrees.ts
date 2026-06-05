@@ -1,4 +1,12 @@
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import {
+  appendFile,
+  copyFile,
+  lstat,
+  mkdir,
+  readFile,
+  stat,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
 
 export interface CreateWorktreeOptions {
@@ -33,6 +41,12 @@ export interface CreateWorktreeOptions {
   pullLatest?: boolean;
   /** Optional remote name for fetch/pull (default `origin`). */
   remote?: string;
+  /**
+   * Relative file paths to copy from the source checkout into newly
+   * created worktrees. Existing destination files and missing source
+   * files are skipped.
+   */
+  copyFiles?: string[];
 }
 
 /**
@@ -104,6 +118,140 @@ async function run(
   ]);
   const exitCode = await proc.exited;
   return { stdout, stderr, exitCode };
+}
+
+function isInsidePath(root: string, candidate: string): boolean {
+  const base = resolve(root);
+  const target = resolve(candidate);
+  return target === base || target.startsWith(`${base}${sep}`);
+}
+
+function cleanCopyPath(input: string): string | null {
+  const rel = input.trim();
+  if (!rel || rel.startsWith("/") || rel.includes("\0")) return null;
+  const normalized = rel.replace(/\\/g, "/");
+  if (
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    normalized.includes("/../")
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+async function gitPath(repoPath: string, rel: string): Promise<string> {
+  const r = await run(["git", "rev-parse", "--git-path", rel], repoPath);
+  if (r.exitCode !== 0) return join(repoPath, ".git", rel);
+  const out = r.stdout.trim();
+  if (!out) return join(repoPath, ".git", rel);
+  return isAbsolute(out) ? out : resolve(repoPath, out);
+}
+
+async function mergeGitExclude(repoPath: string, worktreePath: string): Promise<void> {
+  const sourcePath = await gitPath(repoPath, "info/exclude");
+  let source = "";
+  try {
+    source = await readFile(sourcePath, "utf8");
+  } catch {
+    return;
+  }
+  const sourceLines = source
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim() && !line.trimStart().startsWith("#"));
+  if (sourceLines.length === 0) return;
+
+  const excludePath = await gitPath(worktreePath, "info/exclude");
+  await mkdir(dirname(excludePath), { recursive: true });
+  let existing = "";
+  try {
+    existing = await readFile(excludePath, "utf8");
+  } catch {
+    // File may not exist yet in a brand-new worktree git dir.
+  }
+  const current = new Set(
+    existing
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean),
+  );
+  const additions = sourceLines.filter((line) => !current.has(line.trim()));
+  if (additions.length === 0) return;
+  const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
+  await appendFile(excludePath, `${prefix}${additions.join("\n")}\n`);
+}
+
+async function appendWorktreeExcludes(
+  worktreePath: string,
+  relPaths: string[],
+): Promise<void> {
+  if (relPaths.length === 0) return;
+  const excludePath = await gitPath(worktreePath, "info/exclude");
+  await mkdir(dirname(excludePath), { recursive: true });
+  let existing = "";
+  try {
+    existing = await readFile(excludePath, "utf8");
+  } catch {
+    // File may not exist yet in a brand-new worktree git dir.
+  }
+  const current = new Set(
+    existing
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean),
+  );
+  const additions = relPaths
+    .map((rel) => `/${rel}`)
+    .filter((line) => !current.has(line));
+  if (additions.length === 0) return;
+  const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
+  await appendFile(excludePath, `${prefix}${additions.join("\n")}\n`);
+}
+
+async function copyWorktreeFiles(
+  repoPath: string,
+  worktreePath: string,
+  copyFiles: string[] | undefined,
+): Promise<void> {
+  if (!copyFiles || copyFiles.length === 0) return;
+  const copied: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of copyFiles) {
+    const rel = cleanCopyPath(raw);
+    if (!rel || seen.has(rel)) continue;
+    seen.add(rel);
+    if (rel === ".git/info/exclude") {
+      await mergeGitExclude(repoPath, worktreePath);
+      continue;
+    }
+    if (rel.startsWith(".git/")) continue;
+
+    const from = resolve(repoPath, rel);
+    const to = resolve(worktreePath, rel);
+    if (!isInsidePath(repoPath, from)) continue;
+    if (!isInsidePath(worktreePath, to)) continue;
+
+    let source;
+    try {
+      source = await lstat(from);
+    } catch {
+      continue;
+    }
+    if (!source.isFile()) continue;
+
+    try {
+      await stat(to);
+      continue;
+    } catch {
+      // Destination missing: copy it below.
+    }
+    await mkdir(dirname(to), { recursive: true });
+    await copyFile(from, to);
+    copied.push(rel);
+  }
+  await appendWorktreeExcludes(worktreePath, copied);
 }
 
 export async function isGitRepo(path: string): Promise<boolean> {
@@ -444,6 +592,7 @@ export async function createWorktree(
         `git worktree add (shared) failed: ${r.stderr || r.stdout}`,
       );
     }
+    await copyWorktreeFiles(repoPath, worktreePath, opts.copyFiles);
     return { worktreePath, branch: branchName, baseCommitSha };
   }
   const worktreePath = join(worktreeRoot, taskId);
@@ -465,6 +614,7 @@ export async function createWorktree(
         `git worktree add (existing branch) failed: ${r.stderr || r.stdout}`,
       );
     }
+    await copyWorktreeFiles(repoPath, worktreePath, opts.copyFiles);
     return { worktreePath, branch: branchName, baseCommitSha };
   }
   // Default `new` mode: auto-suffix `-2`, `-3`, … if the AI-chosen
@@ -482,6 +632,7 @@ export async function createWorktree(
       `git worktree add failed (exit ${r.exitCode}): ${r.stderr || r.stdout}`,
     );
   }
+  await copyWorktreeFiles(repoPath, worktreePath, opts.copyFiles);
   return { worktreePath, branch: free, baseCommitSha };
 }
 
