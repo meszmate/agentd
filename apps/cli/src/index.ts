@@ -18,6 +18,7 @@ Deploy (one-shot install as a service on this box, auto-start + auto-update):
 Run (foreground, no service registration):
   agentd serve                      bind to 127.0.0.1:3773 (local)
   agentd serve --public             bind to 0.0.0.0 ("little server" mode)
+  agentd serve --public --no-auth   bind publicly without session tokens
   agentd serve --port 8080 --root /var/lib/agentd
 
 Tasks:
@@ -99,6 +100,8 @@ function cmdServe(argv: string[]) {
       root: { type: "string" },
       public: { type: "boolean" },
       "no-pair": { type: "boolean" },
+      "no-auth": { type: "boolean" },
+      "trust-tailnet": { type: "boolean" },
     },
     allowPositionals: false,
     strict: false,
@@ -134,6 +137,8 @@ function cmdServe(argv: string[]) {
     daemonArgs.push("--root", values.root);
   }
   if (values["no-pair"]) daemonArgs.push("--no-pair");
+  if (values["no-auth"]) daemonArgs.push("--no-auth");
+  if (values["trust-tailnet"]) daemonArgs.push("--trust-tailnet");
 
   const proc = Bun.spawn({
     cmd: ["bun", ...daemonArgs],
