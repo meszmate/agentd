@@ -538,13 +538,11 @@ export const AgentdConfig = z.object({
     })
     .default({ claude: "", codex: "" }),
   /**
-   * Initial value of the "drive" picker in every spawn form. `managed`
-   * (default) launches the agent under the streaming runner; `terminal`
-   * boots the agent CLI inside a per-task tmux pty the operator drives
-   * from the Term tab. Operators who live in terminal-mode flip this
-   * once and forget about it.
+   * Initial drive mode in spawn forms. `terminal` boots the agent CLI
+   * inside a per-task tmux pty the operator drives from the Term tab.
+   * `managed` launches the agent under the streaming runner.
    */
-  defaultTaskMode: z.enum(["managed", "terminal"]).default("managed"),
+  defaultTaskMode: z.enum(["managed", "terminal"]).default("terminal"),
   /**
    * "Last used" form values for the spawn flow. Server-side so they
    * sync across devices instead of getting trapped in browser

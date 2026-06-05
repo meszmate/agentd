@@ -121,7 +121,7 @@ export function SpawnSheet({
   // the task's tmux pty for hands-on driving. Only meaningful for solo
   // tasks — councils and phase batches stay managed (no point running
   // a parallel suite interactively).
-  const [taskMode, setTaskMode] = useState<"managed" | "terminal">("managed");
+  const [taskMode, setTaskMode] = useState<"managed" | "terminal">("terminal");
   const [workspace, setWorkspace] = useState<WorkspaceSetupValue>(() =>
     defaultWorkspaceSetup(""),
   );
@@ -295,17 +295,22 @@ export function SpawnSheet({
         navigate(`/councils/${res.council.id}`);
         return;
       }
+      const terminalMode = taskMode === "terminal";
       const res = await create.mutateAsync({
         agent,
         repoPath: repoPath.trim(),
         baseBranch: finalBase,
         prompt: prompt.trim(),
         title: title.trim() || undefined,
-        autoCommit,
-        autoPush,
-        permissionMode,
-        thinkingLevel,
-        ...(model.trim() ? { model: model.trim() } : {}),
+        autoCommit: terminalMode ? false : autoCommit,
+        autoPush: terminalMode ? false : autoPush,
+        ...(terminalMode
+          ? {}
+          : {
+              permissionMode,
+              thinkingLevel,
+              ...(model.trim() ? { model: model.trim() } : {}),
+            }),
         workspaceMode: workspace.workspaceMode,
         branchMode: workspace.branchMode,
         ...(workspace.branchName.trim()
@@ -313,20 +318,24 @@ export function SpawnSheet({
           : {}),
         ...(workspace.pullLatest ? { pullLatest: true } : {}),
         ...(activeSkills.length ? { skills: activeSkills } : {}),
-        ...(taskMode === "terminal" ? { mode: "terminal" as const } : {}),
+        ...(terminalMode ? { mode: "terminal" as const } : {}),
       });
       void patchPrefs.mutateAsync({
         lastRepo: repoPath.trim(),
         lastProjectId: projectId,
         lastBase: finalBase,
         lastAgent: agent,
-        lastAutoCommit: autoCommit,
-        lastAutoPush: autoPush,
-        lastPermissionMode: permissionMode,
-        lastThinkingLevel: thinkingLevel,
-        ...(agent === "claude"
-          ? { lastModelClaude: model.trim() }
-          : { lastModelCodex: model.trim() }),
+        ...(terminalMode
+          ? {}
+          : {
+              lastAutoCommit: autoCommit,
+              lastAutoPush: autoPush,
+              lastPermissionMode: permissionMode,
+              lastThinkingLevel: thinkingLevel,
+              ...(agent === "claude"
+                ? { lastModelClaude: model.trim() }
+                : { lastModelCodex: model.trim() }),
+            }),
         workspaceMode: workspace.workspaceMode,
         branchMode: workspace.branchMode,
         pullLatest: workspace.pullLatest,
@@ -359,6 +368,7 @@ export function SpawnSheet({
     .slice(0, 5)
     .map((m) => m.label || m.id)
     .join(" / ");
+  const terminalSolo = !phaseMode && !councilMode && taskMode === "terminal";
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(o) => !o && onClose()}>
@@ -492,62 +502,71 @@ export function SpawnSheet({
                   )}
                   {!phaseMode && !councilMode && (
                     <>
-                      <SettingRow label="drive">
-                        <ToolbarPick
-                          label={
-                            taskMode === "terminal"
-                              ? "terminal · operator-driven"
-                              : "managed · streaming runner"
-                          }
-                          options={[
-                            {
-                              value: "managed",
-                              label: "managed · streaming runner",
-                            },
-                            {
-                              value: "terminal",
-                              label: "terminal · operator-driven",
-                            },
-                          ]}
-                          align="end"
-                          onSelect={(v) =>
-                            setTaskMode(v as "managed" | "terminal")
-                          }
-                        />
-                      </SettingRow>
-                      <SettingRow label="permissions">
-                        <ToolbarPick
-                          label={permissionLabel(permissionMode)}
-                          options={PERMISSION_OPTIONS}
-                          align="end"
-                          onSelect={(v) =>
-                            setPermissionMode(v as PermissionMode)
-                          }
-                        />
-                      </SettingRow>
-                      <SettingRow label="thinking">
-                        <ToolbarPick
-                          label={thinkingLevel}
-                          options={THINKING_LEVELS_BY_AGENT[agent].map(
-                            (v) => ({ value: v, label: v }),
-                          )}
-                          align="end"
-                          onSelect={(v) =>
-                            setThinkingLevel(v as ThinkingLevel)
-                          }
-                        />
-                      </SettingRow>
-                      <SettingRow label="model">
-                        <ToolbarPick
-                          label={model || "default"}
-                          options={modelOptions}
-                          align="end"
-                          onSelect={setModel}
-                        />
-                      </SettingRow>
+                      {terminalSolo ? (
+                        <div className="flex items-center justify-between gap-3 min-h-[28px]">
+                          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-500 dark:text-ink-400">
+                            drive
+                          </span>
+                          <span className="inline-flex items-center h-7 px-2 rounded-md border border-ember-500/30 bg-ember-500/10 font-mono text-[10px] uppercase tracking-[0.08em] text-ember-700 dark:text-ember-300">
+                            terminal tmux
+                          </span>
+                        </div>
+                      ) : (
+                        <>
+                          <SettingRow label="drive">
+                            <ToolbarPick
+                              label="managed · streaming runner"
+                              options={[
+                                {
+                                  value: "managed",
+                                  label: "managed · streaming runner",
+                                },
+                                {
+                                  value: "terminal",
+                                  label: "terminal · operator-driven",
+                                },
+                              ]}
+                              align="end"
+                              onSelect={(v) =>
+                                setTaskMode(v as "managed" | "terminal")
+                              }
+                            />
+                          </SettingRow>
+                          <SettingRow label="permissions">
+                            <ToolbarPick
+                              label={permissionLabel(permissionMode)}
+                              options={PERMISSION_OPTIONS}
+                              align="end"
+                              onSelect={(v) =>
+                                setPermissionMode(v as PermissionMode)
+                              }
+                            />
+                          </SettingRow>
+                          <SettingRow label="thinking">
+                            <ToolbarPick
+                              label={thinkingLevel}
+                              options={THINKING_LEVELS_BY_AGENT[agent].map(
+                                (v) => ({ value: v, label: v }),
+                              )}
+                              align="end"
+                              onSelect={(v) =>
+                                setThinkingLevel(v as ThinkingLevel)
+                              }
+                            />
+                          </SettingRow>
+                          <SettingRow label="model">
+                            <ToolbarPick
+                              label={model || "default"}
+                              options={modelOptions}
+                              align="end"
+                              onSelect={setModel}
+                            />
+                          </SettingRow>
+                        </>
+                      )}
                     </>
                   )}
-                  {!phaseMode && (
+                  {!phaseMode && !terminalSolo && (
                     <SettingRow label="commit">
                       <ToolbarPick
                         label={commitModeLabel(autoCommit, autoPush)}

@@ -121,7 +121,7 @@ export function Settings() {
   // (main sheet, project tab, anywhere else that grows one) picks it
   // up. Per-task overrides on the spawn form still win.
   const [defaultTaskMode, setDefaultTaskMode] =
-    useState<"managed" | "terminal">("managed");
+    useState<"managed" | "terminal">("terminal");
   const [reviewEnabled, setReviewEnabled] = useState(
     REVIEW_DEFAULTS.enabled,
   );
