@@ -1,4 +1,11 @@
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import type { ReactNode } from "react";
 import { AgentdClient } from "@agentd/client";
 import { toast as sonnerToast } from "sonner";
@@ -17,10 +24,33 @@ const Ctx = createContext<AppContextValue | null>(null);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [server, setServer] = useState<string>(() => loadStoredServer());
   const [token, setToken] = useState<string | null>(() => loadStoredToken());
+  const [trustedNoToken, setTrustedNoToken] = useState(false);
+
+  useEffect(() => {
+    if (token) {
+      setTrustedNoToken(false);
+      return;
+    }
+    let cancelled = false;
+    setTrustedNoToken(false);
+    void (async () => {
+      try {
+        const r = await fetch(`${server}/health`);
+        if (!r.ok) return;
+        const body = (await r.json()) as { trustedAuth?: boolean };
+        if (!cancelled) setTrustedNoToken(body.trustedAuth === true);
+      } catch {
+        // Login handles unreachable servers.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [server, token]);
 
   const client = useMemo<AgentdClient | null>(
-    () => (token ? new AgentdClient(server, token) : null),
-    [server, token],
+    () => (token || trustedNoToken ? new AgentdClient(server, token) : null),
+    [server, token, trustedNoToken],
   );
 
   const toast = useCallback((msg: string, isErr = false) => {
@@ -37,6 +67,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(() => {
     clearSession();
     setToken(null);
+    setTrustedNoToken(false);
   }, []);
 
   const value = useMemo<AppContextValue>(
