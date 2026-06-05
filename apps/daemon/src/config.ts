@@ -5,6 +5,8 @@ export interface DaemonConfig {
   port: number;
   rootDir: string | undefined;
   printPairing: boolean;
+  noAuth: boolean;
+  trustTailnetAuth: boolean;
 }
 
 export function loadConfig(argv = process.argv.slice(2)): DaemonConfig {
@@ -15,6 +17,8 @@ export function loadConfig(argv = process.argv.slice(2)): DaemonConfig {
       port: { type: "string" },
       root: { type: "string" },
       "no-pair": { type: "boolean" },
+      "no-auth": { type: "boolean" },
+      "trust-tailnet": { type: "boolean" },
       // `--public` is a friendlier alias for `--host 0.0.0.0`. The point is
       // operators deploying on "a little server" can just say `bun serve`
       // or `agentd serve --public` without remembering the bind syntax.
@@ -37,10 +41,16 @@ export function loadConfig(argv = process.argv.slice(2)): DaemonConfig {
   const rootDir =
     typeof values.root === "string" ? values.root : process.env.AGENTD_ROOT;
   const printPairing = values["no-pair"] !== true;
+  const noAuth = values["no-auth"] === true || process.env.AGENTD_NO_AUTH === "1";
+  const trustTailnetAuth =
+    values["trust-tailnet"] === true ||
+    process.env.AGENTD_TRUST_TAILNET === "1";
   return {
     host,
     port: Number.isFinite(port) ? port : 3773,
     rootDir,
     printPairing,
+    noAuth,
+    trustTailnetAuth,
   };
 }
