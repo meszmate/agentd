@@ -887,6 +887,8 @@ export class TaskManager {
     // Auto-create or look up the project for this repo path. Tasks belong
     // to projects so the sidebar can group them and surface what's new.
     const project = ensureProjectForPath(this.db, params.repoPath);
+    const cfg = loadConfig(this.paths.root);
+    const mode = params.mode ?? cfg.defaultTaskMode;
     const task: Task = createTask(this.db, {
       id: taskId,
       title,
@@ -903,19 +905,16 @@ export class TaskManager {
       // done; the post-hook is a safety net). Pull requests stay manual
       // from the Ship menu. Non-git folders force both off — there's
       // nothing to commit to.
-      autoCommit: isGit ? (params.autoCommit ?? true) : false,
-      autoPush: isGit ? (params.autoPush ?? true) : false,
+      autoCommit: mode === "terminal" ? false : isGit ? (params.autoCommit ?? true) : false,
+      autoPush: mode === "terminal" ? false : isGit ? (params.autoPush ?? true) : false,
       skills: params.skills ?? [],
       permissionMode: params.permissionMode ?? "bypassPermissions",
       workspaceMode,
       thinkingLevel:
         params.thinkingLevel ??
-        (() => {
-          const cfg = loadConfig(this.paths.root);
-          return cfg.defaultThinking[params.agent];
-        })(),
+        cfg.defaultThinking[params.agent],
       model: params.model ?? "",
-      mode: params.mode ?? "managed",
+      mode,
       dependsOnTaskId: params.dependsOnTaskId ?? null,
       planGroupId: params.planGroupId ?? null,
       githubIssue: params.githubIssue ?? null,

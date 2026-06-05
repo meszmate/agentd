@@ -158,6 +158,8 @@ async function main() {
     plugins,
     updateChecker,
     version: VERSION,
+    noAuth: cfg.noAuth,
+    trustTailnetAuth: cfg.trustTailnetAuth,
   });
 
   /**
@@ -257,6 +259,12 @@ async function main() {
     },
     websocket: wsHandler,
   });
+
+  if (cfg.noAuth) {
+    console.log("auth:      disabled (no session token required)");
+  } else if (cfg.trustTailnetAuth) {
+    console.log("auth:      trusting direct Tailscale clients (no session token required)");
+  }
 
   const announceUrl = `http://${cfg.host}:${server.port}`;
   console.log(`agentd v${VERSION}`);

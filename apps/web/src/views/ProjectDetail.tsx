@@ -31,13 +31,9 @@ import {
   XCircle,
 } from "lucide-react";
 import {
-  THINKING_LEVELS_BY_AGENT,
-  clampThinkingLevel,
-  type PermissionMode,
   type Project,
   type Task,
   type TaskStatus,
-  type ThinkingLevel,
 } from "@agentd/contracts";
 import {
   Kicker,
@@ -57,16 +53,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-  ToolbarPick,
-  commitModeLabel,
-  parseCommitMode,
-} from "@/components/toolbar-pick";
-import {
   useBridgeSummary,
   useCreateTask,
   useDeleteProject,
   useDiscordChannels,
-  useModels,
   usePatchPrefs,
   usePrefs,
   useProject,
@@ -74,7 +64,6 @@ import {
   useProjectGitState,
   usePullProject,
   useRefreshProjectBranches,
-  useSettings,
   useSkills,
   useTasks,
   useUpdateProject,
@@ -592,25 +581,13 @@ function ProjectComposer({
 
   const prefsQ = usePrefs();
   const patchPrefs = usePatchPrefs();
-  const modelsQ = useModels();
-  const settingsQ = useSettings();
 
   const [prompt, setPrompt] = useState("");
   const [agent, setAgent] = useState<"claude" | "codex">("claude");
-  const [permissionMode, setPermissionMode] =
-    useState<PermissionMode>("bypassPermissions");
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("high");
-  const [model, setModel] = useState<string>("");
   const [base, setBase] = useState("");
   // When set, spawn the task on this existing branch (local or remote)
   // instead of creating a new branch off `base`. "" = auto/new-branch.
   const [existingBranch, setExistingBranch] = useState("");
-  const [autoCommit, setAutoCommit] = useState(true);
-  const [autoPush, setAutoPush] = useState(true);
-  // Drive mode. Hydrated from `cfg.defaultTaskMode` so operators who
-  // flipped the Settings-level default see it here too. The picker
-  // below lets them override per-task.
-  const [taskMode, setTaskMode] = useState<"managed" | "terminal">("managed");
   const [busy, setBusy] = useState(false);
   const [hydrated, setHydrated] = useState(false);
 
@@ -620,20 +597,9 @@ function ProjectComposer({
     const p = prefsQ.data?.prefs;
     if (!p) return;
     setAgent(p.lastAgent);
-    setPermissionMode(p.lastPermissionMode);
-    setThinkingLevel(p.lastThinkingLevel);
-    setModel(
-      p.lastAgent === "claude" ? p.lastModelClaude : p.lastModelCodex,
-    );
     setBase(p.lastBase || "");
-    setAutoCommit(p.lastAutoCommit);
-    setAutoPush(p.lastAutoPush);
-    const cfgMode = settingsQ.data?.defaultTaskMode;
-    if (cfgMode === "terminal" || cfgMode === "managed") {
-      setTaskMode(cfgMode);
-    }
     setHydrated(true);
-  }, [prefsQ.data, settingsQ.data, hydrated]);
+  }, [prefsQ.data, hydrated]);
 
   // Pre-fill the base field with this project's actual default branch
   // (`main`/`master`/`trunk`/...) when the operator hasn't typed one.
@@ -644,22 +610,6 @@ function ProjectComposer({
     if (!detected) return;
     setBase((cur) => (cur.trim() ? cur : detected));
   }, [branchesQ.data?.default, project.id]);
-
-  // Swap model whenever the agent changes after hydration.
-  useEffect(() => {
-    if (!hydrated || !prefsQ.data) return;
-    setModel(
-      agent === "claude"
-        ? prefsQ.data.prefs.lastModelClaude
-        : prefsQ.data.prefs.lastModelCodex,
-    );
-  }, [agent, hydrated, prefsQ.data]);
-
-  // Clamp the thinking level whenever the agent changes so the runner
-  // never receives a value the chosen CLI rejects.
-  useEffect(() => {
-    setThinkingLevel((cur) => clampThinkingLevel(agent, cur));
-  }, [agent]);
 
   const submit = async () => {
     const p = prompt.trim();
@@ -677,26 +627,14 @@ function ProjectComposer({
         repoPath: project.path,
         baseBranch: finalBase,
         prompt: p,
-        autoCommit,
-        autoPush,
-        permissionMode,
-        thinkingLevel,
-        ...(model.trim() ? { model: model.trim() } : {}),
         ...(onExisting
           ? { branchMode: "existing" as const, branchName: onExisting }
           : {}),
-        ...(taskMode === "terminal" ? { mode: "terminal" as const } : {}),
+        mode: "terminal",
       });
       void patchPrefs.mutateAsync({
         lastProjectId: project.id,
         lastAgent: agent,
-        lastPermissionMode: permissionMode,
-        lastThinkingLevel: thinkingLevel,
-        lastAutoCommit: autoCommit,
-        lastAutoPush: autoPush,
-        ...(agent === "claude"
-          ? { lastModelClaude: model.trim() }
-          : { lastModelCodex: model.trim() }),
         lastBase: finalBase,
       });
       setPrompt("");
@@ -745,69 +683,13 @@ function ProjectComposer({
         setBase={setBase}
       />
       <div className="flex flex-wrap items-center gap-2 border-t border-ink-900/[0.06] bg-paper-100/40 px-3 py-2 dark:border-ink-50/[0.06] dark:bg-ink-900/30">
-        <ToolbarPick
-          label={agent}
-          options={[
-            { value: "claude", label: "claude" },
-            { value: "codex", label: "codex" },
-          ]}
-          onSelect={(v) => setAgent(v as "claude" | "codex")}
-        />
-        <ToolbarPick
-          label={taskMode === "terminal" ? "drive:terminal" : "drive:managed"}
-          options={[
-            { value: "managed", label: "managed · streaming runner" },
-            { value: "terminal", label: "terminal · operator-driven" },
-          ]}
-          onSelect={(v) => setTaskMode(v as "managed" | "terminal")}
-        />
-        <ToolbarPick
-          label={
-            permissionMode === "bypassPermissions"
-              ? "bypass"
-              : permissionMode === "acceptEdits"
-                ? "accept-edits"
-                : "plan"
-          }
-          options={[
-            { value: "bypassPermissions", label: "bypass · auto-allow" },
-            { value: "acceptEdits", label: "accept-edits · edits only" },
-            { value: "plan", label: "plan · read-only" },
-          ]}
-          onSelect={(v) => setPermissionMode(v as PermissionMode)}
-        />
-        <ToolbarPick
-          label={`think:${thinkingLevel}`}
-          options={THINKING_LEVELS_BY_AGENT[agent].map((v) => ({
-            value: v,
-            label: v,
-          }))}
-          onSelect={(v) => setThinkingLevel(v as ThinkingLevel)}
-        />
-        <ToolbarPick
-          label={`model:${model || "default"}`}
-          options={[
-            { value: "", label: "(default)" },
-            ...((modelsQ.data?.models[agent] ?? []).map((m) => ({
-              value: m.id,
-              label: m.label || m.id,
-            }))),
-          ]}
-          onSelect={setModel}
-        />
-        <ToolbarPick
-          label={`commit:${commitModeLabel(autoCommit, autoPush)}`}
-          options={[
-            { value: "none", label: "no commit" },
-            { value: "commit", label: "commit only" },
-            { value: "commit+push", label: "commit + push (default)" },
-          ]}
-          onSelect={(v) => {
-            const next = parseCommitMode(v);
-            setAutoCommit(next.autoCommit);
-            setAutoPush(next.autoPush);
-          }}
-        />
+        <span className="inline-flex items-center gap-1.5 h-7 px-2 rounded-md border border-ember-500/30 bg-ember-500/10 font-mono text-[10px] uppercase tracking-[0.08em] text-ember-700 dark:text-ember-300">
+          <TerminalSquare className="h-3 w-3" />
+          terminal tmux
+        </span>
+        <span className="font-mono text-[10px] text-ink-400 dark:text-ink-500">
+          {agent}
+        </span>
         <Spacer />
         <Button
           size="sm"

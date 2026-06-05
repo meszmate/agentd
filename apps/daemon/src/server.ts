@@ -211,7 +211,11 @@ import {
   listTasks,
 } from "@agentd/core";
 import type { PluginManager } from "./pluginManager.ts";
-import { requireSession, bearerOrHeader } from "./auth.ts";
+import {
+  requireSession,
+  bearerOrHeader,
+  isTrustedTailnetRequest,
+} from "./auth.ts";
 import type { TaskManager } from "./taskManager.ts";
 import type { UpdateChecker } from "./updateChecker.ts";
 import { WindowWatcher } from "./windowWatcher.ts";
@@ -236,10 +240,22 @@ export interface BuildServerOptions {
   plugins: PluginManager;
   updateChecker: UpdateChecker;
   version: string;
+  noAuth?: boolean;
+  trustTailnetAuth?: boolean;
 }
 
 export function buildServer(opts: BuildServerOptions) {
-  const { db, bus, paths, tasks, plugins, updateChecker, version } = opts;
+  const {
+    db,
+    bus,
+    paths,
+    tasks,
+    plugins,
+    updateChecker,
+    version,
+    noAuth = false,
+    trustTailnetAuth = false,
+  } = opts;
   const windowWatcher = new WindowWatcher(bus);
   const app = new Hono();
 
@@ -710,9 +726,13 @@ export function buildServer(opts: BuildServerOptions) {
     return p;
   }
 
-  app.get("/health", (c) =>
-    c.json({ ok: true, version, time: Date.now() }),
-  );
+  app.get("/health", (c) => {
+    const env = c.env as { server?: Parameters<typeof isTrustedTailnetRequest>[1] };
+    const trustedAuth =
+      noAuth ||
+      (trustTailnetAuth && isTrustedTailnetRequest(c.req.raw, env.server));
+    return c.json({ ok: true, version, time: Date.now(), trustedAuth });
+  });
 
   app.post("/pair", async (c) => {
     const body = await c.req.json().catch(() => null);
@@ -733,7 +753,7 @@ export function buildServer(opts: BuildServerOptions) {
   });
 
   const api = new Hono();
-  api.use("*", requireSession(db));
+  api.use("*", requireSession(db, { noAuth, trustTailnetAuth }));
 
   api.get("/tasks", (c) => c.json({ tasks: tasks.list() }));
 
@@ -6405,7 +6425,12 @@ export function buildServer(opts: BuildServerOptions) {
   function upgradeRequest(req: Request, server: Bun.Server<WsData>): Response | undefined {
     const url = new URL(req.url);
     const token = url.searchParams.get("session") ?? "";
-    const session = resolveSession(db, token);
+    const session =
+      (noAuth ? { sessionId: "no-auth", deviceLabel: "No Auth" } : null) ??
+      resolveSession(db, token) ??
+      (trustTailnetAuth && isTrustedTailnetRequest(req, server)
+        ? { sessionId: "trusted-tailnet", deviceLabel: "Trusted Tailnet" }
+        : null);
     if (url.pathname === "/ws") {
       if (!session) return new Response("unauthorized", { status: 401 });
       const taskId = url.searchParams.get("task");
