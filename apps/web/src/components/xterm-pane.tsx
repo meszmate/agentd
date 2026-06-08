@@ -17,6 +17,17 @@ const LIGHT_THEME = {
   selectionBackground: "#ff5c2840",
 };
 
+/**
+ * Imperative handle exposed via `onReady`. `send` pushes raw bytes into the
+ * pty's stdin (same wire as a real keypress), so external controls — like the
+ * mobile key toolbar — can synthesize Esc / Shift-Tab / Ctrl combos / tmux
+ * prefix sequences without needing the user to focus the terminal.
+ */
+export interface XTermPaneApi {
+  send: (data: string) => void;
+  focus: () => void;
+}
+
 interface Props {
   /**
    * Build the WebSocket. Called on every (re)connect attempt; the pane handles
@@ -34,6 +45,13 @@ interface Props {
    * the terminal IS the surface — no chrome, just the running CLI.
    */
   bare?: boolean;
+  /**
+   * Receive an imperative handle for sending bytes / focusing. Called once
+   * per mount; the handle stays valid until the pane unmounts (sends are
+   * no-ops when the socket is closed, which is the same behavior as typing
+   * into a disconnected terminal).
+   */
+  onReady?: (api: XTermPaneApi) => void;
 }
 
 interface PtyServerMessage {
@@ -58,10 +76,22 @@ const BACKOFF_MS = [400, 800, 1500, 3000, 5000];
  * Reconnects automatically on transient drops. Surfaces a small status pill
  * at the top so users see what's happening instead of a stale terminal.
  */
-export function XTermPane({ connect, connectionKey, onError, emptyHint, bare }: Props) {
+export function XTermPane({
+  connect,
+  connectionKey,
+  onError,
+  emptyHint,
+  bare,
+  onReady,
+}: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const { resolved } = useTheme();
   const [conn, setConn] = useState<ConnState>("connecting");
+  // Latest onReady — capture via ref so the effect doesn't re-run when the
+  // parent passes an inline function. The api itself is stable across the
+  // pane's lifetime.
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -90,6 +120,19 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint, bare }: 
     let everOpened = false;
     let exitedCleanly = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // Stable handle for external controls (mobile key toolbar). Captures `ws`
+    // by reference via closure so reconnects automatically point at the new
+    // socket without re-handing out the api.
+    const api: XTermPaneApi = {
+      send: (data: string) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "input", data }));
+        }
+      },
+      focus: () => term.focus(),
+    };
+    onReadyRef.current?.(api);
 
     const open = () => {
       if (disposed) return;

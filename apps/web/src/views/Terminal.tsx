@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import {
@@ -12,7 +12,13 @@ import {
   Copy,
 } from "lucide-react";
 import { useApp, useClient } from "@/AppContext";
-import { XTermPane } from "@/components/xterm-pane";
+import { XTermPane, type XTermPaneApi } from "@/components/xterm-pane";
+import {
+  TerminalKeyboardBar,
+  TerminalKeyboardToggle,
+  useTerminalKeyboardBarVisible,
+} from "@/components/terminal-keyboard-bar";
+import { usePatchPrefs, usePrefs } from "@/queries";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -55,13 +61,37 @@ export function Terminal({
 }) {
   const client = useClient();
   const connect = useCallback(() => client.attachTask(taskId), [client, taskId]);
+  const prefsQ = usePrefs();
+  const patchPrefs = usePatchPrefs();
+  const mode = prefsQ.data?.prefs.terminalKeyboardBar ?? "auto";
+  const showBar = useTerminalKeyboardBarVisible(mode);
+  const apiRef = useRef<XTermPaneApi | null>(null);
+  const handleReady = useCallback((api: XTermPaneApi) => {
+    apiRef.current = api;
+  }, []);
   return (
-    <XTermPane
-      connect={connect}
-      connectionKey={`task:${taskId}`}
-      onError={onError}
-      bare={bare}
-    />
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="min-h-0 flex-1">
+        <XTermPane
+          connect={connect}
+          connectionKey={`task:${taskId}`}
+          onError={onError}
+          bare={bare}
+          onReady={handleReady}
+        />
+      </div>
+      {showBar && (
+        <TerminalKeyboardBar
+          onSend={(data) => {
+            apiRef.current?.send(data);
+            apiRef.current?.focus();
+          }}
+          onClose={() =>
+            patchPrefs.mutate({ terminalKeyboardBar: "off" })
+          }
+        />
+      )}
+    </div>
   );
 }
 
@@ -83,6 +113,14 @@ export function TerminalView() {
   const [showNew, setShowNew] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const prefsQ = usePrefs();
+  const patchPrefs = usePatchPrefs();
+  const keyBarMode = prefsQ.data?.prefs.terminalKeyboardBar ?? "auto";
+  const showKeyBar = useTerminalKeyboardBarVisible(keyBarMode);
+  const apiRef = useRef<XTermPaneApi | null>(null);
+  const handleReady = useCallback((api: XTermPaneApi) => {
+    apiRef.current = api;
+  }, []);
 
   // Sessions list is kept fresh by the WS push (see realtime.tsx). The slow
   // refetch interval is just a safety net in case the socket drops.
@@ -372,6 +410,12 @@ export function TerminalView() {
                 )}
               </div>
               <div className="flex items-center gap-1">
+                <TerminalKeyboardToggle
+                  mode={keyBarMode}
+                  onChange={(next) =>
+                    patchPrefs.mutate({ terminalKeyboardBar: next })
+                  }
+                />
                 <button
                   type="button"
                   onClick={onCopyAttachCmd}
@@ -402,8 +446,20 @@ export function TerminalView() {
                   : "select a session"
               }
               onError={(m) => toast(m, true)}
+              onReady={handleReady}
             />
           </div>
+          {active && showKeyBar && (
+            <TerminalKeyboardBar
+              onSend={(data) => {
+                apiRef.current?.send(data);
+                apiRef.current?.focus();
+              }}
+              onClose={() =>
+                patchPrefs.mutate({ terminalKeyboardBar: "off" })
+              }
+            />
+          )}
         </div>
       </div>
 
