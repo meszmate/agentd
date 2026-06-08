@@ -49,6 +49,14 @@ type ConnState = "connecting" | "live" | "reconnecting" | "closed";
 
 // Reconnect schedule: quick first retry for transient drops, then back off.
 const BACKOFF_MS = [400, 800, 1500, 3000, 5000];
+const FONT_SIZE = 12;
+const SYMBOL_FONT = "Symbols Nerd Font Mono";
+const FONT_FAMILY =
+  "'JetBrains Mono', 'JetBrainsMono Nerd Font', 'Hack Nerd Font', 'FiraCode Nerd Font', 'Cascadia Mono', 'Symbols Nerd Font Mono', ui-monospace, 'SF Mono', Menlo, 'DejaVu Sans Mono', monospace";
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /**
  * Generic xterm.js pane wired to a WebSocket. Sends the pty wire protocol:
@@ -70,9 +78,8 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint, bare }: 
 
     const term = new XTerm({
       cursorBlink: true,
-      fontFamily:
-        "'JetBrains Mono', 'JetBrainsMono Nerd Font', 'Hack Nerd Font', 'FiraCode Nerd Font', 'Cascadia Mono', 'Symbols Nerd Font Mono', ui-monospace, 'SF Mono', Menlo, 'DejaVu Sans Mono', monospace",
-      fontSize: 12,
+      fontFamily: FONT_FAMILY,
+      fontSize: FONT_SIZE,
       theme: resolved === "dark" ? DARK_THEME : LIGHT_THEME,
       // Real PTY → tmux handles its own line endings; don't double-convert.
       convertEol: false,
@@ -82,7 +89,6 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint, bare }: 
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(container);
-    fit.fit();
 
     let ws: WebSocket | null = null;
     let disposed = false;
@@ -90,6 +96,49 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint, bare }: 
     let everOpened = false;
     let exitedCleanly = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const rafs: number[] = [];
+
+    const sendResize = () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(
+        JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }),
+      );
+    };
+
+    const fitAndRefresh = () => {
+      if (disposed) return;
+      try {
+        fit.fit();
+        sendResize();
+        term.refresh(0, Math.max(0, term.rows - 1));
+      } catch {
+        // container may be 0×0 mid-transition
+      }
+    };
+
+    const scheduleFit = () => {
+      const first = requestAnimationFrame(() => {
+        const second = requestAnimationFrame(fitAndRefresh);
+        rafs.push(second);
+      });
+      rafs.push(first);
+    };
+
+    scheduleFit();
+    timers.push(setTimeout(scheduleFit, 50), setTimeout(scheduleFit, 250));
+
+    if (typeof document !== "undefined" && "fonts" in document) {
+      const fonts = document.fonts;
+      const symbolSample = "\ue0b0\uf0a0\u{f0000}";
+      void Promise.race([
+        Promise.allSettled([
+          fonts.load(`${FONT_SIZE}px "${SYMBOL_FONT}"`, symbolSample),
+          fonts.ready,
+        ]),
+        delay(1800),
+      ]).finally(scheduleFit);
+    }
 
     const open = () => {
       if (disposed) return;
@@ -106,17 +155,11 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint, bare }: 
       }
       const sock = ws;
 
-      const sendResize = () => {
-        if (sock.readyState !== WebSocket.OPEN) return;
-        sock.send(
-          JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }),
-        );
-      };
-
       sock.onopen = () => {
         attempt = 0;
         everOpened = true;
         setConn("live");
+        fitAndRefresh();
         term.focus();
         sendResize();
       };
@@ -189,11 +232,7 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint, bare }: 
     });
 
     const onWinResize = () => {
-      try {
-        fit.fit();
-      } catch {
-        // container may be 0×0 mid-transition
-      }
+      fitAndRefresh();
     };
     window.addEventListener("resize", onWinResize);
     const ro = new ResizeObserver(onWinResize);
@@ -202,6 +241,8 @@ export function XTermPane({ connect, connectionKey, onError, emptyHint, bare }: 
     return () => {
       disposed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      for (const timer of timers) clearTimeout(timer);
+      for (const raf of rafs) cancelAnimationFrame(raf);
       window.removeEventListener("resize", onWinResize);
       ro.disconnect();
       dataDisp.dispose();
