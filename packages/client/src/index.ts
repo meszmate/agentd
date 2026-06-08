@@ -99,6 +99,7 @@ export interface AgentdUserPrefs {
   repoPickerPins: string[];
   gridOrder: string[];
   gridDismissed: string[];
+  terminalKeyboardBar: "auto" | "on" | "off";
 }
 
 export interface AgentdLogEntry {

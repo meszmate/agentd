@@ -505,6 +505,14 @@ export const UserPrefs = z.object({
    * so a fresh spawn always appears in the grid.
    */
   gridDismissed: z.array(z.string()).default([]),
+  /**
+   * Whether to show the touch-friendly key toolbar (Esc/Tab/Shift-Tab/
+   * arrows/Ctrl combos/tmux window controls) above terminal surfaces.
+   * `auto` shows it only on coarse-pointer / narrow viewports so mobile
+   * users get it automatically while desktops stay clean. `on` and
+   * `off` are explicit overrides.
+   */
+  terminalKeyboardBar: z.enum(["auto", "on", "off"]).default("auto"),
 });
 export type UserPrefs = z.infer<typeof UserPrefs>;
 export const DEFAULT_USER_PREFS: UserPrefs = UserPrefs.parse({});
