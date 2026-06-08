@@ -7,16 +7,15 @@
  * neovim status lines, oh-my-zsh themes, etc.) emit unicode
  * private-use glyphs that JetBrains Mono lacks. Without a fallback
  * those render as empty boxes. This @font-face points at the
- * upstream patched font on jsDelivr; the browser substitutes per
- * codepoint, so JetBrains Mono still draws ASCII / regular text.
+ * vendored upstream patched font; the browser substitutes per codepoint,
+ * so JetBrains Mono still draws ASCII / regular text.
  */
 @font-face {
   font-family: "Symbols Nerd Font Mono";
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: url("https://cdn.jsdelivr.net/gh/ryanoasis/nerd-fonts@v3.2.1/patched-fonts/NerdFontsSymbolsOnly/SymbolsNerdFontMono-Regular.ttf")
-    format("truetype");
+  src: url("/fonts/SymbolsNerdFontMono-Regular.ttf") format("truetype");
   unicode-range:
     U+E000-F8FF,    /* Private Use Area (most Nerd Font glyphs) */
     U+F0000-FFFFD,  /* Supplementary Private Use Area-A */

@@ -27,11 +27,39 @@ const SESSION_FORMAT =
 const WINDOW_FORMAT =
   "#{window_index}|#{window_name}|#{?window_active,1,0}|#{window_panes}|#{window_activity}";
 
+function isUtf8Locale(value: string | undefined): boolean {
+  return /utf-?8/i.test(value ?? "");
+}
+
+function defaultUtf8Locale(): string {
+  return process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8";
+}
+
+function buildTmuxEnv(): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    COLORTERM: process.env.COLORTERM || "truecolor",
+  };
+  const hasUtf8 =
+    isUtf8Locale(env.LC_ALL) ||
+    isUtf8Locale(env.LC_CTYPE) ||
+    isUtf8Locale(env.LANG);
+  if (!hasUtf8) {
+    const locale = defaultUtf8Locale();
+    env.LANG = env.LANG || locale;
+    env.LC_CTYPE = env.LC_CTYPE || locale;
+  } else if (!env.LC_CTYPE && isUtf8Locale(env.LANG)) {
+    env.LC_CTYPE = env.LANG;
+  }
+  return env;
+}
+
 async function spawn(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   try {
-    const proc = Bun.spawn(["tmux", ...args], {
+    const proc = Bun.spawn(["tmux", "-u", ...args], {
       stdout: "pipe",
       stderr: "pipe",
+      env: buildTmuxEnv(),
     });
     const [stdout, stderr] = await Promise.all([
       new Response(proc.stdout).text(),

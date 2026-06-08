@@ -84,6 +84,34 @@ function fatal(msg) {
   process.exit(1);
 }
 
+function isUtf8Locale(value) {
+  return typeof value === "string" && /utf-?8/i.test(value);
+}
+
+function defaultUtf8Locale() {
+  return process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8";
+}
+
+function buildPtyEnv() {
+  const env = {
+    ...process.env,
+    TERM: "xterm-256color",
+    COLORTERM: process.env.COLORTERM || "truecolor",
+  };
+  const hasUtf8 =
+    isUtf8Locale(env.LC_ALL) ||
+    isUtf8Locale(env.LC_CTYPE) ||
+    isUtf8Locale(env.LANG);
+  if (!hasUtf8) {
+    const locale = defaultUtf8Locale();
+    env.LANG = env.LANG || locale;
+    env.LC_CTYPE = env.LC_CTYPE || locale;
+  } else if (!env.LC_CTYPE && isUtf8Locale(env.LANG)) {
+    env.LC_CTYPE = env.LANG;
+  }
+  return env;
+}
+
 const [, , mode, spec, cwdArg, colsArg, rowsArg] = process.argv;
 if (!mode || !spec) fatal("usage: pty-worker.cjs <mode> <spec> [cwd] [cols] [rows]");
 
@@ -101,12 +129,12 @@ if (mode === "task") {
   // otherwise — so reload + re-attach restores scrollback, splits,
   // and any commands the user left running.
   cmd = "tmux";
-  args = ["new-session", "-A", "-s", spec, "-c", cwd];
+  args = ["-u", "new-session", "-A", "-s", spec, "-c", cwd];
 } else if (mode === "term") {
   // Standalone tmux session, named by the operator from the
   // /terminal page. Same `-A` semantics as task mode.
   cmd = "tmux";
-  args = ["new-session", "-A", "-s", spec];
+  args = ["-u", "new-session", "-A", "-s", spec];
 } else {
   fatal(`unknown mode: ${mode}`);
 }
@@ -134,10 +162,7 @@ try {
     cwd,
     cols,
     rows,
-    env: {
-      ...process.env,
-      TERM: "xterm-256color",
-    },
+    env: buildPtyEnv(),
   });
 } catch (e) {
   fatal("spawn failed: " + (e && e.message ? e.message : String(e)));
